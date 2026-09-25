@@ -20,7 +20,7 @@ function record(overrides = {}) {
     id: 'act-1',
     op: 'annotation_created',
     actor: 'client-a',
-    affected: { kind: 'annotation', id: 'note-1', fields: null },
+    affected: { kind: 'annotation', id: 'note-1' },
     before: null,
     after: { id: 'note-1', type: 'note' },
     inverse_op: { op: 'annotation_deleted', annotation_id: 'note-1' },
@@ -59,7 +59,7 @@ describe('describeActivity', () => {
     it('reads a shape-subtype change as "shape" even when geometry also moved', () => {
       const r = record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'shape-1', fields: ['shape', 'geometry'] },
+        affected: { kind: 'annotation', id: 'shape-1' },
         before: {
           type: 'shape',
           shape: 'rectangle',
@@ -77,7 +77,7 @@ describe('describeActivity', () => {
     it('reads a rotation-only geometry change as "rotated"', () => {
       const r = record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1', fields: ['geometry'] },
+        affected: { kind: 'annotation', id: 'a1' },
         before: { type: 'note', geometry: { x: 0, y: 0, w: 10, h: 10, rotation: 0 } },
         after: { type: 'note', geometry: { x: 0, y: 0, w: 10, h: 10, rotation: 15 } },
       });
@@ -87,7 +87,7 @@ describe('describeActivity', () => {
     it('reads a size change as "resized"', () => {
       const r = record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1', fields: ['geometry'] },
+        affected: { kind: 'annotation', id: 'a1' },
         before: { type: 'note', geometry: { x: 0, y: 0, w: 10, h: 10, rotation: 0 } },
         after: { type: 'note', geometry: { x: 0, y: 0, w: 40, h: 10, rotation: 0 } },
       });
@@ -97,7 +97,7 @@ describe('describeActivity', () => {
     it('reads a plain position change as "moved"', () => {
       const r = record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1', fields: ['position'] },
+        affected: { kind: 'annotation', id: 'a1' },
         before: { type: 'note', position: { x: 0, y: 0 } },
         after: { type: 'note', position: { x: 50, y: 0 } },
       });
@@ -107,7 +107,7 @@ describe('describeActivity', () => {
     it('reads a style-only change as "style"', () => {
       const r = record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1', fields: ['style'] },
+        affected: { kind: 'annotation', id: 'a1' },
         before: { type: 'note', style: { color: 'blue' } },
         after: { type: 'note', style: { color: 'red' } },
       });
@@ -117,7 +117,7 @@ describe('describeActivity', () => {
     it('reads a text field change as "text"', () => {
       const r = record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1', fields: ['text'] },
+        affected: { kind: 'annotation', id: 'a1' },
         before: { type: 'note', text: 'old' },
         after: { type: 'note', text: 'new' },
       });
@@ -127,7 +127,7 @@ describe('describeActivity', () => {
     it('reads a locked flip as "locked" / "unlocked"', () => {
       const locking = record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1', fields: ['locked'] },
+        affected: { kind: 'annotation', id: 'a1' },
         before: { type: 'note', locked: false },
         after: { type: 'note', locked: true },
       });
@@ -135,7 +135,7 @@ describe('describeActivity', () => {
 
       const unlocking = record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1', fields: ['locked'] },
+        affected: { kind: 'annotation', id: 'a1' },
         before: { type: 'note', locked: true },
         after: { type: 'note', locked: false },
       });
@@ -145,7 +145,7 @@ describe('describeActivity', () => {
     it('reads an attachment field change as "attached" / "detached"', () => {
       const attaching = record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1', fields: ['attachment'] },
+        affected: { kind: 'annotation', id: 'a1' },
         before: { type: 'label' },
         after: { type: 'label', attachment: { target_id: 'node-1' } },
       });
@@ -153,7 +153,7 @@ describe('describeActivity', () => {
 
       const detaching = record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1', fields: ['attachment'] },
+        affected: { kind: 'annotation', id: 'a1' },
         before: { type: 'label', attachment: { target_id: 'node-1' } },
         after: { type: 'label' },
       });
@@ -163,7 +163,7 @@ describe('describeActivity', () => {
     it('falls back to "generic" for an unrecognised field set', () => {
       const r = record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1', fields: ['some_future_field'] },
+        affected: { kind: 'annotation', id: 'a1' },
         before: { type: 'note' },
         after: { type: 'note', some_future_field: 'x' },
       });
@@ -171,6 +171,8 @@ describe('describeActivity', () => {
     });
 
     it('falls back to "generic" rather than guessing when there is no before snapshot', () => {
+      // A record persisted before PR #627, which still carries
+      // `affected.fields`: even a key set naming `locked` is not read as one.
       const r = record({
         op: 'annotation_updated',
         affected: { kind: 'annotation', id: 'a1', fields: ['locked', 'z', 'geometry'] },
@@ -184,22 +186,22 @@ describe('describeActivity', () => {
   // The regression suite for the defect these records are shaped after: the
   // browser's computeOps (services/sessionSyncClient.js) puts the WHOLE
   // annotation in every annotation_updated op, so `affected.fields` — which
-  // session_store.py fills with the incoming payload's key set — is the
-  // annotation's entire key set no matter what the user actually did. Every
+  // session_store.py filled with the incoming payload's key set until PR #627
+  // — is the annotation's entire key set no matter what the user actually
+  // did. Records persisted before that still carry it. Every
   // annotation carries `locked` and `z` as mandatory envelope fields
   // (createAnnotation), so a classifier reading `fields` as a change set
   // announced "Unlocked" for a note/label/icon that had merely been moved or
   // relayered, and "Changed the shape of" for every edit of a shape.
   //
-  // The pre-existing cases above all feed SPARSE fields, which is the shape
-  // the MCP patch path produces — the producer the classifier happened to be
-  // correct for. These feed the browser's shape, built through the real
-  // createAnnotation so the payload is the one the canvas actually ships.
+  // These feed the browser's shape, built through the real createAnnotation
+  // so the payload is the one the canvas actually ships.
   describe('annotation_updated classification, browser-shaped full payloads', () => {
     function browserEdit(base, changes) {
-      // What the store records for a browser-originated edit: `before` is the
-      // stored annotation, `after` is the whole incoming annotation merged
-      // over it, and `fields` is that payload's entire key set.
+      // What the store recorded for a browser-originated edit before PR #627:
+      // `before` is the stored annotation, `after` is the whole incoming
+      // annotation merged over it, and `fields` is that payload's entire key
+      // set. Kept in that legacy shape so old persisted records stay covered.
       const incoming = createAnnotation({ ...base, ...changes });
       const before = { ...createAnnotation(base), updated_at: '2026-08-26T09:00:00Z' };
       return record({
@@ -293,7 +295,7 @@ describe('describeActivity', () => {
       // the move is what gets reported.
       const r = record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1', fields: ['id', 'locked', 'position', 'z'] },
+        affected: { kind: 'annotation', id: 'a1' },
         before: { id: 'a1', type: 'note', position: { x: 0, y: 0 } },
         after: { id: 'a1', type: 'note', position: { x: 40, y: 0 }, z: 0, locked: false, text: '' },
       });
@@ -339,7 +341,7 @@ describe('describeActivity', () => {
       const incoming = JSON.parse(JSON.stringify(overlaysToAnnotations(moved)[0]));
       return record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: stored.id, fields: Object.keys(incoming).sort() },
+        affected: { kind: 'annotation', id: stored.id },
         before: stored,
         after: { ...stored, ...incoming, updated_at: '2026-08-26T09:00:01Z' },
       });
@@ -572,7 +574,7 @@ describe('describeActivity', () => {
       const incoming = JSON.parse(JSON.stringify(groupsToAnnotations(edited, parentIds)[0]));
       return record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: stored.id, fields: Object.keys(incoming).sort() },
+        affected: { kind: 'annotation', id: stored.id },
         before: stored,
         after: { ...stored, ...incoming, updated_at: '2026-08-26T09:00:01Z' },
       });
@@ -1260,8 +1262,9 @@ describe('describeActivity', () => {
   describe('annotation_updated classification, browser-shaped full payloads (continued)', () => {
     it('reports an agent-only sparse patch from the same before/after diff', () => {
       // The MCP path sends a sparse patch, but the store still snapshots the
-      // whole annotation either side, so the diff serves both producers and
-      // `affected.fields` is not consulted for either.
+      // whole annotation either side, so the diff serves both producers. The
+      // record carries the pre-PR #627 `affected.fields`, which is not
+      // consulted.
       const before = createAnnotation({ id: 'n1', type: 'note', text: 'before' });
       const r = record({
         op: 'annotation_updated',

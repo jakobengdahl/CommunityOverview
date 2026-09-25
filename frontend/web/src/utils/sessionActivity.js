@@ -280,14 +280,14 @@ function olderBuildStyleWriteBack(before, after) {
  * The annotation fields this update actually changed, from the record's own
  * before/after snapshots.
  *
- * Deliberately not `affected.fields`: that is the *incoming payload's* key
- * set, not a change set (session_store.py's `annotation_updated` branch
- * records `sorted(incoming.keys())`), and the browser sends the whole
- * annotation in every op. For any browser-originated edit `fields` is
- * therefore the annotation's entire key set and is identical whatever the
- * user did — reading it as a change set made a move, a recolour or a text
- * edit all render as "Unlocked", asserting a security-relevant state change
- * that never happened. before/after are populated for every producer, because
+ * Deliberately not `affected.fields`: the store no longer writes it (PR
+ * #627), and on records persisted before that it is the *incoming payload's*
+ * key set, not a change set, while the browser sends the whole annotation in
+ * every op. For any browser-originated edit it is therefore the annotation's
+ * entire key set and is identical whatever the user did — reading it as a
+ * change set made a move, a recolour or a text edit all render as "Unlocked",
+ * asserting a security-relevant state change that never happened. before/after
+ * are populated for every producer, because
  * `apply_state_op` is the single choke point both the browser batch and the
  * MCP write path go through, so the diff is authoritative for both.
  *
