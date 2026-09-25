@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 
 import * as sessionStore from '../src/services/sessionStore';
@@ -190,6 +190,10 @@ describe('Server-backed session lifecycle', () => {
       configurable: true,
       value: true,
     });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it('shows a clear read-only offline state when the network is gone', async () => {
