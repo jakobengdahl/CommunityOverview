@@ -189,6 +189,7 @@ class _BootGate:
             with self._lock:
                 if self._overflowed:
                     self._open = True
+                    self._overflowed = False
                     held: List["ExternalChange"] = []
                     overflowed = True
                 elif self._held:
