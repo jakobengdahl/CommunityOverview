@@ -3028,6 +3028,7 @@ function GraphCanvasInner({
           // flag revert on the next autosave, whatever the translators did.
           z: g.data.z ?? 0,
           locked: Boolean(g.data.locked),
+          rotation: g.data.rotation ?? 0,
           // Same envelope treatment as z/locked above, for the same reason:
           // server-owned same-field-conflict bookkeeping
           // (dec-annotation-field-patches-and-conflicts) that must survive
@@ -4383,6 +4384,7 @@ function GraphCanvasInner({
             color: g.color || '#646cff',
             z: g.z ?? 0,
             locked: Boolean(g.locked),
+            rotation: g.rotation ?? 0,
             version: g.version,
             field_versions: g.field_versions,
           },
@@ -4674,6 +4676,7 @@ function GraphCanvasInner({
             color: g.color || '#646cff',
             z: g.z ?? 0,
             locked: Boolean(g.locked),
+            rotation: g.rotation ?? 0,
             version: g.version,
             field_versions: g.field_versions,
           },

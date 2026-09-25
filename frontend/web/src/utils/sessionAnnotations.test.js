@@ -429,62 +429,89 @@ describe('geometry w/h round-trip for label/line/freehand', () => {
   );
 });
 
-// A group has always been lockable over MCP (create_group_annotation takes
-// `locked`), but both group translators dropped the flag, so it never reached
-// the canvas and the browser's next autosave diffed it back to its default —
-// the exact failure docs/ANNOTATION_CONTRACT.md warns about for envelope
-// fields. `z` is carried for the same reason; nothing reads it for groups yet
-// (their paint order is array order), so this preserves the value without
-// offering a control for it.
-describe('group envelope round-trip (locked, z)', () => {
-  it('carries locked and z from the server annotation onto the canvas group', () => {
+// A group has always carried the same envelope fields as other annotations, but
+// dropping any of them before the browser's save path makes the next autosave
+// write a default back over server-owned state.
+describe('group envelope round-trip (locked, z, rotation)', () => {
+  it('carries locked, z and rotation from the server annotation onto the canvas group', () => {
     const { groups } = annotationsToGroups([
-      { id: 'g1', kind: 'group', label: 'Team', position: { x: 0, y: 0 }, locked: true, z: 3 },
+      {
+        id: 'g1',
+        kind: 'group',
+        label: 'Team',
+        position: { x: 0, y: 0 },
+        geometry: { x: 0, y: 0, w: 300, h: 200, rotation: 30 },
+        locked: true,
+        z: 3,
+      },
     ]);
     expect(groups[0].locked).toBe(true);
     expect(groups[0].z).toBe(3);
+    expect(groups[0].rotation).toBe(30);
   });
 
-  it('defaults an unlocked group at the base layer when the server omits both', () => {
+  it('defaults an unlocked group at the base layer with no rotation when the server omits them', () => {
     const { groups } = annotationsToGroups([
       { id: 'g1', kind: 'group', label: 'Team', position: { x: 0, y: 0 } },
     ]);
     expect(groups[0].locked).toBe(false);
     expect(groups[0].z).toBe(0);
+    expect(groups[0].rotation).toBe(0);
   });
 
-  it('carries locked and z back from the canvas group to the annotation', () => {
+  it('carries locked, z and rotation back from the canvas group to the annotation', () => {
     const [ann] = groupsToAnnotations(
-      [{ id: 'g1', label: 'Team', position: { x: 0, y: 0 }, locked: true, z: 2 }],
+      [{ id: 'g1', label: 'Team', position: { x: 0, y: 0 }, locked: true, z: 2, rotation: 45 }],
       {}
     );
     expect(ann.locked).toBe(true);
     expect(ann.z).toBe(2);
+    expect(ann.geometry.rotation).toBe(45);
   });
 
   // The autosave path: a locked group loaded from the server is re-serialised
-  // on every save. Before this round-trip existed the save wrote locked=false
-  // back, silently unlocking a group nobody had touched.
-  it('survives the save/restore round trip instead of reverting to unlocked', () => {
+  // on every save. Before this round-trip existed the save wrote envelope
+  // defaults back, silently changing a group nobody had touched.
+  it('survives the save/restore round trip instead of reverting to defaults', () => {
     const { groups, parentIds } = annotationsToGroups([
-      { id: 'g1', kind: 'group', label: 'Team', position: { x: 1, y: 2 }, locked: true, z: 5 },
+      {
+        id: 'g1',
+        kind: 'group',
+        label: 'Team',
+        position: { x: 1, y: 2 },
+        geometry: { x: 1, y: 2, w: 300, h: 200, rotation: 15 },
+        locked: true,
+        z: 5,
+      },
     ]);
     const [ann] = groupsToAnnotations(groups, parentIds);
     expect(ann.locked).toBe(true);
     expect(ann.z).toBe(5);
+    expect(ann.geometry.rotation).toBe(15);
   });
 
-  it('keeps the flag through the legacy saved-view metadata leg', () => {
+  it('keeps the envelope fields through the legacy saved-view metadata leg', () => {
     const metadata = annotationDocumentToLegacyMetadata([
-      { id: 'g1', type: 'group', label: 'Team', position: { x: 0, y: 0 }, locked: true, z: 4 },
+      {
+        id: 'g1',
+        type: 'group',
+        label: 'Team',
+        position: { x: 0, y: 0 },
+        geometry: { x: 0, y: 0, w: 300, h: 200, rotation: 60 },
+        locked: true,
+        z: 4,
+      },
     ]);
-    expect(metadata.groups[0]).toEqual(expect.objectContaining({ locked: true, z: 4 }));
+    expect(metadata.groups[0]).toEqual(
+      expect.objectContaining({ locked: true, z: 4, rotation: 60 })
+    );
     const document = legacyMetadataToAnnotationDocument({
       groups: metadata.groups,
       parentIds: {},
       annotations: [],
     });
     expect(document.annotations[0]).toEqual(expect.objectContaining({ locked: true, z: 4 }));
+    expect(document.annotations[0].geometry.rotation).toBe(60);
   });
 });
 

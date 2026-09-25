@@ -2,13 +2,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';
 
-// The canvas leg of the group `locked`/`z` round trip. The translators in
+// The canvas leg of the group `locked`/`z`/`rotation` round trip. The translators in
 // frontend/web/src/utils/sessionAnnotations.js are covered by their own suite;
 // what those cannot show is that the flag survives the trip *through* the
 // canvas. Three sites carry it — the groupsToRestore effect, the remote
 // upsert-group op, and handleSaveView's group serialisation — and dropping any
-// one of them puts the flag back at its default on the next autosave, which is
-// what made locking a group a silent no-op.
+// one of them puts the field back at its default on the next autosave.
 
 const hoisted = vi.hoisted(() => ({ setNodes: vi.fn(), seededNodes: [] }));
 
@@ -69,20 +68,27 @@ function producedGroups(from = []) {
   return null;
 }
 
-describe('group lock/layer round trip through the canvas', () => {
+describe('group envelope round trip through the canvas', () => {
   beforeEach(() => {
     hoisted.setNodes.mockClear();
     hoisted.seededNodes = [];
   });
 
-  it('carries locked and z onto a restored group and withholds dragging', () => {
+  it('carries locked, z and rotation onto a restored group and withholds dragging', () => {
     render(
       <GraphCanvas
         nodes={[]}
         edges={[]}
         groupsToRestore={{
           groups: [
-            { id: 'g1', label: 'Locked team', position: { x: 4, y: 5 }, locked: true, z: 3 },
+            {
+              id: 'g1',
+              label: 'Locked team',
+              position: { x: 4, y: 5 },
+              locked: true,
+              z: 3,
+              rotation: 30,
+            },
           ],
           parentIds: {},
         }}
@@ -91,6 +97,7 @@ describe('group lock/layer round trip through the canvas', () => {
     const [group] = producedGroups();
     expect(group.data.locked).toBe(true);
     expect(group.data.z).toBe(3);
+    expect(group.data.rotation).toBe(30);
     // Without this the lock is cosmetic: the menu refuses, but the box still
     // moves and takes its members with it. Note groups deliberately do NOT
     // mirror overlayToFlowNode's `draggable: !locked` — see the unlocked case
@@ -98,7 +105,7 @@ describe('group lock/layer round trip through the canvas', () => {
     expect(group.draggable).toBe(false);
   });
 
-  it('leaves an unlocked group draggable and at the base layer', () => {
+  it('leaves an unlocked group draggable, at the base layer and unrotated', () => {
     render(
       <GraphCanvas
         nodes={[]}
@@ -112,6 +119,7 @@ describe('group lock/layer round trip through the canvas', () => {
     const [group] = producedGroups();
     expect(group.data.locked).toBe(false);
     expect(group.data.z).toBe(0);
+    expect(group.data.rotation).toBe(0);
     // Not `true`: ReactFlow tests `typeof node.draggable === 'undefined'`, so
     // an unlocked group must resolve to `undefined` — the builder writes the
     // key explicitly, which behaves the same as omitting it — and keeps
@@ -121,7 +129,7 @@ describe('group lock/layer round trip through the canvas', () => {
     expect(group.draggable).toBeUndefined();
   });
 
-  it('carries locked and z through a remote upsert-group op', () => {
+  it('carries locked, z and rotation through a remote upsert-group op', () => {
     render(
       <GraphCanvas
         nodes={[]}
@@ -129,7 +137,14 @@ describe('group lock/layer round trip through the canvas', () => {
         remoteAnnotationOps={[
           {
             action: 'upsert-group',
-            group: { id: 'g1', label: 'Team', position: { x: 0, y: 0 }, locked: true, z: 2 },
+            group: {
+              id: 'g1',
+              label: 'Team',
+              position: { x: 0, y: 0 },
+              locked: true,
+              z: 2,
+              rotation: 45,
+            },
             members: [],
           },
         ]}
@@ -138,6 +153,7 @@ describe('group lock/layer round trip through the canvas', () => {
     const [group] = producedGroups();
     expect(group.data.locked).toBe(true);
     expect(group.data.z).toBe(2);
+    expect(group.data.rotation).toBe(45);
     expect(group.draggable).toBe(false);
   });
 
@@ -214,14 +230,21 @@ describe('group lock/layer round trip through the canvas', () => {
     }
   });
 
-  it('re-emits locked and z in the save-view snapshot', () => {
+  it('re-emits locked, z and rotation in the save-view snapshot', () => {
     const onSaveView = vi.fn();
     hoisted.seededNodes = [
       {
         id: 'g1',
         type: 'group',
         position: { x: 4, y: 5 },
-        data: { label: 'Locked team', description: '', color: '#646cff', locked: true, z: 3 },
+        data: {
+          label: 'Locked team',
+          description: '',
+          color: '#646cff',
+          locked: true,
+          z: 3,
+          rotation: 60,
+        },
         style: { width: 300, height: 200 },
         draggable: false,
       },
@@ -231,14 +254,14 @@ describe('group lock/layer round trip through the canvas', () => {
     );
     rerender(<GraphCanvas nodes={[]} edges={[]} onSaveView={onSaveView} saveViewSignal={1} />);
     expect(onSaveView).toHaveBeenCalled();
-    // The autosave path. Omitting either field here is what the browser's next
-    // save used to do, overwriting a lock nobody had touched.
+    // The autosave path. Omitting any envelope field here overwrites server
+    // state even when nobody touched the group.
     expect(onSaveView.mock.calls.at(-1)[0].groups[0]).toEqual(
-      expect.objectContaining({ id: 'g1', locked: true, z: 3 })
+      expect.objectContaining({ id: 'g1', locked: true, z: 3, rotation: 60 })
     );
   });
 
-  it('emits an unlocked group at the base layer when the canvas group has neither', () => {
+  it('emits an unlocked group at the base layer with no rotation when the canvas group omits them', () => {
     const onSaveView = vi.fn();
     hoisted.seededNodes = [
       {
@@ -254,7 +277,7 @@ describe('group lock/layer round trip through the canvas', () => {
     );
     rerender(<GraphCanvas nodes={[]} edges={[]} onSaveView={onSaveView} saveViewSignal={1} />);
     expect(onSaveView.mock.calls.at(-1)[0].groups[0]).toEqual(
-      expect.objectContaining({ locked: false, z: 0 })
+      expect.objectContaining({ locked: false, z: 0, rotation: 0 })
     );
   });
 });
