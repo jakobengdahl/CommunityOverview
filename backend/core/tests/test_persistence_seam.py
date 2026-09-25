@@ -1293,6 +1293,421 @@ class TestExternalRefreshSettlesTheVectorIndexOnce:
                 storage.shutdown_events()
 
 
+def _counting_generator(storage, width=None):
+    """`_stub_generator`, but recording the size of every call it receives.
+
+    Each call is a model forward pass in a real install, the expensive half of
+    a settle; `vector_store.revision` cannot see how many there were, because
+    one stub call absorbs any number of nodes in one rebuild. `width`, when
+    given, makes the stand-in model disagree with a store at another width.
+    """
+    calls = []
+
+    def generate(nodes):
+        calls.append(len(nodes))
+        storage.vector_store._absorb(
+            {
+                node.id: (
+                    _generated(node.name)
+                    if width is None
+                    else [float(len(node.name))] * width
+                )
+                for node in nodes
+            }
+        )
+
+    storage.vector_store.update_nodes_embeddings = generate
+    return calls
+
+
+def _no_generator(storage):
+    """The ML-free install, made explicit so an installed model cannot mask a
+    refusal by generating over it."""
+
+    def absent(nodes):
+        raise ImportError("no embedding model installed")
+
+    storage.vector_store.update_nodes_embeddings = absent
+
+
+def _upsert(node_id, name, embedding=None):
+    payload = _node_payload(node_id, name)
+    if embedding is not None:
+        payload["embedding"] = embedding
+    return EntityOperation.upsert_node(payload)
+
+
+class TestExternalRefreshStrandedPassAtScale:
+    """The fourth settle pass - generating for what a model-width change
+    stranded - was only ever reached with one node in it, so every property it
+    has only at two or more was unmeasured."""
+
+    @staticmethod
+    def _stranding_batch(count):
+        """`count` replaced ids each supplying a vector at the store's width,
+        plus one new id the store says nothing about."""
+        return [_upsert(f"n{i}", f"Renamed {i}", [9.0, 9.0]) for i in range(count)] + [
+            _upsert("g", "Generated")
+        ]
+
+    def _run(self, count):
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        storage.add_nodes(
+            [
+                Node(
+                    id=f"n{i}",
+                    type=NodeType.ACTOR,
+                    name=f"Node {i}",
+                    embedding=[float(i), 0.5],
+                )
+                for i in range(count)
+            ],
+            [],
+        )
+        storage.flush()
+        # A local model three wide, against a store two wide.
+        calls = _counting_generator(storage, width=3)
+        before = storage.vector_store.revision
+        backend.listener(ExternalChange.entities(self._stranding_batch(count)))
+        return storage, storage.vector_store.revision - before, calls
+
+    @pytest.mark.parametrize("count", [3, 30])
+    def test_every_stranded_node_is_generated_again(self, count):
+        storage, _, _ = self._run(count)
+        try:
+            for i in range(count):
+                assert storage.vector_store.get_vector_list(f"n{i}") == pytest.approx(
+                    [float(len(f"Renamed {i}"))] * 3
+                ), f"n{i} was stranded and left without a vector"
+            assert storage.vector_store.get_vector_list("g") == pytest.approx(
+                [float(len("Generated"))] * 3
+            )
+        finally:
+            storage.shutdown_events()
+
+    def test_a_batch_that_strands_costs_exactly_four_whatever_its_size(self):
+        """The constant docs/PERSISTENCE_BACKENDS.md teaches as 'a fourth
+        only when': eviction, adoption, generation, and one more generation
+        for what the width change stranded. Per-node generation of the
+        stranded list costs one rebuild per node instead."""
+        small, small_rebuilds, _ = self._run(3)
+        large, large_rebuilds, _ = self._run(30)
+        try:
+            assert small_rebuilds == 4
+            assert large_rebuilds == 4
+        finally:
+            small.shutdown_events()
+            large.shutdown_events()
+
+    def test_the_model_runs_twice_whatever_the_batch_size(self):
+        """Once for what the store did not supply, once for what the width
+        change stranded - each over the whole list, not a node at a time."""
+        storage, _, calls = self._run(30)
+        try:
+            assert calls == [1, 30]
+        finally:
+            storage.shutdown_events()
+
+    @pytest.mark.parametrize("count", [2, 20])
+    def test_generation_without_stranding_is_one_model_call(self, count):
+        """A generator at the store's own width strands nothing, so the model
+        runs once for every node the store left without a vector."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        calls = _counting_generator(storage)
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [_upsert(f"g{i}", f"Gen {i}") for i in range(count)]
+                )
+            )
+
+            assert calls == [count]
+        finally:
+            storage.shutdown_events()
+
+
+class TestExternalRefreshJudgesTheWidthItReplaced:
+    """Which width a supplied vector is judged against, in the batch shapes
+    the pure-replace and pure-delete tests do not reach. No generator in any
+    of them: generation would paper over a wrong acceptance or refusal."""
+
+    def test_a_new_id_listed_first_does_not_hide_the_replaced_one(self):
+        """The old width is authoritative when ANY upserted id held a vector.
+        Here the first upserted id is new and supplies the vector, and the
+        replaced one supplies none - so a rule that looked only at the first
+        id, at every id, or at the ids that supplied a vector would decide
+        nothing was replaced and adopt a foreign model's width."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        storage.add_nodes(
+            [Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[1.0, 0.0])],
+            [],
+        )
+        storage.flush()
+        _no_generator(storage)
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        _upsert("n", "Newcomer", [1.0, 2.0, 3.0]),
+                        _upsert("a", "Renamed"),
+                    ]
+                )
+            )
+
+            assert storage.vector_store.get_vector_list("n") is None, (
+                "a vector of the wrong width was adopted"
+            )
+            assert storage.vector_store.get_vector_list("a") is None
+        finally:
+            storage.shutdown_events()
+
+    def test_new_ids_at_another_width_do_not_evict_the_live_index(self):
+        """A batch of only new ids empties nothing, so the index still in
+        memory is the anchor. More wrong vectors are supplied than the index
+        holds right ones: anchoring on the batch instead would adopt them, and
+        the rebuild's majority guard would then evict the correct vector of a
+        node the batch never named."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        storage.add_nodes(
+            [Node(id="x", type=NodeType.ACTOR, name="Xeno", embedding=[1.0, 0.0])],
+            [],
+        )
+        storage.flush()
+        _no_generator(storage)
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        _upsert("p", "Papa", [1.0, 2.0, 3.0]),
+                        _upsert("q", "Quebec", [4.0, 5.0, 6.0]),
+                    ]
+                )
+            )
+
+            assert storage.vector_store.get_vector_list("p") is None
+            assert storage.vector_store.get_vector_list("q") is None
+            assert storage.vector_store.get_vector_list("x") == pytest.approx(
+                [1.0, 0.0]
+            ), "a node outside the batch lost its vector"
+        finally:
+            storage.shutdown_events()
+
+    def test_a_batch_that_deletes_and_replaces_still_defends_the_replaced_width(
+        self,
+    ):
+        """The case the replacing flag actually decides: the batch empties the
+        index partly by deleting and partly by replacing. One replaced id is
+        enough for the old width to belong to somebody."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        storage.add_nodes(
+            [
+                Node(id="x", type=NodeType.ACTOR, name="Xeno", embedding=[1.0, 0.0]),
+                Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[2.0, 0.0]),
+            ],
+            [],
+        )
+        storage.flush()
+        _no_generator(storage)
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.delete_node("x"),
+                        _upsert("a", "Renamed", [1.0, 2.0, 3.0]),
+                    ]
+                )
+            )
+
+            assert storage.get_node("x") is None
+            assert storage.vector_store.get_vector_list("a") is None, (
+                "the replaced width was treated as deleted"
+            )
+        finally:
+            storage.shutdown_events()
+
+    def test_an_empty_index_is_anchored_by_the_first_id_touched(self):
+        """The tie-break when nothing local anchors the width is the first id
+        the batch TOUCHED that ends with a supplied vector, not the first
+        vector the store supplied: an id re-touched later keeps its first
+        position. Here that is "a", whose vector only arrives on its second
+        upsert, after "b" and "c" supplied theirs - and a width vote would
+        pick theirs.
+
+        This is where the batch parts from N one-operation reports, which
+        would adopt "b" and "c" and refuse "a". Nobody gets a wrong-width
+        vector either way, and with a generator every node ends with one; the
+        comment on the anchor in _settle_vector_index still describes the
+        two as equivalent and has not been corrected yet."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        _no_generator(storage)
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        _upsert("a", "Alpha"),
+                        _upsert("b", "Beacon", [1.0, 1.0]),
+                        _upsert("c", "Cedar", [2.0, 2.0]),
+                        _upsert("a", "Alpha again", [1.0, 2.0, 3.0]),
+                    ]
+                )
+            )
+
+            assert storage.vector_store.get_vector_list("a") == pytest.approx(
+                [1.0, 2.0, 3.0]
+            )
+            assert storage.vector_store.get_vector_list("b") is None
+            assert storage.vector_store.get_vector_list("c") is None
+        finally:
+            storage.shutdown_events()
+
+
+def _seed_nodes(seed):
+    return [
+        Node(id=node_id, type=NodeType.ACTOR, name=name, embedding=list(vector))
+        for node_id, name, vector in seed
+    ]
+
+
+def _delete(node_id):
+    return EntityOperation.delete_node(node_id)
+
+
+# (seed index, operations) - each operation a factory, so the batched and the
+# one-at-a-time run each get their own payloads.
+_DIFFERENTIAL_SHAPES = {
+    "evict-adopt-generate": (
+        [("a", "Alpha", [1.0, 0.0]), ("b", "Beacon", [2.0, 0.0])],
+        [
+            lambda: _upsert("a", "Renamed", [9.0, 9.0]),
+            lambda: _upsert("c", "Cedar"),
+            lambda: _delete("b"),
+        ],
+    ),
+    "upsert-then-delete": (
+        [("a", "Alpha", [1.0, 0.0]), ("b", "Beacon", [2.0, 0.0])],
+        [lambda: _upsert("a", "Renamed", [9.0, 9.0]), lambda: _delete("a")],
+    ),
+    "delete-then-upsert": (
+        [("a", "Alpha", [1.0, 0.0]), ("b", "Beacon", [2.0, 0.0])],
+        [lambda: _delete("a"), lambda: _upsert("a", "Renamed", [9.0, 9.0])],
+    ),
+    "wrong-width-replace-beside-a-rename": (
+        [("a", "Alpha", [1.0, 0.0]), ("b", "Beacon", [2.0, 0.0])],
+        [
+            lambda: _upsert("a", "Renamed", [1.0, 2.0, 3.0]),
+            lambda: _upsert("b", "Rebeacon"),
+        ],
+    ),
+    "replace-everything-at-the-wrong-width": (
+        [("a", "Alpha", [1.0, 0.0]), ("b", "Beacon", [2.0, 0.0])],
+        [
+            lambda: _upsert("a", "Renamed", [1.0, 2.0, 3.0]),
+            lambda: _upsert("b", "Rebeacon", [4.0, 5.0, 6.0]),
+        ],
+    ),
+    "new-ids-at-the-wrong-width": (
+        [("x", "Xeno", [1.0, 0.0])],
+        [
+            lambda: _upsert("p", "Papa", [1.0, 2.0, 3.0]),
+            lambda: _upsert("q", "Quebec", [4.0, 5.0, 6.0]),
+        ],
+    ),
+    "delete-everything-then-a-new-width": (
+        [("x", "Xeno", [1.0, 0.0])],
+        [lambda: _delete("x"), lambda: _upsert("a", "Alpha", [1.0, 2.0, 3.0])],
+    ),
+    "empty-index-first-is-not-commonest": (
+        [],
+        [
+            lambda: _upsert("a", "Alpha", [1.0, 1.0]),
+            lambda: _upsert("b", "Beacon", [1.0, 2.0, 3.0]),
+            lambda: _upsert("c", "Cedar", [4.0, 5.0, 6.0]),
+        ],
+    ),
+    "empty-index-first-is-widest": (
+        [],
+        [
+            lambda: _upsert("a", "Wide", [1.0, 2.0, 3.0]),
+            lambda: _upsert("b", "Narrow", [7.0, 7.0]),
+        ],
+    ),
+    "second-upsert-says-nothing": (
+        [("a", "Alpha", [1.0, 0.0])],
+        [
+            lambda: _upsert("a", "First", [9.0, 9.0]),
+            lambda: _upsert("a", "Second and longer"),
+        ],
+    ),
+}
+
+
+class TestExternalRefreshBatchMatchesOneOperationReports:
+    """The property the batched settle claims, checked over a table of batch
+    shapes rather than one hand-written index per test: one report of N
+    operations lands what N one-operation reports land, except that a node the
+    batch named is never left without a vector where generation can give it
+    one.
+
+    The one shape known to part from that - an id touched twice on an empty
+    index - is pinned on its own in TestExternalRefreshJudgesTheWidthItReplaced.
+    """
+
+    @staticmethod
+    def _land(seed, operations, generator, batched):
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            if seed:
+                storage.add_nodes(_seed_nodes(seed), [])
+                storage.flush()
+            if generator:
+                _stub_generator(storage)
+            else:
+                _no_generator(storage)
+
+            if batched:
+                backend.listener(
+                    ExternalChange.entities([make() for make in operations])
+                )
+            else:
+                for make in operations:
+                    backend.listener(ExternalChange.entities([make()]))
+
+            return {
+                node.id: (node.name, storage.vector_store.get_vector_list(node.id))
+                for node in storage.get_all_nodes()
+            }
+        finally:
+            storage.shutdown_events()
+
+    @pytest.mark.parametrize("generator", [False, True], ids=["no-model", "model"])
+    @pytest.mark.parametrize("shape", sorted(_DIFFERENTIAL_SHAPES))
+    def test_one_batch_lands_what_one_operation_at_a_time_lands(self, shape, generator):
+        seed, operations = _DIFFERENTIAL_SHAPES[shape]
+        batched = self._land(seed, operations, generator, batched=True)
+        one_at_a_time = self._land(seed, operations, generator, batched=False)
+
+        assert set(batched) == set(one_at_a_time)
+        for node_id, (name, expected) in one_at_a_time.items():
+            got = batched[node_id][1]
+            if expected is None:
+                # The one licensed difference: the batch may recover a node
+                # the one-at-a-time path stranded, and only by generating.
+                if got is not None:
+                    assert generator, f"{node_id} gained a vector with no model"
+                    assert got == pytest.approx(_generated(name)), (
+                        f"{node_id} gained a vector that was not generated"
+                    )
+            else:
+                assert got == pytest.approx(expected), f"{node_id} differs"
+
+
 class TestExternalRefreshSettlesEvenWhenTheBatchFails:
     """A reload supersedes the settle - but _reload_from_store deliberately
     does not land in two cases, and then the applied prefix is what this
