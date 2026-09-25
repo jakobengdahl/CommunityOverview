@@ -945,17 +945,63 @@ def find_similar_nodes_batch(
     threshold: float = 0.7,
     limit: int = 5,
 ) -> Dict[str, List[SimilarNode]]:
-    """Batch variant of :func:`find_similar_nodes`.  More efficient than
-    calling it repeatedly when many names need to be checked at once.
+    """Batch variant of :func:`find_similar_nodes`.
+
+    The lexical pass over graph nodes is shared across all distinct input
+    names. Semantic lookup still calls ``VectorStore.search`` once per distinct
+    name because the vector store exposes only single-query search.
     """
-    return {
-        name: find_similar_nodes(
-            nodes,
-            vector_store,
-            name,
-            node_type=node_type,
-            threshold=threshold,
-            limit=limit,
+    unique_names = list(dict.fromkeys(names))
+    results: Dict[str, List[SimilarNode]] = {name: [] for name in unique_names}
+    seen_node_ids: Dict[str, set] = {name: set() for name in unique_names}
+    lowered_names = {name: name.lower() for name in unique_names}
+
+    for node in nodes.values():
+        if node_type and node.type != node_type:
+            continue
+
+        node_name_lower = node.name.lower()
+        for name in unique_names:
+            name_lower = lowered_names[name]
+            distance = Levenshtein.distance(name_lower, node_name_lower)
+            max_len = max(len(name_lower), len(node_name_lower))
+            similarity = 1.0 if max_len == 0 else 1.0 - (distance / max_len)
+
+            if similarity >= threshold:
+                results[name].append(
+                    SimilarNode(
+                        node=node,
+                        similarity_score=round(similarity, 2),
+                        match_reason=f"Name similarity: {int(similarity * 100)}%",
+                    )
+                )
+                seen_node_ids[name].add(node.id)
+
+    vector_threshold = max(0.4, threshold - 0.2)
+    for name in unique_names:
+        vector_results = vector_store.search(
+            query_text=name, limit=limit, threshold=vector_threshold
         )
-        for name in names
-    }
+
+        for node_id, score in vector_results:
+            if node_id in seen_node_ids[name]:
+                continue
+            node = nodes.get(node_id)
+            if not node:
+                continue
+            if node_type and node.type != node_type:
+                continue
+            results[name].append(
+                SimilarNode(
+                    node=node,
+                    similarity_score=round(score, 2),
+                    match_reason=f"Semantic similarity: {int(score * 100)}%",
+                )
+            )
+            seen_node_ids[name].add(node_id)
+
+    for matches in results.values():
+        matches.sort(key=lambda x: x.similarity_score, reverse=True)
+        del matches[limit:]
+
+    return results
