@@ -762,6 +762,12 @@ export class SessionSyncClient {
   get seq() {
     return this._seq;
   }
+  // Read-only view of `_appliedSeq`, for App.jsx's resyncFromServer: a reload
+  // whose payload seq is below this is older than state the stream already
+  // applied, and applying it would wipe that state.
+  get appliedSeq() {
+    return this._appliedSeq;
+  }
   get connected() {
     return this._source != null;
   }
