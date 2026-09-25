@@ -1226,7 +1226,11 @@ def _index_with(nodes, type_text):
 class _StorageIn:
     """A GraphStorage rooted in a scratch directory, with the process-wide
     config loader reset on the way out - see
-    `test_every_storage_write_path_keeps_the_index_a_superset` for why."""
+    `test_every_storage_write_path_keeps_the_index_a_superset` for why.
+
+    The graph path is absolute: writes land on a background worker that can
+    run after the working directory is restored, and a relative path would
+    then put the journal and history files in the repository root."""
 
     def __init__(self, directory):
         self._directory = directory
@@ -1237,7 +1241,7 @@ class _StorageIn:
         self._cwd = os.getcwd()
         os.chdir(self._directory)
         try:
-            return GraphStorage()
+            return GraphStorage(json_path=str(self._directory / "graph.json"))
         except Exception:
             self.__exit__(None, None, None)
             raise
