@@ -220,6 +220,7 @@ class TestTheBufferIsBounded:
 
         for i in range(_BOOT_BUFFER_LIMIT + 3):
             gate(_change(f"held-{i}"))
+        gate.open()
 
         out = capsys.readouterr().out
         assert out.count("dropping them for a whole-graph reload") == 1, (
@@ -605,7 +606,7 @@ class TestTheGateIsThreadSafe:
                         halfway.set()
                     gate(change)
 
-            reporter = threading.Thread(target=report)
+            reporter = threading.Thread(target=report, daemon=True)
             reporter.start()
             assert halfway.wait(timeout=5), (
                 f"trial {trial}: the reporter never got halfway"
