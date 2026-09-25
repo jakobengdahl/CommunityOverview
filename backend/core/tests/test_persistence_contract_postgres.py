@@ -3268,7 +3268,8 @@ class TestPostgresBatchesSurviveADeadlock:
 
         assert not [t for t in threads if t.is_alive()], "a batch never finished"
         assert errors == [], (
-            f"a batch failed with something other than a deadlock: {errors}"
+            "a batch failed with something other than a deadlock, or was "
+            f"still deadlocking at the deadline: {errors}"
         )
         assert landed_batches == {"First": batches, "Second": batches}
         landed = by_id(first.load_graph_data(), "nodes")

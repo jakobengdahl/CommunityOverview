@@ -748,8 +748,10 @@ writing a backend of your own against a shared server:
   followed by that write's own announcement. So does the transaction
   `start_change_notification()` opens before it starts listening, which
   holds only the graph-identity check (`_claim_or_check_graph_identity()`):
-  one read of the metadata row and, on a store no graph has claimed yet, one
-  `UPDATE` writing this instance's claim. It states no level of its own.
+  at most one read of the metadata row — none once this backend has already
+  checked it, which the `_ensure_schema()` call just before it normally has —
+  and, only when that row exists without a claim, one `UPDATE` writing this
+  instance's. It states no level of its own.
   What migration and `exists()`
   actually send
   depends on whether the store has been migrated before. Cold (nothing
