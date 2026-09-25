@@ -139,32 +139,23 @@ def _bindings(node):
     return []
 
 
-def _scope_aliases(scope, nodes, inherited):
+def _scope_aliases(nodes, inherited):
     """Local name -> the stdout route it stands for in this scope.
 
-    May-alias, not flow: a name bound to a stdout route anywhere in the scope
-    counts throughout it. A name the scope binds only to other things -
-    parameters included - shadows whatever alias it inherited.
+    May-alias and fail-closed: a name bound to a stdout route anywhere in a
+    scope counts throughout it and in every scope nested in it, even where it
+    is also bound to something else. Undoing an alias on a rebinding would
+    have to know which expressions a nested scope evaluates in its parent
+    (defaults, decorators, bases) and every binding form Python has; getting
+    either wrong hides a real write. Erring the other way costs a false flag,
+    which fails loudly and is fixed by renaming.
     """
     aliases = dict(inherited)
-    routed, other = set(), set()
-    if not isinstance(scope, (ast.Module, ast.ClassDef)):
-        args = scope.args
-        for arg in args.posonlyargs + args.args + args.kwonlyargs:
-            other.add(arg.arg)
-        for arg in (args.vararg, args.kwarg):
-            if arg is not None:
-                other.add(arg.arg)
     for node in nodes:
         for name, target in _bindings(node):
             target = _resolved(target, aliases) if target else None
             if target in _STDOUT_ROUTES and target != name:
                 aliases[name] = target
-                routed.add(name)
-            else:
-                other.add(name)
-    for name in other - routed:
-        aliases.pop(name, None)
     return aliases
 
 
@@ -184,7 +175,7 @@ def _writes_to_stdout(call, aliases):
 
 def _collect(scope, inherited, found):
     nodes = _own_nodes(scope)
-    aliases = _scope_aliases(scope, nodes, inherited)
+    aliases = _scope_aliases(nodes, inherited)
     # A class body's names are not visible inside its methods.
     passed_down = inherited if isinstance(scope, ast.ClassDef) else aliases
     for node in nodes:
@@ -229,10 +220,20 @@ def _stdout_calls(source):
         "import sys\ndef f():\n    out = sys.stdout\n    def g():\n        out.write('x')",
         "import sys\nout: object = sys.stdout\nout.write('x')",
         "import sys\nsys.stdout.buffer.write(b'x')",
+        # Evaluated in the enclosing scope, so a rebinding inside the
+        # function must not hide it - nor may any rebinding at all.
+        "import sys\nout = sys.stdout\ndef f(out, x=out.write('x')): pass",
+        "import sys\nout = sys.stdout\ndef f():\n    out = open('y')\n"
+        "    out.write('x')",
     ],
 )
 def test_the_guard_catches_each_way_of_writing_to_stdout(source):
     assert _stdout_calls(source) == [source.count("\n") + 1]
+
+
+def test_the_guard_catches_a_write_in_a_decorator_the_function_rebinds():
+    source = "import sys\nw = sys.stdout.write\n@deco(w('x'))\ndef f(w): pass"
+    assert _stdout_calls(source) == [3]
 
 
 @pytest.mark.parametrize(
@@ -247,11 +248,7 @@ def test_the_guard_catches_each_way_of_writing_to_stdout(source):
         # handle in another.
         "import sys\ndef b():\n    f = open('x')\n    f.write('y')\n"
         "def a():\n    f = sys.stdout",
-        # A local binding to something else shadows an inherited alias, and
-        # a class body's names do not reach its methods.
-        "import sys\nout = sys.stdout\ndef f():\n    out = open('x')\n"
-        "    out.write('y')",
-        "import sys\nout = sys.stdout\ndef f(out):\n    out.write('y')",
+        # A class body's names do not reach its methods.
         "import sys\nclass A:\n    f = sys.stdout\n    def m(self):\n"
         "        f.write('x')",
     ],
