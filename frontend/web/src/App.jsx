@@ -252,7 +252,12 @@ function App() {
   // no timeout, unlike SessionSyncClient's own outbound ops POST, so a hung
   // GET must not wedge reconnect recovery forever) recognise it is no longer
   // the current owner and not stomp on a newer resync that started meanwhile.
-  const resyncInFlightRef = useRef(false);
+  // Holds `{ client }`, the sync client the in-flight resync was started
+  // for (null when idle), not a bare boolean or a session id: a slow resync
+  // for the session being left must not swallow the first resync of the
+  // session just switched to, and switching away and back builds a new
+  // client for the same id whose first resync must not be swallowed either.
+  const resyncInFlightRef = useRef(null);
   const resyncGuardTokenRef = useRef(0);
   // Ops the sync client has told us (via onDropped) were terminally rejected
   // by the server — 400/413/404/410, never retryable — since the current
@@ -593,11 +598,24 @@ function App() {
       // concurrent one loses nothing a later op/resync wouldn't also catch —
       // including onDropped's own resync call, whose "converge back to
       // server truth" goal an already-in-flight resync accomplishes anyway.
-      if (resyncInFlightRef.current) return 0;
-      resyncInFlightRef.current = true;
-      // A token, not just the boolean: if the guard timer below fires (its
-      // request never settles) while a *later* resync has since legitimately
-      // taken over, this call's eventual finally must not clear a flag it no
+      //
+      // Only a resync for the *same* sync client is skipped. One for the
+      // current client's session supersedes an in-flight one started for a
+      // client that has since been replaced (a session switch, including away
+      // and back to the same id): taking the token below makes the old call
+      // stop at its next checkpoint. A resync naming a session the current
+      // client is not on never supersedes, or it would cancel the current
+      // session's resync and then bail at its own switched-away check,
+      // leaving nothing to reload.
+      const client = syncRef.current;
+      const inFlight = resyncInFlightRef.current;
+      if (inFlight !== null) {
+        if (inFlight.client === client || client?.sessionId !== targetId) return 0;
+      }
+      resyncInFlightRef.current = { client };
+      // A token, not just the marker: if the guard timer below fires (its
+      // request never settles), or a resync for a newer client supersedes
+      // this one, this call's eventual finally must not clear a marker it no
       // longer owns (review round 3). Every checkpoint below that could run
       // after an arbitrarily long await (the reload, and each recovered
       // nodes_added's node fetch inside the replay loop) re-checks this same
@@ -619,7 +637,7 @@ function App() {
       // run letting a redundant resync start): they stop this call from
       // acting on stale state instead of preventing the timer from firing.
       const guardTimer = setTimeout(() => {
-        if (resyncGuardTokenRef.current === myToken) resyncInFlightRef.current = false;
+        if (resyncGuardTokenRef.current === myToken) resyncInFlightRef.current = null;
       }, RESYNC_GUARD_TIMEOUT_MS);
       try {
         // Selection claims are excluded from every capture below:
@@ -749,7 +767,7 @@ function App() {
         return appliedCount;
       } finally {
         clearTimeout(guardTimer);
-        if (resyncGuardTokenRef.current === myToken) resyncInFlightRef.current = false;
+        if (resyncGuardTokenRef.current === myToken) resyncInFlightRef.current = null;
       }
     },
     [syncRef, applyRemoteOp]

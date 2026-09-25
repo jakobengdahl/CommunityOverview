@@ -230,6 +230,27 @@ describe('useSharedSession.loadSessionFromServer', () => {
     });
   });
 
+  // A load without a seq must not claim seq 0: the client would then resync
+  // on any first snapshot, instead of skipping the check it cannot make.
+  it('passes an undefined load seq through when the payload carries none', async () => {
+    const setBaseline = vi.fn();
+    const deps = makeDeps({ ensureSyncConnected: vi.fn(() => ({ setBaseline, sessionId: null })) });
+    api.getSession.mockResolvedValueOnce({
+      state: { positions: {}, annotations: [] },
+      resolved: { nodes: [NODE_A], edges: [] },
+    });
+    const { result } = renderHook(() => useSharedSession(deps));
+
+    await act(async () => {
+      await result.current.loadSessionFromServer('1234-5678');
+    });
+
+    expect(setBaseline).toHaveBeenCalledTimes(1);
+    expect(setBaseline).toHaveBeenCalledWith(expect.objectContaining({ node_refs: ['node-a'] }), {
+      seq: undefined,
+    });
+  });
+
   it('treats a 404 as an empty session and seeds an empty eager baseline', async () => {
     const setBaseline = vi.fn();
     const deps = makeDeps({ ensureSyncConnected: vi.fn(() => ({ setBaseline, sessionId: null })) });
