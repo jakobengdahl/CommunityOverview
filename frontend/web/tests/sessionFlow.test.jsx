@@ -143,6 +143,15 @@ import useGraphStore from '../src/store/graphStore';
 import { I18nProvider } from '../src/i18n';
 import { SessionSyncClient, DEFAULT_REQUEST_TIMEOUT_MS } from '../src/services/sessionSyncClient';
 
+// vi.clearAllMocks() keeps a mockImplementation() a test installed, so each
+// module default is captured here and put back before every test; otherwise
+// a test inherits whatever the test before it left behind (e.g. a
+// getNodeDetails that resolves node-a lets a resync replay it).
+const defaultMockImplementations = [
+  ...Object.values(api).filter((fn) => vi.isMockFunction(fn)),
+  global.fetch,
+].map((fn) => [fn, fn.getMockImplementation()]);
+
 function renderApp() {
   return render(
     <I18nProvider>
@@ -173,6 +182,10 @@ describe('Server-backed session lifecycle', () => {
     // has rendered" barrier below and it stops being a barrier at all.
     canvasProps.baselineEpoch = null;
     vi.clearAllMocks();
+    defaultMockImplementations.forEach(([fn, impl]) => {
+      fn.mockReset();
+      fn.mockImplementation(impl);
+    });
   });
 
   it('toolbar Save View still opens the naming dialog and emits ops to the server', async () => {
