@@ -71,6 +71,13 @@ function missingFrom(source, target) {
   return [...source.keys()].filter((path) => !target.has(path)).sort();
 }
 
+function kindMismatches(enMap, svMap) {
+  return [...enMap.keys()]
+    .filter((path) => svMap.has(path))
+    .filter((path) => leafKind(enMap.get(path)) !== leafKind(svMap.get(path)))
+    .map((path) => `${path}: en ${leafKind(enMap.get(path))} vs sv ${leafKind(svMap.get(path))}`);
+}
+
 describe('key parity helpers', () => {
   it('walk into objects held in arrays, with index-qualified paths', () => {
     const seededEn = { list: [{ title: 'A', body: 'B' }], plain: ['x', 'y'] };
@@ -82,11 +89,35 @@ describe('key parity helpers', () => {
     expect(missingFrom(svSeeded, enSeeded)).toEqual([]);
   });
 
+  it('walk into mixed arrays and arrays of arrays that hold an object', () => {
+    const seeded = leafEntries({
+      mixed: ['a', { title: 'T' }],
+      nested: [[{ title: 'N' }]],
+      strings: [['x', 'y']],
+    });
+    expect([...seeded.keys()].sort()).toEqual([
+      'mixed.0',
+      'mixed.1.title',
+      'nested.0.0.title',
+      'strings.0',
+    ]);
+  });
+
   it('report a kind mismatch nested in an array', () => {
     const enSeeded = leafEntries({ list: [{ title: 'A' }] });
     const svSeeded = leafEntries({ list: [{ title: ['A'] }] });
     expect(leafKind(enSeeded.get('list.0.title'))).toBe('string');
     expect(leafKind(svSeeded.get('list.0.title'))).toBe('array');
+    expect(kindMismatches(enSeeded, svSeeded)).toEqual(['list.0.title: en string vs sv array']);
+  });
+
+  it('report kind mismatches only for keys present in both files', () => {
+    const enSeeded = leafEntries({ same: 'a', differs: null, onlyEn: 'x', empty: {} });
+    const svSeeded = leafEntries({ same: 'b', differs: ['n'], onlySv: 1, empty: 'e' });
+    expect(kindMismatches(enSeeded, svSeeded)).toEqual([
+      'differs: en null vs sv array',
+      'empty: en object vs sv string',
+    ]);
   });
 
   it('find dotted key names inside objects held in arrays', () => {
@@ -134,13 +165,7 @@ describe('i18n key parity between en.json and sv.json', () => {
   });
 
   it('uses the same kind of value (string, array, ...) for each shared key', () => {
-    const mismatched = [...enLeaves.keys()]
-      .filter((path) => svLeaves.has(path))
-      .filter((path) => leafKind(enLeaves.get(path)) !== leafKind(svLeaves.get(path)))
-      .map(
-        (path) =>
-          `${path}: en ${leafKind(enLeaves.get(path))} vs sv ${leafKind(svLeaves.get(path))}`
-      );
+    const mismatched = kindMismatches(enLeaves, svLeaves);
     expect(mismatched, `Value kind mismatches:\n  ${mismatched.join('\n  ')}`).toEqual([]);
   });
 });
