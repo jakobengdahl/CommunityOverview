@@ -888,8 +888,8 @@ can configure one. See `docs/EVENT_SUBSCRIPTIONS.md`.
 | `create_visualization_session` | Create a new empty session (optional non-unique name; server assigns a default when omitted) |
 | `list_visualization_sessions` | List existing sessions, most recently updated first |
 | `get_visualization_session` | Inspect one session's resource metadata (incl. node count) |
-| `rename_visualization_session` | Set or clear a session's display name |
-| `delete_visualization_session` | Permanently delete a session — requires `confirm=true` |
+| `rename_visualization_session` | Set or clear a session's display name (draws one unit from a rate budget of its own; `rate_limited` when spent) |
+| `delete_visualization_session` | Permanently delete a session — requires `confirm=true` (a confirmed call draws one unit from a rate budget of its own; `rate_limited` when spent) |
 | `list_sticky_notes` | List every sticky note in a session (id/text/x/y/w/h/color/font_size/rotation/z/locked) |
 | `create_sticky_note` | Create a sticky note at a model-space position, or replace one by id (create/upsert) |
 | `update_sticky_note` | Partially update a sticky note's content, style, position, size, rotation, layer order and/or lock state |
@@ -1048,7 +1048,10 @@ state. The returned `revision` threads straight into
 arrange" three deterministic calls.
 
 A repeated id counts once: the tool deduplicates `node_ids` before checking the
-500-id cap, the 256 KiB byte cap and the per-client rate budget. Both caps are
+500-id cap, the 256 KiB byte cap and the per-client rate budget. The rate budget
+is charged one unit per distinct id that resolves, not per id sent: ids reported
+in `skipped` are not charged, and a call that returns `no_resolvable_nodes`
+draws nothing. Both caps are
 checked before any id is resolved and return `too_large`, with a `message` that
 names which cap was hit. An unknown session is reported as not found before any
 id is resolved, so it is never masked by `no_resolvable_nodes`. That error is
