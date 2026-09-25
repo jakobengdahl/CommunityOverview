@@ -96,7 +96,8 @@ def reported(caplog, capsys):
 
     # A report is a WARNING; the same text at ERROR would slip past both the
     # positive checks here and any check that nothing was reported. Checked
-    # again at teardown, for whatever was logged after the last call.
+    # again at teardown, for whatever was logged after the last call or by a
+    # fixture torn down before this one.
     def assert_nothing_louder(records):
         louder = [
             record.getMessage()
@@ -105,21 +106,28 @@ def reported(caplog, capsys):
         ]
         assert not louder, f"reported above WARNING: {louder}"
 
+    # A cursor rather than caplog.clear(): on a pytest whose clear() rebinds
+    # the record list instead of emptying it, the list the teardown check
+    # reads detaches at the first clear, and nothing after it is looked at.
+    seen = 0
+
     def take() -> str:
+        nonlocal seen
+        fresh = caplog.records[seen:]
+        seen += len(fresh)
         messages = [
             record.getMessage()
-            for record in caplog.records
+            for record in fresh
             if record.name == _BACKEND_LOGGER and record.levelno == logging.WARNING
         ]
-        assert_nothing_louder(caplog.records)
-        caplog.clear()
+        assert_nothing_louder(fresh)
         out = capsys.readouterr().out
         leaked = [message for message in messages if message in out]
         assert not leaked, f"a report went to stdout: {leaked}"
         return "\n".join(messages)
 
     yield take
-    assert_nothing_louder(caplog.get_records("call"))
+    assert_nothing_louder(caplog.get_records("call") + caplog.get_records("teardown"))
 
 
 def _assert_dropped_tail_reported(report: str, journal_path, *, parsed: bool):
