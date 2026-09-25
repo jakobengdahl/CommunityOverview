@@ -309,10 +309,13 @@ function genericOverlayToAnnotation(o) {
 // node shape needs `position` + points *relative* to it, the same anchor
 // convention `line`'s dx/dy uses, so a plain ReactFlow drag (which only
 // moves `position`) slides the whole stroke without this layer rewriting
-// every point on every render.
+// every point on every render. When a stored envelope position exists, it is
+// the anchor: the first sampled point may differ from it, and deriving the
+// overlay position from points[0] would rewrite geometry.x/y on a no-op
+// browser round trip.
 function freehandAnnotationToOverlay(a) {
   const rawPoints = Array.isArray(a.points) && a.points.length ? a.points : [{ x: 0, y: 0 }];
-  const anchor = rawPoints[0];
+  const anchor = a.position || a.geometry || rawPoints[0];
   return {
     id: a.id,
     kind: 'freehand',
