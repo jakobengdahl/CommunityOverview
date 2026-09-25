@@ -124,7 +124,10 @@ def _expansions(dotted, aliases, seen=frozenset()):
     names = {dotted}
     for i in range(1, len(parts)):
         if parts[i] in _ROUTE_MODULES:
+            # The first such suffix's own expansion reaches every later one;
+            # recursing on each as well is exponential in their number.
             names |= _expansions(".".join(parts[i:]), aliases, seen)
+            break
     head, _, rest = dotted.partition(".")
     if head not in seen:
         for route in aliases.get(head, ()):
@@ -167,8 +170,10 @@ def _bound(targets, value):
 
 def _bindings(node):
     """(local name, dotted name it is bound to, or None) for each name `node`
-    binds: imports, assignments of every form, loop, comprehension and `with`
-    targets, and `match` captures. A name bound to an expression rather than to a plain
+    binds: imports, plain, annotated, unpacking and walrus assignments, loop,
+    comprehension and `with` targets, and `match` captures. An augmented
+    assignment (`out += x`) is not followed: it rebinds a name to the result
+    of an operator, not to what the right-hand side names. A name bound to an expression rather than to a plain
     dotted name is paired with every dotted name in it. An `except` target is
     left out: it binds the exception raised, which no stdout route is."""
     if isinstance(node, ast.Import):
@@ -363,10 +368,17 @@ def _stdout_calls(source):
         # Each binding form the guard follows, not only a plain name on the left
         # of `=`.
         "import sys\nout, err = sys.stdout, sys.stderr\nout.write('x')",
+        "import sys\n[out, err] = [sys.stdout, sys.stderr]\nout.write('x')",
+        "import sys\nerr, *out = sys.stderr, sys.stdout\nout.write('x')",
         "import sys\nif (out := sys.stdout):\n    out.write('x')",
         "import sys\nfor out in (sys.stdout,):\n    out.write('x')",
         "import sys\n[out.write('x') for out in [sys.stdout]]",
         "import sys\nwith sys.stdout as out:\n    out.write('x')",
+        "import sys\nasync def f():\n    async for out in g(sys.stdout):\n"
+        "        out.write('x')",
+        "import sys\nasync def f():\n    async with g(sys.stdout) as out:\n"
+        "        out.write('x')",
+        "import sys\ndef f(*, out=sys.stdout if c else x):\n    out.write('x')",
         "import sys\nmatch sys.stdout:\n    case out:\n        out.write('x')",
         "import sys\nmatch [sys.stdout]:\n    case [*out]:\n        out.write('x')",
         "import sys\nmatch {1: sys.stdout}:\n    case {**out}:\n        out.write('x')",
@@ -383,6 +395,9 @@ def _stdout_calls(source):
         "import os\nos.sys.stdout.write('x')",
         "import logging\nlogging.sys.__stdout__.write('x')",
         "import os\nm = os.sys\nm.stdout.write('x')",
+        # And in time linear in the path, however many such modules it runs
+        # through.
+        "import os\nx" + ".os" * 60 + ".write(1, b'x')",
     ],
 )
 def test_the_guard_catches_each_way_of_writing_to_stdout(source):
