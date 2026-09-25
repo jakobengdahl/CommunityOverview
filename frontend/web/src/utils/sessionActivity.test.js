@@ -406,18 +406,6 @@ describe('describeActivity', () => {
 
     it.each([
       {
-        name: 'freehand whose stored position disagrees with its first point',
-        ann: () =>
-          serverAnnotation('freehand', {
-            x: 0,
-            y: 0,
-            points: [
-              { x: 120, y: 340 },
-              { x: 130, y: 350 },
-            ],
-          }),
-      },
-      {
         name: 'line whose stored position disagrees with its from-endpoint',
         ann: () =>
           serverAnnotation('line', {
@@ -428,13 +416,31 @@ describe('describeActivity', () => {
           }),
       },
     ])('does not read the browser rebuilding $name as a move', ({ ann }) => {
-      // The translators derive these kinds' position from their own content,
-      // so an untouched round trip rewrites position without the user having
-      // dragged anything. Nothing else changed either, so there is nothing to
-      // report.
+      // This translator derives position from endpoint content, so an
+      // untouched round trip rewrites position without the user having
+      // dragged anything. Nothing else changed either, so there is nothing
+      // to report.
       const stored = ann();
       const r = browserMove(stored, 0);
       expect(r.before.position).not.toEqual(r.after.position);
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_generic');
+    });
+
+    it('does not rewrite a freehand position that disagrees with its first point', () => {
+      const stored = serverAnnotation('freehand', {
+        x: 0,
+        y: 0,
+        points: [
+          { x: 120, y: 340 },
+          { x: 130, y: 350 },
+        ],
+      });
+      const r = browserMove(stored, 0);
+      expect(r.after.position).toEqual(r.before.position);
+      expect(r.after.geometry).toMatchObject({
+        x: r.before.geometry.x,
+        y: r.before.geometry.y,
+      });
       expect(describeActivity(r).key).toBe('history.desc.annotation_updated_generic');
     });
 
