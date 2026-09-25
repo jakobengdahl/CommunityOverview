@@ -128,10 +128,11 @@ class TestImportReturnsBeforeEmbeddingsComplete:
         encode step failed under CI load (1.387s against a 2.0s delay) with
         the endpoint behaving correctly. An endpoint that waits on the encode
         step returns only after the gate's timeout has run out, by which point
-        the step has finished and the first assertion below fails. The one
-        clock left is that 30 s timeout: a test thread stalled for longer
-        than it between the POST and that assertion would let the stub release
-        itself and fail a correct endpoint. Short of such a stall the outcome
+        the step has finished and the first assertion below fails. Two loose
+        clocks remain, and only a stall of the test thread can trip either:
+        the gate's 30 s timeout, which must not run out between the POST and
+        the immediate status check or the stub releases itself; and the 10 s
+        terminal wait after the release. Short of such a stall the outcome
         does not depend on how fast the runner is."""
         json_path = os.path.join(temp_dir, "test.json")
         storage = GraphStorage(json_path=json_path)
