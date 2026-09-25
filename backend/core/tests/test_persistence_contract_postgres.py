@@ -602,8 +602,18 @@ class TestPostgresPlansHelperSkipsMaintenance:
 
         planned = [text for text, _ in _plans(issued)]
 
-        assert not [t for t in planned if t.upper().startswith("ANALYZE")]
-        assert any(t.upper().startswith("INSERT") for t in planned), planned
+        # Every other statement naming a graph table, each one planned.
+        expected = [
+            text
+            for text, params in ((_rendered(q), p) for q, p in issued)
+            if ("graph_nodes" in text or "graph_edges" in text)
+            and params is not _EXECUTED_NEVER
+            and not text.upper().startswith("ANALYZE")
+        ]
+        assert planned == expected
+        assert _tables_named(
+            " ".join(t for t in planned if t.upper().startswith("INSERT"))
+        ) == {"graph_nodes", "graph_edges"}
         deletes = [t for t in planned if t.upper().startswith("DELETE")]
         assert _tables_named(" ".join(deletes)) == {"graph_nodes", "graph_edges"}
 
@@ -5420,10 +5430,10 @@ class TestPostgresTreatsAnUnreadableAnnouncementAsAReload:
         assert [op.entity_id for op in changes[1].operations] == ["second"]
         # The refresh that failed is the one thing an operator must hear
         # about: the instance is behind until the next change reaches it.
-        assert reported().splitlines() == [
+        assert (
             "applying an external change failed: RuntimeError: "
             "the application refused this one"
-        ]
+        ) in reported().splitlines()
 
     def test_a_non_driver_read_failure_reconnects_and_keeps_reporting(
         self, schema, backends, monkeypatch

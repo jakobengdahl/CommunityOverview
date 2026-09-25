@@ -68,8 +68,7 @@ def _dotted(node):
     return None
 
 
-# Every way of writing to stdout that bypasses the logger, by the name it
-# resolves to once imports and plain assignments are followed.
+# Every way of writing to stdout that bypasses the logger.
 _STDOUT_CALLS = {
     "print",
     "builtins.print",
@@ -77,26 +76,29 @@ _STDOUT_CALLS = {
     "sys.__stdout__.write",
 }
 
+# Names an alias can stand for on its way to one of the calls above. Only
+# these are followed: an alias to anything else is not recorded, so it can
+# never re-route a literal `print` or `sys.stdout.write` away from the guard.
+_STDOUT_ROUTES = _STDOUT_CALLS | {
+    "builtins",
+    "sys",
+    "sys.stdout",
+    "sys.__stdout__",
+    "os",
+    "os.write",
+}
 
-def _aliases(tree):
-    """Local name -> the dotted name it stands for, from `import x as y`,
-    `from x import y as z` and `y = <dotted name>` anywhere in the module."""
-    aliases = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for name in node.names:
-                if name.asname:
-                    aliases[name.asname] = name.name
-        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-            for name in node.names:
-                aliases[name.asname or name.name] = f"{node.module}.{name.name}"
-        elif isinstance(node, ast.Assign):
-            target = _dotted(node.value)
-            if target:
-                for name in node.targets:
-                    if isinstance(name, ast.Name) and name.id != target:
-                        aliases[name.id] = target
-    return aliases
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+
+
+def _own_nodes(scope):
+    """Every node in `scope`, not descending into the scopes nested in it."""
+    stack = list(ast.iter_child_nodes(scope))
+    while stack:
+        node = stack.pop()
+        yield node
+        if not isinstance(node, _SCOPES):
+            stack.extend(ast.iter_child_nodes(node))
 
 
 def _resolved(dotted, aliases):
@@ -110,27 +112,61 @@ def _resolved(dotted, aliases):
     return dotted
 
 
+def _record(aliases, name, target):
+    target = _resolved(target, aliases)
+    if name != target and target in _STDOUT_ROUTES:
+        aliases[name] = target
+
+
+def _scope_aliases(nodes, inherited):
+    """Local name -> the stdout route it stands for, from `import x as y`,
+    `from x import y as z` and `y = <dotted name>` in this scope."""
+    aliases = dict(inherited)
+    for node in nodes:
+        if isinstance(node, ast.Import):
+            for name in node.names:
+                if name.asname:
+                    _record(aliases, name.asname, name.name)
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            for name in node.names:
+                _record(aliases, name.asname or name.name, f"{node.module}.{name.name}")
+        elif isinstance(node, ast.Assign):
+            target = _dotted(node.value)
+            if target:
+                for name in node.targets:
+                    if isinstance(name, ast.Name):
+                        _record(aliases, name.id, target)
+    return aliases
+
+
 def _writes_to_stdout(call, aliases):
-    name = _resolved(_dotted(call.func), aliases)
-    if name in _STDOUT_CALLS:
+    literal = _dotted(call.func)
+    names = {literal, _resolved(literal, aliases)}
+    if names & _STDOUT_CALLS:
         return True
     # File descriptor 1 is stdout whatever sys.stdout has been swapped for.
     return (
-        name == "os.write"
+        "os.write" in names
         and bool(call.args)
         and isinstance(call.args[0], ast.Constant)
         and call.args[0].value == 1
     )
 
 
+def _collect(scope, inherited, found):
+    nodes = list(_own_nodes(scope))
+    aliases = _scope_aliases(nodes, inherited)
+    for node in nodes:
+        if isinstance(node, ast.Call) and _writes_to_stdout(node, aliases):
+            found.append(node.lineno)
+        if isinstance(node, _SCOPES):
+            _collect(node, aliases, found)
+
+
 def _stdout_calls(source):
-    tree = ast.parse(source)
-    aliases = _aliases(tree)
-    return [
-        node.lineno
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and _writes_to_stdout(node, aliases)
-    ]
+    found = []
+    _collect(ast.parse(source), {}, found)
+    return sorted(found)
 
 
 @pytest.mark.parametrize(
@@ -149,6 +185,11 @@ def _stdout_calls(source):
         "say = print\nsay('x')",
         "from builtins import print as say\nsay('x')",
         "import sys\nout = sys.stdout\nout.write('x')",
+        # A literal name is caught whatever an import or an assignment
+        # elsewhere in the module rebinds it to.
+        "from rich import print\nprint('x')",
+        "import sys\ndef f():\n    print = sys.stderr.write\nprint('x')",
+        "import sys\ndef f():\n    sys = foo.bar\nsys.stdout.write('x')",
     ],
 )
 def test_the_guard_catches_each_way_of_writing_to_stdout(source):
@@ -163,6 +204,10 @@ def test_the_guard_catches_each_way_of_writing_to_stdout(source):
         "import os\nos.write(2, b'x')",
         "import os\nos.write(fd, b'x')",
         "handle = open('f', 'w')\nhandle.write('x')",
+        # An alias to stdout in one function does not reach a same-named
+        # handle in another.
+        "import sys\ndef b():\n    f = open('x')\n    f.write('y')\n"
+        "def a():\n    f = sys.stdout",
     ],
 )
 def test_the_guard_ignores_logger_calls_and_other_streams(source):
