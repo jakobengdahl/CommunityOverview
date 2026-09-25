@@ -94,27 +94,32 @@ def reported(caplog, capsys):
     line: its WARNING records, none of which may also have reached stdout."""
     caplog.set_level(logging.WARNING, logger=_BACKEND_LOGGER)
 
+    # A report is a WARNING; the same text at ERROR would slip past both the
+    # positive checks here and any check that nothing was reported. Checked
+    # again at teardown, for whatever was logged after the last call.
+    def assert_nothing_louder(records):
+        louder = [
+            record.getMessage()
+            for record in records
+            if record.name == _BACKEND_LOGGER and record.levelno > logging.WARNING
+        ]
+        assert not louder, f"reported above WARNING: {louder}"
+
     def take() -> str:
         messages = [
             record.getMessage()
             for record in caplog.records
             if record.name == _BACKEND_LOGGER and record.levelno == logging.WARNING
         ]
-        # A report is a WARNING; the same text at ERROR would slip past both
-        # the positive checks here and any check that nothing was reported.
-        louder = [
-            record.getMessage()
-            for record in caplog.records
-            if record.name == _BACKEND_LOGGER and record.levelno > logging.WARNING
-        ]
-        assert not louder, f"reported above WARNING: {louder}"
+        assert_nothing_louder(caplog.records)
         caplog.clear()
         out = capsys.readouterr().out
         leaked = [message for message in messages if message in out]
         assert not leaked, f"a report went to stdout: {leaked}"
         return "\n".join(messages)
 
-    return take
+    yield take
+    assert_nothing_louder(caplog.get_records("call"))
 
 
 def _assert_dropped_tail_reported(report: str, journal_path, *, parsed: bool):

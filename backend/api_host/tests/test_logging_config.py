@@ -177,12 +177,21 @@ def test_text_format_leaves_an_existing_root_handler_and_uvicorn_alone():
 
 def test_structured_json_with_an_empty_root_logs_json_to_stdout():
     """basicConfig would put a handler on stderr with the text format; the
-    JSON handler must be the only one, and on stdout."""
+    JSON handler must be the only one, and on stdout.
+
+    The call also re-formats whatever handlers the uvicorn loggers carry, so
+    they are pinned empty and restored: otherwise this test would re-format
+    handlers another test or a real server left on them."""
     previous_handlers = logging.root.handlers[:]
     previous_level = logging.root.level
+    previous_uvicorn_handlers = {
+        name: logging.getLogger(name).handlers[:] for name in _UVICORN_NAMES
+    }
     try:
         logging.root.handlers = []
         logging.root.setLevel(logging.WARNING)
+        for name in _UVICORN_NAMES:
+            logging.getLogger(name).handlers = []
 
         configure_root_logging("structured_json")
 
@@ -192,12 +201,16 @@ def test_structured_json_with_an_empty_root_logs_json_to_stdout():
         assert handler.stream is sys.stdout
         assert isinstance(handler.formatter, StructuredJsonFormatter)
         assert logging.root.level == logging.INFO
+        for name in _UVICORN_NAMES:
+            assert logging.getLogger(name).handlers == []
     finally:
         for handler in logging.root.handlers:
             if handler not in previous_handlers:
                 handler.close()
         logging.root.handlers = previous_handlers
         logging.root.setLevel(previous_level)
+        for name, handlers in previous_uvicorn_handlers.items():
+            logging.getLogger(name).handlers = handlers
 
 
 def test_an_unrecognised_log_format_takes_the_text_branch():
@@ -205,6 +218,9 @@ def test_an_unrecognised_log_format_takes_the_text_branch():
     previous_level = logging.root.level
     try:
         logging.root.handlers = []
+        # Not INFO, so the level assertion below sees the call set it rather
+        # than what an earlier test left behind.
+        logging.root.setLevel(logging.WARNING)
 
         configure_root_logging("xml")
 

@@ -69,15 +69,163 @@ def _dotted(node):
 
 
 # Every way of writing to stdout that bypasses the logger.
-_STDOUT_CALLS = {"print", "builtins.print", "sys.stdout.write"}
+_STDOUT_CALLS = {
+    "print",
+    "builtins.print",
+    "sys.stdout.write",
+    "sys.__stdout__.write",
+    "sys.stdout.buffer.write",
+    "sys.__stdout__.buffer.write",
+    "sys.stdout.writelines",
+    "sys.__stdout__.writelines",
+    "sys.stdout.buffer.writelines",
+    "sys.__stdout__.buffer.writelines",
+}
+
+# Names an alias can stand for on its way to one of the calls above. Only
+# these are followed: an alias to anything else is not recorded, so it can
+# never re-route a literal `print` or `sys.stdout.write` away from the guard.
+_STDOUT_ROUTES = _STDOUT_CALLS | {
+    "builtins",
+    "sys",
+    "sys.stdout",
+    "sys.__stdout__",
+    "sys.stdout.buffer",
+    "sys.__stdout__.buffer",
+    "os",
+    "os.write",
+}
+
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+
+
+def _own_nodes(scope):
+    """Every node in `scope`, not descending into the scopes nested in it."""
+    nodes, stack = [], list(ast.iter_child_nodes(scope))
+    while stack:
+        node = stack.pop()
+        nodes.append(node)
+        if not isinstance(node, _SCOPES):
+            stack.extend(ast.iter_child_nodes(node))
+    return nodes
+
+
+def _expansions(dotted, aliases, seen=frozenset()):
+    """Every name `dotted` may stand for: itself, and each expansion of its
+    first component through every route that name may be bound to."""
+    if not dotted:
+        return set()
+    head, _, rest = dotted.partition(".")
+    names = {dotted}
+    if head not in seen:
+        for route in aliases.get(head, ()):
+            expanded = route + (f".{rest}" if rest else "")
+            names |= _expansions(expanded, aliases, seen | {head})
+    return names
+
+
+def _bindings(node):
+    """(local name, dotted name it is bound to, or None) for each name `node`
+    binds: imports, plain and annotated assignments."""
+    if isinstance(node, ast.Import):
+        return [(name.asname, name.name) for name in node.names if name.asname]
+    if isinstance(node, ast.ImportFrom):
+        if not node.module or node.level:
+            return [(name.asname or name.name, None) for name in node.names]
+        if [name.name for name in node.names] == ["*"]:
+            # Binds whatever the module exports, so every attribute of it a
+            # stdout route goes through.
+            prefix = f"{node.module}."
+            return [
+                (route[len(prefix) :], route)
+                for route in _STDOUT_ROUTES
+                if route.startswith(prefix) and "." not in route[len(prefix) :]
+            ]
+        return [
+            (name.asname or name.name, f"{node.module}.{name.name}")
+            for name in node.names
+        ]
+    if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        value = _dotted(node.value)
+        return [(t.id, value) for t in targets if isinstance(t, ast.Name)]
+    return []
+
+
+def _parameter_bindings(scope):
+    """(parameter, dotted name of its default) for a function's defaulted
+    parameters: `def f(out=sys.stdout)` binds `out` inside `f`."""
+    if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        return []
+    args = scope.args
+    positional = args.posonlyargs + args.args
+    pairs = list(zip(positional[len(positional) - len(args.defaults) :], args.defaults))
+    pairs += [
+        (a, d) for a, d in zip(args.kwonlyargs, args.kw_defaults) if d is not None
+    ]
+    return [(arg.arg, _dotted(default)) for arg, default in pairs]
+
+
+def _scope_aliases(scope, nodes, inherited):
+    """Local name -> every stdout route it may stand for in this scope.
+
+    May-alias and fail-closed: a name bound to a stdout route anywhere in a
+    scope counts throughout it and in every scope nested in it, in any order
+    and even where it is also bound to something else. Routes are only ever
+    added - to what the name inherited as well as to each other - never
+    replaced, and the bindings are applied until nothing changes, so a chain
+    is followed whichever order its links appear in. Undoing an alias on a
+    rebinding would have to know which expressions a nested scope evaluates
+    in its parent (defaults, decorators, bases) and every binding form Python
+    has; getting either wrong hides a real write. Erring the other way costs a
+    false flag, which fails loudly and is fixed by renaming.
+    """
+    aliases = {name: set(routes) for name, routes in inherited.items()}
+    bindings = _parameter_bindings(scope)
+    for node in nodes:
+        bindings.extend(_bindings(node))
+    changed = True
+    while changed:
+        changed = False
+        for name, target in bindings:
+            for route in _expansions(target, aliases) & _STDOUT_ROUTES:
+                if route != name and route not in aliases.setdefault(name, set()):
+                    aliases[name].add(route)
+                    changed = True
+    return aliases
+
+
+def _writes_to_stdout(call, aliases):
+    names = _expansions(_dotted(call.func), aliases)
+    if names & _STDOUT_CALLS:
+        return True
+    # File descriptor 1 is stdout whatever sys.stdout has been swapped for.
+    return (
+        "os.write" in names
+        and bool(call.args)
+        and isinstance(call.args[0], ast.Constant)
+        and call.args[0].value == 1
+    )
+
+
+def _collect(scope, inherited, found):
+    nodes = _own_nodes(scope)
+    aliases = _scope_aliases(scope, nodes, inherited)
+    # Class scopes too, though a method body cannot see a class body's names:
+    # its decorators, defaults and bases are evaluated in that body, and
+    # telling the two apart is the kind of precision the fail-closed rule
+    # above gives up.
+    for node in nodes:
+        if isinstance(node, ast.Call) and _writes_to_stdout(node, aliases):
+            found.append(node.lineno)
+        if isinstance(node, _SCOPES):
+            _collect(node, aliases, found)
 
 
 def _stdout_calls(source):
-    return [
-        node.lineno
-        for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.Call) and _dotted(node.func) in _STDOUT_CALLS
-    ]
+    found = []
+    _collect(ast.parse(source), {}, found)
+    return sorted(found)
 
 
 @pytest.mark.parametrize(
@@ -86,16 +234,83 @@ def _stdout_calls(source):
         "print('x')",
         "import builtins\nbuiltins.print('x')",
         "import sys\nsys.stdout.write('x')",
+        "import sys as s\ns.stdout.write('x')",
+        "from sys import stdout\nstdout.write('x')",
+        "from sys import stdout as out\nout.write('x')",
+        "import sys\nsys.__stdout__.write('x')",
+        "from sys import __stdout__\n__stdout__.write('x')",
+        "import os\nos.write(1, b'x')",
+        "from os import write\nwrite(1, b'x')",
+        "say = print\nsay('x')",
+        "from builtins import print as say\nsay('x')",
+        "import sys\nout = sys.stdout\nout.write('x')",
+        # A literal name is caught whatever an import or an assignment
+        # elsewhere in the module rebinds it to.
+        "from rich import print\nprint('x')",
+        "import sys\ndef f():\n    print = sys.stderr.write\nprint('x')",
+        "import sys\ndef f():\n    sys = foo.bar\nsys.stdout.write('x')",
+        # Chains: an alias built on an alias defined before it.
+        "import sys as s\nout = s.stdout\nout.write('x')",
+        "from sys import stdout as o\nx = o\nx.write('x')",
+        "import sys\na = sys\nb = a.stdout\nb.write('x')",
+        "def f():\n    import sys as s\n    out = s.stdout\n    out.write('x')",
+        "import sys\ndef f():\n    out = sys.stdout\n    def g():\n        out.write('x')",
+        "import sys\nout: object = sys.stdout\nout.write('x')",
+        "import sys\nsys.stdout.buffer.write(b'x')",
+        # Evaluated in the enclosing scope, so a rebinding inside the
+        # function must not hide it - nor may any rebinding at all.
+        "import sys\nout = sys.stdout\ndef f(out, x=out.write('x')): pass",
+        "import sys\nout = sys.stdout\ndef f():\n    out = open('y')\n"
+        "    out.write('x')",
+        # A class body's aliases, used where the body evaluates them.
+        "import sys\nclass A:\n    out = sys.stdout\n"
+        "    def m(self, x=out.write('x')): pass",
+        "import sys\nclass A:\n    w = sys.stdout.write\n    class B(w('x')): pass",
+        "import sys\ndef f(out=sys.stdout):\n    out.write('x')",
+        "import sys\ndef f(*, out=sys.stdout):\n    out.write('x')",
+        "import sys\nsys.stdout.writelines(['x'])",
+        # Every route a name may stand for counts, whatever else binds it
+        # and in whatever order a chain's links appear.
+        "import sys\nout = sys.stdout\ndef f(out=sys, x=out.write('x')): pass",
+        "import sys\nout = sys\nout = sys.stdout\nout.stdout.write('x')",
+        "import os\nw = print\nw = os\nw.write(1, b'x')",
+        "import sys\nw = out.write\nout = sys.stdout\ndef f():\n    w('x')",
+        "from sys import *\nstdout.write('x')",
+        "from sys import *\n__stdout__.buffer.write(b'x')",
+        "from os import *\nwrite(1, b'x')",
     ],
 )
 def test_the_guard_catches_each_way_of_writing_to_stdout(source):
     assert _stdout_calls(source) == [source.count("\n") + 1]
 
 
-def test_the_guard_ignores_logger_calls_and_other_streams():
-    source = (
-        "import logging, sys\nlogging.getLogger().warning('x')\nsys.stderr.write('x')"
-    )
+@pytest.mark.parametrize(
+    "source",
+    [
+        # Evaluated where the function is defined, not in its body.
+        "import sys\nw = sys.stdout.write\n@deco(w('x'))\ndef f(w): pass",
+        "import sys\nout = sys\ndef f(x=out.stdout.write('x')):\n    out = sys.stdout",
+    ],
+)
+def test_the_guard_catches_a_write_where_the_function_is_defined(source):
+    assert _stdout_calls(source) == [3]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import logging, sys\nlogging.getLogger().warning('x')\nsys.stderr.write('x')",
+        "from sys import stderr\nstderr.write('x')",
+        "import os\nos.write(2, b'x')",
+        "import os\nos.write(fd, b'x')",
+        "handle = open('f', 'w')\nhandle.write('x')",
+        # An alias to stdout in one function does not reach a same-named
+        # handle in another.
+        "import sys\ndef b():\n    f = open('x')\n    f.write('y')\n"
+        "def a():\n    f = sys.stdout",
+    ],
+)
+def test_the_guard_ignores_logger_calls_and_other_streams(source):
     assert _stdout_calls(source) == []
 
 

@@ -739,17 +739,21 @@ writing a backend of your own against a shared server:
   a contended row waits and wins rather than failing on serialization. None
   of those four leaves its level to the environment. Migration
   (`_ensure_schema()`) and `exists()` are not part of that guarantee: they
-  run under whatever the connection's environment defaults to, which is fine
-  for what they do — neither reads graph data, so neither is exposed to the
-  snapshot anomalies those four guard against.
+  run under whatever the connection's environment defaults to. Neither reads
+  nodes or edges, so neither is exposed to the snapshot anomalies those four
+  guard against. The one graph row they do touch is the `graph_metadata` row:
+  the graph-identity check that ends migration reads it (and, only when it
+  exists without a claim, writes this instance's with one `UPDATE`), and
+  `exists()` reads it too.
   `_resolve()`, the read behind change notification, inherits the default
   too; it answers each identifier from what the store holds when it reads,
   and a write it sees that is newer than the announcement it is resolving is
   followed by that write's own announcement. So does the transaction
   `start_change_notification()` opens before it starts listening, which
   holds only the graph-identity check (`_claim_or_check_graph_identity()`):
-  at most one read of the metadata row — none once this backend has already
-  checked it, which the `_ensure_schema()` call just before it normally has —
+  at most one read of the metadata row — none once this backend's check has
+  completed, which, on this backend's first migration, the `_ensure_schema()`
+  call just before it does if the row was there to find —
   and, only when that row exists without a claim, one `UPDATE` writing this
   instance's. It states no level of its own.
   What migration and `exists()`
@@ -761,17 +765,34 @@ writing a backend of your own against a shared server:
   tables one catalog lookup via `_create_missing()` (a `pg_class`/
   `pg_namespace` join) plus a `CREATE TABLE IF NOT EXISTS` if it is missing:
   up to four catalog lookups and four creates behind the one lock, not a
-  single `SELECT`. Once a process has migrated once, `self._migrated`
+  single `SELECT`. The last thing a cold migration sends, in a transaction of
+  its own after the lock is released, is the graph-identity check: one
+  `SELECT doc` from `graph_metadata`, plus the claiming `UPDATE` described
+  above when the row exists unclaimed. Once a process has migrated once,
+  `self._migrated`
   short-circuits every later call on that backend object: no advisory lock,
-  no catalog lookup, nothing sent to the server. `exists()` adds exactly one
-  further read on top of whichever of those two paths `_ensure_schema()`
-  took — the single-row `SELECT` against `graph_metadata` — so a warm
-  `exists()` call is one `SELECT` and zero advisory locks, and a cold one is
-  that same `SELECT` plus everything above. The traversal's two indexes are
-  not in those counts: they are created after the lock is released, one pooled
-  connection each, and each costs a `pg_class`/`pg_index` lookup plus a
-  `CREATE INDEX IF NOT EXISTS` only when the lookup says it is missing — see
-  the index bullet below for why they sit outside the transaction.
+  no catalog lookup, nothing sent to the server. `exists()` then runs the
+  identity check again, unless this backend has already completed it, and
+  adds the single-row `SELECT 1` against `graph_metadata`. The check counts as
+  completed only once it has found the row, so on a store nothing has been
+  saved to yet, it repeats on every call. A warm `exists()` call is therefore
+  one `SELECT` and zero advisory locks once this backend has seen the metadata
+  row, and two `SELECT`s until then — including on a store another instance
+  saved to after this one migrated, until the first call that finds the row;
+  a cold call is that plus everything above.
+  Two more steps are left out of those counts. The traversal's two indexes are
+  created after the lock is released, one pooled connection each, and each
+  costs a `pg_class`/`pg_index` lookup plus a `CREATE INDEX IF NOT EXISTS`
+  only when the lookup says it is missing — see the index bullet below for
+  why they sit outside the transaction. After them, and before the identity
+  check, the scope seam reads the catalog for each scoped table (the
+  `scope_id` column in `pg_attribute`, the policy state in
+  `pg_class`/`pg_policy`), adding the column with `ALTER TABLE … ADD COLUMN
+  IF NOT EXISTS` where it is missing, then reads the column (and, for a
+  scoped instance, the policy state) again to learn what took. A scoped
+  instance also sends, per table and only for what is missing, `CREATE
+  POLICY`, `ALTER TABLE … ENABLE ROW LEVEL SECURITY` and `ALTER TABLE … FORCE
+  ROW LEVEL SECURITY` — see "Keeping scopes apart" below.
 - **Whole-graph saves are serialised per store**, by a second advisory lock
   keyed on the schema. Without it two concurrent saves do not merely race for
   last place: the second writer's `DELETE` takes its snapshot when the
