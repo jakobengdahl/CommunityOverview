@@ -43,8 +43,7 @@ function snapshot() {
   return {
     canInstall: Boolean(installPromptEvent) && !installed,
     installed,
-    showIosInstallHint:
-      isIosDevice() && !installed && !installPromptEvent && !isIosHintDismissed(),
+    showIosInstallHint: isIosDevice() && !installed && !installPromptEvent && !isIosHintDismissed(),
   };
 }
 
