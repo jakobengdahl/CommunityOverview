@@ -148,14 +148,14 @@ class TestChatServiceToolExecution:
             "type label",
         ):
             assert field in description
-        assert "a local node's name" in description
-        assert "federated nodes: a subset of these fields" in description
+        assert "local and federated nodes alike" in description
+        assert "subset" not in description
         assert "semantic-fallback" in description
         assert "returns nothing" not in description
         # Exact sentences, so a changed field list, scope or fallback clause fails.
         assert (
-            "Matches a local node's name, description, summary, tags, subtypes, "
-            "aliases and type label (federated nodes: a subset of these fields)."
+            "Matches a node's name, description, summary, tags, subtypes, "
+            "aliases and type label, for local and federated nodes alike."
         ) in description
         assert (
             "By default the whole query must occur verbatim, so a multi-word query "

@@ -125,7 +125,8 @@ class SearchRequest(BaseModel):
         description=(
             "When true, rank results by embedding meaning instead of lexical "
             "substring matching. Lexical search still auto-falls back to semantic "
-            "ranking when it returns zero results."
+            "ranking for local results when a non-empty query matches no local "
+            "node before tag, metadata and access filters are applied."
         ),
     )
     match_mode: str = Field(

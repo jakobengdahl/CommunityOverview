@@ -369,10 +369,10 @@ def register_mcp_tools(
         indicating whether semantic ranking produced the returned nodes.
 
         Args:
-            query: Search text, matched against a local node's name,
-                description, summary, tags, subtypes, aliases and type label
-                (federated nodes against a subset of these fields). Use "" to
-                match on the filters alone.
+            query: Search text, matched against a node's name, description,
+                summary, tags, subtypes, aliases and type label; local and
+                federated nodes are matched on the same fields. Use "" to match
+                on the filters alone.
             node_types: List of node types to filter on (Actor, Initiative, etc.)
             limit: Max number of results (default 50)
             action: Optional action for frontend ('add_to_visualization' to add to current view)
@@ -391,7 +391,9 @@ def register_mcp_tools(
             semantic: When True, rank results by embedding meaning (cosine
                 similarity) instead of lexical substring matching. Default False
                 keeps the lexical behavior, which still auto-falls back to
-                semantic ranking when it returns zero results.
+                semantic ranking for local results when a non-empty query
+                matches no local node before tag, metadata and access filters
+                are applied.
             match_mode: How the lexical query is matched. ``"substring"``
                 (default) requires the whole query verbatim — unchanged
                 behaviour. ``"any_term"`` splits the query on whitespace into
