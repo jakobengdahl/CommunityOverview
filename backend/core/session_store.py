@@ -111,7 +111,7 @@ STATE_OPS = {
 
 
 def is_valid_session_id(session_id: str) -> bool:
-    return bool(isinstance(session_id, str) and SESSION_ID_RE.match(session_id))
+    return bool(isinstance(session_id, str) and SESSION_ID_RE.fullmatch(session_id))
 
 
 def _now_iso() -> str:
