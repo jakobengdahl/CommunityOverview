@@ -35,6 +35,8 @@ function FloatingSearch({ variant = 'floating' }) {
   const inputRef = useRef(null);
   const containerRef = useRef(null);
   const debounceRef = useRef(null);
+  const activeSearchRef = useRef(0);
+  const selectionRef = useRef(0);
 
   useLayoutEffect(() => {
     const search = containerRef.current;
@@ -162,19 +164,21 @@ function FloatingSearch({ variant = 'floating' }) {
         node.metadata?.origin_graph_name ||
         (originGraphId ? graphDisplayNames[originGraphId] : null) ||
         graphDisplayNames.local ||
-        'Local';
+        t('floating_search.local_graph');
 
       return `${originGraphName}: ${node.name}`;
     },
-    [graphDisplayNames, showGraphPrefix]
+    [graphDisplayNames, showGraphPrefix, t]
   );
 
   // Debounced search
   useEffect(() => {
     if (query.length < 2) {
+      activeSearchRef.current += 1;
       setResults([]);
       setResultsQuery(null);
       setShowDropdown(false);
+      setIsLoading(false);
       return;
     }
 
@@ -183,10 +187,12 @@ function FloatingSearch({ variant = 'floating' }) {
     let cancelled = false;
     clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(async () => {
+      const searchId = activeSearchRef.current + 1;
+      activeSearchRef.current = searchId;
       setIsLoading(true);
       try {
         const result = await api.searchGraph(query, { limit: 10, federationDepth });
-        if (cancelled) return;
+        if (cancelled || activeSearchRef.current !== searchId) return;
         const nodes = (result.nodes || []).filter(
           (n) => n.type !== 'Community' && n.type !== 'VisualizationView'
         );
@@ -195,12 +201,14 @@ function FloatingSearch({ variant = 'floating' }) {
         setSelectedIndex(0);
         setShowDropdown(nodes.length > 0);
       } catch (err) {
-        if (cancelled) return;
+        if (cancelled || activeSearchRef.current !== searchId) return;
         console.error('Search error:', err);
         setResults([]);
         setResultsQuery(query);
       } finally {
-        setIsLoading(false);
+        if (!cancelled && activeSearchRef.current === searchId) {
+          setIsLoading(false);
+        }
       }
     }, 300);
 
@@ -258,6 +266,8 @@ function FloatingSearch({ variant = 'floating' }) {
 
   const selectResult = useCallback(
     async (node) => {
+      const selectionId = selectionRef.current + 1;
+      selectionRef.current = selectionId;
       // SavedView: clear canvas and load the saved view's nodes with positions and edges
       if (node.type === 'SavedView') {
         try {
@@ -266,11 +276,14 @@ function FloatingSearch({ variant = 'floating' }) {
           const savedEdges = node.metadata?.edges || [];
           const savedEdgeIds = new Set(node.metadata?.edge_ids || []);
           const savedViewAnnotations = savedViewMetadataToCanvasMetadata(node.metadata || {});
+          const details =
+            nodeIds.length > 0
+              ? await Promise.all(nodeIds.map((id) => api.getNodeDetails(id).catch(() => null)))
+              : [];
+          if (selectionRef.current !== selectionId) return;
+
+          clearVisualization();
           if (nodeIds.length > 0) {
-            clearVisualization();
-            const details = await Promise.all(
-              nodeIds.map((id) => api.getNodeDetails(id).catch(() => null))
-            );
             const loadedNodes = details
               .filter((d) => d?.success)
               .map((d) => {
@@ -302,22 +315,23 @@ function FloatingSearch({ variant = 'floating' }) {
               }
               const edgeMap = new Map(edgesToLoad.map((e) => [e.id, e]));
               addNodesToVisualization(loadedNodes, Array.from(edgeMap.values()));
-
-              // Restore groups if any were saved
-              if (savedViewAnnotations.groups.length > 0) {
-                setPendingGroups({
-                  groups: savedViewAnnotations.groups,
-                  parentIds: savedViewAnnotations.parentIds,
-                });
-              }
-              if (savedViewAnnotations.annotations.length > 0) {
-                setPendingAnnotations(savedViewAnnotations.annotations);
-              }
             }
           }
+
+          if (savedViewAnnotations.groups.length > 0) {
+            setPendingGroups({
+              groups: savedViewAnnotations.groups,
+              parentIds: savedViewAnnotations.parentIds,
+            });
+          }
+          if (savedViewAnnotations.annotations.length > 0) {
+            setPendingAnnotations(savedViewAnnotations.annotations);
+          }
         } catch (err) {
+          if (selectionRef.current !== selectionId) return;
           console.error('Error loading saved view:', err);
         }
+        if (selectionRef.current !== selectionId) return;
         setQuery('');
         setResults([]);
         setResultsQuery(null);
@@ -339,6 +353,7 @@ function FloatingSearch({ variant = 'floating' }) {
         addNodesToVisualization([node], []);
         try {
           const related = await api.getRelatedNodes(node.id, { depth: 1 });
+          if (selectionRef.current !== selectionId) return;
           if (related.edges && related.edges.length > 0) {
             const vizNodeIds = new Set(vizNodes.map((n) => n.id));
             vizNodeIds.add(node.id);
@@ -350,8 +365,10 @@ function FloatingSearch({ variant = 'floating' }) {
             }
           }
         } catch (err) {
+          if (selectionRef.current !== selectionId) return;
           console.error('Error loading edges for node:', err);
         }
+        if (selectionRef.current !== selectionId) return;
         setTimeout(() => setFocusNodeId(node.id), 100);
       }
 
@@ -405,8 +422,8 @@ function FloatingSearch({ variant = 'floating' }) {
           ref={inputRef}
           type="text"
           className="floating-search-input"
-          placeholder="Search graph..."
-          aria-label={t('mobile_nav.search_panel_title')}
+          placeholder={t('floating_search.placeholder')}
+          aria-label={t('floating_search.aria_label')}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={handleKeyDown}
@@ -447,7 +464,11 @@ function FloatingSearch({ variant = 'floating' }) {
                 <span className="floating-search-result-type" style={{ color }}>
                   {getTypeLabel(node.type)}
                 </span>
-                {isInViz && <span className="floating-search-result-badge">in view</span>}
+                {isInViz && (
+                  <span className="floating-search-result-badge">
+                    {t('floating_search.in_view_badge')}
+                  </span>
+                )}
               </button>
             );
           })}
