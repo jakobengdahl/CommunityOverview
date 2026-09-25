@@ -1052,8 +1052,9 @@ state. The returned `revision` threads straight into
 arrange" three deterministic calls.
 
 A repeated id counts once: the tool deduplicates `node_ids` before checking the
-500-id cap, the 256 KiB byte cap and the per-client rate budget. The rate budget
-is charged one unit per distinct id that resolves, not per id sent: ids reported
+500-id cap, the 256 KiB byte cap and the tool's rate budget. That budget is per
+tool, not per client — every MCP client on the instance draws from the same one —
+and it is charged one unit per distinct id that resolves, not per id sent: ids reported
 in `skipped` are not charged, and a call that returns `no_resolvable_nodes`
 draws nothing. Both caps are
 checked before any id is resolved and return `too_large`, with a `message` that
@@ -1105,8 +1106,9 @@ computed from `assumed_node_size` (`{width, height}` from the read tool) plus a
 gap — offset by the full node size, not half, to leave a visible gutter. Read the
 layout first to get `assumed_node_size` and the current `revision`, then pass that
 `revision` as `expected_revision` on the write. A single write is capped at 500
-moves / 256 KiB (`too_large` beyond that) and additionally draws from a per-client
-rate budget sized to the number of moves, so a very large arrange can hit
+moves / 256 KiB (`too_large` beyond that) and additionally draws from the tool's
+rate budget (per tool, shared by every MCP client on the instance) sized to the
+number of moves, so a very large arrange can hit
 `rate_limited` first — either way, split it across successive writes and thread the
 returned `revision` into the next `expected_revision`.
 

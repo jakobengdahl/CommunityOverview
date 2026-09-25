@@ -44,7 +44,11 @@ def bucket_attrs(manager):
     attrs = sorted(
         attr for attr, value in vars(manager).items() if isinstance(value, _TokenBucket)
     )
-    assert REQUIRED_BUCKET_ATTRS <= set(attrs)
+    missing = sorted(REQUIRED_BUCKET_ATTRS - set(attrs))
+    assert not missing, (
+        f"required rate buckets missing from the manager: {missing}; a bucket "
+        f"renamed or removed must be updated in REQUIRED_BUCKET_ATTRS too"
+    )
 
     stray = _stray_buckets("self", vars(manager), direct=False)
     for cls in type(manager).__mro__:
