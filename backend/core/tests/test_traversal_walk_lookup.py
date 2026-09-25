@@ -15,28 +15,49 @@ from backend.core import storage_search
 from backend.core.models import Edge, Node, NodeType, RelationshipType
 
 
-class _VanishingOnLookup(dict):
-    """Loses one key on its first observation, and counts every observation.
+_ABSENT = object()
 
-    Seven routes are instrumented - `in`, `.get()`, `[]`, `.keys()`,
-    iteration, `.items()` and `.values()` - so a check-then-use spelled through
-    any of them is caught: the first observation answers "present" and removes
-    the key, and a second one misses. `observations` counts how often the
-    victim was observed, present or not; the four whole-dict routes observe
-    every key, so each counts as one observation of the victim.
+
+class _VanishingOnLookup(dict):
+    """Loses one key on one observation, and counts every observation.
+
+    Eight routes are instrumented - `in`, `.get()`, `[]`, `.keys()`,
+    iteration, `.items()`, `.values()` and `.copy()` - so a check-then-use
+    spelled through any of them is caught: observation number `vanish_at`
+    (the first, by default) answers "present" and removes the key, and a later
+    one misses. `observations` counts how often the victim was observed,
+    present or not; the whole-dict routes observe every key, so each counts as
+    one observation of the victim.
+
+    A whole-dict read is one observation, and a snapshot of the dict at that
+    instant. `dict(d)` and `{**d}` on a dict subclass that overrides iteration
+    are carried out as `d.keys()` and then `d[k]` per key, so a `d[victim]`
+    right after a whole-dict read is answered from that read's snapshot, as
+    part of the same observation - otherwise the fixture raises KeyError out
+    of a copy that on a plain dict is atomic. A Python loop doing keys-then-
+    index looks the same from here and is treated the same; single-key
+    check-then-use (`in` or `.get()`, then `[]`) is still caught.
     """
 
-    def __init__(self, *args, victim=None, **kwargs):
+    def __init__(self, *args, victim=None, vanish_at=1, **kwargs):
         super().__init__(*args, **kwargs)
         self.victim = victim
+        self.vanish_at = vanish_at
         self.observations = 0
+        self._snapshot = _ABSENT
 
     def _observe(self, key):
         if key != self.victim:
             return
+        self._snapshot = _ABSENT
         self.observations += 1
-        if self.observations == 1:
+        if self.observations == self.vanish_at:
             super().pop(key, None)
+
+    def _observe_whole(self):
+        value = super().get(self.victim, _ABSENT)
+        self._observe(self.victim)
+        self._snapshot = value
 
     def __contains__(self, key):
         present = super().__contains__(key)
@@ -49,6 +70,9 @@ class _VanishingOnLookup(dict):
         return value
 
     def __getitem__(self, key):
+        if key == self.victim and self._snapshot is not _ABSENT:
+            value, self._snapshot = self._snapshot, _ABSENT
+            return value
         value = super().__getitem__(key)
         self._observe(key)
         return value
@@ -58,21 +82,26 @@ class _VanishingOnLookup(dict):
     # fixture failing rather than the code under test.
     def keys(self):
         snapshot = set(super().keys())
-        self._observe(self.victim)
+        self._observe_whole()
         return snapshot
 
     def __iter__(self):
         snapshot = list(super().__iter__())
-        self._observe(self.victim)
+        self._observe_whole()
         return iter(snapshot)
 
     def items(self):
         snapshot = list(super().items())
-        self._observe(self.victim)
+        self._observe_whole()
         return snapshot
 
     def values(self):
         snapshot = list(super().values())
+        self._observe_whole()
+        return snapshot
+
+    def copy(self):
+        snapshot = dict(super().items())
         self._observe(self.victim)
         return snapshot
 
@@ -95,6 +124,35 @@ def _fixture():
         "ab": Edge(id="ab", source="a", target="b", type=RelationshipType.RELATES_TO)
     }
     return nodes, edges
+
+
+class TestTheFixtureCopiesLikeADict:
+    """A walk that snapshots the dict and resolves from the copy is correct,
+    so the fixture must let every copying spelling through as one observation.
+    """
+
+    def test_a_copy_sees_the_victim_once_and_keeps_it(self):
+        for copy in (dict, lambda d: {**d}, lambda d: d.copy()):
+            vanishing = _VanishingOnLookup({"a": 1, "b": 2}, victim="b")
+
+            snapshot = copy(vanishing)
+
+            assert snapshot == {"a": 1, "b": 2}
+            assert type(snapshot) is dict
+            assert vanishing.observations == 1
+            assert "b" not in vanishing
+
+    def test_check_then_index_still_misses_after_a_copy(self):
+        vanishing = _VanishingOnLookup({"a": 1, "b": 2}, victim="b", vanish_at=2)
+        dict(vanishing)
+
+        assert "b" in vanishing
+        try:
+            vanishing["b"]
+        except KeyError:
+            pass
+        else:
+            raise AssertionError("check-then-index was not caught")
 
 
 class TestTheWalkResolvesEachIdOnce:
@@ -146,3 +204,31 @@ class TestTheWalkResolvesEachIdOnce:
 
         assert [n.id for n in result["nodes"]] == ["a"]
         assert result["edges"] == []
+
+    def test_a_node_vanishing_at_any_observation_never_breaks_the_default_walk(
+        self,
+    ):
+        """The default path also reads `nodes` while it traverses, to skip
+        archived neighbours, so the resolution is not the victim's first
+        observation there. Sweeping the vanishing point across every
+        observation the walk makes puts it on the resolution's too, whatever
+        the traversal's shape. The sweep ends at the first `vanish_at` the
+        walk never reaches, which is what shows it covered them all.
+        """
+        for vanish_at in range(1, 20):
+            nodes, edges = _fixture()
+            vanishing = _VanishingOnLookup(nodes, victim="b", vanish_at=vanish_at)
+
+            result = storage_search.get_related_nodes(
+                vanishing, edges, _graph(nodes, edges), "a"
+            )
+
+            assert None not in result["nodes"]
+            assert {n.id for n in result["nodes"]} <= {"a", "b"}
+            assert "a" in {n.id for n in result["nodes"]}
+            if vanishing.observations < vanish_at:
+                assert "b" in {n.id for n in result["nodes"]}
+                assert vanish_at > 1
+                break
+        else:
+            raise AssertionError("the walk observed the victim 19+ times")
