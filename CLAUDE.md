@@ -355,7 +355,13 @@ below, every round. Without them a reviewer has no contract to classify
 findings against, and the loop has nothing to terminate on.
 
 **A round is two reviewers, not one.** Both, every round, on the full diff from
-main:
+main. **Spawn the mutation reviewer with `isolation: "worktree"`**, never
+sharing the correctness reviewer's checkout: the correctness reviewer only
+reads the tree, so it can share, but running both against one checkout lets
+the mutation reviewer's in-progress production-code edits show up under the
+correctness reviewer as unexplained working-tree changes — which it may then
+revert (e.g. `git checkout --`), destroying the mutation reviewer's edit
+mid-run and corrupting both reports.
 
 ```
 Agent(   # 1. correctness — its findings decide whether the loop continues
@@ -381,6 +387,7 @@ Agent(   # 1. correctness — its findings decide whether the loop continues
 )
 
 Agent(   # 2. mutation — its survivors are residue, not blockers
+  isolation: "worktree",  # own worktree — never the correctness reviewer's checkout
   prompt="""In /path/to/repo on branch <name>: edit the CHANGED PRODUCTION
             code to try to violate one of the guarantees below, and report
             which edits the test suite lets through.
