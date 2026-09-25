@@ -96,6 +96,7 @@ export function annotationsToGroups(annotations) {
       // everything else.
       z: a.z ?? 0,
       locked: Boolean(a.locked),
+      rotation: a.geometry?.rotation ?? 0,
       // Same server-owned same-field-conflict bookkeeping as every other
       // annotation kind (dec-annotation-field-patches-and-conflicts) — a
       // group is an ordinary annotation server-side (session_store.py's
@@ -143,6 +144,7 @@ export function groupsToAnnotations(viewGroups, parentIds) {
           member_node_ids: membersByGroup[g.id] || [],
           z: g.z ?? 0,
           locked: Boolean(g.locked),
+          rotation: g.rotation ?? 0,
           version: g.version,
           field_versions: g.field_versions,
         })

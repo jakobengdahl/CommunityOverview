@@ -550,9 +550,9 @@ describe('describeActivity', () => {
   // announced "Unlocked" — the literal string this whole change exists to
   // eliminate. PR #483 made it carry `locked` and `z`, and this module
   // followed for free: it reports whatever the round trip preserves, so the
-  // assertions below now pin that the lock and the layer survive where they
-  // once pinned the clobber. `rotation` is still dropped, and `label` is
-  // still defaulted, so those two keep the asymmetry.
+  // assertions below now pin that lock, layer, and rotation survive where they
+  // once pinned the clobber. `label` is still defaulted, so it keeps the
+  // asymmetry.
   describe('annotation_updated classification, groups', () => {
     // build_group_annotation's output shape (backend/core/session_annotations.py).
     function serverGroup({ x = 10, y = 20, w = 320, h = 200, ...rest } = {}) {
@@ -669,28 +669,22 @@ describe('describeActivity', () => {
       ).toBe('history.desc.annotation_updated_text');
     });
 
-    it('still under-reports unrotating a group, the one field still dropped', () => {
-      // Latent rather than live: no shipped producer sets a group's rotation
-      // (build_group_annotation hardcodes 0 and takes no parameter, and the
-      // generic rotation tools refuse group ids), so this guards the invariant
-      // ahead of a group rotation control shipping rather than a path in use.
-      // Rotation is the remaining asymmetry: the group translators carry
-      // `locked` and `z` but not rotation, so the write-back always says 0. A
-      // change away from 0 is visible; a change back to it is not
-      // distinguishable from the drop, so it reads as a plain update. Safe
-      // direction, and the same shape the other two had before PR #483.
+    it('reports rotating and unrotating a group once the translators preserve rotation', () => {
+      // Group translators now carry `locked`, `z`, and `rotation`, so this
+      // reports rotation changes in both directions instead of treating an
+      // unrotate as a no-op browser write-back.
       const at = (v) => serverGroup({ geometry: { x: 10, y: 20, w: 320, h: 200, rotation: v } });
       expect(
         describeActivity(record({ op: 'annotation_updated', before: at(0), after: at(45) })).key
       ).toBe('history.desc.annotation_updated_rotated');
       expect(
         describeActivity(record({ op: 'annotation_updated', before: at(45), after: at(0) })).key
-      ).toBe('history.desc.annotation_updated_generic');
+      ).toBe('history.desc.annotation_updated_rotated');
     });
 
     it('does not report renaming a rotated group as a rotation change', () => {
-      // Rotation is still dropped, so a rename of a rotated group must not
-      // surface as an unrotate.
+      // Rotation is preserved, so a rename of a rotated group must still not
+      // surface as a rotation change.
       const rotated = serverGroup({ label: 'Team' });
       rotated.geometry = { ...rotated.geometry, rotation: 45 };
       expect(describeActivity(groupEdit(rotated, (g) => ({ ...g, label: 'B' }))).key).toBe(

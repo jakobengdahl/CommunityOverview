@@ -122,11 +122,9 @@ function sameValue(a, b, path = [], annotationType) {
  * not "the field is ignored", and a follow-up scoped from that misreading
  * would be scoped wrong.
  *
- * Two fields are in that position today, by the two different routes:
- * `rotation`, which the pair simply does not carry, so a group rotated off 0
- * reports it and one rotated back to 0 does not; and `label`, which
- * `annotationsToGroups` substitutes `'Group'` for when it is empty, so
- * naming an unlabelled group literally "Group" reads as a plain update.
+ * One field is in that position today: `label`, which `annotationsToGroups`
+ * substitutes `'Group'` for when it is empty, so naming an unlabelled group
+ * literally "Group" reads as a plain update.
  *
  * Holding `label` to this rule is not a wart to be fixed — but the exposure
  * is narrower than it first looks, and worth stating precisely so a
@@ -137,18 +135,13 @@ function sameValue(a, b, path = [], annotationType) {
  * of an unlabelled group in which nothing higher-priority changed being
  * reported as a rename the user never made.
  *
- * `rotation`'s asymmetry is latent rather than live: no shipped producer can
- * set a group's rotation — `build_group_annotation` hardcodes 0 and exposes
- * no parameter, and the rotation-carrying generic tools refuse group ids — so
- * it is guarded here ahead of a group rotation control existing, not because
- * something writes it today.
- *
- * `locked` and `z` were there too until the translators were fixed to carry
- * them, at which point this module started reporting a group's lock and layer
- * correctly in both directions with no change of its own. That is the point
- * of reconstructing the write-back rather than enumerating known rewrites:
- * what the round trip preserves is what gets reported, so the classifier
- * tracks the translators instead of drifting from them.
+ * `locked`, `z`, and `rotation` were there too until the translators were
+ * fixed to carry them, at which point this module started reporting a group's
+ * lock, layer, and rotation correctly in both directions with no change of
+ * its own. That is the point of reconstructing the write-back rather than
+ * enumerating known rewrites: what the round trip preserves is what gets
+ * reported, so the classifier tracks the translators instead of drifting from
+ * them.
  *
  * Returns null when the annotation cannot be round-tripped — reachable by a
  * `before` snapshot written by an older build, carrying a kind this one
