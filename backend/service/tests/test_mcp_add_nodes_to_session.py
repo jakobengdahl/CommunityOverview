@@ -88,6 +88,20 @@ class _HashableDict(dict):
         return 1
 
 
+class _UnhashingDict(dict):
+    def __hash__(self):
+        raise ValueError("no hash")
+
+
+class _RecordingBucket:
+    def __init__(self):
+        self.consumed = []
+
+    def consume(self, key, amount):
+        self.consumed.append(amount)
+        return True
+
+
 class _NoStringForm(Exception):
     pass
 
@@ -512,6 +526,98 @@ class TestAddNodesToSession:
         assert len(result["skipped"]) == 1
         assert result["skipped"][0] is unhashing
 
+    def test_an_id_whose_hash_raises_is_deduplicated_by_its_sorted_json(self, tools):
+        tools_map, manager = tools
+        sid = _session(manager)
+        first = _UnhashingDict({"id": "b", "x": 1})
+        reordered = _UnhashingDict({"x": 1, "id": "b"})
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=["alpha", first, reordered]
+        )
+
+        assert result["success"] is True
+        assert result["added"] == ["alpha"]
+        assert len(result["skipped"]) == 1
+        assert result["skipped"][0] is first
+
+    def test_equal_hashable_ids_of_different_types_are_one_id(self, tools):
+        """1, True and 1.0 are one id under hash equality, as on main, though
+        their JSON forms differ."""
+        tools_map, manager = tools
+        sid = _session(manager)
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=[1, True, 1.0, "a"]
+        )
+
+        assert result["error"] == "no_resolvable_nodes"
+        assert result["skipped"] == [1, "a"]
+        assert [type(node_id) for node_id in result["skipped"]] == [int, str]
+
+    def test_ids_that_look_like_each_others_dedupe_keys_stay_distinct(self, tools):
+        """A string, a tuple and a list that share a JSON rendering or a key
+        tag are three different ids."""
+        tools_map, manager = tools
+        sid = _session(manager)
+        node_ids = ['["x"]', ("u", '["x"]'), ["x"]]
+
+        result = tools_map["add_nodes_to_session"](session_id=sid, node_ids=node_ids)
+
+        assert result["error"] == "no_resolvable_nodes"
+        assert result["skipped"] == node_ids
+        assert [type(node_id) for node_id in result["skipped"]] == [str, tuple, list]
+
+    def test_an_unencodable_id_is_not_mistaken_for_an_id_equal_to_its_identity(
+        self, tools
+    ):
+        tools_map, manager = tools
+        sid = _session(manager)
+        cyclic = []
+        cyclic.append(cyclic)
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=["alpha", id(cyclic), cyclic]
+        )
+
+        assert result["success"] is True
+        assert result["added"] == ["alpha"]
+        assert len(result["skipped"]) == 2
+        assert result["skipped"][0] == id(cyclic)
+        assert result["skipped"][1] is cyclic
+
+    def test_unencodable_ids_equal_to_a_later_id_do_not_shadow_it(self, tools):
+        tools_map, manager = tools
+        sid = _session(manager)
+        first, second = _EqualToAlpha(), _EqualToAlpha()
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=[first, second, "alpha"]
+        )
+
+        assert result["success"] is True
+        assert result["added"] == ["alpha"]
+        assert len(result["skipped"]) == 2
+        assert result["skipped"][0] is first
+        assert result["skipped"][1] is second
+
+    def test_only_resolvable_ids_draw_from_the_rate_budget(self, tools):
+        tools_map, manager = tools
+        sid = _session(manager)
+        bucket = _RecordingBucket()
+        manager._mcp_bucket = bucket
+        cyclic = []
+        cyclic.append(cyclic)
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid,
+            node_ids=["alpha", cyclic, _UnhashingUnprintable(), "ghost", "beta"],
+        )
+
+        assert result["success"] is True
+        assert result["added"] == ["alpha", "beta"]
+        assert bucket.consumed == [2]
+
     def test_an_id_with_no_canonical_json_counts_against_no_cap_and_is_not_resolved(
         self, tmp_path
     ):
@@ -588,20 +694,22 @@ class TestAddNodesToSession:
     ):
         """Brackets, separators and every id's encoding count exactly: escaped
         non-ASCII, an unhashable id, one encoded through ``default=str`` and a
-        hashable dict whose keys do not sort included."""
-        node_ids = [
+        hashable dict whose keys do not sort included; a key-reordered repeat
+        of the unhashable id counts once."""
+        unique_ids = [
             "alpha",
             {"id": "b", "x": [1, 2]},
             "é",
             {1},
             _HashableDict({1: "a", "b": 2}),
         ]
+        node_ids = unique_ids + [{"x": [1, 2], "id": "b"}]
         storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
         service = GraphService(storage)
         tools_map, manager = _wire(
             storage,
             service,
-            max_op_batch_bytes=len(json.dumps(node_ids, default=str)) + slack,
+            max_op_batch_bytes=len(json.dumps(unique_ids, default=str)) + slack,
         )
         tools_map["add_nodes"](
             nodes=[{"id": "alpha", "type": "Initiative", "name": "Alpha"}], edges=[]
@@ -613,7 +721,7 @@ class TestAddNodesToSession:
         if succeeds:
             assert result["success"] is True
             assert result["added"] == ["alpha"]
-            assert result["skipped"] == node_ids[1:]
+            assert result["skipped"] == unique_ids[1:]
         else:
             assert result["error"] == "too_large"
 
@@ -633,6 +741,23 @@ class TestAddNodesToSession:
 
         assert result["success"] is True
         assert result["added"] == [long_id]
+
+    def test_a_single_id_over_the_byte_cap_is_rejected(self, tmp_path):
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        service = GraphService(storage)
+        lookups = []
+        original = storage.get_node
+        storage.get_node = lambda node_id: (lookups.append(node_id), original(node_id))[
+            1
+        ]
+        tools_map, manager = _wire(storage, service, max_op_batch_bytes=20)
+        sid = _session(manager)
+
+        result = tools_map["add_nodes_to_session"](session_id=sid, node_ids=["x" * 30])
+
+        assert result["error"] == "too_large"
+        assert "size cap" in result["message"]
+        assert lookups == []
 
     def test_an_oversized_count_names_the_count_cap(self, tmp_path):
         storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
