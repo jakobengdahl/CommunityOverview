@@ -298,7 +298,7 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
                     raise ValueError("invalid bearer token")
 
             elif scheme.lower() == "basic":
-                if not config.auth_password:
+                if not config.auth_username or not config.auth_password:
                     raise ValueError("basic auth not configured")
                 decoded = base64.b64decode(credentials).decode("utf-8")
                 username, _, password = decoded.partition(":")

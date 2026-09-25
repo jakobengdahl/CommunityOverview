@@ -89,7 +89,7 @@ OPENAI_API_KEY=sk-xxxxx
 
 # Authentication (recommended for production)
 AUTH_ENABLED=true
-AUTH_USERNAME=admin
+AUTH_USERNAME=<operator-username>
 AUTH_PASSWORD=<strong-password>
 ```
 
