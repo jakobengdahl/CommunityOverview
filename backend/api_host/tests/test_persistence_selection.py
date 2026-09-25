@@ -506,6 +506,7 @@ class TestTheEnvironmentIsTheInterface:
             "GRAPH_POSTGRES_DSN",
             "GRAPH_POSTGRES_SCHEMA",
             "GRAPH_POSTGRES_POOL_SIZE",
+            "GRAPH_POSTGRES_SCOPE",
         ):
             monkeypatch.delenv(name, raising=False)
         monkeypatch.setenv(leftover, value)
