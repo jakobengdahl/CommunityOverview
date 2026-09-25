@@ -490,7 +490,9 @@ def test_absorb_refuses_a_mixed_width_batch_and_leaves_the_index_alone():
     sidecar silently unwritable — with nothing failing at the time."""
     store = VectorStore()
     store.load_vectors({"a": np.ones(4, dtype=np.float32)})
-    before = store.export_vectors()
+    # export_vectors hands out the live arrays; copy them, or an in-place
+    # write to "a" would change the snapshot too and could never fail below.
+    before = {k: v.copy() for k, v in store.export_vectors().items()}
 
     with pytest.raises(ValueError):
         store._absorb({"b": [1.0, 2.0], "c": [1.0, 2.0, 3.0]})

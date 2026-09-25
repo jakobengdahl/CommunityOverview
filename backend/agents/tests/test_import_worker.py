@@ -399,17 +399,25 @@ class TestGenerationStalenessGuard:
                 if armed and fire_on == "release" and depth == 0:
                     _second_import()
 
-        def _encode_then_arm(nodes):
-            # Armed only now, so the first acquire/release it fires on is the
-            # commit's.
+        real_commit = storage.commit_generation_embeddings
+
+        def _armed_commit(generation, vectors):
+            # Armed only while the commit is on the stack, so any other lock
+            # the worker takes before or after it can never fire the hook.
             nonlocal armed
             armed = True
-            return {n.id: [1.0, 0.0, 0.0] for n in nodes}
+            try:
+                return real_commit(generation, vectors)
+            finally:
+                armed = False
 
         monkeypatch.setattr(storage, "_lock", _HookedLock())
         monkeypatch.setattr(
-            storage.vector_store, "compute_node_embeddings", _encode_then_arm
+            storage.vector_store,
+            "compute_node_embeddings",
+            lambda nodes: {n.id: [1.0, 0.0, 0.0] for n in nodes},
         )
+        monkeypatch.setattr(storage, "commit_generation_embeddings", _armed_commit)
 
         claimed = store.claim_next("worker-a")
         assert claimed.id == job.id
