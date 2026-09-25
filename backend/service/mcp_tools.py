@@ -1706,8 +1706,10 @@ def register_mcp_tools(
 
         A batch is capped at 500 distinct ids and 256 KiB of ids, and each call
         also draws from a per-client rate budget sized to the number of distinct
-        ids — so a batch well below the hard caps can still return
-        ``rate_limited``. A repeated id counts once against all three. Split
+        ids that resolve — ids reported in ``skipped`` are not charged, and a
+        call that returns ``no_resolvable_nodes`` draws nothing — so a batch
+        well below the hard caps can still return ``rate_limited``. A repeated
+        id counts once against all three. Split
         large sets across successive calls, threading the returned ``revision``
         into the next ``expected_revision``.
 
@@ -2097,7 +2099,9 @@ def register_mcp_tools(
             name: The new display name, or null to clear it.
 
         Returns:
-            Dict with success and the updated session resource.
+            Dict with success and the updated session resource. Each call draws
+            one unit from a rate budget shared with no other tool; busy and
+            rate_limited are retryable.
         """
         if session_manager is None:
             return {"success": False, "error": "Session manager not available"}
@@ -2111,13 +2115,22 @@ def register_mcp_tools(
             return denied
         try:
             session = session_manager.rename_session_sync(
-                session_id, name, client_id=_MCP_SESSION_CLIENT_ID
+                session_id,
+                name,
+                client_id=_MCP_SESSION_CLIENT_ID,
+                rate_limit_label="rename_visualization_session",
             )
         except LayoutBusy:
             return {
                 "success": False,
                 "error": "busy",
                 "message": "Another change is being applied to this session; retry.",
+            }
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many session writes; slow down and retry.",
             }
         except SessionLimitReached:
             return {
@@ -2152,7 +2165,8 @@ def register_mcp_tools(
 
         Returns:
             Dict with success and deleted=true, or a confirmation_required / error
-            result.
+            result. A confirmed call draws one unit from a rate budget shared with
+            no other tool; busy and rate_limited are retryable.
         """
         if session_manager is None:
             return {"success": False, "error": "Session manager not available"}
@@ -2175,13 +2189,21 @@ def register_mcp_tools(
             }
         try:
             existed = session_manager.delete_session_sync(
-                session_id, deleted_by=_MCP_SESSION_CLIENT_ID
+                session_id,
+                deleted_by=_MCP_SESSION_CLIENT_ID,
+                rate_limit_label="delete_visualization_session",
             )
         except LayoutBusy:
             return {
                 "success": False,
                 "error": "busy",
                 "message": "Another change is being applied to this session; retry.",
+            }
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many session writes; slow down and retry.",
             }
         if not existed:
             return {"success": False, "error": f"Session '{session_id}' not found."}

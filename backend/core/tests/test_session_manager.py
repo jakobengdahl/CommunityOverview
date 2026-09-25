@@ -2998,6 +2998,40 @@ class TestRenameSessionSync:
         assert renamed[0]["seq"] == s.seq
         assert s.name == "Renamed"
 
+    async def test_a_rate_limited_rename_changes_and_creates_nothing(self):
+        mgr = _manager()
+        s = mgr.create_session(name="Before")
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+        mgr._mcp_bucket = _TokenBucket(0.0, 0.0)
+        unknown = "1234-5678-9012-3456"
+
+        with pytest.raises(RateLimited):
+            mgr.rename_session_sync(s.id, "After", client_id="mcp-agent")
+        with pytest.raises(RateLimited):
+            mgr.rename_session_sync(unknown, "After", client_id="mcp-agent")
+
+        assert s.name == "Before" and s.seq == 0
+        assert mgr.get_session(unknown) is None
+        assert await _drain(sub) == []
+
+
+class TestDeleteSessionSyncRateLimit:
+    async def test_a_rate_limited_delete_leaves_the_session_and_broadcasts_nothing(
+        self,
+    ):
+        mgr = _manager()
+        s = mgr.create_session()
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+        mgr._mcp_bucket = _TokenBucket(0.0, 0.0)
+
+        with pytest.raises(RateLimited):
+            mgr.delete_session_sync(s.id, deleted_by="mcp-agent")
+
+        assert mgr.get_session(s.id) is s
+        assert await _drain(sub) == []
+
 
 class TestDeleteRenameLocking:
     """R10: delete must not race an in-flight apply_ops batch for the same session."""
@@ -3458,6 +3492,12 @@ _MCP_BUCKET_WRITES = {
         optimized_image_bytes=100,
         rate_limit_label=label,
     ),
+    "rename_session_sync": lambda mgr, sid, i, label: mgr.rename_session_sync(
+        sid, f"name-{i}", client_id="mcp-agent", rate_limit_label=label
+    ),
+    "delete_session_sync": lambda mgr, sid, i, label: mgr.delete_session_sync(
+        sid, deleted_by="mcp-agent", rate_limit_label=label
+    ),
 }
 
 # session_manager calls in mcp_tools.py that spend no rate-limit bucket.
@@ -3465,11 +3505,9 @@ _MCP_UNMETERED_CALLS = {
     "claimed_elements",
     "connected_count",
     "create_session",
-    "delete_session_sync",
     "get_session",
     "list_sessions",
     "push_command",
-    "rename_session_sync",
 }
 
 
@@ -3542,13 +3580,9 @@ _MCP_UNMETERED_RUNS = {
     "claimed_elements": lambda mgr, sid: mgr.claimed_elements(sid),
     "connected_count": lambda mgr, sid: mgr.connected_count(sid),
     "create_session": lambda mgr, sid: mgr.create_session(),
-    "delete_session_sync": lambda mgr, sid: mgr.delete_session_sync(sid),
     "get_session": lambda mgr, sid: mgr.get_session(sid),
     "list_sessions": lambda mgr, sid: mgr.list_sessions(),
     "push_command": lambda mgr, sid: mgr.push_command(sid, {"type": "noop"}),
-    "rename_session_sync": lambda mgr, sid: mgr.rename_session_sync(
-        sid, "Renamed", client_id="mcp-agent"
-    ),
 }
 
 
