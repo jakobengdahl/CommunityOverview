@@ -109,8 +109,8 @@ def test_adopted_node_keeps_the_remote_aliases_and_subtypes(tmp_path):
             "id": "remote-1",
             "type": "Actor",
             "name": "External Node",
-            "aliases": ["eSam", "Second Alias"],
-            "subtypes": ["Agency", "Board"],
+            "aliases": ["eSam", "Second Alias", "eSam"],
+            "subtypes": ["Board", "Agency", "Board"],
         },
     )
 
@@ -119,8 +119,8 @@ def test_adopted_node_keeps_the_remote_aliases_and_subtypes(tmp_path):
     assert result["success"] is True
     adopted = service.storage.get_node(result["adopted_node"]["id"])
     assert (adopted.aliases, adopted.subtypes) == (
-        ["eSam", "Second Alias"],
-        ["Agency", "Board"],
+        ["eSam", "Second Alias", "eSam"],
+        ["Board", "Agency", "Board"],
     )
     found = service.search_graph(query="second alias", limit=10)
     assert result["adopted_node"]["id"] in [node["id"] for node in found["nodes"]]
