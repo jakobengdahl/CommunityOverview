@@ -1256,9 +1256,15 @@ class _StorageIn:
         return False
 
 
-def _write_store(directory, nodes):
+def _write_store(storage, directory, nodes):
+    """Replace the store behind `storage`'s back, as another writer would.
+
+    Drains `storage`'s own queued writes first: one landing after the rewrite
+    appends to a journal written against the old graph.json, and `load` then
+    refuses the store instead of reading it."""
     import json
 
+    storage.flush()
     (directory / "graph.json").write_text(json.dumps({"nodes": nodes, "edges": []}))
     for stray in ("graph.journal.ndjson", "graph.history.ndjson"):
         if (directory / stray).exists():
@@ -1401,6 +1407,7 @@ class TestAReloadIndexesArchivedNodesToo:
     ):
         with _StorageIn(tmp_path) as storage:
             _write_store(
+                storage,
                 tmp_path,
                 [
                     {"id": f"n{i}", "type": "Actor", "name": f"node {i}"}
@@ -1717,6 +1724,7 @@ class TestAReloadOfAnyShapeKeepsTheIndexInStep:
                 storage.search_nodes(query="widget", limit=50)
 
             _write_store(
+                storage,
                 tmp_path,
                 [
                     {"id": "c", "type": "Actor", "name": "c widget"},
@@ -1770,6 +1778,7 @@ class TestAReaderInsideTheReloadSwapIsNotAnsweredFromTheOldGraph:
 
             storage.nodes = _ReaderLandsAfterTheNodesSwap(storage.nodes)
             _write_store(
+                storage,
                 tmp_path,
                 [{"id": i, "type": "Actor", "name": f"{i} widget"} for i in ids]
                 + [{"id": "r", "type": "Actor", "name": "afterward"}],
