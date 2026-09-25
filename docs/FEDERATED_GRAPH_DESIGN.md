@@ -248,6 +248,8 @@ Even though federation is transparent, users must see provenance:
 - Cached nodes keep their remote `aliases` and `subtypes`, so federated search
   matches and ranks them with the same scorer as local search (name, alias, type
   label, tags, subtypes, description, summary)
+- Federated search honours the lexical `match_mode` (`substring` or `any_term`)
+  the same way local search does
 - Provenance metadata in REST and MCP responses
 - UI depth selector and source-graph badges
 - Startup and scheduled sync with configurable interval

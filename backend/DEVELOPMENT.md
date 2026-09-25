@@ -541,8 +541,8 @@ The requested mode is echoed back as `result["match_mode"]`, but it describes th
 mode that was **requested, not necessarily the matcher that produced the
 results** — see the paragraph on the semantic fallback below. Read
 `result["semantic"]` alongside it: that is the field that says which matcher ran
-locally. (Federated rows come from the federation manager's own substring
-matcher either way — see the boundary note below.)
+locally. (Federated rows are always matched lexically in the requested mode —
+see the note below.)
 
 Each term is matched as a **substring, not a word**, and no term is filtered out:
 `"a pricing plan"` matches every node containing the letter `a` anywhere. Ranking
@@ -557,12 +557,15 @@ by the automatic semantic fallback: the lexical attempt still runs in the
 requested mode, and the mode decides whether the fallback fires at all, since it
 only fires when that attempt matched nothing. A non-empty lexical result is never
 discarded. `match_mode` is still echoed in that case while `result["semantic"]`
-flips to true. Federated search stays substring-matched — the same boundary
-semantic ranking has. Within that, the federation cache is matched and ranked by
-the same code as local search, over the fields the cache holds — including the
+flips to true. Federated search honours `match_mode` too: the federation cache
+splits the query into the same terms and ranks by the same best-term rule and
+tie-break as local search, so a query finds the same nodes locally and remotely
+in either mode. It does not take part in semantic ranking or the semantic
+fallback, which stay local. The federation cache is matched and ranked by the
+same code as local search, over the fields the cache holds — including the
 node type and its localized schema labels, so a query such as `aktör` reaches
-federated Actor nodes as well as local ones. Aliases and subtypes are not carried
-into the cache on sync, so they match local nodes only.
+federated Actor nodes as well as local ones. The cache keeps each remote node's
+aliases and subtypes, so those match federated nodes too.
 
 The in-app chat agent's `search_graph` tool exposes `match_mode` and `semantic`
 with the same values and defaults, so the chat and MCP search surfaces offer the
