@@ -100,28 +100,28 @@ _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
 
 
 def _own_nodes(scope):
-    """Every node in `scope`, not descending into the scopes nested in it, in
-    source order - so an alias is defined before an alias built on it."""
+    """Every node in `scope`, not descending into the scopes nested in it."""
     nodes, stack = [], list(ast.iter_child_nodes(scope))
     while stack:
         node = stack.pop()
         nodes.append(node)
         if not isinstance(node, _SCOPES):
             stack.extend(ast.iter_child_nodes(node))
-    return sorted(
-        nodes, key=lambda n: (getattr(n, "lineno", 0), getattr(n, "col_offset", 0))
-    )
+    return nodes
 
 
-def _resolved(dotted, aliases):
-    seen = set()
-    while dotted:
-        head, _, rest = dotted.partition(".")
-        if head not in aliases or head in seen:
-            return dotted
-        seen.add(head)
-        dotted = aliases[head] + (f".{rest}" if rest else "")
-    return dotted
+def _expansions(dotted, aliases, seen=frozenset()):
+    """Every name `dotted` may stand for: itself, and each expansion of its
+    first component through every route that name may be bound to."""
+    if not dotted:
+        return set()
+    head, _, rest = dotted.partition(".")
+    names = {dotted}
+    if head not in seen:
+        for route in aliases.get(head, ()):
+            expanded = route + (f".{rest}" if rest else "")
+            names |= _expansions(expanded, aliases, seen | {head})
+    return names
 
 
 def _bindings(node):
@@ -158,30 +158,36 @@ def _parameter_bindings(scope):
 
 
 def _scope_aliases(scope, nodes, inherited):
-    """Local name -> the stdout route it stands for in this scope.
+    """Local name -> every stdout route it may stand for in this scope.
 
     May-alias and fail-closed: a name bound to a stdout route anywhere in a
-    scope counts throughout it and in every scope nested in it, even where it
-    is also bound to something else. Undoing an alias on a rebinding would
-    have to know which expressions a nested scope evaluates in its parent
-    (defaults, decorators, bases) and every binding form Python has; getting
-    either wrong hides a real write. Erring the other way costs a false flag,
-    which fails loudly and is fixed by renaming.
+    scope counts throughout it and in every scope nested in it, in any order
+    and even where it is also bound to something else. Routes are only ever
+    added - to what the name inherited as well as to each other - never
+    replaced, and the bindings are applied until nothing changes, so a chain
+    is followed whichever order its links appear in. Undoing an alias on a
+    rebinding would have to know which expressions a nested scope evaluates
+    in its parent (defaults, decorators, bases) and every binding form Python
+    has; getting either wrong hides a real write. Erring the other way costs a
+    false flag, which fails loudly and is fixed by renaming.
     """
-    aliases = dict(inherited)
+    aliases = {name: set(routes) for name, routes in inherited.items()}
     bindings = _parameter_bindings(scope)
     for node in nodes:
         bindings.extend(_bindings(node))
-    for name, target in bindings:
-        target = _resolved(target, aliases) if target else None
-        if target in _STDOUT_ROUTES and target != name:
-            aliases[name] = target
+    changed = True
+    while changed:
+        changed = False
+        for name, target in bindings:
+            for route in _expansions(target, aliases) & _STDOUT_ROUTES:
+                if route != name and route not in aliases.setdefault(name, set()):
+                    aliases[name].add(route)
+                    changed = True
     return aliases
 
 
 def _writes_to_stdout(call, aliases):
-    literal = _dotted(call.func)
-    names = {literal, _resolved(literal, aliases)}
+    names = _expansions(_dotted(call.func), aliases)
     if names & _STDOUT_CALLS:
         return True
     # File descriptor 1 is stdout whatever sys.stdout has been swapped for.
@@ -254,14 +260,27 @@ def _stdout_calls(source):
         "import sys\ndef f(out=sys.stdout):\n    out.write('x')",
         "import sys\ndef f(*, out=sys.stdout):\n    out.write('x')",
         "import sys\nsys.stdout.writelines(['x'])",
+        # Every route a name may stand for counts, whatever else binds it
+        # and in whatever order a chain's links appear.
+        "import sys\nout = sys.stdout\ndef f(out=sys, x=out.write('x')): pass",
+        "import sys\nout = sys\nout = sys.stdout\nout.stdout.write('x')",
+        "import os\nw = print\nw = os\nw.write(1, b'x')",
+        "import sys\nw = out.write\nout = sys.stdout\ndef f():\n    w('x')",
     ],
 )
 def test_the_guard_catches_each_way_of_writing_to_stdout(source):
     assert _stdout_calls(source) == [source.count("\n") + 1]
 
 
-def test_the_guard_catches_a_write_in_a_decorator_the_function_rebinds():
-    source = "import sys\nw = sys.stdout.write\n@deco(w('x'))\ndef f(w): pass"
+@pytest.mark.parametrize(
+    "source",
+    [
+        # Evaluated where the function is defined, not in its body.
+        "import sys\nw = sys.stdout.write\n@deco(w('x'))\ndef f(w): pass",
+        "import sys\nout = sys\ndef f(x=out.stdout.write('x')):\n    out = sys.stdout",
+    ],
+)
+def test_the_guard_catches_a_write_where_the_function_is_defined(source):
     assert _stdout_calls(source) == [3]
 
 
