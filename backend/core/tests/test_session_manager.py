@@ -3550,6 +3550,16 @@ _MCP_UNMETERED_RUNS = {
 }
 
 
+def _bucket_attrs(mgr):
+    """Every ``_TokenBucket`` the manager holds, so a bucket added later is
+    covered without editing the tests that use this."""
+    attrs = sorted(
+        attr for attr, value in vars(mgr).items() if isinstance(value, _TokenBucket)
+    )
+    assert {"_bucket", "_mcp_bucket", "_image_bucket", "_lookup_bucket"} <= set(attrs)
+    return attrs
+
+
 class TestMcpUnmeteredCallsSpendNoBucket:
     async def test_every_unmetered_call_has_a_run(self):
         assert set(_MCP_UNMETERED_RUNS) == _MCP_UNMETERED_CALLS
@@ -3559,7 +3569,7 @@ class TestMcpUnmeteredCallsSpendNoBucket:
         mgr = _manager()
         s = mgr.create_session()
         consumed = []
-        for attr in ("_bucket", "_mcp_bucket", "_image_bucket", "_lookup_bucket"):
+        for attr in _bucket_attrs(mgr):
             setattr(mgr, attr, _RecordingBucket(consumed))
 
         _MCP_UNMETERED_RUNS[call](mgr, s.id)
@@ -3577,7 +3587,7 @@ class TestMcpUnmeteredCallsSpendNoBucket:
         mgr.connect(s.id, "c1", "A")
         mgr.claims.claim(s.id, "c1", ["n1"])
         sid = s.id if state == "claimed_with_presence" else "9999-9999"
-        buckets = ("_bucket", "_mcp_bucket", "_image_bucket", "_lookup_bucket")
+        buckets = _bucket_attrs(mgr)
         before = {
             attr: (dict(getattr(mgr, attr)._tokens), dict(getattr(mgr, attr)._last))
             for attr in buckets
