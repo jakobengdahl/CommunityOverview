@@ -888,8 +888,8 @@ can configure one. See `docs/EVENT_SUBSCRIPTIONS.md`.
 | `create_visualization_session` | Create a new empty session (optional non-unique name; server assigns a default when omitted) |
 | `list_visualization_sessions` | List existing sessions, most recently updated first |
 | `get_visualization_session` | Inspect one session's resource metadata (incl. node count) |
-| `rename_visualization_session` | Set or clear a session's display name (one unit of the MCP session-write rate budget; `rate_limited` when spent) |
-| `delete_visualization_session` | Permanently delete a session — requires `confirm=true` (a confirmed call spends one unit of the MCP session-write rate budget; `rate_limited` when spent) |
+| `rename_visualization_session` | Set or clear a session's display name (draws one unit from a rate budget of its own; `rate_limited` when spent) |
+| `delete_visualization_session` | Permanently delete a session — requires `confirm=true` (a confirmed call draws one unit from a rate budget of its own; `rate_limited` when spent) |
 | `list_sticky_notes` | List every sticky note in a session (id/text/x/y/w/h/color/font_size/rotation/z/locked) |
 | `create_sticky_note` | Create a sticky note at a model-space position, or replace one by id (create/upsert) |
 | `update_sticky_note` | Partially update a sticky note's content, style, position, size, rotation, layer order and/or lock state |

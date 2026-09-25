@@ -698,8 +698,9 @@ class SessionManager:
         async path and the REST ``PATCH``. The rate check comes before it, so a
         refused rename materialises nothing.
 
-        Charges one token to ``_mcp_bucket``, like every other synchronous MCP
-        write.
+        Charges one token to ``_mcp_bucket`` under the key
+        ``_mcp_rate_limit_key(client_id or "rest", rate_limit_label)``, like
+        every other synchronous MCP write.
         """
         if not is_valid_session_id(session_id):
             raise SessionNotFound()
@@ -738,8 +739,9 @@ class SessionManager:
         interleave. Stale lock objects are left in ``self._locks`` for the same
         reason ``delete_session`` documents.
 
-        Charges one token to ``_mcp_bucket`` under ``deleted_by``, like every
-        other synchronous MCP write.
+        Charges one token to ``_mcp_bucket`` under the key
+        ``_mcp_rate_limit_key(deleted_by or "rest", rate_limit_label)``, like
+        every other synchronous MCP write.
         """
         if not self._mcp_bucket.consume(
             self._mcp_rate_limit_key(deleted_by or "rest", rate_limit_label), 1.0

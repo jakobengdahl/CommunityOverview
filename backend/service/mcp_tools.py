@@ -2098,7 +2098,7 @@ def register_mcp_tools(
 
         Returns:
             Dict with success and the updated session resource. Each call draws
-            from a per-client rate budget shared with no other tool; busy and
+            one unit from a rate budget shared with no other tool; busy and
             rate_limited are retryable.
         """
         if session_manager is None:
@@ -2163,8 +2163,8 @@ def register_mcp_tools(
 
         Returns:
             Dict with success and deleted=true, or a confirmation_required / error
-            result. A confirmed call draws from a per-client rate budget shared
-            with no other tool; busy and rate_limited are retryable.
+            result. A confirmed call draws one unit from a rate budget shared with
+            no other tool; busy and rate_limited are retryable.
         """
         if session_manager is None:
             return {"success": False, "error": "Session manager not available"}
