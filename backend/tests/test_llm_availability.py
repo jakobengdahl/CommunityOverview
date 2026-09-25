@@ -13,9 +13,6 @@ class TestGetLlmAvailability:
 
     def test_returns_available_false_when_no_keys(self):
         with patch.dict(os.environ, {}, clear=True):
-            os.environ.pop("ANTHROPIC_API_KEY", None)
-            os.environ.pop("OPENAI_API_KEY", None)
-            os.environ.pop("LLM_PROVIDER", None)
             result = get_llm_availability()
         assert result["available"] is False
         assert result["provider"] == "claude"
