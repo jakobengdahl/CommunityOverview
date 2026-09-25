@@ -126,10 +126,13 @@ class TestImportReturnsBeforeEmbeddingsComplete:
 
         A gate rather than a sleep: timing the response against a sleeping
         encode step failed under CI load (1.387s against a 2.0s delay) with
-        the endpoint behaving correctly. Nothing here races a clock - an
-        endpoint that waits on the encode step returns only after the gate's
-        timeout has run out, by which point the step has finished and the
-        first assertion below fails, however slow or fast the runner is."""
+        the endpoint behaving correctly. An endpoint that waits on the encode
+        step returns only after the gate's timeout has run out, by which point
+        the step has finished and the first assertion below fails. The one
+        clock left is that 30 s timeout: a test thread stalled for longer
+        than it between the POST and that assertion would let the stub release
+        itself and fail a correct endpoint. Short of such a stall the outcome
+        does not depend on how fast the runner is."""
         json_path = os.path.join(temp_dir, "test.json")
         storage = GraphStorage(json_path=json_path)
         service = GraphService(storage)
