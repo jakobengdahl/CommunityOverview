@@ -258,7 +258,7 @@ _BACKEND_LOGGER = "backend.core.postgres_backend"
 
 
 @pytest.fixture
-def reported(caplog, capsys):
+def reported(caplog, capsys, backends):
     """What the backend reported since the previous call, one message per line.
 
     A report is a WARNING record on the backend's module logger. Each one is
@@ -269,6 +269,11 @@ def reported(caplog, capsys):
     teardown. Filtered to WARNING alone, the same text at ERROR would slip
     past both a positive check and any check that nothing was said - and a
     record logged after the last call would never be looked at at all.
+
+    The backends are closed here, before that teardown check, rather than
+    left to `backends`: this fixture depends on that one, so it tears down
+    after this one, and whatever closing logged - a listener thread stopping,
+    say - would come too late to be looked at.
     """
     caplog.set_level(logging.WARNING, logger=_BACKEND_LOGGER)
 
@@ -280,21 +285,31 @@ def reported(caplog, capsys):
         ]
         assert not louder, f"reported above WARNING: {louder}"
 
+    # A cursor rather than caplog.clear(): on a pytest whose clear() rebinds
+    # the record list instead of emptying it, the list the teardown check
+    # reads detaches at the first clear, and nothing after it is looked at.
+    seen = 0
+
     def take() -> str:
+        nonlocal seen
+        fresh = caplog.records[seen:]
+        seen += len(fresh)
         messages = [
             record.getMessage()
-            for record in caplog.records
+            for record in fresh
             if record.name == _BACKEND_LOGGER and record.levelno == logging.WARNING
         ]
-        assert_nothing_louder(caplog.records)
-        caplog.clear()
+        assert_nothing_louder(fresh)
         out = capsys.readouterr().out
         leaked = [message for message in messages if message in out]
         assert not leaked, f"a report went to stdout: {leaked}"
         return "\n".join(messages)
 
     yield take
-    assert_nothing_louder(caplog.get_records("call"))
+    for backend in backends:
+        backend.close()
+    backends.clear()
+    assert_nothing_louder(caplog.get_records("call") + caplog.get_records("teardown"))
 
 
 def _statements_issued(action, into=None):

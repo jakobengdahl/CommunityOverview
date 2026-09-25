@@ -549,15 +549,17 @@ class TestChangeNotificationWiring:
             assert storage.edges["bc"].metadata == {"weight": {"history": [2]}}
             assert [op.payload for op in reported] == as_reported
 
-            written = [
-                (kind, payload["id"], payload) for kind, payload in backend.calls
+            # The kinds first, so a write that became a snapshot or a delete
+            # fails as a readable list rather than on indexing its payload.
+            assert [kind for kind, _ in backend.calls] == [
+                "upsert_node",
+                "upsert_edge",
             ]
-            assert [(kind, entity_id) for kind, entity_id, _ in written] == [
-                ("upsert_node", "b"),
-                ("upsert_edge", "bc"),
-            ]
-            assert written[0][2]["metadata"] == {"owner": {"teams": ["edge"]}}
-            assert written[1][2]["metadata"] == {"weight": {"history": [2]}}
+            (_, node_written), (_, edge_written) = backend.calls
+            assert node_written["id"] == "b"
+            assert edge_written["id"] == "bc"
+            assert node_written["metadata"] == {"owner": {"teams": ["edge"]}}
+            assert edge_written["metadata"] == {"weight": {"history": [2]}}
         finally:
             storage.shutdown_events()
 
