@@ -381,12 +381,17 @@ def _leading_verb(conn, query):
     return match.group(0).upper() if match else ""
 
 
-def _sequential_scans(issued):
+def _sequential_scans(issued, on=None):
     """(statements naming a graph table, those whose plan scans one).
 
     EXPLAIN does not execute, so this is safe to run for every statement.
     Maintenance statements are skipped, not planned: see `_MAINTENANCE`.
+
+    `on` narrows "scans" to a sequential scan of that one table, and each
+    statement it reports then carries its plan, for a caller whose question
+    is about one table's indexes rather than every relation the plan reads.
     """
+    scan = re.compile(r"Seq Scan on " + re.escape(on) + r"\b" if on else r"Seq Scan")
     touched, scanning = [], []
     with psycopg.connect(DSN, autocommit=True) as conn:
         for query, params in issued:
@@ -407,8 +412,9 @@ def _sequential_scans(issued):
                     f"parameters, so its cost is unknown: {text}"
                 )
             rows = conn.execute(psycopg.sql.SQL("EXPLAIN ") + query, params).fetchall()
-            if "Seq Scan" in "\n".join(r[0] for r in rows):
-                scanning.append(text)
+            plan = "\n".join(r[0] for r in rows)
+            if scan.search(plan):
+                scanning.append(f"{text}\n{plan}" if on else text)
     return touched, scanning
 
 
@@ -1845,6 +1851,11 @@ class TestPostgresProvisionsWhatTheTraversalNeeds:
         the statistics the save itself left, with no ANALYZE of this test's
         own. Measured on this seed: a BitmapOr over both indexes, and a
         sequential scan of graph_edges as soon as either index is dropped.
+
+        Only a scan of graph_edges fails it. The same plan joins graph_nodes
+        for the far end, and whether that join scans depends on the seed's
+        size and the server's cost settings, not on the edge indexes this
+        test is about.
         """
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
@@ -1861,14 +1872,14 @@ class TestPostgresProvisionsWhatTheTraversalNeeds:
 
         issued = _statements_issued(lambda: backend.traverse("n0", 1))
 
-        touched, scanning = _sequential_scans(issued)
+        touched, scanning = _sequential_scans(issued, on="graph_edges")
         # The level query in particular, so a traversal that stopped issuing
         # it through a cursor this spy sees cannot pass by planning nothing.
         assert any("far_id" in text for text in touched), (
             f"the traversal's level query was not among what it issued: {touched}"
         )
         assert not scanning, (
-            "the traversal is planned as a sequential scan although its "
+            "the traversal scans graph_edges sequentially although its "
             f"indexes exist: {scanning}"
         )
 
@@ -3197,37 +3208,48 @@ class TestPostgresBatchesSurviveADeadlock:
         )
 
     def test_opposite_orderings_under_real_contention_all_land(self, schema, backends):
-        """The real path, opportunistically: a cycle may or may not form."""
+        """The real path, opportunistically: a cycle may or may not form.
+
+        Under the production retry bound. postgres_backend.py documents that
+        the bound can occasionally be exhausted under contention - accepted
+        behaviour, not a bug - and two writers forcing opposite orders on the
+        same two rows every batch reach that tail often (observed in CI). So
+        a batch that exhausts it is resubmitted here, as a caller would, and
+        what is asserted is convergence: every batch lands, nothing but a
+        deadlock ever fails one, and the store ends as one batch's whole
+        write. How many retries that took is the injected tests' question,
+        not this one's. The shared deadline bounds the resubmissions too.
+        """
         first = PostgresGraphPersistenceBackend(DSN, schema=schema)
         second = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.extend([first, second])
         first.save_graph_data(snapshot([node_payload("x"), node_payload("y")]))
 
-        # postgres_backend.py documents that the production bound (pinned at
-        # 3 by the injected tests above) can occasionally be exhausted
-        # under heavy contention - that is accepted behaviour, not a bug. Two
-        # threads is much lighter than the "many instances" load that note is
-        # about, but 30 rapid opposite-order batches still hit that rare tail
-        # often enough to flake this assertion (observed in CI). Raise just
-        # these two instances' retry headroom so the stress test exercises
-        # real contention without asserting on the tail of a distribution the
-        # production default was never meant to eliminate.
-        first.DEADLOCK_RETRIES = 20
-        second.DEADLOCK_RETRIES = 20
-
+        batches = 15
         errors = []
+        landed_batches = {"First": 0, "Second": 0}
         start = threading.Barrier(2)
+        deadline = time.monotonic() + 90
 
         def hammer(backend, name, ids):
             try:
                 start.wait(timeout=30)
-                for _ in range(15):
-                    backend.apply_batch(
-                        [
-                            EntityOperation.upsert_node(node_payload(entity, name=name))
-                            for entity in ids
-                        ]
-                    )
+                for _ in range(batches):
+                    while True:
+                        try:
+                            backend.apply_batch(
+                                [
+                                    EntityOperation.upsert_node(
+                                        node_payload(entity, name=name)
+                                    )
+                                    for entity in ids
+                                ]
+                            )
+                            break
+                        except psycopg.errors.DeadlockDetected:
+                            if time.monotonic() > deadline:
+                                raise
+                    landed_batches[name] += 1
             except Exception as exc:
                 errors.append(f"{name}: {type(exc).__name__}: {exc}")
 
@@ -3239,16 +3261,22 @@ class TestPostgresBatchesSurviveADeadlock:
                 target=hammer, args=(second, "Second", ["y", "x"]), daemon=True
             ),
         ]
-        deadline = time.monotonic() + 90
         for thread in threads:
             thread.start()
         for thread in threads:
             thread.join(max(0.0, deadline - time.monotonic()))
 
         assert not [t for t in threads if t.is_alive()], "a batch never finished"
-        assert errors == [], f"a batch failed rather than retrying: {errors}"
+        assert errors == [], (
+            f"a batch failed with something other than a deadlock: {errors}"
+        )
+        assert landed_batches == {"First": batches, "Second": batches}
         landed = by_id(first.load_graph_data(), "nodes")
         assert set(landed) == {"x", "y"}
+        # Each batch writes both rows in one transaction, so whichever batch
+        # committed last owns both: a split means a batch landed partially.
+        names = {landed[entity]["name"] for entity in ("x", "y")}
+        assert len(names) == 1 and names <= {"First", "Second"}, names
 
 
 class TestPostgresEntityWritesDoNotSerialiseAgainstEachOther:

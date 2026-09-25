@@ -745,7 +745,12 @@ writing a backend of your own against a shared server:
   `_resolve()`, the read behind change notification, inherits the default
   too; it answers each identifier from what the store holds when it reads,
   and a write it sees that is newer than the announcement it is resolving is
-  followed by that write's own announcement. What migration and `exists()`
+  followed by that write's own announcement. So does the transaction
+  `start_change_notification()` opens before it starts listening, which
+  holds only the graph-identity check (`_claim_or_check_graph_identity()`):
+  one read of the metadata row and, on a store no graph has claimed yet, one
+  `UPDATE` writing this instance's claim. It states no level of its own.
+  What migration and `exists()`
   actually send
   depends on whether the store has been migrated before. Cold (nothing
   provisioned yet), `_ensure_schema()` issues one advisory-lock statement,
