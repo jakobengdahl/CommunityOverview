@@ -268,24 +268,31 @@ describe('ActivityDrawer mobile overlay', () => {
     // Seeded with a non-default value so a restore that hard-codes '' fails.
     const originalOverflow = document.body.style.overflow;
     document.body.style.overflow = 'clip';
+    let view;
+    try {
+      view = renderDrawer({ open: true });
+      const { rerender } = view;
+      await settled();
+      expect(document.body.style.overflow).toBe('hidden');
 
-    const { rerender } = renderDrawer({ open: true });
-    await settled();
-    expect(document.body.style.overflow).toBe('hidden');
-
-    rerender(
-      <I18nProvider>
-        <ActivityDrawer
-          open={false}
-          onClose={vi.fn()}
-          sessionId="1234-5678"
-          currentClientId="client-me"
-          roster={[]}
-        />
-      </I18nProvider>
-    );
-    expect(document.body.style.overflow).toBe('clip');
-    document.body.style.overflow = originalOverflow;
+      rerender(
+        <I18nProvider>
+          <ActivityDrawer
+            open={false}
+            onClose={vi.fn()}
+            sessionId="1234-5678"
+            currentClientId="client-me"
+            roster={[]}
+          />
+        </I18nProvider>
+      );
+      expect(document.body.style.overflow).toBe('clip');
+    } finally {
+      // Unmount first: an early failure leaves the drawer open, and its own
+      // unmount would otherwise re-apply 'clip' after this restore.
+      view?.unmount();
+      document.body.style.overflow = originalOverflow;
+    }
   });
 
   it('does not lock body scroll on desktop', async () => {
