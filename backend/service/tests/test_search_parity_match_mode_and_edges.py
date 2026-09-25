@@ -105,20 +105,27 @@ def _origin_ids(result):
 
 
 @pytest.mark.parametrize(
-    "match_mode, expected",
+    "query, match_mode, expected",
     [
-        (MATCH_MODE_SUBSTRING, []),
-        (MATCH_MODE_ANY_TERM, ["exact", "two_terms", "desc_two", "desc_one"]),
+        (QUERY, MATCH_MODE_SUBSTRING, []),
+        (QUERY, MATCH_MODE_ANY_TERM, ["exact", "two_terms", "desc_two", "desc_one"]),
+        # One term, so every hit ties on matched terms and scan order decides
+        # between the two description matches.
+        (
+            "pricing",
+            MATCH_MODE_SUBSTRING,
+            ["exact", "two_terms", "desc_one", "desc_two"],
+        ),
     ],
 )
 def test_federated_search_matches_and_ranks_like_local_search(
-    tmp_path, match_mode, expected
+    tmp_path, query, match_mode, expected
 ):
     local = _local_service(tmp_path / "local", NODES).search_graph(
-        query=QUERY, match_mode=match_mode
+        query=query, match_mode=match_mode
     )
     federated = _federated_service(tmp_path / "fed", NODES).search_graph(
-        query=QUERY, match_mode=match_mode
+        query=query, match_mode=match_mode
     )
 
     assert _origin_ids(local) == expected

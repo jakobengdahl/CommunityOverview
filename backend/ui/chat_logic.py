@@ -615,7 +615,7 @@ class ChatProcessor:
                         "match_mode": {
                             "type": "string",
                             "enum": list(MATCH_MODES),
-                            "description": "How the query text is matched. 'substring' (default) requires the whole query verbatim. 'any_term' splits the query on whitespace and matches nodes containing ANY of the terms, each as a substring — pass distinctive terms, since a short or common one matches almost everything. Ignored when semantic is true; federated results stay substring-matched.",
+                            "description": "How the query text is matched. 'substring' (default) requires the whole query verbatim. 'any_term' splits the query on whitespace and matches nodes containing ANY of the terms, each as a substring — pass distinctive terms, since a short or common one matches almost everything. Applies to local and federated results alike; semantic=true replaces it for local results only, since federated results are always matched lexically.",
                             "default": "substring",
                         },
                         "semantic": {

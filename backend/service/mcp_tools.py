@@ -363,8 +363,9 @@ def register_mcp_tools(
         As a safety net the search falls back to semantic ranking automatically
         when a non-empty lexical query matches no local node, so such a
         query's local results come only from that fallback (none where no
-        embedding model is available); federated results stay
-        substring-matched. The response includes a ``"semantic"`` boolean
+        embedding model is available); federated results are always matched
+        lexically in the requested ``match_mode``. The response includes a
+        ``"semantic"`` boolean
         indicating whether semantic ranking produced the returned nodes.
 
         Args:
@@ -401,9 +402,10 @@ def register_mcp_tools(
                 you repeat counts once. Each term is matched as a
                 substring, not as a word, so pass the distinctive terms: a short
                 or common one ("a", "the") matches almost everything and pads
-                the tail of the result with noise. Ignored when
-                ``semantic=True``. Applies to the local graph; federated search
-                stays substring-matched.
+                the tail of the result with noise. Applies to local and
+                federated search alike; ``semantic=True`` replaces it for local
+                results only, since federated results are always matched
+                lexically.
             visualization_session_id: Optional browser session ID — when provided, the result
                 is pushed to that session's live canvas, if one is open. The
                 result then carries a ``visualization_delivery`` report saying

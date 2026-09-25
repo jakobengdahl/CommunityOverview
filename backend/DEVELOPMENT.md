@@ -551,8 +551,9 @@ callers should pass the distinctive terms rather than a whole natural-language
 sentence. (A word-boundary or minimum-length rule would change what a term means
 and is deliberately left out of the opt-in mode.)
 
-The mode applies to the local lexical search. It is ignored when `semantic=true`
-(that path does not use the lexical matcher). It is *superseded* — not ignored —
+The mode applies to the lexical search, local and federated. For local results it
+is ignored when `semantic=true` (that path does not use the lexical matcher);
+federated results are still matched in the requested mode. It is *superseded* — not ignored —
 by the automatic semantic fallback: the lexical attempt still runs in the
 requested mode, and the mode decides whether the fallback fires at all, since it
 only fires when that attempt matched nothing. A non-empty lexical result is never
