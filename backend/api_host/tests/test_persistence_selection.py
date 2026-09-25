@@ -51,6 +51,22 @@ requires_backend_module = pytest.mark.skipif(
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_persistence_selection(monkeypatch):
+    """Every test starts from an environment that selects nothing.
+
+    `AppConfig` fills each field a test does not pass from the environment, so
+    a developer shell or CI job with, say, `GRAPH_POSTGRES_SCOPE` exported
+    would turn the file-default assertions here into refusals. By prefix
+    rather than by name, so a setting added later is cleared without anyone
+    remembering to list it. Tests that mean to read a variable set it
+    themselves, after this has run.
+    """
+    for name in list(os.environ):
+        if name == "GRAPH_BACKEND" or name.startswith("GRAPH_POSTGRES_"):
+            monkeypatch.delenv(name)
+
+
 class StubBackend:
     """A snapshot-contract backend that keeps the graph in memory.
 
@@ -495,20 +511,11 @@ class TestTheEnvironmentIsTheInterface:
         would move the graph without anyone asking. The other tests that set
         one either pass the backend as a keyword, which skips the environment
         default entirely, or never ask which backend was chosen, so none of
-        them would notice. One setting per case, the others cleared, so each
-        is shown unable to select postgres on its own.
+        them would notice. One setting per case, the others cleared by the
+        module fixture, so each is shown unable to select postgres on its own.
         """
-        if selected is None:
-            monkeypatch.delenv("GRAPH_BACKEND", raising=False)
-        else:
+        if selected is not None:
             monkeypatch.setenv("GRAPH_BACKEND", selected)
-        for name in (
-            "GRAPH_POSTGRES_DSN",
-            "GRAPH_POSTGRES_SCHEMA",
-            "GRAPH_POSTGRES_POOL_SIZE",
-            "GRAPH_POSTGRES_SCOPE",
-        ):
-            monkeypatch.delenv(name, raising=False)
         monkeypatch.setenv(leftover, value)
         config = AppConfig()
         assert config.graph_backend == "file"
