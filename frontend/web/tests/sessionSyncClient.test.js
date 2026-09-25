@@ -383,7 +383,21 @@ describe('SessionSyncClient', () => {
     expect(onResync).not.toHaveBeenCalled();
     es.emit({ type: 'snapshot', seq: 5, session: { state: {} } });
     expect(onResync).toHaveBeenCalledTimes(1);
+    // Without a session id: a reconnect resyncs whatever session the host is on.
+    expect(onResync).toHaveBeenLastCalledWith();
     expect(client.seq).toBe(5);
+  });
+
+  it('resyncs without a session id on a catch_up that carries ops, and not on an empty one', () => {
+    const onResync = vi.fn();
+    const { client } = makeClient({ handlers: { onResync } });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'catch_up', seq: 4, ops: [] });
+    expect(onResync).not.toHaveBeenCalled();
+    es.emit({ type: 'catch_up', seq: 6, ops: [{ op: 'nodes_added', node_ids: ['x'] }] });
+    expect(onResync).toHaveBeenCalledTimes(1);
+    expect(onResync).toHaveBeenLastCalledWith();
   });
 
   // smallfix-late-joiner-misses-ops-before-stream-20260924: the first snapshot
@@ -434,6 +448,7 @@ describe('SessionSyncClient', () => {
     // A later snapshot resyncs as it always did, even at or below the load seq.
     es.emit({ type: 'snapshot', seq: 5, session: { state: {} } });
     expect(onResync).toHaveBeenCalledTimes(1);
+    expect(onResync).toHaveBeenLastCalledWith();
   });
 
   it('keeps the load seq when a later setBaseline carries none', () => {
@@ -1226,6 +1241,44 @@ describe('SessionSyncClient', () => {
       await vi.advanceTimersByTimeAsync(10);
       expect(fetchImpl.calls).toHaveLength(3);
       expect(fetchImpl.calls[2].body.ops).toEqual([{ op: 'nodes_added', node_ids: ['b'] }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('an op enqueued while the retry POST is in flight is sent once that POST settles', async () => {
+    vi.useFakeTimers();
+    try {
+      let releaseRetry;
+      const retrySettled = new Promise((r) => {
+        releaseRetry = r;
+      });
+      const bodies = [];
+      const fetchImpl = vi.fn(async (_url, opts) => {
+        bodies.push(JSON.parse(opts.body));
+        if (bodies.length === 1) return { ok: false, status: 503 };
+        if (bodies.length === 2) await retrySettled;
+        return { ok: true, status: 200, json: async () => ({ seq: bodies.length }) };
+      });
+      // Backoff is max(500, 4 * 20) = 500ms; the debounce is 20ms.
+      const { client } = makeClient({ fetchImpl, flushIntervalMs: 20 });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['a'] });
+      await vi.advanceTimersByTimeAsync(20);
+      expect(bodies).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(500); // the retry POST starts and hangs
+      expect(bodies).toHaveLength(2);
+
+      client.syncState({ node_refs: ['a', 'b'] });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(bodies).toHaveLength(2);
+
+      releaseRetry();
+      await vi.advanceTimersByTimeAsync(20);
+      expect(bodies).toHaveLength(3);
+      expect(bodies[2].ops).toEqual([{ op: 'nodes_added', node_ids: ['b'] }]);
     } finally {
       vi.useRealTimers();
     }
