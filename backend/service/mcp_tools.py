@@ -1566,8 +1566,10 @@ def register_mcp_tools(
         reports them. Only the nodes you name move; a write is a partial update of
         the position map, not a replacement. A batch is capped at 500 moves and
         256 KiB of payload (``too_large`` above that), and each write also draws
-        from a per-client rate budget sized to the number of moves — so a single
-        very large arrange may return ``rate_limited`` before the hard cap. Either
+        from this tool's rate budget, sized to the number of moves — so a single
+        very large arrange may return ``rate_limited`` before the hard cap. The
+        budget is per tool, not per client: every MCP client on the instance
+        draws from the same one. Either
         way, split a large session across successive writes, threading the
         returned ``revision`` into the next ``expected_revision``.
         Layout patterns (horizontal DAG, grid, swimlanes) and the full geometry
@@ -1705,10 +1707,12 @@ def register_mcp_tools(
         nothing new on the canvas.
 
         A batch is capped at 500 distinct ids and 256 KiB of ids, and each call
-        also draws from a per-client rate budget sized to the number of distinct
+        also draws from this tool's rate budget, sized to the number of distinct
         ids that resolve — ids reported in ``skipped`` are not charged, and a
         call that returns ``no_resolvable_nodes`` draws nothing — so a batch
-        well below the hard caps can still return ``rate_limited``. A repeated
+        well below the hard caps can still return ``rate_limited``. The budget
+        is per tool, not per client: every MCP client on the instance draws
+        from the same one. A repeated
         id counts once against all three. Split
         large sets across successive calls, threading the returned ``revision``
         into the next ``expected_revision``.

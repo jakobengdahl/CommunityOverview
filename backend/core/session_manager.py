@@ -741,8 +741,12 @@ class SessionManager:
 
         Charges one token to ``_mcp_bucket`` under the key
         ``_mcp_rate_limit_key(deleted_by or "rest", rate_limit_label)``, like
-        every other synchronous MCP write.
+        every other synchronous MCP write. A malformed id is reported as not
+        found before that charge, as ``rename_session_sync`` does, so a direct
+        caller that skipped the tool's own id check spends nothing on it.
         """
+        if not is_valid_session_id(session_id):
+            return False
         if not self._mcp_bucket.consume(
             self._mcp_rate_limit_key(deleted_by or "rest", rate_limit_label), 1.0
         ):
