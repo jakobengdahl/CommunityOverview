@@ -26,7 +26,7 @@ function record(overrides = {}) {
     op: 'annotation_created',
     actor: 'client-me',
     occurred_at: new Date().toISOString(),
-    affected: { kind: 'annotation', id: 'note-1', fields: null },
+    affected: { kind: 'annotation', id: 'note-1' },
     before: null,
     after: { id: 'note-1', type: 'note' },
     inverse_op: { op: 'annotation_deleted', annotation_id: 'note-1' },
