@@ -51,6 +51,16 @@ UNKNOWN_SESSION_ID = "9999-8888-7777-6666"
 DELIVERED_KEYS = {"requested", "delivered", "status", "live_consumers"}
 UNDELIVERED_KEYS = DELIVERED_KEYS | {"warning"}
 
+# Spelled out rather than imported: a test comparing the warning with the
+# module's own constant would pass whatever that constant were rewritten to,
+# including advice that inverts this one.
+EXPECTED_REMEDY = (
+    " A push is not stored in the session's state — use add_nodes_to_session to "
+    "change what the session holds. Trust this report rather than a "
+    "reachability check made before the push (connect_to_visualization_session): "
+    "a client present then may have left by the time the push was sent."
+)
+
 
 def _wire(tmp_path, *, with_registry=True, with_manager=True, session_manager=None):
     storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
@@ -179,8 +189,9 @@ def test_stored_session_with_no_consumer_reports_undelivered(wired):
     assert "has a registry entry but nothing" not in delivery["warning"]
     assert "no stored state" not in delivery["warning"]
     assert "could not be queried" not in delivery["warning"]
-    # And it must not send the caller to a check with the same false positive.
+    # And it must name this report, not a pre-push check, as the verdict.
     assert "Trust this report" in delivery["warning"]
+    assert delivery["warning"].endswith(EXPECTED_REMEDY)
     # The push left no trace to read back — the half of the defect that makes
     # the report the only way to notice.
     assert manager.get_session(session_id).state.get("node_refs", []) == []
@@ -288,6 +299,31 @@ async def test_a_bare_registry_entry_alone_is_never_delivery(wired):
     delivery = _delivery(tools, session_id)
     assert delivery["delivered"] is False
     assert delivery["live_consumers"] == 0
+
+
+@pytest.mark.asyncio
+async def test_an_undelivered_push_to_a_bare_entry_reaches_a_browser_opened_later(
+    wired,
+):
+    """Undelivered is not discarded: the entry's queue replays to the next consumer.
+
+    The docs and the warning say so rather than claiming the push left no trace,
+    so this pins the behaviour they describe: the command reported undelivered is
+    the one a browser opening the session afterwards receives.
+    """
+    tools, registry, _manager = wired
+    session_id = _new_session(tools)
+    registry.get_or_create(session_id)
+
+    delivery = _delivery(tools, session_id)
+    assert delivery["delivered"] is False
+    assert "may still apply it" in delivery["warning"]
+    assert "left no trace" not in delivery["warning"]
+
+    async with _legacy_consumer(registry, session_id) as received:
+        assert await _settle(lambda: len(received) == 1)
+    assert received[0]["type"] == "tool_result"
+    assert [n["id"] for n in received[0]["result"]["nodes"]] == ["alpha"]
 
 
 @pytest.mark.asyncio
@@ -522,7 +558,8 @@ def test_the_report_is_the_only_difference_a_session_id_makes(wired):
         assert with_push[key] == value, key
 
 
-def test_clear_visualization_result_shape_is_unchanged(wired):
+@pytest.mark.asyncio
+async def test_clear_visualization_result_shape_is_unchanged(wired):
     """It gates before pushing instead of reporting, and keeps doing so."""
     tools, registry, _manager = wired
     session_id = _new_session(tools)
@@ -531,10 +568,292 @@ def test_clear_visualization_result_shape_is_unchanged(wired):
     assert refused["success"] is False
     assert "visualization_delivery" not in refused
 
-    registry.get_or_create(session_id)
-    cleared = tools["clear_visualization"](visualization_session_id=session_id)
+    async with _legacy_consumer(registry, session_id):
+        cleared = tools["clear_visualization"](visualization_session_id=session_id)
     assert cleared["success"] is True
     assert "visualization_delivery" not in cleared
+
+
+@pytest.mark.asyncio
+async def test_clear_visualization_sends_the_clear_to_the_attached_canvas(wired):
+    """A reported clear must reach the canvas, on either channel it holds.
+
+    The tool returns success from its gate alone, so a clear that was never
+    pushed would still say the canvas was cleared.
+    """
+    tools, registry, manager = wired
+    session_id = _new_session(tools)
+    subscription, _member = manager.connect(session_id, "client-1", "Tester")
+    try:
+        async with _legacy_consumer(registry, session_id) as received:
+            cleared = tools["clear_visualization"](visualization_session_id=session_id)
+            assert cleared["success"] is True
+            assert await _settle(lambda: len(received) == 1)
+
+        assert received[0]["tool"] == "clear_visualization"
+        assert received[0]["result"]["action"] == "clear_visualization"
+        commands = [e for e in _drain_hub(subscription) if e["type"] == "command"]
+        assert [c["command"]["result"]["action"] for c in commands] == [
+            "clear_visualization"
+        ]
+    finally:
+        manager.disconnect(session_id, "client-1", subscription)
+
+
+@pytest.mark.asyncio
+async def test_one_browser_during_page_load_handover_counts_as_two(wired):
+    """One browser holds both channels while the op stream comes up.
+
+    The frontend keeps the legacy ``EventSource`` open until the op stream is
+    ready, so for that window a single tab is two consumer connections and
+    ``live_consumers`` sums them. Both receive the same push under one
+    ``command_id``, which is what lets the browser apply it once. After the
+    legacy channel is released the op stream alone still delivers.
+    """
+    tools, registry, manager = wired
+    session_id = _new_session(tools)
+
+    subscription = None
+    try:
+        async with _legacy_consumer(registry, session_id) as legacy_received:
+            before = _delivery(tools, session_id)
+            assert before["delivered"] is True
+            assert before["live_consumers"] == 1
+            assert await _settle(lambda: len(legacy_received) == 1)
+
+            subscription, _member = manager.connect(session_id, "browser-1", "Tester")
+            during = _delivery(tools, session_id)
+            assert during["delivered"] is True
+            assert during["live_consumers"] == 2
+            assert await _settle(lambda: len(legacy_received) == 2)
+            hub_commands = [
+                e for e in _drain_hub(subscription) if e["type"] == "command"
+            ]
+            assert [c["command"]["command_id"] for c in hub_commands] == [
+                legacy_received[1]["command_id"]
+            ]
+
+        assert registry.has_consumer(session_id) is False
+        after = _delivery(tools, session_id)
+        assert after["delivered"] is True
+        assert after["live_consumers"] == 1
+        # The report alone would pass a hub that claims delivery without
+        # publishing once no legacy consumer is attached; the op stream must
+        # actually carry this push, as a new command.
+        after_commands = [e for e in _drain_hub(subscription) if e["type"] == "command"]
+        assert len(after_commands) == 1
+        assert after_commands[0]["command"]["tool"] == "search_graph"
+        assert (
+            after_commands[0]["command"]["command_id"]
+            != legacy_received[1]["command_id"]
+        )
+    finally:
+        if subscription is not None:
+            manager.disconnect(session_id, "browser-1", subscription)
+
+
+# ---------------------------------------------------------------------------
+# The pre-push reachability check agrees with the delivery report
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_connect_stops_claiming_a_reachable_canvas_when_the_tab_closes(wired):
+    """The entry left behind by a closed tab is not a legacy push channel.
+
+    Before the fix ``connect_to_visualization_session`` said a browser was
+    holding the channel open, and that pushes reach it, in the very state the
+    delivery report calls undelivered. The two must now agree.
+    """
+    tools, registry, _manager = wired
+    session_id = _new_session(tools)
+
+    async with _legacy_consumer(registry, session_id):
+        live = tools["connect_to_visualization_session"](session_id=session_id)
+        assert live["connected"] is True
+        assert "draining its legacy push channel" in live["message"]
+        assert _delivery(tools, session_id)["delivered"] is True
+
+    assert registry.session_exists(session_id) is True
+    assert registry.has_consumer(session_id) is False
+
+    stale = tools["connect_to_visualization_session"](session_id=session_id)
+    assert stale["connected"] is True
+    assert stale["has_stored_state"] is True
+    assert stale["connected_clients"] == 0
+    assert "legacy push channel" not in stale["message"]
+    assert "with no client connected" in stale["message"]
+    assert "reaches nobody" in stale["message"]
+    assert _delivery(tools, session_id)["delivered"] is False
+
+
+@pytest.mark.asyncio
+async def test_state_still_reads_back_for_a_stored_session_whose_tab_closed(wired):
+    """A stale entry must not turn a stored session into a missing one.
+
+    The stale entry fails the consumer gate, so stored state is the only thing
+    left resolving the id, and the state read must return it rather than an
+    error.
+    """
+    tools, registry, _manager = wired
+    session_id = _new_session(tools)
+    assert tools["add_nodes_to_session"](session_id=session_id, node_ids=["alpha"])[
+        "success"
+    ]
+
+    async with _legacy_consumer(registry, session_id):
+        pass
+
+    assert registry.session_exists(session_id) is True
+    assert registry.has_consumer(session_id) is False
+
+    state = tools["get_visualization_session_state"](session_id=session_id)
+    assert "error" not in state
+    assert state["session_id"] == session_id
+    assert state["visible_node_ids"] == ["alpha"]
+    assert state["node_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_clear_visualization_refuses_a_session_whose_tab_closed(wired):
+    """``clear_visualization`` gates on a consumer, not on the leftover entry."""
+    tools, registry, _manager = wired
+    session_id = _new_session(tools)
+
+    async with _legacy_consumer(registry, session_id):
+        cleared = tools["clear_visualization"](visualization_session_id=session_id)
+        assert cleared["success"] is True
+
+    assert registry.session_exists(session_id) is True
+    refused = tools["clear_visualization"](visualization_session_id=session_id)
+    assert refused["success"] is False
+    assert "exists, but no client" in refused["error"]
+    assert "draining its legacy push channel" in refused["error"]
+
+
+@pytest.mark.parametrize(
+    "leave_entry",
+    [
+        pytest.param(lambda reg, sid: reg.get_or_create(sid), id="get_or_create"),
+        pytest.param(lambda reg, sid: reg.mint_trigger_token(sid), id="trigger"),
+    ],
+)
+def test_a_bare_entry_with_no_stored_state_resolves_as_not_found(wired, leave_entry):
+    """With nothing stored and nothing draining, there is no session to report.
+
+    An entry left by ``mint_trigger_token`` (or any other ``get_or_create``) is
+    not a client, so the tools must not describe the id as "open in a client".
+    """
+    tools, registry, _manager = wired
+    leave_entry(registry, UNKNOWN_SESSION_ID)
+    assert registry.session_exists(UNKNOWN_SESSION_ID) is True
+    assert registry.has_consumer(UNKNOWN_SESSION_ID) is False
+
+    connect = tools["connect_to_visualization_session"](session_id=UNKNOWN_SESSION_ID)
+    assert connect["connected"] is False
+    assert "not found" in connect["message"]
+
+    state = tools["get_visualization_session_state"](session_id=UNKNOWN_SESSION_ID)
+    assert "not found" in state["error"]
+
+    refused = tools["clear_visualization"](visualization_session_id=UNKNOWN_SESSION_ID)
+    assert refused["success"] is False
+    assert "not found" in refused["error"]
+
+
+@pytest.mark.parametrize(
+    "deleted, bare_entry",
+    [(False, False), (True, False), (False, True)],
+    ids=["never_stored", "deleted", "never_stored_with_bare_entry"],
+)
+def test_op_stream_presence_without_stored_state_resolves_as_not_found(
+    wired, deleted, bare_entry
+):
+    """Presence alone is not existence, so a deleted session is not resurrected.
+
+    Deleting a session leaves an attached client's presence in place, and
+    ``SessionManager.connect`` registers presence for an id the store does not
+    hold. Either way a client is counted on the op stream while nothing is
+    stored, and the read tools must still report the id as not found — also
+    when a registry entry with nothing draining it sits beside that presence,
+    since presence plus an entry is still neither stored state nor a consumer.
+    """
+    tools, registry, manager = wired
+    session_id = _new_session(tools) if deleted else UNKNOWN_SESSION_ID
+    if bare_entry:
+        registry.get_or_create(session_id)
+        assert registry.session_exists(session_id) is True
+        assert registry.has_consumer(session_id) is False
+    subscription, _member = manager.connect(session_id, "client-1", "Tester")
+    try:
+        if deleted:
+            assert tools["delete_visualization_session"](
+                session_id=session_id, confirm=True
+            )["success"]
+        assert manager.get_session(session_id) is None
+        assert manager.connected_count(session_id) == 1
+
+        connect = tools["connect_to_visualization_session"](session_id=session_id)
+        assert connect["connected"] is False
+        assert "not found" in connect["message"]
+
+        state = tools["get_visualization_session_state"](session_id=session_id)
+        assert "not found" in state["error"]
+    finally:
+        manager.disconnect(session_id, "client-1", subscription)
+
+
+@pytest.mark.asyncio
+async def test_a_live_consumer_without_stored_state_is_still_found(wired):
+    """The legacy-only case the gate exists for keeps resolving."""
+    tools, registry, _manager = wired
+
+    async with _legacy_consumer(registry, UNKNOWN_SESSION_ID):
+        connect = tools["connect_to_visualization_session"](
+            session_id=UNKNOWN_SESSION_ID
+        )
+        cleared = tools["clear_visualization"](
+            visualization_session_id=UNKNOWN_SESSION_ID
+        )
+        state = tools["get_visualization_session_state"](session_id=UNKNOWN_SESSION_ID)
+
+    assert connect["connected"] is True
+    assert connect["has_stored_state"] is False
+    assert "no stored state yet" in connect["message"]
+    assert cleared["success"] is True
+    # With no stored state there is nothing to count: both counts are present
+    # and zero, the same shape a stored session reports.
+    assert "error" not in state
+    assert state["visible_node_ids"] == []
+    assert state["node_count"] == 0
+    assert state["visible_node_count"] == 0
+
+
+def test_a_registry_that_cannot_report_consumers_is_not_a_push_target(tmp_path):
+    """An older or foreign registry without ``has_consumer`` gates as no consumer."""
+
+    class _ConsumerBlindRegistry:
+        def is_valid_session_id(self, session_id):
+            return True
+
+        def session_exists(self, session_id):
+            return True
+
+        def push_command_sync(self, session_id, command):
+            return True
+
+    storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+    service = GraphService(storage)
+    mock_mcp = Mock()
+    mock_mcp.tool = MagicMock(return_value=lambda f: f)
+    tools = register_mcp_tools(
+        mock_mcp, service, session_registry=_ConsumerBlindRegistry()
+    )
+
+    refused = tools["clear_visualization"](visualization_session_id=UNKNOWN_SESSION_ID)
+    assert refused["success"] is False
+    connect = tools["connect_to_visualization_session"](session_id=UNKNOWN_SESSION_ID)
+    assert connect["connected"] is False
 
 
 def test_clear_visualization_accepts_op_stream_presence_without_registry(tmp_path):
@@ -830,6 +1149,9 @@ def test_a_registry_that_cannot_report_consumers_makes_no_delivery_claim(tmp_pat
 _CLAUSE_PRECONDITIONS = {
     "no connected client": lambda s: s["hub_presence_read"] and s["hub_clients"] == 0,
     "presence count could not be read": lambda s: not s["hub_presence_read"],
+    "was published to the shared-session hub": (
+        lambda s: s["hub_published"] and not s["hub_presence_read"]
+    ),
     "a client is connected to its op stream": (
         lambda s: s["hub_presence_read"] and s["hub_clients"] > 0
     ),
@@ -844,6 +1166,13 @@ _CLAUSE_PRECONDITIONS = {
             and s["legacy_consumers"] == 0
         )
     ),
+    "may still apply it": (
+        lambda s: (
+            s["registry_configured"]
+            and s["legacy_enqueued"]
+            and s["legacy_consumers"] == 0
+        )
+    ),
     "no browser is holding": (
         lambda s: (
             s["registry_configured"]
@@ -851,6 +1180,39 @@ _CLAUSE_PRECONDITIONS = {
         )
     ),
 }
+
+# The whole clause each branch may emit, spelled out. Fragment matching alone
+# lets a reworded claim ride into another branch: "it stays queued for the next
+# browser" appended to the no-registry clause contains no fragment above.
+_LEGACY_CLAUSES = {
+    "no legacy push channel is configured",
+    (
+        "the session's legacy push channel has a registry entry but nothing "
+        "draining it (an entry outlives the browser that created it, and is "
+        "also created without one), so the command waits in its queue and a "
+        "browser that opens the session later may still apply it"
+    ),
+    "no browser is holding the session's legacy push channel",
+}
+_HUB_CLAUSES = {
+    "no shared-session hub is configured",
+    "the publish to the shared-session hub failed, so nothing was published there",
+    (
+        "the command was published to the shared-session hub, but its presence "
+        "count could not be read, so whether a client received it is unknown"
+    ),
+    (
+        "the session has no stored state, so the hub had nothing to publish to, "
+        "and its presence count could not be read"
+    ),
+    (
+        "a client is connected to its op stream, but the session has no stored "
+        "state, so the hub had nothing to publish to"
+    ),
+    "its op stream has no connected client",
+}
+_UNKNOWN_PREFIX = "It is not known whether anything received this push: "
+_NOTHING_PREFIX = "Nothing received this push: "
 
 
 def _reachable_undelivered_states():
@@ -925,8 +1287,10 @@ def test_no_warning_clause_ever_asserts_an_unestablished_state():
         warning = _undelivered_push_warning(outcome_unknown=outcome_unknown, **state)
         reason = warning.split(". A push")[0]
         checked += 1
+        # The whole warning, remedy included: a clause moved into the remedy
+        # would otherwise be appended to every state unchecked.
         for fragment, established in _CLAUSE_PRECONDITIONS.items():
-            if fragment in reason:
+            if fragment in warning:
                 assert established(state), (
                     f"clause {fragment!r} is not established by {state}"
                 )
@@ -934,6 +1298,16 @@ def test_no_warning_clause_ever_asserts_an_unestablished_state():
             assert reason.startswith("It is not known whether anything received"), state
         else:
             assert reason.startswith("Nothing received this push"), state
+        # Decompose the whole sentence, so no clause can be reworded, extended
+        # or smuggled into another branch or into the remedy unnoticed.
+        prefix = _UNKNOWN_PREFIX if outcome_unknown else _NOTHING_PREFIX
+        assert warning.startswith(prefix), state
+        assert warning.endswith("." + EXPECTED_REMEDY), state
+        clauses = warning[len(prefix) : -len("." + EXPECTED_REMEDY)].split("; ")
+        assert len(clauses) == 2, (state, clauses)
+        legacy_clause, hub_clause = clauses
+        assert legacy_clause in _LEGACY_CLAUSES, (state, legacy_clause)
+        assert hub_clause in _HUB_CLAUSES, (state, hub_clause)
     # Guards the enumeration itself: a tightened precondition that silently
     # skipped every state would otherwise pass vacuously.
     assert checked == 36, f"expected 36 reachable undelivered states, got {checked}"

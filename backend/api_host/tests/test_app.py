@@ -5,9 +5,12 @@ Tests that the FastAPI application is properly configured and
 all REST API endpoints function correctly.
 """
 
+import json
 import os
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 from fastapi.testclient import TestClient
 
 from backend.api_host import create_app
@@ -55,9 +58,10 @@ class TestHealthAndRoot:
         assert data["endpoints"]["startup_diagnostics"] == "/diagnostics/startup"
         assert data["operability"]["startup_status"] == "ready"
         # Nothing declared in config; the manifest still carries the server's
-        # own animated_layout capability.
+        # own animated_layout capability, which is counted as a default.
         assert data["operability"]["capabilities"] == {
-            "configured": 1,
+            "configured": 0,
+            "defaulted": 1,
             "enabled": 1,
             "disabled": 0,
         }
@@ -174,9 +178,10 @@ class TestHealthAndRoot:
             },
         }
         # Nothing declared in config; the manifest still carries the server's
-        # own animated_layout capability.
+        # own animated_layout capability, which is counted as a default.
         assert data["capabilities"] == {
-            "configured": 1,
+            "configured": 0,
+            "defaulted": 1,
             "enabled": 1,
             "disabled": 0,
         }
@@ -584,6 +589,113 @@ class TestStatisticsEndpoints:
             },
         ]
         assert [c["id"] for c in data["capabilities"][2:]] == ["animated_layout"]
+
+    def test_capability_summary_separates_declared_from_defaulted(self):
+        from backend.api_host.diagnostics import count_enabled_capabilities
+        from backend.config import config_loader
+
+        os.environ["SCHEMA_FILE"] = str(
+            Path(__file__).resolve().parents[3]
+            / "config"
+            / "test"
+            / "schema_config.json"
+        )
+        config_loader.reset_loader()
+
+        summary = count_enabled_capabilities(
+            config_loader.get_capabilities(),
+            config_loader.get_declared_capability_count(),
+        )
+
+        assert summary == {
+            "configured": 2,
+            "defaulted": 1,
+            "enabled": 2,
+            "disabled": 1,
+        }
+
+    @pytest.mark.parametrize(
+        "declared, expected",
+        [
+            (
+                [{"id": "animated_layout", "enabled": False}],
+                {"configured": 1, "defaulted": 0, "enabled": 0, "disabled": 1},
+            ),
+            (
+                [{"id": "animated_layout", "enabled": None}],
+                {"configured": 0, "defaulted": 1, "enabled": 0, "disabled": 1},
+            ),
+        ],
+        ids=["declared-default-id", "dropped-default-id"],
+    )
+    def test_capability_summary_counts_the_default_id_by_how_it_was_declared(
+        self, tmp_path, declared, expected
+    ):
+        from backend.api_host.diagnostics import count_enabled_capabilities
+        from backend.config import config_loader
+
+        config_path = tmp_path / "schema_config.json"
+        config_path.write_text(json.dumps({"presentation": {"capabilities": declared}}))
+        os.environ["SCHEMA_FILE"] = str(config_path)
+        config_loader.reset_loader()
+
+        summary = count_enabled_capabilities(
+            config_loader.get_capabilities(),
+            config_loader.get_declared_capability_count(),
+        )
+
+        assert summary == expected
+
+    @pytest.mark.parametrize(
+        "profile, expected",
+        [
+            (
+                "test-profile",
+                {"configured": 2, "defaulted": 1, "enabled": 2, "disabled": 1},
+            ),
+            (
+                "declares-default-id",
+                {"configured": 1, "defaulted": 0, "enabled": 0, "disabled": 1},
+            ),
+        ],
+    )
+    def test_startup_diagnostics_summarise_declared_capabilities(
+        self, app_config, mock_llm_provider, tmp_path, profile, expected
+    ):
+        from backend.config import config_loader
+
+        if profile == "test-profile":
+            schema_file = (
+                Path(__file__).resolve().parents[3]
+                / "config"
+                / "test"
+                / "schema_config.json"
+            )
+        else:
+            schema_file = tmp_path / "schema_config.json"
+            schema_file.write_text(
+                json.dumps(
+                    {
+                        "presentation": {
+                            "capabilities": [
+                                {"id": "animated_layout", "enabled": False}
+                            ]
+                        }
+                    }
+                )
+            )
+        os.environ["SCHEMA_FILE"] = str(schema_file)
+        config_loader.reset_loader()
+        with patch(
+            "backend.ui.chat_logic.create_provider", return_value=mock_llm_provider
+        ):
+            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+                client = TestClient(create_app(app_config))
+
+        response = client.get("/diagnostics/startup")
+
+        assert response.status_code == 200
+        assert response.json()["capabilities"] == expected
 
     def test_get_runtime_info(self, test_app: TestClient):
         """Get runtime metadata via REST."""

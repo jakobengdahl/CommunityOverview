@@ -13,6 +13,7 @@ import json
 import pytest
 
 from backend.core.session_store import (
+    AnnotationFieldConflict,
     FileSessionPersistenceBackend,
     InMemorySessionPersistenceBackend,
     OpError,
@@ -369,6 +370,7 @@ class TestStateOps:
             },
         )
         assert updated["annotation"]["text"] == "hi"
+        update_version = updated["annotation"]["version"]
 
         # Simulate undo_last_action's replay of the stored inverse op: the
         # exact pre-update snapshot, applied with trusted_replay=True.
@@ -384,6 +386,61 @@ class TestStateOps:
             "undo of a sparse update that ADDED 'text' must remove the field "
             "entirely, not merely leave it in place"
         )
+        # The removal is itself a change to 'text': its field version must
+        # track the undo, not the update that added it, or a later
+        # base_version check would read 'text' as unchanged since that update.
+        assert restored["version"] == update_version + 1
+        assert restored["field_versions"].get("text") == restored["version"]
+
+    def test_stale_patch_to_a_field_undo_removed_conflicts(self, tmp_path):
+        """The consequence of the field-version bump above: a writer still on
+        the update's version that touches 'text' after undo removed it must be
+        told it conflicts, not silently re-add the field."""
+        store = _store(tmp_path)
+        s = store.create()
+        created = self._apply(
+            store,
+            s,
+            {
+                "op": "annotation_created",
+                "annotation": {"id": "note-1", "kind": "note"},
+            },
+        )
+        prior_snapshot = copy.deepcopy(created["annotation"])
+        updated = self._apply(
+            store,
+            s,
+            {
+                "op": "annotation_updated",
+                "annotation": {"id": "note-1", "kind": "note", "text": "hi"},
+            },
+        )
+        update_version = updated["annotation"]["version"]
+        store.apply_state_op(
+            s,
+            {"op": "annotation_updated", "annotation": prior_snapshot},
+            record_activity=False,
+            trusted_replay=True,
+        )
+        seq_after_undo = s.seq
+
+        with pytest.raises(AnnotationFieldConflict) as exc:
+            self._apply(
+                store,
+                s,
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "note-1",
+                        "kind": "note",
+                        "text": "stale edit",
+                    },
+                    "base_version": update_version,
+                },
+            )
+        assert set(exc.value.conflicts) == {"text"}
+        assert "text" not in s.state["annotations"][0]
+        assert s.seq == seq_after_undo
 
     def test_annotation_updated_non_replay_merge_is_unaffected(self, tmp_path):
         """A normal (non-undo) ``annotation_updated`` — trusted_replay=False —
@@ -562,3 +619,49 @@ class TestRingBufferCatchUp:
         assert store.ops_since(s.id, 1) is None
         # but a recent enough since_seq is served from the ring
         assert [op["seq"] for op in store.ops_since(s.id, 4)] == [5]
+
+
+class TestRestoreRing:
+    def _two_sessions(self):
+        """``b`` is created first and holds the longer ring, so a restore that
+        lands on the first ring or trims every ring to ``saved`` shows."""
+        store = SessionStore(InMemorySessionPersistenceBackend())
+        b, a = store.create(), store.create()
+        store.apply_state_op(a, {"op": "nodes_added", "node_ids": ["a0"]})
+        for i in range(3):
+            store.apply_state_op(b, {"op": "nodes_added", "node_ids": [f"b{i}"]})
+        return store, a, b
+
+    def test_restoring_saved_contents_leaves_other_sessions_rings_alone(self):
+        store, a, b = self._two_sessions()
+        saved = list(store.ring(a.id))
+        b_before = list(store.ring(b.id))
+        store.apply_state_op(a, {"op": "nodes_added", "node_ids": ["later"]})
+
+        store.restore_ring(a.id, saved)
+
+        assert list(store.ring(a.id)) == saved
+        assert list(store.ring(b.id)) == b_before
+
+    def test_restoring_no_ring_drops_only_that_sessions_ring(self):
+        store, a, b = self._two_sessions()
+        b_before = list(store.ring(b.id))
+
+        store.restore_ring(a.id, None)
+
+        assert store.ring(a.id) is None
+        assert list(store.ring(b.id)) == b_before
+
+    def test_restoring_keeps_the_ring_bounded(self):
+        store = SessionStore(InMemorySessionPersistenceBackend(), ring_size=2)
+        s = store.create()
+        store.apply_state_op(s, {"op": "nodes_added", "node_ids": ["n0"]})
+        saved = list(store.ring(s.id))
+        store.apply_state_op(s, {"op": "nodes_added", "node_ids": ["n1"]})
+
+        store.restore_ring(s.id, saved)
+        for i in range(2, 5):
+            store.apply_state_op(s, {"op": "nodes_added", "node_ids": [f"n{i}"]})
+
+        assert store.ring(s.id).maxlen == 2
+        assert [op["seq"] for op in store.ring(s.id)] == [4, 5]

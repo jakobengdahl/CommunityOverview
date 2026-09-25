@@ -22,6 +22,7 @@ contract a third-party backend has to meet.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -43,6 +44,8 @@ from typing import (
     Tuple,
     runtime_checkable,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # Cross-platform file locking
@@ -711,8 +714,8 @@ class FileGraphPersistenceBackend:
                 record_id = parsed.get("journal_id")
             except (ValueError, KeyError, TypeError) as exc:
                 if index == last:
-                    print(
-                        f"Warning: dropping the incomplete last record of "
+                    logger.warning(
+                        f"dropping the incomplete last record of "
                         f"{self.journal_path} (interrupted write): {exc}"
                     )
                     break
@@ -723,8 +726,8 @@ class FileGraphPersistenceBackend:
                     f"checkpoint"
                 ) from exc
             if index == last and not complete:
-                print(
-                    f"Warning: dropping the incomplete last record of "
+                logger.warning(
+                    f"dropping the incomplete last record of "
                     f"{self.journal_path} (interrupted write)"
                 )
                 break
@@ -837,7 +840,7 @@ class FileGraphPersistenceBackend:
                 try:
                     self._checkpoint_locked()
                 except Exception as exc:
-                    print(f"Warning: graph checkpoint failed, will retry: {exc}")
+                    logger.warning(f"graph checkpoint failed, will retry: {exc}")
 
     def _checkpoint_locked(self) -> None:
         metadata = {

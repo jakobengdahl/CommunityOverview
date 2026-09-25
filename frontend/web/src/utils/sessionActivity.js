@@ -190,7 +190,10 @@ function browserWriteBack(annotation) {
     // lands in it is not observable in the result at all. The translators
     // also do not normalise the payload, only clone it, so there is nothing
     // about it the write-back could have told us.
-    const withoutImage = { ...annotation, image: undefined };
+    // Deleted from a shallow copy rather than spread as `image: undefined`,
+    // so a skipped-annotation warning logs the stored object's own fields.
+    const withoutImage = { ...annotation };
+    delete withoutImage.image;
     return overlaysToAnnotations(annotationsToOverlays([withoutImage]))[0] || null;
   } catch {
     return null;
@@ -246,18 +249,45 @@ function shapeChanged(before, after) {
 // counted them would report every update as a change to them.
 const BOOKKEEPING_FIELDS = new Set(['updated_at', 'updated_by', 'created_at', 'created_by']);
 
+// The only style keys the label/line translators carried before
+// smallfix-label-overlay-drops-nonvisual-style-keys.
+const OLDER_BUILD_STYLE_KEYS = {
+  label: ['color', 'fontSize', 'opacity'],
+  line: ['color', 'opacity'],
+};
+
+/**
+ * Whether `after.style` is exactly what a build from before
+ * smallfix-label-overlay-drops-nonvisual-style-keys wrote back for `before`:
+ * its label/line translators carried only OLDER_BUILD_STYLE_KEYS and
+ * dropped the rest.
+ * The log keeps 7 days, so it holds such records — and a browser tab still
+ * on that build — and without this their dropped keys would read as a
+ * restyle the user never made. A change to exactly that projection is then
+ * indistinguishable from the drop, so it reads as a plain update instead:
+ * the same safe-direction asymmetry `browserWriteBack` describes.
+ */
+function olderBuildStyleWriteBack(before, after) {
+  const annotationType = before.type || before.kind;
+  const keys = OLDER_BUILD_STYLE_KEYS[annotationType];
+  if (!keys) return false;
+  const written = {};
+  for (const key of keys) written[key] = before.style?.[key];
+  return sameValue(after.style, written, ['style'], annotationType);
+}
+
 /**
  * The annotation fields this update actually changed, from the record's own
  * before/after snapshots.
  *
- * Deliberately not `affected.fields`: that is the *incoming payload's* key
- * set, not a change set (session_store.py's `annotation_updated` branch
- * records `sorted(incoming.keys())`), and the browser sends the whole
- * annotation in every op. For any browser-originated edit `fields` is
- * therefore the annotation's entire key set and is identical whatever the
- * user did — reading it as a change set made a move, a recolour or a text
- * edit all render as "Unlocked", asserting a security-relevant state change
- * that never happened. before/after are populated for every producer, because
+ * Deliberately not `affected.fields`: the store no longer writes it (PR
+ * #627), and on records persisted before that it is the *incoming payload's*
+ * key set, not a change set, while the browser sends the whole annotation in
+ * every op. For any browser-originated edit it is therefore the annotation's
+ * entire key set and is identical whatever the user did — reading it as a
+ * change set made a move, a recolour or a text edit all render as "Unlocked",
+ * asserting a security-relevant state change that never happened. before/after
+ * are populated for every producer, because
  * `apply_state_op` is the single choke point both the browser batch and the
  * MCP write path go through, so the diff is authoritative for both.
  *
@@ -346,7 +376,9 @@ function computeAnnotationUpdateKind(record) {
     const raised = (record.after.z || 0) > (record.before.z || 0);
     return raised ? 'raised' : 'lowered';
   }
-  if (changed.has('style')) return 'style';
+  if (changed.has('style') && !olderBuildStyleWriteBack(record.before, record.after)) {
+    return 'style';
+  }
   if (changed.has('text') || changed.has('label') || changed.has('value')) return 'text';
   return 'generic';
 }

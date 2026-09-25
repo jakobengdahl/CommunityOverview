@@ -410,7 +410,7 @@ class AgentsSettings:
                     )
                     mcp_integrations.append(integration)
             except (json.JSONDecodeError, KeyError) as e:
-                print(f"Warning: Failed to parse MCP_INTEGRATIONS: {e}")
+                logger.warning(f"Failed to parse MCP_INTEGRATIONS: {e}")
 
         # Add default integrations if none configured
         if not mcp_integrations:
@@ -423,7 +423,7 @@ class AgentsSettings:
 
             model_profiles = config_loader.get_model_profiles()
         except Exception as exc:
-            print(f"Warning: Failed to load model profiles for agents: {exc}")
+            logger.warning(f"Failed to load model profiles for agents: {exc}")
             model_profiles = []
 
         return cls(

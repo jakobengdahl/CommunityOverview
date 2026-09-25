@@ -673,6 +673,8 @@ def adopt_federated_node(
         description=source_node.description,
         summary=source_node.summary,
         tags=list(source_node.tags),
+        subtypes=list(source_node.subtypes),
+        aliases=list(source_node.aliases),
         metadata=metadata,
     )
 

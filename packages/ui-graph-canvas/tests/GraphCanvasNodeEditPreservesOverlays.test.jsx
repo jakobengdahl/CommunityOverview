@@ -106,6 +106,9 @@ describe('GraphCanvas preserves groups and annotations across an in-place node e
     });
 
     expectOverlaysPresent();
+    // The edit itself must land too, not only survive alongside the overlays:
+    // node-1's own data carries the edited field.
+    expect(store.nodes.find((n) => n.id === 'node-1').data.description).toBe('edited');
   });
 
   it('still clears every overlay on an explicit clearGroupsFlag (genuine replace/clear)', () => {

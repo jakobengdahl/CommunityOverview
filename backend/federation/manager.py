@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Callable
 import asyncio
 import httpx2 as httpx
 
+from backend.core import storage_search
 from backend.core.models import Edge, Node
 
 from .config import FederationFileConfig, FederationGraphConfig
@@ -227,84 +228,32 @@ class FederationManager:
             return min(global_depth, graph_cfg.max_depth_override)
         return global_depth
 
-    @staticmethod
-    def _score_node_match(node: Node, query_lower: str) -> int:
-        """Score how well a federated node matches a query. Higher = better match.
-
-        Uses the same tier structure as GraphStorage._score_node_match: large
-        primary scores for name matches (300 000–500 000) prevent secondary
-        signals from bleeding across name-match tiers. Aliases score in a
-        dedicated band (200 000–250 000) just below real-name matches.
-        """
-        score = 0
-        name_lower = (node.name or "").lower()
-
-        # Primary tier — a node's own name or an alias, whichever is stronger.
-        # Combined with max(), not summed, so an alias (≤250 000) can never lift a
-        # node past another node's stronger real-name match (≥300 000).
-        name_score = 0
-        if name_lower == query_lower:
-            name_score = 500_000
-        elif name_lower.startswith(query_lower):
-            name_score = 400_000
-        elif query_lower in name_lower:
-            name_score = 300_000
-
-        # Alias sub-tier — synonyms rank as second-class names, above secondary signals
-        alias_score = 0
-        if node.aliases:
-            aliases_lower = [a.lower() for a in node.aliases]
-            if query_lower in aliases_lower:
-                alias_score = 250_000
-            elif any(a.startswith(query_lower) for a in aliases_lower):
-                alias_score = 220_000
-            elif any(query_lower in a for a in aliases_lower):
-                alias_score = 200_000
-
-        score += max(name_score, alias_score)
-
-        # Secondary — type matching (type name only; federation cache has no localized labels)
-        type_name_lower = str(node.type).lower()
-        if type_name_lower == query_lower:
-            score += 700
-        elif type_name_lower.startswith(query_lower):
-            score += 650
-        elif query_lower in type_name_lower:
-            score += 600
-
-        # Secondary — tag matching
-        if node.tags:
-            tags_lower = [t.lower() for t in node.tags]
-            if query_lower in tags_lower:
-                score += 500
-            elif any(query_lower in t for t in tags_lower):
-                score += 450
-
-        # Secondary — subtype matching
-        if node.subtypes:
-            if any(query_lower in s.lower() for s in node.subtypes):
-                score += 400
-
-        # Secondary — description / summary matching (lowest)
-        if (
-            query_lower in (node.description or "").lower()
-            or query_lower in (node.summary or "").lower()
-        ):
-            score += 200
-
-        return score
-
     def search_nodes(
         self,
         query: str,
         node_types: Optional[List[str]],
         limit: int,
         max_depth: Optional[int] = None,
+        include_archived: bool = False,
+        type_searchable_text: Optional[Dict[str, str]] = None,
+        match_mode: str = storage_search.MATCH_MODE_SUBSTRING,
     ) -> Dict[str, Any]:
+        """Search the federation caches the way local search searches storage.
+
+        ``type_searchable_text`` is the local storage's type -> "name + localized
+        labels" map, so a query such as a translated type label matches federated
+        nodes of that type too. Archived nodes are dropped before the ``limit``
+        slice unless ``include_archived`` is set, so they cannot take slots.
+        ``match_mode`` splits and ranks the query exactly as local search does.
+        """
+        storage_search.validate_match_mode(match_mode)
         query_lower = query.lower().strip()
         match_all = query_lower in {"", "*"}
+        terms = [] if match_all else storage_search.query_terms(query_lower, match_mode)
+        type_text = type_searchable_text or {}
 
         matched_nodes: List[Node] = []
+        scored: List[tuple] = []
         matched_edges: List[Edge] = []
 
         with self._lock:
@@ -313,6 +262,9 @@ class FederationManager:
         for cache in caches:
             for node in cache.nodes.values():
                 if node_types and node.type_str not in node_types:
+                    continue
+
+                if not include_archived and node.archived:
                     continue
 
                 graph_id = (node.metadata or {}).get("origin_graph_id")
@@ -327,21 +279,22 @@ class FederationManager:
                     except Exception:
                         continue
 
-                if not match_all:
-                    tags_text = " ".join(node.tags) if node.tags else ""
-                    subtypes_text = " ".join(node.subtypes) if node.subtypes else ""
-                    aliases_text = " ".join(node.aliases) if node.aliases else ""
-                    searchable_text = f"{node.name} {node.description} {node.summary} {tags_text} {subtypes_text} {aliases_text}".lower()
-                    if query_lower not in searchable_text:
-                        continue
+                if match_all:
+                    matched_nodes.append(node)
+                    continue
 
-                matched_nodes.append(node)
+                fields = storage_search.build_match_fields(node, type_text)
+                matched_terms = [term for term in terms if term in fields.text]
+                if not matched_terms:
+                    continue
+                best = max(
+                    storage_search.score_fields(fields, term) for term in matched_terms
+                )
+                scored.append((best, len(matched_terms), node))
 
         if not match_all:
-            matched_nodes.sort(
-                key=lambda n: self._score_node_match(n, query_lower),
-                reverse=True,
-            )
+            scored.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+            matched_nodes = [entry[2] for entry in scored]
 
         matched_nodes = matched_nodes[:limit]
         matched_node_ids = {n.id for n in matched_nodes}
@@ -570,7 +523,9 @@ class FederationManager:
                 "name": source_node.get("name", "Unnamed"),
                 "description": source_node.get("description", ""),
                 "summary": source_node.get("summary", ""),
-                "tags": source_node.get("tags", []),
+                "tags": source_node.get("tags") or [],
+                "subtypes": source_node.get("subtypes") or [],
+                "aliases": source_node.get("aliases") or [],
                 "metadata": metadata,
                 # Preserve the remote lifecycle flag so a node archived in the
                 # origin graph stays archived (hidden by default) when federated.

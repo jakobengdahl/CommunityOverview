@@ -852,6 +852,47 @@ describe('generic annotation overlay serialization', () => {
     expect(flowNodeToOverlay(node)).toEqual(overlay);
   });
 
+  it('round-trips a zero-size (unresized) label through a data-only slot, not a style box', () => {
+    const overlay = {
+      id: 'label-unsized',
+      kind: 'label',
+      position: { x: 0, y: 0 },
+      text: 'hi',
+      color: '#fff',
+      size: { w: 0, h: 0 },
+      z: 0,
+      locked: false,
+      rotation: 0,
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node.data.size).toEqual({ w: 0, h: 0 });
+    expect(node.style).toBeUndefined();
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  it('round-trips a label size with exactly one zero axis unchanged', () => {
+    for (const size of [
+      { w: 0, h: 40 },
+      { w: 40, h: 0 },
+    ]) {
+      const overlay = {
+        id: 'label-half-sized',
+        kind: 'label',
+        position: { x: 0, y: 0 },
+        text: 'hi',
+        color: '#fff',
+        size,
+        z: 0,
+        locked: false,
+        rotation: 0,
+      };
+      const node = overlayToFlowNode(overlay);
+      expect(node.data.size).toEqual(size);
+      expect(node.style).toBeUndefined();
+      expect(flowNodeToOverlay(node)).toEqual(overlay);
+    }
+  });
+
   it('carries no size on a freshly hydrated label/arrow overlay with no size given', () => {
     const labelNode = overlayToFlowNode({ id: 'l', kind: 'label', position: { x: 0, y: 0 } });
     expect(labelNode.data.size).toBeUndefined();
@@ -1202,5 +1243,44 @@ describe('isRemoteLocked / isAnnotationDraggable (exclusive annotation leases)',
   it('a group box is subject to the same lease-based exclusivity as any other annotation', () => {
     expect(isAnnotationDraggable({ type: 'group', data: {} })).toBe(true);
     expect(isAnnotationDraggable({ type: 'group', data: { remoteLease: LEASE } })).toBe(false);
+  });
+});
+
+// smallfix-label-overlay-drops-nonvisual-style-keys: the host carries a
+// label/line's unmodelled style keys as `extraStyle`; the live ReactFlow
+// node must hold it too, or a hydrate -> autosave round trip still drops it.
+describe('label/arrow extraStyle passthrough', () => {
+  it.each([
+    { id: 'l', kind: 'label', position: { x: 0, y: 0 }, text: 'hi', color: '#fff' },
+    {
+      id: 'a',
+      kind: 'arrow',
+      position: { x: 0, y: 0 },
+      dx: 160,
+      dy: 0,
+      color: '#fff',
+      startArrow: false,
+      endArrow: true,
+    },
+  ])('round-trips extraStyle on a $kind', (fields) => {
+    const overlay = {
+      ...fields,
+      extraStyle: { dash: 'dotted' },
+      z: 0,
+      locked: false,
+      rotation: 0,
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node.data.extraStyle).toEqual({ dash: 'dotted' });
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  it('adds no extraStyle to a label/arrow that had none', () => {
+    for (const kind of ['label', 'arrow']) {
+      const out = flowNodeToOverlay(
+        overlayToFlowNode({ id: kind, kind, position: { x: 0, y: 0 } })
+      );
+      expect(Object.prototype.hasOwnProperty.call(out, 'extraStyle')).toBe(false);
+    }
   });
 });

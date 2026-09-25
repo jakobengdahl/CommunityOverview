@@ -8,6 +8,7 @@ must never do: replay a journal onto the wrong graph, or lose one silently.
 """
 
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -82,6 +83,66 @@ def backend(tmp):
     b = FileGraphPersistenceBackend(tmp / "g.json")
     b.save_graph_data(_snapshot("a", "b"))
     return b
+
+
+_BACKEND_LOGGER = "backend.core.storage_backends"
+
+
+@pytest.fixture
+def reported(caplog, capsys):
+    """What the file backend reported since the previous call, one message per
+    line: its WARNING records, none of which may also have reached stdout."""
+    caplog.set_level(logging.WARNING, logger=_BACKEND_LOGGER)
+
+    # A report is a WARNING; the same text at ERROR would slip past both the
+    # positive checks here and any check that nothing was reported. Checked
+    # again at teardown, for whatever was logged after the last call or by a
+    # fixture torn down before this one.
+    def assert_nothing_louder(records):
+        louder = [
+            record.getMessage()
+            for record in records
+            if record.name == _BACKEND_LOGGER and record.levelno > logging.WARNING
+        ]
+        assert not louder, f"reported above WARNING: {louder}"
+
+    # A cursor rather than caplog.clear(): on a pytest whose clear() rebinds
+    # the record list instead of emptying it, the list the teardown check
+    # reads detaches at the first clear, and nothing after it is looked at.
+    seen = 0
+
+    def take() -> str:
+        nonlocal seen
+        fresh = caplog.records[seen:]
+        seen += len(fresh)
+        messages = [
+            record.getMessage()
+            for record in fresh
+            if record.name == _BACKEND_LOGGER and record.levelno == logging.WARNING
+        ]
+        assert_nothing_louder(fresh)
+        out = capsys.readouterr().out
+        leaked = [message for message in messages if message in out]
+        assert not leaked, f"a report went to stdout: {leaked}"
+        return "\n".join(messages)
+
+    yield take
+    assert_nothing_louder(caplog.get_records("call") + caplog.get_records("teardown"))
+
+
+def _assert_dropped_tail_reported(report: str, journal_path, *, parsed: bool):
+    """The dropped-tail report names the journal it trimmed and, when the line
+    did not parse, why - the path is what an operator goes and looks at."""
+    prefix = (
+        f"dropping the incomplete last record of {journal_path} (interrupted write)"
+    )
+    lines = [line for line in report.splitlines() if line.startswith(prefix)]
+    assert len(lines) == 1, report
+    reason = lines[0][len(prefix) :]
+    if parsed:
+        assert reason == "", lines[0]
+    else:
+        assert reason.startswith(": ") and reason[2:].strip(), lines[0]
 
 
 class TestJournalWrites:
@@ -216,7 +277,7 @@ class TestReplay:
 
 
 class TestCrashShapes:
-    def test_an_interrupted_last_append_is_dropped_whole(self, backend, capsys):
+    def test_an_interrupted_last_append_is_dropped_whole(self, backend, reported):
         backend.upsert_node(_payload("c"))
         with open(backend.journal_path, "a", encoding="utf-8") as f:
             f.write(
@@ -226,12 +287,12 @@ class TestCrashShapes:
         data = FileGraphPersistenceBackend(backend.json_path).load_graph_data()
 
         assert _ids(data) == {"a", "b", "c"}
-        assert "incomplete last record" in capsys.readouterr().out
+        _assert_dropped_tail_reported(reported(), backend.journal_path, parsed=False)
         assert backend.journal_path.read_bytes().endswith(b"\n")
         _appends_still_land_after(backend.json_path, {"a", "b", "c"})
 
     def test_a_complete_last_line_that_is_not_json_is_dropped_too(
-        self, backend, capsys
+        self, backend, reported
     ):
         backend.upsert_node(_payload("c"))
         with open(backend.journal_path, "a", encoding="utf-8") as f:
@@ -240,7 +301,7 @@ class TestCrashShapes:
         data = FileGraphPersistenceBackend(backend.json_path).load_graph_data()
 
         assert _ids(data) == {"a", "b", "c"}
-        assert "incomplete last record" in capsys.readouterr().out
+        _assert_dropped_tail_reported(reported(), backend.journal_path, parsed=False)
         _appends_still_land_after(backend.json_path, {"a", "b", "c"})
 
     def test_an_interrupted_batch_lands_nowhere(self, backend):
@@ -348,7 +409,7 @@ class TestCheckpoints:
         assert _ids(backend.load_graph_data()) == {"z"}
 
     def test_a_failed_cadence_checkpoint_keeps_the_mutation_and_retries(
-        self, tmp, monkeypatch, capsys
+        self, tmp, monkeypatch, reported
     ):
         b = FileGraphPersistenceBackend(tmp / "g.json", checkpoint_interval=2)
         b.save_graph_data(_snapshot())
@@ -361,7 +422,7 @@ class TestCheckpoints:
         b.upsert_node(_payload("a"))
         b.upsert_node(_payload("b"))  # hits the interval, checkpoint fails
 
-        assert "checkpoint failed" in capsys.readouterr().out
+        assert "checkpoint failed" in reported()
         assert len(_lines(b.journal_path)) == 2
         monkeypatch.setattr("backend.core.storage_backends.json.dump", real_dump)
         b.upsert_node(_payload("c"))
@@ -446,7 +507,7 @@ class TestThroughGraphStorage:
 
 class TestFailureReporting:
     def test_a_valid_last_line_without_its_newline_is_still_an_interrupted_append(
-        self, backend, capsys
+        self, backend, reported
     ):
         """The newline is what says the append completed; a well-formed line
         without it was not acknowledged and must not be replayed."""
@@ -457,7 +518,7 @@ class TestFailureReporting:
         data = FileGraphPersistenceBackend(backend.json_path).load_graph_data()
 
         assert _ids(data) == {"a", "b", "c"}
-        assert "incomplete last record" in capsys.readouterr().out
+        _assert_dropped_tail_reported(reported(), backend.journal_path, parsed=True)
 
     def test_flush_surfaces_a_failed_checkpoint(self, tmp, monkeypatch):
         storage = GraphStorage(json_path=str(tmp / "g.json"))
@@ -1819,6 +1880,10 @@ class TestSaveNowFlagHandling:
         path = str(tmp / "g.json")
         storage = GraphStorage(json_path=path)
         storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="A")], [])
+        # The add_nodes write is queued, not landed. Under load it can reach
+        # the stubs below and spend the one upsert failure, which sends
+        # update_node down save() and lets _save_now succeed a shutdown early.
+        storage.flush()
 
         backend = storage._persistence_backend
         real_save = backend.save_graph_data
@@ -1851,6 +1916,11 @@ class TestSaveNowFlagHandling:
         assert "graph write at shutdown failed" in capsys.readouterr().out, (
             "_save_now's catch-and-print behavior did not fire as expected "
             "- this test depends on it to reach the assertions below"
+        )
+        assert failures == {"upsert": 0, "save": 0}, (
+            "the first shutdown did not run the documented path (entity write "
+            "fails, heal save fails, _save_now fails) - the stubbed failures "
+            f"were not all spent: {failures}"
         )
         assert storage._resync_pending, (
             "the first shutdown's own fallback write failed too; the flag "

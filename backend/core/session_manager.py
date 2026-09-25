@@ -674,7 +674,12 @@ class SessionManager:
         return existed
 
     def rename_session_sync(
-        self, session_id: str, name: Optional[str], client_id: Optional[str] = None
+        self,
+        session_id: str,
+        name: Optional[str],
+        client_id: Optional[str] = None,
+        *,
+        rate_limit_label: Optional[str] = None,
     ) -> Session:
         """Rename a session **synchronously** (the MCP tool path).
 
@@ -690,12 +695,22 @@ class SessionManager:
 
         ``get_or_create`` first (R7): a rename for an id that only exists in a
         browser URL/recents must materialise it rather than raise, matching the
-        async path and the REST ``PATCH``.
+        async path and the REST ``PATCH``. The rate check comes before it, so a
+        refused rename materialises nothing.
+
+        Charges one token to ``_mcp_bucket`` under the key
+        ``_mcp_rate_limit_key(client_id or "rest", rate_limit_label)``, like
+        every other synchronous MCP write.
         """
         if not is_valid_session_id(session_id):
             raise SessionNotFound()
         if name is not None and not isinstance(name, str):
             raise OpError("'name' must be a string or null")
+        actor = client_id or "rest"
+        if not self._mcp_bucket.consume(
+            self._mcp_rate_limit_key(actor, rate_limit_label), 1.0
+        ):
+            raise RateLimited()
         self.get_or_create(session_id)
         if self._lock(session_id).locked():
             raise LayoutBusy()
@@ -703,39 +718,16 @@ class SessionManager:
         if session is None:
             raise SessionNotFound()
 
-        op = {"op": "session_renamed", "name": name, "client_id": client_id or "rest"}
-        saved_state = copy.deepcopy(session.state)
-        saved_seq = session.seq
-        saved_name = session.name
-        saved_updated_at = session.updated_at
-        ring = self.store.ring(session_id)
-        saved_ring = list(ring) if ring is not None else None
-        try:
-            applied = self.store.apply_state_op(session, op)
-            self.store.persist(session)
-        except Exception:
-            session.state = saved_state
-            session.seq = saved_seq
-            session.name = saved_name
-            session.updated_at = saved_updated_at
-            if ring is not None and saved_ring is not None:
-                ring.clear()
-                ring.extend(saved_ring)
-            raise
-
-        self.bus.publish(
-            session_id,
-            {
-                "type": "op",
-                "client_id": op["client_id"],
-                "op": applied,
-                "seq": applied["seq"],
-            },
-        )
+        op = {"op": "session_renamed", "name": name, "client_id": actor}
+        self._apply_op_sync(session, session_id, actor, op)
         return session
 
     def delete_session_sync(
-        self, session_id: str, deleted_by: Optional[str] = None
+        self,
+        session_id: str,
+        deleted_by: Optional[str] = None,
+        *,
+        rate_limit_label: Optional[str] = None,
     ) -> bool:
         """Delete a session **synchronously** (the MCP tool path).
 
@@ -746,7 +738,19 @@ class SessionManager:
         otherwise deletes inline on the event-loop thread, where no coroutine can
         interleave. Stale lock objects are left in ``self._locks`` for the same
         reason ``delete_session`` documents.
+
+        Charges one token to ``_mcp_bucket`` under the key
+        ``_mcp_rate_limit_key(deleted_by or "rest", rate_limit_label)``, like
+        every other synchronous MCP write. A malformed id is reported as not
+        found before that charge, as ``rename_session_sync`` does, so a direct
+        caller that skipped the tool's own id check spends nothing on it.
         """
+        if not is_valid_session_id(session_id):
+            return False
+        if not self._mcp_bucket.consume(
+            self._mcp_rate_limit_key(deleted_by or "rest", rate_limit_label), 1.0
+        ):
+            raise RateLimited()
         if self._lock(session_id).locked():
             raise LayoutBusy()
         existed = self.store.delete(session_id)
@@ -963,9 +967,7 @@ class SessionManager:
                 session.name = saved_name
                 session.updated_at = saved_updated_at
                 session.activity_log = saved_activity_log
-                if ring is not None and saved_ring is not None:
-                    ring.clear()
-                    ring.extend(saved_ring)
+                self.store.restore_ring(session_id, saved_ring)
                 raise
 
             # Commit succeeded: apply ephemeral claim/lease effects and broadcast
@@ -1859,13 +1861,15 @@ class SessionManager:
         """Apply, persist and broadcast one state op on the calling thread.
 
         Snapshots for rollback so a persistence failure leaves in-memory state,
-        seq and ring untouched — mirroring apply_ops' all-or-nothing guarantee.
+        name, seq and ring untouched — mirroring apply_ops' all-or-nothing
+        guarantee (``session_renamed`` writes ``session.name``, not the state).
         Returns ``None`` when ``apply_state_op`` reports a legitimate no-op (e.g.
         an update on an already-deleted annotation, or a create retry for an id
         another collaborator just deleted) — nothing is persisted or broadcast,
         and the caller decides how to surface that (the two annotation callers
-        above raise a typed exception; ``apply_layout``/``add_node_refs`` never
-        hit this branch, since their ops always apply). ``record_activity=False``
+        above raise a typed exception; ``apply_layout``, ``add_node_refs`` and
+        ``rename_session_sync`` never hit this branch, since their ops always
+        apply). ``record_activity=False``
         is passed through to ``apply_state_op`` by ``undo_last_action`` so
         replaying an inverse op does not itself become a new undoable action,
         together with ``trusted_replay=True`` so restoring the session's own
@@ -1873,6 +1877,7 @@ class SessionManager:
         """
         saved_state = copy.deepcopy(session.state)
         saved_seq = session.seq
+        saved_name = session.name
         saved_updated_at = session.updated_at
         saved_activity_log = copy.deepcopy(session.activity_log)
         ring = self.store.ring(session_id)
@@ -1889,11 +1894,10 @@ class SessionManager:
         except Exception:
             session.state = saved_state
             session.seq = saved_seq
+            session.name = saved_name
             session.updated_at = saved_updated_at
             session.activity_log = saved_activity_log
-            if ring is not None and saved_ring is not None:
-                ring.clear()
-                ring.extend(saved_ring)
+            self.store.restore_ring(session_id, saved_ring)
             raise
 
         if applied is None:

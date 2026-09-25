@@ -1,47 +1,50 @@
+import { randomInt } from 'node:crypto';
 import { test, expect } from '@playwright/test';
+import { addNodeViaSearch, seedNode, uniqueToken } from './helpers';
 
 /**
  * Multi-context e2e for shared sessions (design step 8).
  *
  * Two browser contexts (two "users") join the *same* session by URL and drive
  * the real collaboration surface: presence, node add/move fan-out, annotation
- * create, rename, delete-with-warning, and reconnect catch-up. The deterministic
+ * create, delete-with-warning, and reconnect catch-up. The deterministic
  * core of these scenarios is also covered headlessly in
  * backend/core/tests/test_session_multiuser.py; this spec proves they hold
  * through the actual UI + SSE transport.
  *
- * Requires the backend + frontend dev servers (started by playwright.config.js)
- * and a non-empty graph. Not part of the core pytest CI — run with
- * `npm run test:e2e`.
+ * Requires the backend + frontend dev servers (started by playwright.config.js).
+ * Each test seeds the node it puts on the canvas, so the e2e graph may start
+ * empty. Not part of any CI job — run with `npm run test:e2e`.
  */
 
 const SESSION_URL = (id) => `/?session=${id}`;
 const randomSessionId = () => {
-  const d4 = () => String(Math.floor(1000 + Math.random() * 9000));
+  const d4 = () => String(randomInt(1000, 10000));
   return `${d4()}-${d4()}`;
 };
 
 const nodeCount = (page) => page.locator('.react-flow__node').count();
 
-// The search bar has no submit button — typing (debounced, 2+ chars) opens a
-// result dropdown and Enter selects the highlighted (first) result.
-async function search(page, query) {
-  await page.locator('input[placeholder*="Search"]').first().fill(query);
-  await expect(page.locator('.floating-search-dropdown').first()).toBeVisible({ timeout: 15000 });
-  await page.locator('input[placeholder*="Search"]').first().press('Enter');
+// A canvas node's position in flow coordinates, read from the translate that
+// React Flow applies to it.
+async function flowPosition(node) {
+  const transform = await node.evaluate((el) => el.style.transform);
+  const match = /translate\((-?[\d.]+)px, (-?[\d.]+)px\)/.exec(transform);
+  expect(match, `unexpected node transform: ${transform}`).not.toBeNull();
+  return { x: Math.round(Number(match[1])), y: Math.round(Number(match[2])) };
 }
 
-// Add at least one node to the canvas via search; returns the resulting count.
-async function seedNodes(page, query = 'an') {
-  await search(page, query);
-  await expect(page.locator('.react-flow__node').first()).toBeVisible({ timeout: 15000 });
+// Seeds a uniquely named node, puts it on `page`'s canvas via search and
+// returns the resulting canvas node count.
+async function seedNodes(page, request) {
+  const token = uniqueToken();
+  const node = await seedNode(request, { name: `Shared session ${token}` });
+  await addNodeViaSearch(page, token, node.name);
   return nodeCount(page);
 }
 
 test.describe('shared session — two users, one session', () => {
-  test('presence, node fan-out, note fan-out and rename sync across clients', async ({
-    browser,
-  }) => {
+  test('presence, node fan-out and note fan-out across clients', async ({ browser, request }) => {
     const sessionId = randomSessionId();
     const ctxA = await browser.newContext();
     const ctxB = await browser.newContext();
@@ -64,7 +67,7 @@ test.describe('shared session — two users, one session', () => {
     });
 
     // Node add fan-out: A adds nodes, B converges to the same count via ops.
-    const countA = await seedNodes(a);
+    const countA = await seedNodes(a, request);
     expect(countA).toBeGreaterThan(0);
     await expect.poll(() => nodeCount(b), { timeout: 15000 }).toBe(countA);
 
@@ -78,7 +81,7 @@ test.describe('shared session — two users, one session', () => {
     await ctxB.close();
   });
 
-  test('node move syncs position to the other client', async ({ browser }) => {
+  test('node move syncs position to the other client', async ({ browser, request }) => {
     const sessionId = randomSessionId();
     const ctxA = await browser.newContext();
     const ctxB = await browser.newContext();
@@ -86,14 +89,22 @@ test.describe('shared session — two users, one session', () => {
     const b = await ctxB.newPage();
     await a.goto(SESSION_URL(sessionId));
     await b.goto(SESSION_URL(sessionId));
+    // Wait until B's stream is live (A sees it on the roster) before seeding, so
+    // the add reaches B as an op rather than racing B's initial load.
+    await expect(a.locator('.floating-header-presence-dot').first()).toBeVisible({
+      timeout: 15000,
+    });
 
-    const count = await seedNodes(a);
+    const count = await seedNodes(a, request);
     await expect.poll(() => nodeCount(b), { timeout: 15000 }).toBe(count);
 
-    // Record the moved node's position in B, drag it in A, expect B to follow.
+    // Compare flow coordinates (the node's own translate), not screen boxes:
+    // B's viewport can pan or fit on its own, which moves the box on screen
+    // without the node having moved at all.
     const nodeA = a.locator('.react-flow__node').first();
     const nodeB = b.locator('.react-flow__node').first();
-    const before = await nodeB.boundingBox();
+    const before = await flowPosition(nodeB);
+    expect(await flowPosition(nodeA)).toEqual(before);
 
     const box = await nodeA.boundingBox();
     await a.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
@@ -101,21 +112,18 @@ test.describe('shared session — two users, one session', () => {
     await a.mouse.move(box.x + 160, box.y + 120, { steps: 8 });
     await a.mouse.up();
 
-    await expect
-      .poll(
-        async () => {
-          const now = await nodeB.boundingBox();
-          return now && before ? Math.abs(now.x - before.x) + Math.abs(now.y - before.y) : 0;
-        },
-        { timeout: 15000 }
-      )
-      .toBeGreaterThan(20);
+    const moved = await flowPosition(nodeA);
+    expect(Math.abs(moved.x - before.x) + Math.abs(moved.y - before.y)).toBeGreaterThan(20);
+    await expect.poll(() => flowPosition(nodeB), { timeout: 15000 }).toEqual(moved);
 
     await ctxA.close();
     await ctxB.close();
   });
 
-  test('deleting a session with another user connected warns about it', async ({ browser }) => {
+  test('deleting a session with another user connected warns about it', async ({
+    browser,
+    request,
+  }) => {
     const sessionId = randomSessionId();
     const ctxA = await browser.newContext();
     const ctxB = await browser.newContext();
@@ -126,7 +134,7 @@ test.describe('shared session — two users, one session', () => {
 
     // Make the session non-empty so it materialises server-side and appears in
     // the recents list, then wait until B is present on A's roster.
-    await seedNodes(a);
+    await seedNodes(a, request);
     await expect(a.locator('.floating-header-presence-dot').first()).toBeVisible({
       timeout: 15000,
     });
@@ -145,12 +153,66 @@ test.describe('shared session — two users, one session', () => {
     await ctxB.close();
   });
 
-  test('reconnecting client catches up on the session state', async ({ browser }) => {
+  test('a client whose stream subscribes after ops landed still shows them', async ({
+    browser,
+    request,
+  }) => {
     const sessionId = randomSessionId();
     const ctxA = await browser.newContext();
     const a = await ctxA.newPage();
     await a.goto(SESSION_URL(sessionId));
-    const count = await seedNodes(a);
+    await seedNodes(a, request);
+
+    // Hold B's first stream request so its initial session GET completes
+    // before A's next op lands, and its stream subscribes only afterwards.
+    const ctxB = await browser.newContext();
+    const b = await ctxB.newPage();
+    let releaseStream;
+    const streamHeld = new Promise((resolve) => {
+      releaseStream = resolve;
+    });
+    let held = false;
+    await b.route('**/api/sessions/*/stream*', async (route) => {
+      if (!held) {
+        held = true;
+        await streamHeld;
+      }
+      await route.continue();
+    });
+    const loaded = b.waitForResponse(
+      (r) => r.url().includes(`/api/sessions/${sessionId}?`) && r.request().method() === 'GET'
+    );
+    await b.goto(SESSION_URL(sessionId));
+    await loaded;
+    await expect.poll(() => held, { timeout: 15000 }).toBe(true);
+
+    // Match the nodes_added POST itself, not an unrelated claim or move, so
+    // B's stream is released only once the new node is on the server.
+    const opLanded = a.waitForResponse(
+      (r) =>
+        r.url().includes(`/api/sessions/${sessionId}/ops`) &&
+        r.request().method() === 'POST' &&
+        (r.request().postData() || '').includes('"nodes_added"')
+    );
+    const count = await seedNodes(a, request);
+    expect((await opLanded).ok()).toBe(true);
+
+    releaseStream();
+    await expect.poll(() => nodeCount(b), { timeout: 15000 }).toBe(count);
+
+    await ctxA.close();
+    await ctxB.close();
+  });
+
+  // Also covers the late-joiner race: A's ops can land between B's initial
+  // session GET and its stream subscribe, which the first snapshot's seq
+  // must then trigger a resync for.
+  test('reconnecting client catches up on the session state', async ({ browser, request }) => {
+    const sessionId = randomSessionId();
+    const ctxA = await browser.newContext();
+    const a = await ctxA.newPage();
+    await a.goto(SESSION_URL(sessionId));
+    const count = await seedNodes(a, request);
 
     // A second user opens the shared URL fresh and should load the current
     // content (snapshot on connect), not an empty canvas.

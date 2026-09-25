@@ -15,7 +15,8 @@ from unittest.mock import MagicMock, Mock
 import pytest
 
 from backend.core import GraphStorage
-from backend.core.session_manager import LayoutBusy, SessionManager
+from backend.core.session_manager import LayoutBusy, SessionManager, _TokenBucket
+from backend.core.tests.rate_buckets import bucket_attrs
 from backend.core.session_store import (
     InMemorySessionPersistenceBackend,
     SessionStore,
@@ -282,3 +283,113 @@ class TestBusyGuard:
             ]
             is True
         )
+
+
+class _RecordingBucket:
+    def __init__(self, allow=True):
+        self.allow = allow
+        self.consumed = []
+
+    def consume(self, key, n=1.0):
+        self.consumed.append((key, n))
+        return self.allow
+
+
+def _record_buckets(manager, allow=True):
+    buckets = {attr: _RecordingBucket(allow) for attr in bucket_attrs(manager)}
+    for attr, bucket in buckets.items():
+        setattr(manager, attr, bucket)
+    return buckets
+
+
+def _charges(buckets):
+    return {
+        attr: bucket.consumed for attr, bucket in buckets.items() if bucket.consumed
+    }
+
+
+class TestRateLimit:
+    """Rename and delete are session writes like every other synchronous MCP
+    write: each is charged one token to ``_mcp_bucket`` under its own tool
+    label, and refused as ``rate_limited`` when that budget is spent."""
+
+    def test_rename_draws_one_token_from_its_own_mcp_key(self, crud_tools):
+        tools_map, manager = crud_tools
+        sid = tools_map["create_visualization_session"]()["session"]["session_id"]
+        buckets = _record_buckets(manager)
+
+        result = tools_map["rename_visualization_session"](session_id=sid, name="x")
+
+        assert result["success"] is True
+        assert _charges(buckets) == {
+            "_mcp_bucket": [("mcp-agent:rename_visualization_session", 1.0)]
+        }
+
+    def test_confirmed_delete_draws_one_token_from_its_own_mcp_key(self, crud_tools):
+        tools_map, manager = crud_tools
+        sid = tools_map["create_visualization_session"]()["session"]["session_id"]
+        buckets = _record_buckets(manager)
+
+        unconfirmed = tools_map["delete_visualization_session"](session_id=sid)
+        assert unconfirmed["error"] == "confirmation_required"
+        assert _charges(buckets) == {}
+
+        result = tools_map["delete_visualization_session"](session_id=sid, confirm=True)
+
+        assert result["success"] is True
+        assert _charges(buckets) == {
+            "_mcp_bucket": [("mcp-agent:delete_visualization_session", 1.0)]
+        }
+
+    def test_rename_is_refused_when_its_budget_is_spent(self, crud_tools):
+        tools_map, manager = crud_tools
+        sid = tools_map["create_visualization_session"](name="Before")["session"][
+            "session_id"
+        ]
+        manager._mcp_bucket = _TokenBucket(1.0, 0.0)
+
+        assert tools_map["rename_visualization_session"](session_id=sid, name="A")[
+            "success"
+        ]
+        result = tools_map["rename_visualization_session"](session_id=sid, name="B")
+
+        assert result["success"] is False
+        assert result["error"] == "rate_limited"
+        assert manager.get_session(sid).name == "A"
+        # Delete has its own key, so a spent rename budget does not block it.
+        assert tools_map["delete_visualization_session"](session_id=sid, confirm=True)[
+            "success"
+        ]
+
+    def test_delete_is_refused_when_its_budget_is_spent(self, crud_tools):
+        tools_map, manager = crud_tools
+        first = tools_map["create_visualization_session"]()["session"]["session_id"]
+        second = tools_map["create_visualization_session"]()["session"]["session_id"]
+        manager._mcp_bucket = _TokenBucket(1.0, 0.0)
+
+        assert tools_map["delete_visualization_session"](
+            session_id=first, confirm=True
+        )["success"]
+        result = tools_map["delete_visualization_session"](
+            session_id=second, confirm=True
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "rate_limited"
+        assert manager.get_session(second) is not None
+        # Rename has its own key, so a spent delete budget does not block it.
+        assert tools_map["rename_visualization_session"](session_id=second, name="R")[
+            "success"
+        ]
+
+    def test_ops_bucket_spent_does_not_refuse_rename_or_delete(self, crud_tools):
+        tools_map, manager = crud_tools
+        sid = tools_map["create_visualization_session"]()["session"]["session_id"]
+        manager._bucket = _TokenBucket(0.0, 0.0)
+
+        assert tools_map["rename_visualization_session"](session_id=sid, name="x")[
+            "success"
+        ]
+        assert tools_map["delete_visualization_session"](session_id=sid, confirm=True)[
+            "success"
+        ]

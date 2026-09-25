@@ -119,6 +119,56 @@ describe('SessionDrawer mobile overlay', () => {
     expect(buttons[buttons.length - 1]).toHaveFocus();
   });
 
+  it('wraps Tab from the last focusable element back to the first on a mobile viewport', () => {
+    setMobile(true);
+    renderDrawer();
+    const buttons = screen.getAllByRole('button');
+    buttons[buttons.length - 1].focus();
+
+    fireEvent.keyDown(document, { key: 'Tab' });
+    expect(screen.getByRole('button', { name: 'Close menu' })).toHaveFocus();
+  });
+
+  it('pulls focus back into the drawer on Tab when it has escaped on a mobile viewport', () => {
+    setMobile(true);
+    renderDrawer();
+    const outside = document.createElement('button');
+    document.body.appendChild(outside);
+    outside.focus();
+
+    fireEvent.keyDown(document, { key: 'Tab' });
+    expect(screen.getByRole('button', { name: 'Close menu' })).toHaveFocus();
+    outside.remove();
+  });
+
+  it('neither moves focus in nor traps Tab on desktop', () => {
+    setMobile(false);
+    const trigger = document.createElement('button');
+    document.body.appendChild(trigger);
+    trigger.focus();
+
+    renderDrawer();
+    expect(trigger).toHaveFocus();
+    const notPrevented = fireEvent.keyDown(document, { key: 'Tab' });
+    expect(notPrevented).toBe(true);
+    expect(trigger).toHaveFocus();
+    trigger.remove();
+  });
+
+  it('stops trapping Tab while a stacked dialog suspends Escape', () => {
+    setMobile(true);
+    const onClose = vi.fn();
+    renderDrawer({ suspendEscape: true, onClose });
+    const buttons = screen.getAllByRole('button');
+    buttons[buttons.length - 1].focus();
+
+    const notPrevented = fireEvent.keyDown(document, { key: 'Tab' });
+    expect(notPrevented).toBe(true);
+    expect(buttons[buttons.length - 1]).toHaveFocus();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it('restores focus to the previously-focused element on close in mobile mode', () => {
     setMobile(true);
     const trigger = document.createElement('button');

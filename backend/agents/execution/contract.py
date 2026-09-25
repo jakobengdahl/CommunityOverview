@@ -176,6 +176,9 @@ class ExecutionStoreContractTests:
         j = store.enqueue(_job())
         assert store.cancel(j.id, now=T0) is True
         assert store.get(j.id).state == ExecutionState.CANCELLED
+        # A plain cancel carries no result; only a caller that passes one
+        # (e.g. a superseded import) gets one stored.
+        assert store.get(j.id).result is None
 
     def test_cancel_terminal_returns_false(self, store):
         j = store.enqueue(_job())

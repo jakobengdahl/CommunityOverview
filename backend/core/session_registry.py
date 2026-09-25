@@ -1,16 +1,20 @@
 """
 Visualization Session Registry.
 
-Manages short-lived browser sessions that external AI clients can push
-visualization commands to via MCP.  Each session is identified by a
-short ID generated in the browser (e.g. "8244-1742") and backed by an
-asyncio.Queue.  The browser holds an SSE connection open; when an MCP
-tool pushes a command to the queue the browser receives it immediately.
+Manages browser sessions that external AI clients can push visualization
+commands to via MCP.  Each session is identified by a short ID generated in
+the browser (e.g. "8244-1742") and backed by a bounded asyncio.Queue.  While
+a browser holds the session's SSE connection open it receives a pushed
+command immediately.  While nothing holds it, the command waits in the queue
+(oldest dropped first once full), and a browser that opens the session before
+the entry is evicted drains it and may apply it then.
 
 This registry is the MCP *push* channel only.  Session *state* (what the
 browser is showing) is owned by the shared-session store
 (``core.session_store``); MCP query tools read it from there.  A registry
-entry simply signals that a browser is connected to receive pushes.
+entry holds a session's push queue; it does not mean a browser is connected.
+Whether anything is draining that queue is ``has_consumer`` (see "Entries vs.
+consumers" below).
 
 Thread-safety notes
 -------------------
@@ -63,15 +67,20 @@ _SESSION_TTL = 3600  # seconds — sessions not updated for this long are evicte
 # drains that session's queue; every subsequent MCP-tool or pulse push would grow
 # an unbounded queue for the session's lifetime (and each push refreshes
 # last_seen, so TTL eviction never reclaims it). Bounding the queue with
-# drop-oldest keeps memory finite while preserving the legacy→op handover window:
-# a legacy consumer that (re)connects within the window still receives the most
-# recent commands. The window is sub-second (design §8.1 R5), so this bound is far
-# larger than any legitimate pre-connect buffer.
+# drop-oldest keeps memory finite while still replaying the most recent commands
+# to a legacy consumer that connects later — whether within the sub-second
+# legacy→op handover (design §8.1 R5) or up to _SESSION_TTL after the last push,
+# when a browser opens a session that was pushed to while nothing was draining it.
 _MAX_QUEUE_SIZE = 1000
 
 
 class SessionRegistry:
-    """In-memory registry of active browser visualization sessions."""
+    """In-memory registry of visualization-session push queues.
+
+    An entry is a queue that may hold commands for a browser that has not opened
+    the session yet; it does not mean a browser is connected (see
+    ``has_consumer``).
+    """
 
     def __init__(self) -> None:
         self._sessions: Dict[str, dict] = {}

@@ -1,13 +1,13 @@
 # Manual Testing Checklist
 
-This checklist is used for manual verification before `dev` is merged to `preview`.
-It is updated when PRs that require manual verification land on `dev`.
+This checklist is used for manual verification before `main` is merged to `preview`.
+It is updated when PRs that require manual verification land on `main`.
 
 ---
 
 ## How to use this list
 
-1. Work through the relevant sections after a batch of features has been merged to `dev`
+1. Work through the relevant sections after a batch of features has been merged to `main`
 2. Check off and sign with a date in a copy — do not leave checkmarks in this file
 3. If a test fails: open an issue and block the merge until it is resolved
 
@@ -62,6 +62,6 @@ It is updated when PRs that require manual verification land on `dev`.
 
 ## Add new sections here
 
-When a PR that requires manual testing is merged to `dev`, add a section with:
+When a PR that requires manual testing is merged to `main`, add a section with:
 - PR number and a one-line description
 - Checklist with concrete steps and expected outcomes

@@ -490,6 +490,9 @@ export function overlayToFlowNode(overlay) {
     // `style` box or resize handles (it draws at its own text size), but the
     // stored value must still survive a hydrate -> autosave round trip.
     if (overlay.size) data.size = overlay.size;
+    // Style keys the canvas has no control for, passthrough only — see
+    // extraStyleOf in the host's sessionAnnotations.js.
+    if (overlay.extraStyle) data.extraStyle = overlay.extraStyle;
     return { ...base, data, draggable: !locked, zIndex };
   }
   if (GENERIC_OVERLAY_TYPES.has(overlay.kind)) {
@@ -547,6 +550,8 @@ export function overlayToFlowNode(overlay) {
   // above: an arrow/line's shape is entirely dx/dy, never this field, but
   // the stored value must still survive the hydrate -> autosave round trip.
   if (overlay.size) data.size = overlay.size;
+  // Same extraStyle passthrough as label above.
+  if (overlay.extraStyle) data.extraStyle = overlay.extraStyle;
   return { ...base, data, draggable: !locked && !isArrowAnchored(data), zIndex };
 }
 
@@ -596,6 +601,7 @@ export function flowNodeToOverlay(node) {
     };
     // Mirrors overlayToFlowNode's `data.size` slot for label above.
     if (node.data?.size) out.size = node.data.size;
+    if (node.data?.extraStyle) out.extraStyle = node.data.extraStyle;
     return out;
   }
   if (GENERIC_OVERLAY_TYPES.has(node.type)) {
@@ -632,6 +638,7 @@ export function flowNodeToOverlay(node) {
   if (node.data?.end?.attachment) out.end = node.data.end;
   // Mirrors overlayToFlowNode's `data.size` slot for arrow/line above.
   if (node.data?.size) out.size = node.data.size;
+  if (node.data?.extraStyle) out.extraStyle = node.data.extraStyle;
   return out;
 }
 

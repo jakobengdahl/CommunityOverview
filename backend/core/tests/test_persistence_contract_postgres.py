@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import itertools
 import json
+import logging
 import os
 import pathlib
 import random
+import re
 import secrets
 import threading
 import time
@@ -63,6 +65,7 @@ from backend.core.postgres_backend import (  # noqa: E402  (after importorskip)
     DEFAULT_POOL_SIZE,
     MIGRATION_LOCK_KEY,
     NOTIFY_PAYLOAD_LIMIT,
+    SAVE_LOCK_KEY,
     SCOPE_COLUMN,
     SCOPE_POLICY_SUFFIX,
     SCOPE_SETTING,
@@ -251,6 +254,64 @@ def backends():
         backend.close()
 
 
+_BACKEND_LOGGER = "backend.core.postgres_backend"
+
+
+@pytest.fixture
+def reported(caplog, capsys, backends):
+    """What the backend reported since the previous call, one message per line.
+
+    A report is a WARNING record on the backend's module logger. Each one is
+    also checked not to have reached stdout, so a report printed as well as
+    logged fails here rather than reading as a single line.
+
+    Anything louder than WARNING fails outright, on every call and again at
+    teardown. Filtered to WARNING alone, the same text at ERROR would slip
+    past both a positive check and any check that nothing was said - and a
+    record logged after the last call would never be looked at at all.
+
+    The backends are closed here, before that teardown check, rather than
+    left to `backends`: this fixture depends on that one, so it tears down
+    after this one, and whatever closing logged - a listener thread stopping,
+    say - would come too late to be looked at.
+    """
+    caplog.set_level(logging.WARNING, logger=_BACKEND_LOGGER)
+
+    def assert_nothing_louder(records):
+        louder = [
+            record.getMessage()
+            for record in records
+            if record.name == _BACKEND_LOGGER and record.levelno > logging.WARNING
+        ]
+        assert not louder, f"reported above WARNING: {louder}"
+
+    # A cursor rather than caplog.clear(): on a pytest whose clear() rebinds
+    # the record list instead of emptying it, the list the teardown check
+    # reads detaches at the first clear, and nothing after it is looked at.
+    seen = 0
+
+    def take() -> str:
+        nonlocal seen
+        fresh = caplog.records[seen:]
+        seen += len(fresh)
+        messages = [
+            record.getMessage()
+            for record in fresh
+            if record.name == _BACKEND_LOGGER and record.levelno == logging.WARNING
+        ]
+        assert_nothing_louder(fresh)
+        out = capsys.readouterr().out
+        leaked = [message for message in messages if message in out]
+        assert not leaked, f"a report went to stdout: {leaked}"
+        return "\n".join(messages)
+
+    yield take
+    for backend in backends:
+        backend.close()
+    backends.clear()
+    assert_nothing_louder(caplog.get_records("call") + caplog.get_records("teardown"))
+
+
 def _statements_issued(action, into=None):
     """Every statement `action` issues, captured on the cursor.
 
@@ -328,11 +389,39 @@ def _tables_named(text):
     }
 
 
-def _sequential_scans(issued):
+# Statements naming a graph table that have no plan: the `ANALYZE` a
+# whole-graph save issues after its transaction, and its kin. `EXPLAIN
+# ANALYZE <table>` is a syntax error rather than a question about scans.
+# A denylist on purpose: an allowlist of verbs would silently drop a
+# `(SELECT ...)` or a `TABLE ...` read and report it as "not scanning",
+# where anything unlisted here is still EXPLAINed and fails loudly if it
+# cannot be planned.
+_MAINTENANCE = frozenset({"ANALYZE", "ANALYSE", "VACUUM"})
+
+# Whitespace and SQL comments ahead of a statement's first keyword. Matched
+# on the raw text: `_rendered` folds newlines, and a folded `--` comment
+# would swallow the statement that follows it.
+_LEADING_NOISE = re.compile(r"(?:\s+|--[^\n]*(?:\n|$)|/\*.*?\*/)*", re.DOTALL)
+
+
+def _leading_verb(conn, query):
+    raw = query.as_string(conn) if hasattr(query, "as_string") else str(query)
+    rest = raw[_LEADING_NOISE.match(raw).end() :]
+    match = re.match(r"[A-Za-z]+", rest)
+    return match.group(0).upper() if match else ""
+
+
+def _sequential_scans(issued, on=None):
     """(statements naming a graph table, those whose plan scans one).
 
     EXPLAIN does not execute, so this is safe to run for every statement.
+    Maintenance statements are skipped, not planned: see `_MAINTENANCE`.
+
+    `on` narrows "scans" to a sequential scan of that one table, and each
+    statement it reports then carries its plan, for a caller whose question
+    is about one table's indexes rather than every relation the plan reads.
     """
+    scan = re.compile(r"Seq Scan on " + re.escape(on) + r"\b" if on else r"Seq Scan")
     touched, scanning = [], []
     with psycopg.connect(DSN, autocommit=True) as conn:
         for query, params in issued:
@@ -340,6 +429,8 @@ def _sequential_scans(issued):
             if "graph_nodes" not in text and "graph_edges" not in text:
                 continue
             if params is _EXECUTED_NEVER:
+                continue
+            if _leading_verb(conn, query) in _MAINTENANCE:
                 continue
             touched.append(text)
             if params is None and "%s" in text:
@@ -351,8 +442,9 @@ def _sequential_scans(issued):
                     f"parameters, so its cost is unknown: {text}"
                 )
             rows = conn.execute(psycopg.sql.SQL("EXPLAIN ") + query, params).fetchall()
-            if "Seq Scan" in "\n".join(r[0] for r in rows):
-                scanning.append(text)
+            plan = "\n".join(r[0] for r in rows)
+            if scan.search(plan):
+                scanning.append(f"{text}\n{plan}" if on else text)
     return touched, scanning
 
 
@@ -367,10 +459,10 @@ class TestPostgresStatementSpyHandlesAnEmptyExecutemany:
     this is what reaches it, and proves the sentinel is recorded rather than
     the branch being dead code.
 
-    Deliberately not run through `_sequential_scans`: that helper is used
-    elsewhere only around a single narrow entity write (`WHERE id = %s`
-    against the primary key), where a scan is a regression. A whole-graph
-    `save_graph_data` issues an unfiltered `DELETE FROM <table>` to replace
+    Deliberately not run through `_sequential_scans`: where that helper
+    backs a "no scan" assertion, it wraps only narrow entity writes (`WHERE
+    id = %s` against the primary key), where a scan is a regression. A
+    whole-graph `save_graph_data` issues an unfiltered `DELETE FROM <table>` to replace
     the previous graph - by design, since "replace the whole graph" means
     every existing row is gone - and an unfiltered delete has no index to
     seek with, so it correctly plans as a sequential scan regardless of how
@@ -392,6 +484,174 @@ class TestPostgresStatementSpyHandlesAnEmptyExecutemany:
             "an empty save's executemany calls were not recorded with the "
             "'executed never' sentinel - _EXECUTED_NEVER is dead code"
         )
+
+
+class TestPostgresSequentialScanHelperSkipsMaintenance:
+    """`_sequential_scans` around a whole-graph save, ANALYZE included.
+
+    `save_graph_data` ends with an `ANALYZE` of each graph table. Planned as
+    `EXPLAIN ANALYZE <table>` that is a syntax error, so without the verb
+    guard this raises. The guard must not be a blanket skip either: the
+    save's unfiltered `DELETE` of the previous graph has no index to seek
+    with, so it still has to be read as scanning.
+    """
+
+    def test_a_whole_graph_save_is_planned_without_its_analyze(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.exists()
+
+        issued = _statements_issued(
+            lambda: backend.save_graph_data(
+                snapshot(
+                    [node_payload("n1"), node_payload("n2")],
+                    [edge_payload("e1", "n1", "n2")],
+                )
+            )
+        )
+        analyzes = [
+            text
+            for text in (_rendered(q) for q, _ in issued)
+            if text.upper().startswith("ANALYZE")
+        ]
+        assert len(analyzes) == 2, (
+            f"the save no longer issues its trailing ANALYZE, so this test "
+            f"no longer exercises the guard: {analyzes}"
+        )
+
+        touched, scanning = _sequential_scans(issued)
+
+        assert not [t for t in touched if t.upper().startswith("ANALYZE")]
+        assert any(t.upper().startswith("INSERT") for t in touched), touched
+        deletes = [t for t in touched if t.upper().startswith("DELETE")]
+        assert _tables_named(" ".join(deletes)) == {"graph_nodes", "graph_edges"}
+        assert set(deletes) <= set(scanning), (
+            f"the whole-graph DELETE plans as a sequential scan and was not "
+            f"reported as one: {scanning}"
+        )
+
+    @pytest.mark.parametrize(
+        "prefix", ["", "  \n\t", "-- note\n", "/* note */ ", "/* a */\n-- b\n  "]
+    )
+    @pytest.mark.parametrize("verb", ["select", "Select", "SELECT"])
+    def test_a_statement_behind_comments_is_still_planned(self, schema, prefix, verb):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        try:
+            backend.exists()
+        finally:
+            backend.close()
+        query = psycopg.sql.SQL(f'{prefix}{verb} doc FROM "{schema}".graph_nodes')
+
+        touched, scanning = _sequential_scans([(query, None)])
+
+        assert touched and scanning == touched, (touched, scanning)
+
+    @pytest.mark.parametrize(
+        "read",
+        [
+            '(SELECT doc FROM "{schema}".graph_nodes)',
+            'TABLE "{schema}".graph_nodes',
+            '-- ANALYZE\nSELECT doc FROM "{schema}".graph_nodes',
+        ],
+    )
+    def test_a_read_not_led_by_a_dml_verb_is_still_planned(self, schema, read):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        try:
+            backend.exists()
+        finally:
+            backend.close()
+        query = psycopg.sql.SQL(read.format(schema=schema))
+
+        touched, scanning = _sequential_scans([(query, None)])
+
+        assert touched and scanning == touched, (touched, scanning)
+
+    @pytest.mark.parametrize(
+        "statement",
+        [
+            "ANALYZE",
+            "ANALYSE",
+            "-- DELETE\nVACUUM",
+            "/* SELECT */ analyze",
+            "  \n\tANALYZE",
+            "/* a */\n-- b\n  VACUUM",
+        ],
+    )
+    def test_a_maintenance_statement_is_skipped(self, schema, statement):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        try:
+            backend.exists()
+        finally:
+            backend.close()
+        query = psycopg.sql.SQL(f'{statement} "{schema}".graph_nodes')
+
+        assert _sequential_scans([(query, None)]) == ([], [])
+
+
+class TestPostgresPlansHelperSkipsMaintenance:
+    """`_plans` around a whole-graph save, ANALYZE included.
+
+    The same guard `_sequential_scans` needs, for the same reason: planned as
+    `EXPLAIN ANALYZE <table>`, the save's trailing ANALYZE is a syntax error.
+    The rest of the save must still be planned.
+    """
+
+    def test_a_whole_graph_save_is_planned_without_its_analyze(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.exists()
+
+        issued = _statements_issued(
+            lambda: backend.save_graph_data(
+                snapshot(
+                    [node_payload("n1"), node_payload("n2")],
+                    [edge_payload("e1", "n1", "n2")],
+                )
+            )
+        )
+        assert [
+            text
+            for text in (_rendered(q) for q, _ in issued)
+            if text.upper().startswith("ANALYZE")
+        ], "the save no longer issues its trailing ANALYZE, so this proves nothing"
+
+        planned = [text for text, _ in _plans(issued)]
+
+        # Every other statement naming a graph table, each one planned.
+        expected = [
+            text
+            for text, params in ((_rendered(q), p) for q, p in issued)
+            if ("graph_nodes" in text or "graph_edges" in text)
+            and params is not _EXECUTED_NEVER
+            and not text.upper().startswith("ANALYZE")
+        ]
+        assert planned == expected
+        assert _tables_named(
+            " ".join(t for t in planned if t.upper().startswith("INSERT"))
+        ) == {"graph_nodes", "graph_edges"}
+        deletes = [t for t in planned if t.upper().startswith("DELETE")]
+        assert _tables_named(" ".join(deletes)) == {"graph_nodes", "graph_edges"}
+
+    @pytest.mark.parametrize(
+        "statement",
+        [
+            "ANALYZE",
+            "ANALYSE",
+            "-- DELETE\nVACUUM",
+            "/* SELECT */ analyze",
+            "  \n\tANALYZE",
+            "/* a */\n-- b\n  VACUUM",
+        ],
+    )
+    def test_a_maintenance_statement_is_skipped(self, schema, statement):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        try:
+            backend.exists()
+        finally:
+            backend.close()
+        query = psycopg.sql.SQL(f'{statement} "{schema}".graph_nodes')
+
+        assert _plans([(query, None)]) == []
 
 
 def _wait_until_blocking(pid, timeout=15.0, count=1):
@@ -1176,7 +1436,7 @@ class TestPostgresBootsForALeastPrivilegeRole:
         assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
 
     def test_a_role_that_owns_nothing_is_not_warned_about_indexes_it_has(
-        self, lowpriv, backends, capsys
+        self, lowpriv, backends, reported
     ):
         """The operator provisioned the store exactly as the docs prescribe -
         tables AND the two traversal indexes - and the role owns none of it.
@@ -1224,9 +1484,9 @@ class TestPostgresBootsForALeastPrivilegeRole:
         low_dsn = _dsn_as_role(name, password)
         backend = PostgresGraphPersistenceBackend(low_dsn, schema=schema)
         backends.append(backend)
-        capsys.readouterr()
+        reported()
         backend.save_graph_data(snapshot([node_payload("a")]))
-        printed = capsys.readouterr().out
+        printed = reported()
         assert "scan instead of seek" not in printed, (
             "warned about indexes the store already has: " + printed
         )
@@ -1240,7 +1500,7 @@ class TestPostgresBootsForALeastPrivilegeRole:
         # "only table or database owner can analyze it", and both are
         # lc_messages-dependent. What this test is about is that the notice
         # reaches the operator at all.
-        # With the colon: "Warning: ANALYZE after save:" is the notice-handler
+        # With the colon: "ANALYZE after save:" is the notice-handler
         # line, which is what this test is about. "could not ANALYZE after
         # save;" is the exception line, and matching both would let a mutation
         # that makes ANALYZE raise outright satisfy an assertion about the
@@ -1251,7 +1511,7 @@ class TestPostgresBootsForALeastPrivilegeRole:
         # leave four handlers, and an unrelated statement's notices then print
         # four times, each labelled as coming from ANALYZE - which a
         # substring assertion is perfectly happy with.
-        assert printed.count("Warning: ANALYZE after save:") == 2, (
+        assert printed.count("ANALYZE after save:") == 2, (
             "one line per table, once: " + printed
         )
         # A second save must cost the same two lines, not four. A handler
@@ -1261,11 +1521,11 @@ class TestPostgresBootsForALeastPrivilegeRole:
         # four times, each labelled as coming from ANALYZE. A substring
         # assertion is perfectly happy with that; a count is not.
         backend.save_graph_data(snapshot([node_payload("a")]))
-        again = capsys.readouterr().out
-        assert again.count("Warning: ANALYZE after save:") == 2, (
+        again = reported()
+        assert again.count("ANALYZE after save:") == 2, (
             "the notice handler from the first save is still attached: " + again
         )
-        assert "Warning: ANALYZE after save:" in printed, (
+        assert "ANALYZE after save:" in printed, (
             "a role that cannot ANALYZE was told nothing about it: " + printed
         )
         assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
@@ -1287,7 +1547,7 @@ class TestPostgresIndexCreationLosesRacesQuietly:
     statement raises anyway.
     """
 
-    def _boot_with_a_losing_create(self, schema, backends, capsys, really_create):
+    def _boot_with_a_losing_create(self, schema, backends, reported, really_create):
         import psycopg as _psycopg
 
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
@@ -1308,22 +1568,22 @@ class TestPostgresIndexCreationLosesRacesQuietly:
 
         _psycopg.Connection.execute = _lose
         try:
-            capsys.readouterr()
+            reported()
             backend._ensure_schema()
         finally:
             _psycopg.Connection.execute = original
-        return capsys.readouterr().out
+        return reported()
 
-    def test_a_lost_race_is_not_reported(self, schema, backends, capsys):
+    def test_a_lost_race_is_not_reported(self, schema, backends, reported):
         printed = self._boot_with_a_losing_create(
-            schema, backends, capsys, really_create=True
+            schema, backends, reported, really_create=True
         )
         assert "scan instead of seek" not in printed, (
             "reported a failure on a store whose index is there: " + printed
         )
 
     def test_a_create_that_really_failed_is_still_reported(
-        self, schema, backends, capsys
+        self, schema, backends, reported
     ):
         # The same index name exists in ANOTHER schema first. The re-check asks
         # the catalog by name and schema; by name alone it finds the neighbour's
@@ -1359,7 +1619,7 @@ class TestPostgresIndexCreationLosesRacesQuietly:
                 )
         try:
             printed = self._boot_with_a_losing_create(
-                schema, backends, capsys, really_create=False
+                schema, backends, reported, really_create=False
             )
             for index in ("graph_edges_source_idx", "graph_edges_target_idx"):
                 assert index in printed and "scan instead of seek" in printed, (
@@ -1389,7 +1649,9 @@ class TestPostgresIndexWorkIsDoneOnce:
     nothing exercised the path where it raises.
     """
 
-    def test_a_store_that_has_its_indexes_issues_no_ddl(self, schema, backends, capsys):
+    def test_a_store_that_has_its_indexes_issues_no_ddl(
+        self, schema, backends, reported
+    ):
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
         backend._ensure_schema()
@@ -1411,7 +1673,7 @@ class TestPostgresIndexWorkIsDoneOnce:
         )
 
     def test_a_catalog_it_cannot_read_is_reported_not_assumed_away(
-        self, schema, backends, capsys
+        self, schema, backends, reported
     ):
         """`_index_state` answers "missing" when it cannot ask - a pool blip
         during boot, a server that refuses a connection - so the caller
@@ -1439,7 +1701,7 @@ class TestPostgresIndexWorkIsDoneOnce:
         backend.save_graph_data(snapshot([node_payload("a")]))
         again = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(again)
-        capsys.readouterr()
+        reported()
         ConnectionPool.connection = _blip
         try:
             again._ensure_schema()
@@ -1447,13 +1709,34 @@ class TestPostgresIndexWorkIsDoneOnce:
             pass
         finally:
             ConnectionPool.connection = real
-        printed = capsys.readouterr().out
+        printed = reported()
         assert "scan instead of seek" in printed, (
             "a catalog that could not be read was taken as an answer: " + printed
         )
 
+    # Both kinds, because the `except` around the ANALYZE is deliberately
+    # broad. A psycopg error alone lets it be narrowed to `psycopg.Error`
+    # with the suite still green, and then a failure that is not the
+    # driver's - `remove_notice_handler` raising ValueError for a handler it
+    # does not hold, say, or composing the table name - escapes and fails a
+    # save that had already committed. Not a pool failure: psycopg_pool's
+    # errors are `psycopg.Error` subclasses, so the narrowed form would still
+    # catch those. Nor the handler's own logging: psycopg catches whatever a
+    # notice handler raises.
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            pytest.param(
+                lambda: psycopg.errors.InsufficientPrivilege("no ANALYZE for you"),
+                id="psycopg",
+            ),
+            pytest.param(
+                lambda: ValueError("notice handler not registered"), id="not-psycopg"
+            ),
+        ],
+    )
     def test_an_analyze_that_raises_does_not_fail_the_save(
-        self, schema, backends, capsys
+        self, schema, backends, reported, failure
     ):
         import psycopg as _psycopg
 
@@ -1465,7 +1748,7 @@ class TestPostgresIndexWorkIsDoneOnce:
 
         def _refuse_analyze(self, query, *args, **kwargs):
             if "ANALYZE" in repr(query):
-                raise _psycopg.errors.InsufficientPrivilege("no ANALYZE for you")
+                raise failure()
             return original(self, query, *args, **kwargs)
 
         _psycopg.Connection.execute = _refuse_analyze
@@ -1477,7 +1760,12 @@ class TestPostgresIndexWorkIsDoneOnce:
         assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"], (
             "the save did not land"
         )
-        assert "could not ANALYZE after save" in capsys.readouterr().out
+        # The exception text as well as the prefix: the prefix alone says a
+        # refresh was skipped, and only the text says why.
+        assert (
+            f"could not ANALYZE after save; the traversal's indexes may go "
+            f"unused: {failure()}"
+        ) in reported().splitlines()
 
 
 class TestPostgresReportsAnIndexItCannotUse:
@@ -1490,7 +1778,7 @@ class TestPostgresReportsAnIndexItCannotUse:
     """
 
     def test_an_invalid_index_is_reported_rather_than_taken_as_done(
-        self, schema, backends, capsys
+        self, schema, backends, reported
     ):
         with psycopg.connect(DSN, autocommit=True) as conn:
             conn.execute(
@@ -1536,9 +1824,9 @@ class TestPostgresReportsAnIndexItCannotUse:
 
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
-        capsys.readouterr()
+        reported()
         backend._ensure_schema()
-        printed = capsys.readouterr().out
+        printed = reported()
         assert "graph_edges_source_idx" in printed and "not valid" in printed, (
             "an index the planner cannot use was taken as done: " + printed
         )
@@ -1652,6 +1940,56 @@ class TestPostgresProvisionsWhatTheTraversalNeeds:
         assert rows is not None and rows[1] >= 1, (
             "the statistics describe the table before the save rather than "
             f"after it: reltuples = {rows}"
+        )
+
+    # The size the test above was measured at. Smaller is not
+    # a cheaper version of the same test: measured on this server, at 500
+    # nodes / 5 000 edges the planner joins graph_nodes by sequential scan
+    # whatever the indexes, because at that size it is the cheaper plan.
+    PLANNED_NODES = 2000
+    PLANNED_EDGES = 20000
+
+    def test_the_traversal_is_planned_on_its_indexes(self, schema, backends):
+        """The test above asserts that the indexes exist; this one asserts
+        that the traversal is planned on them. An index that exists and is not
+        used - on an expression the level query does not repeat exactly, say -
+        passes every catalog check and leaves the sequential scan in place.
+
+        Depth 1, so the frontier is one id and the plan is the one whose
+        choice does not hinge on how wide a level has grown. Planned against
+        the statistics the save itself left, with no ANALYZE of this test's
+        own. Measured on this seed: a BitmapOr over both indexes, and a
+        sequential scan of graph_edges as soon as either index is dropped.
+
+        Only a scan of graph_edges fails it. The same plan joins graph_nodes
+        for the far end, and whether that join scans depends on the seed's
+        size and the server's cost settings, not on the edge indexes this
+        test is about.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        nodes, edges = self.PLANNED_NODES, self.PLANNED_EDGES
+        backend.save_graph_data(
+            snapshot(
+                [node_payload(f"n{i}") for i in range(nodes)],
+                [
+                    edge_payload(f"e{i}", f"n{i % nodes}", f"n{(i * 7 + 1) % nodes}")
+                    for i in range(edges)
+                ],
+            )
+        )
+
+        issued = _statements_issued(lambda: backend.traverse("n0", 1))
+
+        touched, scanning = _sequential_scans(issued, on="graph_edges")
+        # The level query in particular, so a traversal that stopped issuing
+        # it through a cursor this spy sees cannot pass by planning nothing.
+        assert any("far_id" in text for text in touched), (
+            f"the traversal's level query was not among what it issued: {touched}"
+        )
+        assert not scanning, (
+            "the traversal scans graph_edges sequentially although its "
+            f"indexes exist: {scanning}"
         )
 
 
@@ -2979,37 +3317,48 @@ class TestPostgresBatchesSurviveADeadlock:
         )
 
     def test_opposite_orderings_under_real_contention_all_land(self, schema, backends):
-        """The real path, opportunistically: a cycle may or may not form."""
+        """The real path, opportunistically: a cycle may or may not form.
+
+        Under the production retry bound. postgres_backend.py documents that
+        the bound can occasionally be exhausted under contention - accepted
+        behaviour, not a bug - and two writers forcing opposite orders on the
+        same two rows every batch reach that tail often (observed in CI). So
+        a batch that exhausts it is resubmitted here, as a caller would, and
+        what is asserted is convergence: every batch lands, nothing but a
+        deadlock ever fails one, and the store ends as one batch's whole
+        write. How many retries that took is the injected tests' question,
+        not this one's. The shared deadline bounds the resubmissions too.
+        """
         first = PostgresGraphPersistenceBackend(DSN, schema=schema)
         second = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.extend([first, second])
         first.save_graph_data(snapshot([node_payload("x"), node_payload("y")]))
 
-        # postgres_backend.py documents that the production bound (pinned at
-        # 3 by the injected tests above) can occasionally be exhausted
-        # under heavy contention - that is accepted behaviour, not a bug. Two
-        # threads is much lighter than the "many instances" load that note is
-        # about, but 30 rapid opposite-order batches still hit that rare tail
-        # often enough to flake this assertion (observed in CI). Raise just
-        # these two instances' retry headroom so the stress test exercises
-        # real contention without asserting on the tail of a distribution the
-        # production default was never meant to eliminate.
-        first.DEADLOCK_RETRIES = 20
-        second.DEADLOCK_RETRIES = 20
-
+        batches = 15
         errors = []
+        landed_batches = {"First": 0, "Second": 0}
         start = threading.Barrier(2)
+        deadline = time.monotonic() + 90
 
         def hammer(backend, name, ids):
             try:
                 start.wait(timeout=30)
-                for _ in range(15):
-                    backend.apply_batch(
-                        [
-                            EntityOperation.upsert_node(node_payload(entity, name=name))
-                            for entity in ids
-                        ]
-                    )
+                for _ in range(batches):
+                    while True:
+                        try:
+                            backend.apply_batch(
+                                [
+                                    EntityOperation.upsert_node(
+                                        node_payload(entity, name=name)
+                                    )
+                                    for entity in ids
+                                ]
+                            )
+                            break
+                        except psycopg.errors.DeadlockDetected:
+                            if time.monotonic() > deadline:
+                                raise
+                    landed_batches[name] += 1
             except Exception as exc:
                 errors.append(f"{name}: {type(exc).__name__}: {exc}")
 
@@ -3021,16 +3370,23 @@ class TestPostgresBatchesSurviveADeadlock:
                 target=hammer, args=(second, "Second", ["y", "x"]), daemon=True
             ),
         ]
-        deadline = time.monotonic() + 90
         for thread in threads:
             thread.start()
         for thread in threads:
             thread.join(max(0.0, deadline - time.monotonic()))
 
         assert not [t for t in threads if t.is_alive()], "a batch never finished"
-        assert errors == [], f"a batch failed rather than retrying: {errors}"
+        assert errors == [], (
+            "a batch failed with something other than a deadlock, or was "
+            f"still deadlocking at the deadline: {errors}"
+        )
+        assert landed_batches == {"First": batches, "Second": batches}
         landed = by_id(first.load_graph_data(), "nodes")
         assert set(landed) == {"x", "y"}
+        # Each batch writes both rows in one transaction, so whichever batch
+        # committed last owns both: a split means a batch landed partially.
+        names = {landed[entity]["name"] for entity in ("x", "y")}
+        assert len(names) == 1 and names <= {"First", "Second"}, names
 
 
 class TestPostgresEntityWritesDoNotSerialiseAgainstEachOther:
@@ -3208,10 +3564,21 @@ class TestPostgresEntityWritesLeaveNoLockBehind:
         # write actually used whether *it* still holds anything narrows the
         # question to this backend, the same way `_wait_until_blocking`
         # narrows "is anything blocked" to "is this pid blocked".
+        #
+        # The pid alone answers for one connection, and the pool may hold
+        # more than one: a lock left on another of this backend's connections
+        # would not be seen. So the lock the entity write takes is also looked
+        # for by its key, on any connection - `(SAVE_LOCK_KEY,
+        # hashtext(schema))` is two int4 keys, which `pg_locks` shows as
+        # classid, objid and objsubid 2. The schema is this test's own, so an
+        # unrelated session cannot hold that key.
         with backend._pool.connection() as conn:
             held = conn.execute(
-                "SELECT count(*) FROM pg_locks"
-                " WHERE locktype = 'advisory' AND pid = pg_backend_pid()"
+                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'"
+                " AND (pid = pg_backend_pid()"
+                " OR (classid = %s::oid AND objid = hashtext(%s)::oid"
+                " AND objsubid = 2))",
+                (SAVE_LOCK_KEY, schema),
             ).fetchone()[0]
 
         assert held == 0, (
@@ -5072,7 +5439,9 @@ class TestPostgresTreatsAnUnreadableAnnouncementAsAReload:
         (change,) = collector.wait_for(1)
         assert change.operations is None
 
-    def test_a_listener_that_raises_does_not_end_the_reporting(self, schema, backends):
+    def test_a_listener_that_raises_does_not_end_the_reporting(
+        self, schema, backends, reported
+    ):
         """One bad refresh must not silence the instance for good: the thread
         that dies here is the only one that would ever hear another write."""
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
@@ -5095,6 +5464,12 @@ class TestPostgresTreatsAnUnreadableAnnouncementAsAReload:
             backend.stop_change_notification()
 
         assert [op.entity_id for op in changes[1].operations] == ["second"]
+        # The refresh that failed is the one thing an operator must hear
+        # about: the instance is behind until the next change reaches it.
+        assert (
+            "applying an external change failed: RuntimeError: "
+            "the application refused this one"
+        ) in reported().splitlines()
 
     def test_a_non_driver_read_failure_reconnects_and_keeps_reporting(
         self, schema, backends, monkeypatch
@@ -5336,7 +5711,7 @@ class TestPostgresDoesNotStartASecondListener:
     """
 
     def test_a_start_that_times_out_does_not_leave_a_startable_backend(
-        self, schema, backends, monkeypatch
+        self, schema, backends, monkeypatch, reported
     ):
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
@@ -5359,6 +5734,14 @@ class TestPostgresDoesNotStartASecondListener:
         try:
             with pytest.raises(TimeoutError):
                 backend.start_change_notification(_Collector())
+            # The failed start stopped a thread it could not join. That is
+            # the one state in which this backend refuses to start again, so
+            # the operator is told why rather than left to find out.
+            assert (
+                f"the listener thread for {backend._channel} did not stop "
+                f"within 1.0s; notification cannot be started again on this "
+                f"backend"
+            ) in reported().splitlines()
 
             live = [t for t in threading.enumerate() if t.name.startswith("pg-notify")]
             # The thread is still there - that is the situation, not the bug.
@@ -5545,7 +5928,7 @@ class TestPostgresReportsAContractViolationDistinctly:
     """
 
     def test_a_refusal_is_reported_and_reporting_continues(
-        self, schema, backends, capsys
+        self, schema, backends, reported
     ):
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
@@ -5567,7 +5950,10 @@ class TestPostgresReportsAContractViolationDistinctly:
             backend.stop_change_notification()
 
         assert [op.entity_id for op in changes[1].operations] == ["second"]
-        assert "refused" in capsys.readouterr().out
+        assert (
+            "change notification refused: reported from a writing thread"
+            in reported().splitlines()
+        )
 
 
 class TestPostgresStopFromInsideTheListener:
@@ -5672,7 +6058,7 @@ class TestPostgresPacesAServerThatRefusesConnections:
         return [b - a for a, b in zip(attempts, attempts[1:])]
 
     def test_a_refused_connection_is_retried_with_a_growing_wait(
-        self, schema, backends, monkeypatch
+        self, schema, backends, monkeypatch, reported
     ):
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
@@ -5680,6 +6066,18 @@ class TestPostgresPacesAServerThatRefusesConnections:
         # High enough that the ceiling never binds: this is about the shape of
         # the escalation, not about where it stops.
         gaps = self._refused_connect_gaps(backend, monkeypatch, 30.0, 4)
+
+        # Both halves of the outage are reported: the connection that
+        # dropped, and each attempt to get it back. A deaf instance that says
+        # nothing looks exactly like a quiet one.
+        lines = reported().splitlines()
+        lost = f"lost the listening connection on {backend._channel}: "
+        assert [line for line in lines if line.startswith(lost)], lines
+        retrying = (
+            f"reconnecting to {backend._channel} after OperationalError: "
+            f"injected: connection refused"
+        )
+        assert lines.count(retrying) >= 3, lines
 
         assert gaps[-1] >= 2 * gaps[0], (
             f"connect attempts {[round(g, 3) for g in gaps]} are evenly "
@@ -6547,7 +6945,8 @@ def _plans(issued, dsn=DSN, scope=None):
 
     Planned as `dsn`'s role sees it, with the scope setting bound the way the
     backend binds it, so the plan is the one the deployment actually gets -
-    policy qual included, where the server applies one.
+    policy qual included, where the server applies one. Maintenance
+    statements are skipped, not planned: see `_MAINTENANCE`.
     """
     plans = []
     with psycopg.connect(dsn) as conn:
@@ -6558,6 +6957,8 @@ def _plans(issued, dsn=DSN, scope=None):
             if "graph_nodes" not in text and "graph_edges" not in text:
                 continue
             if params is _EXECUTED_NEVER:
+                continue
+            if _leading_verb(conn, query) in _MAINTENANCE:
                 continue
             rows = conn.execute(psycopg.sql.SQL("EXPLAIN ") + query, params).fetchall()
             plans.append((text, "\n".join(r[0] for r in rows)))
@@ -7287,7 +7688,7 @@ class TestTheOptionalScopeSeam:
         assert by_id(backend.load_graph_data(), "nodes")["old"]["name"] == "Renamed"
 
     def test_a_column_without_its_policy_is_reported_once_asked_for(
-        self, columnless, backends, capsys
+        self, columnless, backends, reported
     ):
         """The only thing that tells an operator the server enforces nothing.
 
@@ -7308,11 +7709,11 @@ class TestTheOptionalScopeSeam:
                 )
         backend = PostgresGraphPersistenceBackend(dsn, schema=schema, scope="scope-a")
         backends.append(backend)
-        capsys.readouterr()
+        reported()
 
         backend.save_graph_data(snapshot([node_payload("a")]))
 
-        printed = capsys.readouterr().out
+        printed = reported()
         assert "not its row-level security policy" in printed, (
             f"nothing said the server enforces nothing: {printed}"
         )
@@ -7325,7 +7726,7 @@ class TestTheOptionalScopeSeam:
     # -- optional, and what happens when it cannot be provisioned ------------
 
     def test_a_store_without_the_column_is_read_and_written_as_it_was(
-        self, columnless, backends, capsys
+        self, columnless, backends, reported
     ):
         """Nothing about such a store may change.
 
@@ -7349,7 +7750,7 @@ class TestTheOptionalScopeSeam:
         # to hear about is the ANALYZE its role cannot run, which it heard
         # about before this seam existed.
         backend.exists()
-        self._assert_silent_about_the_seam(capsys.readouterr().out)
+        self._assert_silent_about_the_seam(reported())
 
         issued = _statements_issued(
             lambda: (
@@ -7377,7 +7778,7 @@ class TestTheOptionalScopeSeam:
             if "set_config" in text
             or (params and SCOPE_SETTING in [str(value) for value in params])
         ], "an unscoped instance bound a scope setting"
-        self._assert_silent_about_the_seam(capsys.readouterr().out)
+        self._assert_silent_about_the_seam(reported())
         assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
 
     @staticmethod
@@ -7428,7 +7829,7 @@ class TestTheOptionalScopeSeam:
         ["column only", "policy, not enabled", "enabled, not forced"],
     )
     def test_a_scope_the_server_does_not_enforce_is_reported(
-        self, columnless, backends, capsys, provision
+        self, columnless, backends, reported, provision
     ):
         """Three ways for the server to be enforcing nothing, and the warning
         has to fire for each.
@@ -7475,11 +7876,11 @@ class TestTheOptionalScopeSeam:
                 )
         backend = PostgresGraphPersistenceBackend(dsn, schema=schema, scope="scope-a")
         backends.append(backend)
-        capsys.readouterr()
+        reported()
 
         backend.save_graph_data(snapshot([node_payload("a")]))
 
-        printed = capsys.readouterr().out
+        printed = reported()
         assert "not by the server" in printed, (
             f"a store the server does not enforce was not reported ({provision}): "
             f"{printed}"
@@ -7488,7 +7889,7 @@ class TestTheOptionalScopeSeam:
         assert _stored(schema, "graph_nodes") == {"a": "scope-a"}
 
     def test_an_unscoped_instance_on_a_half_provisioned_store_says_nothing(
-        self, columnless, backends, capsys
+        self, columnless, backends, reported
     ):
         """The column on one scoped table and not the other, with no scope.
 
@@ -7512,7 +7913,7 @@ class TestTheOptionalScopeSeam:
         backend = PostgresGraphPersistenceBackend(dsn, schema=schema)
         backends.append(backend)
         backend.exists()
-        self._assert_silent_about_the_seam(capsys.readouterr().out)
+        self._assert_silent_about_the_seam(reported())
 
         issued = _statements_issued(
             lambda: (
@@ -7725,7 +8126,7 @@ class TestTheOptionalScopeSeam:
             )
 
     def test_a_store_that_configured_no_scope_gets_no_policy(
-        self, owner, backends, capsys
+        self, owner, backends, reported
     ):
         """The column, and nothing that would cost it its traversal plan.
 
@@ -7735,7 +8136,7 @@ class TestTheOptionalScopeSeam:
         """
         name, schema, password = owner
         backend = self._as_owner(owner, backends)
-        capsys.readouterr()
+        reported()
         backend.save_graph_data(snapshot([node_payload("a")]))
 
         with psycopg.connect(DSN, autocommit=True) as conn:
@@ -7750,7 +8151,7 @@ class TestTheOptionalScopeSeam:
                 assert not enabled, f"{table} took row-level security unasked"
                 assert not policy, f"{table} took a policy unasked"
                 assert _stored(schema, table, "id") is not None
-        assert capsys.readouterr().out == ""
+        assert reported() == ""
         # The column is there all the same, which is what lets a host turn the
         # seam on later without rewriting a table full of rows.
         assert _stored(schema, "graph_nodes") == {"a": None}

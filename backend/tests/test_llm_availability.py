@@ -13,9 +13,6 @@ class TestGetLlmAvailability:
 
     def test_returns_available_false_when_no_keys(self):
         with patch.dict(os.environ, {}, clear=True):
-            os.environ.pop("ANTHROPIC_API_KEY", None)
-            os.environ.pop("OPENAI_API_KEY", None)
-            os.environ.pop("LLM_PROVIDER", None)
             result = get_llm_availability()
         assert result["available"] is False
         assert result["provider"] == "claude"
@@ -58,9 +55,9 @@ class TestGetLlmAvailability:
         assert result["has_anthropic_key"] is False
 
     def test_defaults_to_claude_when_no_provider_env(self):
+        # clear=True: an ambient OPENAI_API_KEY would make auto-detect pick openai.
         env = {"ANTHROPIC_API_KEY": "sk-ant-test"}
-        with patch.dict(os.environ, env, clear=False):
-            os.environ.pop("LLM_PROVIDER", None)
+        with patch.dict(os.environ, env, clear=True):
             result = get_llm_availability()
         assert result["provider"] == "claude"
         assert result["available"] is True

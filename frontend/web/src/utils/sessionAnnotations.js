@@ -371,6 +371,23 @@ function freehandOverlayToAnnotation(o) {
   return createAnnotation(input);
 }
 
+// label/line carry their visual style keys as named overlay fields (the
+// canvas reads `color`/`fontSize`/`opacity` directly). Any other key in the
+// stored `style` is agent-authored data the canvas has no control for; it
+// rides along as `extraStyle` and is merged back underneath the named keys,
+// or the browser's first write-back would persist the style without it
+// (smallfix-label-overlay-drops-nonvisual-style-keys). Carried only when
+// present, so a plain overlay does not grow an empty field.
+const LABEL_STYLE_KEYS = ['color', 'fontSize', 'opacity'];
+const LINE_STYLE_KEYS = ['color', 'opacity'];
+
+function extraStyleOf(style, namedKeys) {
+  if (!style || typeof style !== 'object') return undefined;
+  const extra = { ...style };
+  for (const key of namedKeys) delete extra[key];
+  return Object.keys(extra).length > 0 ? extra : undefined;
+}
+
 // Note/label/arrow annotations round-trip between the server annotation model
 // (design 3.1) and the canvas-shape overlay descriptors the GraphCanvas emits
 // (via onSaveView) and consumes (via annotationsToRestore). Groups keep their
@@ -402,7 +419,7 @@ export function annotationsToOverlays(annotations) {
         field_versions: a.field_versions,
       });
     } else if (a?.type === 'label') {
-      out.push({
+      const overlay = {
         id: a.id,
         kind: 'label',
         position: a.position || { x: 0, y: 0 },
@@ -425,7 +442,10 @@ export function annotationsToOverlays(annotations) {
         rotation: a.geometry?.rotation ?? 0,
         version: a.version,
         field_versions: a.field_versions,
-      });
+      };
+      const extraStyle = extraStyleOf(a.style, LABEL_STYLE_KEYS);
+      if (extraStyle) overlay.extraStyle = extraStyle;
+      out.push(overlay);
     } else if (a?.type === 'line') {
       const from = a.from || a.position || { x: 0, y: 0 };
       const to = a.to || { x: from.x + 160, y: from.y };
@@ -451,6 +471,8 @@ export function annotationsToOverlays(annotations) {
       };
       if (a.startAnchor) overlay.startAnchor = a.startAnchor;
       if (a.endAnchor) overlay.endAnchor = a.endAnchor;
+      const extraStyle = extraStyleOf(a.style, LINE_STYLE_KEYS);
+      if (extraStyle) overlay.extraStyle = extraStyle;
       // `start`/`end` (docs/ANNOTATION_CONTRACT.md's line-endpoint attachment,
       // distinct from the GUI-only startAnchor/endAnchor snap above) always
       // come back from createAnnotation as at least `{point}` — never
@@ -505,7 +527,7 @@ export function overlaysToAnnotations(overlays) {
           type: 'label',
           position: o.position || { x: 0, y: 0 },
           text: o.text || '',
-          style: { color: o.color, fontSize: o.fontSize, opacity: o.opacity },
+          style: { ...o.extraStyle, color: o.color, fontSize: o.fontSize, opacity: o.opacity },
           attachment: o.attachment,
           z: o.z ?? 0,
           locked: Boolean(o.locked),
@@ -545,7 +567,7 @@ export function overlaysToAnnotations(overlays) {
         position: { x: from.x, y: from.y },
         from: { x: from.x, y: from.y },
         to: { x: from.x + dx, y: from.y + dy },
-        style: { color: o.color, opacity: o.opacity },
+        style: { ...o.extraStyle, color: o.color, opacity: o.opacity },
         startArrow: o.startArrow ?? false,
         endArrow: o.endArrow ?? true,
         z: o.z ?? 0,

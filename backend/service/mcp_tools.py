@@ -15,6 +15,7 @@ Usage:
     tools_map = register_mcp_tools(mcp, service)
 """
 
+import json
 import secrets
 from typing import List, Optional, Dict, Any, Callable
 
@@ -88,21 +89,27 @@ _MCP_LAYOUT_CLIENT_ID = "mcp-agent"
 # delete) so an assistant's session management is auditable as one actor.
 _MCP_SESSION_CLIENT_ID = "mcp-agent"
 
+# SESSION_ID_RE also accepts the older two-group form, which is what the tools'
+# own docstring examples use, so the message must not name only the long one.
+_INVALID_SESSION_ID_ERROR = (
+    "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD "
+    "(the older DDDD-DDDD form is also accepted)"
+)
+
 # Server-assigned default when an assistant creates a session without a name
 # (contract §4: names are non-unique and the server fills a default).
 _DEFAULT_SESSION_NAME = "Untitled session"
 
-# Appended to every undelivered-push warning: a push writes nothing, so an
-# agent that simply retries it gets the same silence. It deliberately does NOT
-# send the caller to connect_to_visualization_session as the pre-push check:
-# that tool's reachability verdict counts a bare registry entry, which is the
-# false positive this report exists to remove.
+# Appended to every undelivered-push warning: a push writes no session state, so
+# an agent that simply retries it gets the same silence. It deliberately names
+# this report, not connect_to_visualization_session, as the verdict: that tool
+# is read before the push, and a consumer present then can be gone by the time
+# the push is sent.
 _UNDELIVERED_PUSH_REMEDY = (
-    " A push is not stored, so this left no trace — use add_nodes_to_session to "
-    "change what the session holds. Trust this report rather than "
-    "connect_to_visualization_session's reachability line, which counts a "
-    "registry entry that outlives the browser that created it; its "
-    "connected_clients count is sound."
+    " A push is not stored in the session's state — use add_nodes_to_session to "
+    "change what the session holds. Trust this report rather than a "
+    "reachability check made before the push (connect_to_visualization_session): "
+    "a client present then may have left by the time the push was sent."
 )
 
 
@@ -140,7 +147,8 @@ def _undelivered_push_warning(
         legacy_reason = (
             "the session's legacy push channel has a registry entry but nothing "
             "draining it (an entry outlives the browser that created it, and is "
-            "also created without one)"
+            "also created without one), so the command waits in its queue and a "
+            "browser that opens the session later may still apply it"
         )
     else:
         legacy_reason = "no browser is holding the session's legacy push channel"
@@ -282,10 +290,18 @@ def register_mcp_tools(
           (``add_nodes_to_session``, the layout tools) need; it is created by
           ``create_visualization_session`` or lazily by a browser's first
           change, so a browser sitting on a fresh session has none yet.
-        - **a reachable canvas** — either a client reporting presence on the op
-          stream (``clients``) or an entry in the legacy push registry
-          (``push_target``). ``_push_to_session`` delivers to both, so either
-          one means a push lands somewhere.
+        - **a push destination** — either clients reporting presence on the op
+          stream (``clients``) or a consumer draining the legacy push queue
+          (``push_target``). ``_push_to_session`` sends to both, but neither is
+          proof that a given push was read. ``push_target`` is deliberately the
+          consumer count, not ``session_exists``: a registry entry outlives the
+          browser that created it and is also created with no browser at all
+          (``mint_trigger_token``, the session auto-add tools), so an entry
+          alone would report a canvas nobody has open. A presence count is a
+          live client, but the hub publishes only for a session with stored
+          state. Whether a push reached a consumer is the
+          ``visualization_delivery`` report that ``_push_to_session`` returns,
+          not either of these facts.
 
         Gating the read tools on the registry alone made a session created and
         populated over MCP — with no browser ever opened — report not-found even
@@ -300,9 +316,10 @@ def register_mcp_tools(
             if session_manager is not None
             else 0
         )
-        push_target = bool(
-            session_registry and session_registry.session_exists(session_id)
-        )
+        # A registry that cannot report its consumers cannot support a claim
+        # that anything is reading its queue.
+        has_consumer = getattr(session_registry, "has_consumer", None)
+        push_target = bool(callable(has_consumer) and has_consumer(session_id))
         return stored, clients, push_target
 
     def register_tool(func: Callable) -> Callable:
@@ -340,18 +357,22 @@ def register_mcp_tools(
         before.
 
         By default the query is matched lexically (substring). Multi-word or
-        natural-language queries that no node contains verbatim therefore return
-        nothing; set ``match_mode="any_term"`` to match any single term instead,
-        or ``semantic=True`` to rank nodes by embedding meaning.
-        As a safety net the search also falls back to semantic ranking
-        automatically when a non-empty lexical query yields zero results, so a
-        conceptual query still surfaces the closest nodes. The response includes
-        a ``"semantic"`` boolean indicating whether semantic ranking produced the
-        returned nodes.
+        natural-language queries that no node contains verbatim therefore match
+        nothing lexically; set ``match_mode="any_term"`` to match any single term
+        instead, or ``semantic=True`` to rank nodes by embedding meaning.
+        As a safety net the search falls back to semantic ranking automatically
+        when a non-empty lexical query matches no local node, so such a
+        query's local results come only from that fallback (none where no
+        embedding model is available); federated results are always matched
+        lexically in the requested ``match_mode``. The response includes a
+        ``"semantic"`` boolean
+        indicating whether semantic ranking produced the returned nodes.
 
         Args:
-            query: Search text (matches against name, description, summary). Use ""
-                to match on the filters alone.
+            query: Search text, matched against a node's name, description,
+                summary, tags, subtypes, aliases and type label; local and
+                federated nodes are matched on the same fields. Use "" to match
+                on the filters alone.
             node_types: List of node types to filter on (Actor, Initiative, etc.)
             limit: Max number of results (default 50)
             action: Optional action for frontend ('add_to_visualization' to add to current view)
@@ -369,8 +390,12 @@ def register_mcp_tools(
                 excluded. Set True to include archived items in the results.
             semantic: When True, rank results by embedding meaning (cosine
                 similarity) instead of lexical substring matching. Default False
-                keeps the lexical behavior, which still auto-falls back to
-                semantic ranking when it returns zero results.
+                keeps the lexical behavior. A query other than "" or "*" that
+                matches no local node of the requested types (archived nodes
+                count only with ``include_archived``) falls back to semantic
+                ranking for local results. The check runs before tag, metadata
+                and access filters, so a match those filters remove gets no
+                fallback.
             match_mode: How the lexical query is matched. ``"substring"``
                 (default) requires the whole query verbatim — unchanged
                 behaviour. ``"any_term"`` splits the query on whitespace into
@@ -381,17 +406,21 @@ def register_mcp_tools(
                 you repeat counts once. Each term is matched as a
                 substring, not as a word, so pass the distinctive terms: a short
                 or common one ("a", "the") matches almost everything and pads
-                the tail of the result with noise. Ignored when
-                ``semantic=True``. Applies to the local graph; federated search
-                stays substring-matched.
+                the tail of the result with noise. Applies to local and
+                federated search alike; ``semantic=True`` replaces it for local
+                results only, since federated results are always matched
+                lexically.
             visualization_session_id: Optional browser session ID — when provided, the result
-                is pushed live to the connected browser window via SSE. The
+                is pushed to that session's live canvas, if one is open. The
                 result then carries a ``visualization_delivery`` report saying
                 whether anything actually received it (``delivered``,
                 ``status``, ``live_consumers``, and a ``warning`` naming the
-                state when nothing did). A push writes no session state, so an
-                undelivered one leaves no trace to read back — check this field
-                rather than assuming the canvas changed.
+                state when nothing did). A push writes no session state when it
+                is sent, so reading the session back cannot show whether it
+                landed — check this field rather than assuming the canvas
+                changed. Undelivered is not always discarded: a legacy registry
+                entry with nothing draining it keeps the command queued, and a
+                browser that opens the session later may still apply it.
 
         Returns:
             Dict with matching nodes and edges connecting them, and
@@ -447,13 +476,16 @@ def register_mcp_tools(
             include_archived: When False (default) archived edges are not traversed
                 and archived neighbour nodes are excluded. Set True to include them.
             visualization_session_id: Optional browser session ID — when provided, the result
-                is pushed live to the connected browser window via SSE. The
+                is pushed to that session's live canvas, if one is open. The
                 result then carries a ``visualization_delivery`` report saying
                 whether anything actually received it (``delivered``,
                 ``status``, ``live_consumers``, and a ``warning`` naming the
-                state when nothing did). A push writes no session state, so an
-                undelivered one leaves no trace to read back — check this field
-                rather than assuming the canvas changed.
+                state when nothing did). A push writes no session state when it
+                is sent, so reading the session back cannot show whether it
+                landed — check this field rather than assuming the canvas
+                changed. Undelivered is not always discarded: a legacy registry
+                entry with nothing draining it keeps the command queued, and a
+                browser that opens the session later may still apply it.
 
         Returns:
             Dict with nodes and edges, and ``visualization_delivery`` when a
@@ -948,13 +980,16 @@ def register_mcp_tools(
         Args:
             name: Name of the saved view
             visualization_session_id: Optional browser session ID — when provided, the view
-                is loaded live in the connected browser window via SSE. The
+                is loaded in that session's live canvas, if one is open. The
                 result then carries a ``visualization_delivery`` report saying
                 whether anything actually received it (``delivered``,
                 ``status``, ``live_consumers``, and a ``warning`` naming the
-                state when nothing did). A push writes no session state, so an
-                undelivered one leaves no trace to read back — check this field
-                rather than assuming the canvas changed.
+                state when nothing did). A push writes no session state when it
+                is sent, so reading the session back cannot show whether it
+                landed — check this field rather than assuming the canvas
+                changed. Undelivered is not always discarded: a legacy registry
+                entry with nothing draining it keeps the command queued, and a
+                browser that opens the session later may still apply it.
 
         Returns:
             The nodes and edges to display in the visualization, with position
@@ -991,10 +1026,11 @@ def register_mcp_tools(
         Removes everything currently displayed in the browser window without
         affecting the underlying graph data. Use this to start a fresh view.
 
-        This is a live-canvas command. It refuses unless a browser is currently
-        reachable through the shared-session op stream or the legacy push
-        channel. The tools that act on the session's stored state have no such
-        live-client requirement.
+        This is a live-canvas command. It refuses unless a client is currently
+        reporting presence on the shared-session op stream or draining the
+        legacy push channel. A leftover legacy registry entry with nothing
+        reading it does not count. The tools that act on the session's stored
+        state have no such live-client requirement.
 
         When ``expected_revision`` is supplied and the session has stored state,
         the clear is rejected unless it matches the current session revision.
@@ -1020,7 +1056,7 @@ def register_mcp_tools(
         if not is_valid_session_id(visualization_session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         stored, clients, push_target = _session_facts(visualization_session_id)
         if not push_target and clients <= 0:
@@ -1041,8 +1077,8 @@ def register_mcp_tools(
                 "success": False,
                 "error": (
                     f"Session '{visualization_session_id}' exists, but no "
-                    "browser is connected to its op stream or holding its "
-                    "legacy push channel open."
+                    "client is connected to its op stream or draining its "
+                    "legacy push channel."
                 ),
             }
         session = (
@@ -1114,7 +1150,7 @@ def register_mcp_tools(
         if not session_registry.is_valid_session_id(visualization_session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         try:
             rule = auto_add_registry.add_rule(
@@ -1148,7 +1184,7 @@ def register_mcp_tools(
         if not session_registry.is_valid_session_id(visualization_session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         agents = [
             r.to_dict() for r in auto_add_registry.list_rules(visualization_session_id)
@@ -1175,7 +1211,7 @@ def register_mcp_tools(
         if not session_registry.is_valid_session_id(visualization_session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         removed = auto_add_registry.remove_rule(visualization_session_id, agent_id)
         if not removed:
@@ -1193,10 +1229,13 @@ def register_mcp_tools(
         Use this tool first to confirm the session ID before using the
         visualization_session_id parameter in other tools.
 
-        A session resolves as soon as it exists — whether a browser opened it or
-        ``create_visualization_session`` did. No browser needs to be connected:
-        session state is server-owned, so a client that opens the session later
-        picks up whatever was put there meanwhile.
+        A session resolves when it has stored state, or while a browser is
+        draining its legacy push channel. No browser needs to be connected to a
+        stored session: session state is server-owned, so a client that opens
+        the session later picks up whatever was put there meanwhile. A push
+        registry entry left behind by a browser that has gone does not count:
+        an id with no stored state and nothing draining its push channel
+        reports not found.
 
         Two facts decide what you can do with it, and the result reports both:
 
@@ -1227,7 +1266,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "connected": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         # Same read gate as get_visualization_session_state: this tool reports a
         # session's existence and node count, so a hook that narrows reads must
@@ -1241,9 +1280,9 @@ def register_mcp_tools(
         if denied:
             return denied
         stored, clients, push_target = _session_facts(session_id)
-        # Existence is the store or the legacy registry — deliberately not
-        # presence. A client can still be attached to a session that was just
-        # deleted, and reporting that as found would resurrect it.
+        # Existence is the store or a live legacy consumer — deliberately not
+        # op-stream presence. A client can still be attached to a session that
+        # was just deleted, and reporting that as found would resurrect it.
         if not stored and not push_target:
             return {
                 "connected": False,
@@ -1265,15 +1304,15 @@ def register_mcp_tools(
                 "visualization_session_id parameter reach the canvas."
             )
         elif stored and push_target:
-            # Reachable through the legacy push channel only: a browser is
-            # holding it open without reporting presence on the op stream, so
-            # the count in this very payload is 0 and must not be contradicted.
+            # Reachable through the legacy push channel only: a client is
+            # draining it without reporting presence on the op stream, so the
+            # count in this very payload is 0 and must not be contradicted.
             message = (
-                f"Session '{session_id}' exists and a browser is holding its "
-                "legacy push channel open, though none is reporting presence "
-                f"on the op stream (connected_clients is 0). "
+                f"Session '{session_id}' exists and a client is draining its "
+                "legacy push channel, though none is reporting presence on the "
+                f"op stream (connected_clients is 0). "
                 f"{stored_state_tools}, and results pushed with the "
-                "visualization_session_id parameter reach that browser."
+                "visualization_session_id parameter reach that client."
             )
         elif stored:
             message = (
@@ -1331,15 +1370,18 @@ def register_mcp_tools(
                 returned by create_visualization_session (e.g. "8244-1742")
 
         Returns:
-            Dict with visible_node_ids, selected_node_ids, node_count,
-            dimmed_node_ids, dimmed_edge_ids and edge_intensity (0.0-1.0, the
-            baseline opacity every non-dimmed edge renders at; 1.0 is full
-            prominence).
+            Dict with visible_node_ids, selected_node_ids, node_count (every
+            node the session references, hidden ones included — the same value
+            get_visualization_layout and add_nodes_to_session report),
+            visible_node_count (the length of visible_node_ids, as
+            connect_to_visualization_session reports it), dimmed_node_ids,
+            dimmed_edge_ids and edge_intensity (0.0-1.0, the baseline opacity
+            every non-dimmed edge renders at; 1.0 is full prominence).
         """
         if session_registry is None and session_manager is None:
             return {"error": "Visualization sessions are not available"}
         if not is_valid_session_id(session_id):
-            return {"error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD"}
+            return {"error": _INVALID_SESSION_ID_ERROR}
         denied = _authorize_session(
             GRAPH_ACTION_READ, "get_visualization_session_state"
         )
@@ -1355,12 +1397,14 @@ def register_mcp_tools(
                 )
             }
         visible, selected = _session_view_state(session_id)
+        node_count = 0
         dimmed_node_ids: list = []
         dimmed_edge_ids: list = []
         edge_intensity = 1.0
         if session_manager is not None:
             session = session_manager.get_session(session_id)
             if session is not None:
+                node_count = len(session.state.get("node_refs", []))
                 visible_set = set(visible)
                 dimmed_node_ids = [
                     n
@@ -1373,7 +1417,8 @@ def register_mcp_tools(
             "session_id": session_id,
             "visible_node_ids": visible,
             "selected_node_ids": selected,
-            "node_count": len(visible),
+            "node_count": node_count,
+            "visible_node_count": len(visible),
             "dimmed_node_ids": dimmed_node_ids,
             "dimmed_edge_ids": dimmed_edge_ids,
             "edge_intensity": edge_intensity,
@@ -1444,7 +1489,7 @@ def register_mcp_tools(
         if session_manager is None:
             return {"error": "Session manager not available"}
         if not is_valid_session_id(session_id):
-            return {"error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD"}
+            return {"error": _INVALID_SESSION_ID_ERROR}
         denied = _authorize_session(GRAPH_ACTION_READ, "get_visualization_layout")
         if denied:
             return denied
@@ -1525,8 +1570,10 @@ def register_mcp_tools(
         reports them. Only the nodes you name move; a write is a partial update of
         the position map, not a replacement. A batch is capped at 500 moves and
         256 KiB of payload (``too_large`` above that), and each write also draws
-        from a per-client rate budget sized to the number of moves — so a single
-        very large arrange may return ``rate_limited`` before the hard cap. Either
+        from this tool's rate budget, sized to the number of moves — so a single
+        very large arrange may return ``rate_limited`` before the hard cap. The
+        budget is per tool, not per client: every MCP client on the instance
+        draws from the same one. Either
         way, split a large session across successive writes, threading the
         returned ``revision`` into the next ``expected_revision``.
         Layout patterns (horizontal DAG, grid, swimlanes) and the full geometry
@@ -1564,7 +1611,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "apply_visualization_layout")
         if denied:
@@ -1663,11 +1710,16 @@ def register_mcp_tools(
         legitimately report success with an empty ``added`` and still show
         nothing new on the canvas.
 
-        A batch is capped at 500 ids, and each call also draws from a per-client
-        rate budget sized to the number of ids — so a batch well below the hard
-        cap can still return ``rate_limited``. Split large sets across
-        successive calls, threading the returned ``revision`` into the next
-        ``expected_revision``.
+        A batch is capped at 500 distinct ids and 256 KiB of ids, and each call
+        also draws from this tool's rate budget, sized to the number of distinct
+        ids that resolve — ids reported in ``skipped`` are not charged, and a
+        call that returns ``no_resolvable_nodes`` draws nothing — so a batch
+        well below the hard caps can still return ``rate_limited``. The budget
+        is per tool, not per client: every MCP client on the instance draws
+        from the same one. A repeated
+        id counts once against all three. Split
+        large sets across successive calls, threading the returned ``revision``
+        into the next ``expected_revision``.
 
         Args:
             session_id: The session ID shown in the browser header (e.g. "8244-1742")
@@ -1679,34 +1731,107 @@ def register_mcp_tools(
         Returns:
             Dict with success, added (ids actually added, deduplicated), skipped
             (ids that did not resolve, deduplicated), node_count (nodes the
-            session references, hidden ones included — the same total
-            ``get_visualization_session`` reports, not the visible count from
-            ``get_visualization_session_state``) and the new revision. On a
+            session references, hidden ones included — the same node_count
+            ``get_visualization_session``, ``get_visualization_layout`` and
+            ``get_visualization_session_state`` report; the visible count is the
+            latter's ``visible_node_count``) and the new revision. On a
             concurrency clash returns success=false with the current revision so
             the caller can re-read and retry. Retryable errors:
             revision_conflict, busy, rate_limited; change the request for
-            too_large or a validation error.
+            too_large, no_resolvable_nodes (none of the ids resolve; the
+            response carries them in ``skipped``) or a validation error. An
+            unknown session is reported as not found whether or not any id
+            resolves.
         """
         if session_manager is None:
             return {"success": False, "error": "Session manager not available"}
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "add_nodes_to_session")
         if denied:
             return denied
         if not isinstance(node_ids, list) or not node_ids:
             return {"success": False, "error": "'node_ids' must be a non-empty list"}
-        # Checked before the resolve below, which costs one node lookup per id:
-        # the write path enforces the same cap, but only after that work is
-        # already done.
-        if len(node_ids) > session_manager.max_ops_per_batch:
+        session_not_found = {
+            "success": False,
+            "error": (
+                f"Session '{session_id}' not found. "
+                "This tool acts on a session's stored state, which exists "
+                "once create_visualization_session created it or a browser "
+                "made its first change to it."
+            ),
+        }
+        # Before the resolve, so an unknown session is not masked by
+        # no_resolvable_nodes when none of the ids resolve either.
+        if session_manager.get_session(session_id) is None:
+            return session_not_found
+        # A repeated id is one id: dedupe before the caps and the rate budget
+        # below count it. This runs on the uncapped list, so it must stay
+        # linear — an unhashable value (a dict or list arriving unvalidated
+        # through POST /execute_tool) is keyed by its canonical JSON instead of
+        # being compared pairwise. Every id is encoded once here, and the byte
+        # cap below is summed from those encodings. A value with no canonical
+        # JSON (a cycle, mixed-type dict keys, nesting past the recursion
+        # limit, a ``__str__`` that raises) can only come from an in-process
+        # caller; it could never resolve and the byte cap could not measure
+        # it, so it is skipped before both, whether it is hashable or not.
+        unique_ids: List[Any] = []
+        unique_ids_bytes = 0
+        unencodable: List[Any] = []
+        seen: set = set()
+        for node_id in node_ids:
+            try:
+                key = ("h", node_id)
+                hash(key)
+                hashable = True
+            except Exception:
+                hashable = False
+            if hashable and key in seen:
+                continue
+            # Only an unhashable id needs the sorted form, as its dedupe key;
+            # sorting a hashable one could refuse keys the unsorted form takes.
+            try:
+                encoded = json.dumps(node_id, sort_keys=not hashable, default=str)
+            except Exception:
+                key = ("i", id(node_id))
+                if key not in seen:
+                    seen.add(key)
+                    unencodable.append(node_id)
+                continue
+            if not hashable:
+                key = ("u", encoded)
+            if key not in seen:
+                seen.add(key)
+                unique_ids.append(node_id)
+                unique_ids_bytes += len(encoded)
+        # Both caps are checked before the resolve below, which costs one node
+        # lookup per id: the write path enforces them too, but only after that
+        # work is already done.
+        if len(unique_ids) > session_manager.max_ops_per_batch:
             return {
                 "success": False,
                 "error": "too_large",
-                "message": "Too many nodes in one write; split into batches.",
+                "message": (
+                    f"Too many node ids in one write (the cap is "
+                    f"{session_manager.max_ops_per_batch}); split into batches."
+                ),
+            }
+        # The length of ``json.dumps(unique_ids)``: the brackets plus a ", "
+        # between items.
+        if unique_ids_bytes + 2 * max(len(unique_ids), 1) > (
+            session_manager.max_op_batch_bytes
+        ):
+            return {
+                "success": False,
+                "error": "too_large",
+                "message": (
+                    f"The node ids in one write exceed the "
+                    f"{session_manager.max_op_batch_bytes}-byte size cap; send "
+                    "fewer or shorter ids per call."
+                ),
             }
 
         # Resolve through the projection under the *mutate* decision, not a read
@@ -1718,28 +1843,24 @@ def register_mcp_tools(
         # above, so a target-aware hook is asked about this tool twice rather
         # than about a helper it has never heard of.
         resolved = service.resolve_session_node_semantics(
-            node_ids, action=GRAPH_ACTION_MUTATE, target="add_nodes_to_session"
+            unique_ids, action=GRAPH_ACTION_MUTATE, target="add_nodes_to_session"
         )
         if not resolved.get("success"):
             return resolved
         known = resolved.get("nodes") or {}
-        resolvable = [
-            node_id
-            for node_id in node_ids
-            if isinstance(node_id, str) and node_id in known
-        ]
         # Anything not resolvable is skipped, including an id that is not a
         # string at all — `known` is keyed by string id, so testing membership
-        # for an unhashable value would raise instead. Deduplicated in order for
-        # the same reason `added` is: a repeated id is one id, whichever list it
-        # ends up in. Non-strings are compared by equality, since an unhashable
-        # one cannot go in a set.
-        skipped: List[Any] = []
-        for node_id in node_ids:
-            if isinstance(node_id, str) and node_id in known:
-                continue
-            if node_id not in skipped:
-                skipped.append(node_id)
+        # for an unhashable value would raise instead.
+        resolvable = [
+            node_id
+            for node_id in unique_ids
+            if isinstance(node_id, str) and node_id in known
+        ]
+        skipped = [
+            node_id
+            for node_id in unique_ids
+            if not (isinstance(node_id, str) and node_id in known)
+        ] + unencodable
         if not resolvable:
             return {
                 "success": False,
@@ -1788,18 +1909,13 @@ def register_mcp_tools(
             return {
                 "success": False,
                 "error": "too_large",
-                "message": "Too many nodes in one write; split into batches.",
-            }
-        except SessionNotFound:
-            return {
-                "success": False,
-                "error": (
-                    f"Session '{session_id}' not found. "
-                    "This tool acts on a session's stored state, which exists "
-                    "once create_visualization_session created it or a browser "
-                    "made its first change to it."
+                "message": (
+                    "Too many node ids, or too many bytes of them, in one write; "
+                    "split into batches."
                 ),
             }
+        except SessionNotFound:
+            return session_not_found
         except OpError as exc:
             return {"success": False, "error": str(exc)}
         return {
@@ -1873,10 +1989,17 @@ def register_mcp_tools(
         Create a new, empty visualization session and return its identity.
 
         Use this to prepare a named session from scratch: create it, add nodes
-        with the search/related tools (passing the returned session id as
-        ``visualization_session_id``), inspect its geometry with
+        with ``add_nodes_to_session``, inspect its geometry with
         ``get_visualization_layout``, arrange it with
         ``apply_visualization_layout``, then hand the user its link.
+
+        ``add_nodes_to_session`` writes the session's stored state whether or
+        not anyone has it open. Passing the session id as
+        ``visualization_session_id`` to the search/related tools is not a
+        substitute: a push writes no session state, so its nodes land only if a
+        canvas receives it and adds them. Check ``visualization_delivery``
+        (``delivered``, ``status``) on such a result before assuming the push
+        reached anything.
 
         Args:
             name: Optional display name. Names are not required to be unique; when
@@ -1954,7 +2077,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_READ, "get_visualization_session")
         if denied:
@@ -1984,27 +2107,38 @@ def register_mcp_tools(
             name: The new display name, or null to clear it.
 
         Returns:
-            Dict with success and the updated session resource.
+            Dict with success and the updated session resource. Each call draws
+            one unit from a rate budget shared with no other tool; busy and
+            rate_limited are retryable.
         """
         if session_manager is None:
             return {"success": False, "error": "Session manager not available"}
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "rename_visualization_session")
         if denied:
             return denied
         try:
             session = session_manager.rename_session_sync(
-                session_id, name, client_id=_MCP_SESSION_CLIENT_ID
+                session_id,
+                name,
+                client_id=_MCP_SESSION_CLIENT_ID,
+                rate_limit_label="rename_visualization_session",
             )
         except LayoutBusy:
             return {
                 "success": False,
                 "error": "busy",
                 "message": "Another change is being applied to this session; retry.",
+            }
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many session writes; slow down and retry.",
             }
         except SessionLimitReached:
             return {
@@ -2039,14 +2173,15 @@ def register_mcp_tools(
 
         Returns:
             Dict with success and deleted=true, or a confirmation_required / error
-            result.
+            result. A confirmed call draws one unit from a rate budget shared with
+            no other tool; busy and rate_limited are retryable.
         """
         if session_manager is None:
             return {"success": False, "error": "Session manager not available"}
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "delete_visualization_session")
         if denied:
@@ -2062,13 +2197,21 @@ def register_mcp_tools(
             }
         try:
             existed = session_manager.delete_session_sync(
-                session_id, deleted_by=_MCP_SESSION_CLIENT_ID
+                session_id,
+                deleted_by=_MCP_SESSION_CLIENT_ID,
+                rate_limit_label="delete_visualization_session",
             )
         except LayoutBusy:
             return {
                 "success": False,
                 "error": "busy",
                 "message": "Another change is being applied to this session; retry.",
+            }
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many session writes; slow down and retry.",
             }
         if not existed:
             return {"success": False, "error": f"Session '{session_id}' not found."}
@@ -2115,7 +2258,7 @@ def register_mcp_tools(
         if session_manager is None:
             return {"error": "Session manager not available"}
         if not is_valid_session_id(session_id):
-            return {"error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD"}
+            return {"error": _INVALID_SESSION_ID_ERROR}
         denied = _authorize_session(GRAPH_ACTION_READ, "list_sticky_notes")
         if denied:
             return denied
@@ -2196,7 +2339,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "create_sticky_note")
         if denied:
@@ -2377,7 +2520,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "update_sticky_note")
         if denied:
@@ -2533,7 +2676,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "delete_sticky_note")
         if denied:
@@ -2713,7 +2856,7 @@ def register_mcp_tools(
         if session_manager is None:
             return {"error": "Session manager not available"}
         if not is_valid_session_id(session_id):
-            return {"error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD"}
+            return {"error": _INVALID_SESSION_ID_ERROR}
         denied = _authorize_session(GRAPH_ACTION_READ, "list_annotations")
         if denied:
             return denied
@@ -2871,7 +3014,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "create_annotation")
         if denied:
@@ -3134,7 +3277,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "create_image_annotation")
         if denied:
@@ -3367,7 +3510,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "update_annotation")
         if denied:
@@ -3536,7 +3679,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "reorder_annotation")
         if denied:
@@ -3671,7 +3814,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "set_annotation_lock")
         if denied:
@@ -3810,7 +3953,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "duplicate_annotation")
         if denied:
@@ -3968,7 +4111,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "delete_annotation")
         if denied:
@@ -4135,7 +4278,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "create_group_annotation")
         if denied:
@@ -4297,7 +4440,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "update_group_members")
         if denied:
@@ -4464,7 +4607,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "delete_group_annotation")
         if denied:
@@ -4595,11 +4738,14 @@ def _push_to_session(
     - ``warning`` — present only when undelivered, naming the state that made it
       so.
 
-    A push leaves no trace in the session's stored state (only
+    A push writes nothing to the session's stored state when it is sent (only
     ``add_nodes_to_session`` writes ``node_refs``), so a caller that ignores this
-    report cannot tell afterwards whether anything received the push.
-    ``delivered`` means a consumer was attached when the command was enqueued,
-    not that the canvas has finished applying it.
+    report cannot tell afterwards whether anything received the push. An
+    undelivered push is not necessarily discarded: a legacy registry entry with
+    nothing draining it keeps the command queued, and a browser that opens the
+    session later may still apply it.
+    ``delivered`` means a consumer was attached when the command was sent, not
+    that the canvas has finished applying it.
     """
     if not session_id:
         return {"requested": False, "delivered": False, "status": "not_requested"}

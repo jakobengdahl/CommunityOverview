@@ -28,6 +28,8 @@ function FloatingSearch({ variant = 'floating' }) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
+  // The query whose results are rendered, so tests can wait on the applied outcome.
+  const [resultsQuery, setResultsQuery] = useState(null);
   const [showDropdown, setShowDropdown] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef(null);
@@ -171,30 +173,41 @@ function FloatingSearch({ variant = 'floating' }) {
   useEffect(() => {
     if (query.length < 2) {
       setResults([]);
+      setResultsQuery(null);
       setShowDropdown(false);
       return;
     }
 
+    // Set when the query or depth changes, so a response that settles afterwards
+    // cannot repopulate results the user has already typed past or cleared.
+    let cancelled = false;
     clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(async () => {
       setIsLoading(true);
       try {
         const result = await api.searchGraph(query, { limit: 10, federationDepth });
+        if (cancelled) return;
         const nodes = (result.nodes || []).filter(
           (n) => n.type !== 'Community' && n.type !== 'VisualizationView'
         );
         setResults(nodes);
+        setResultsQuery(query);
         setSelectedIndex(0);
         setShowDropdown(nodes.length > 0);
       } catch (err) {
+        if (cancelled) return;
         console.error('Search error:', err);
         setResults([]);
+        setResultsQuery(query);
       } finally {
         setIsLoading(false);
       }
     }, 300);
 
-    return () => clearTimeout(debounceRef.current);
+    return () => {
+      cancelled = true;
+      clearTimeout(debounceRef.current);
+    };
   }, [query, federationDepth]);
 
   // Click outside to close
@@ -307,6 +320,7 @@ function FloatingSearch({ variant = 'floating' }) {
         }
         setQuery('');
         setResults([]);
+        setResultsQuery(null);
         setShowDropdown(false);
         return;
       }
@@ -343,6 +357,7 @@ function FloatingSearch({ variant = 'floating' }) {
 
       setQuery('');
       setResults([]);
+      setResultsQuery(null);
       setShowDropdown(false);
     },
     [
@@ -382,6 +397,7 @@ function FloatingSearch({ variant = 'floating' }) {
       className={`floating-search${variant === 'sheet' ? ' floating-search--sheet' : ''}`}
       id="guide-target-search"
       ref={containerRef}
+      data-results-query={resultsQuery ?? undefined}
     >
       <div className="floating-search-bar">
         <Search size={18} className="floating-search-icon" aria-hidden="true" />

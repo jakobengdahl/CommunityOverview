@@ -716,6 +716,11 @@ export class SessionSyncClient {
     // guards on, instead of racing the stream's own lazy materialisation.
     this._readyWaiters = [];
     this._hadSnapshot = false;
+    // Seq the host's initial REST load reflected (setBaseline's `seq`), or
+    // null when the baseline did not come from a load. The first stream
+    // snapshot carries no content the host applies, so a snapshot newer than
+    // this means ops landed between that load and the stream subscribe.
+    this._loadedSeq = null;
     this._source = null;
     this._flushTimer = null;
     this._retryTimer = null;
@@ -756,6 +761,12 @@ export class SessionSyncClient {
 
   get seq() {
     return this._seq;
+  }
+  // Read-only view of `_appliedSeq`, for App.jsx's resyncFromServer: a reload
+  // whose payload seq is below this is older than state the stream already
+  // applied, and applying it would wipe that state.
+  get appliedSeq() {
+    return this._appliedSeq;
   }
   get connected() {
     return this._source != null;
@@ -1222,9 +1233,14 @@ export class SessionSyncClient {
     return new Promise((resolve) => this._readyWaiters.push(resolve));
   }
 
-  /** Set the synced baseline without emitting ops (after a load or remote apply). */
-  setBaseline(state) {
+  /**
+   * Set the synced baseline without emitting ops (after a load or remote apply).
+   * Pass `seq` when `state` came from the initial session load, so the first
+   * stream snapshot can tell whether the load was already stale.
+   */
+  setBaseline(state, { seq } = {}) {
     this._baseline = normalizeMirror(state);
+    if (typeof seq === 'number') this._loadedSeq = seq;
     // A wholesale reset (initial load, or resyncFromServer after a
     // reconnect) makes any pending "skip the next echo-fold" markers moot —
     // the fresh baseline already reflects server truth for every annotation,
@@ -1402,7 +1418,11 @@ export class SessionSyncClient {
   }
 
   _scheduleFlush() {
-    if (this._flushTimer || this._closed) return;
+    // While a retry is pending it owns the next send: a debounced flush ahead of
+    // it would re-hit a server that just failed (429/5xx/timeout) every
+    // flushIntervalMs and turn the backoff into a no-op. Ops enqueued meanwhile
+    // ride the retry.
+    if (this._flushTimer || this._retryTimer || this._closed) return;
     this._flushTimer = setTimeout(() => {
       this._flushTimer = null;
       this._flush();
@@ -1641,7 +1661,14 @@ export class SessionSyncClient {
   }
 
   _scheduleRetry() {
-    if (this._retryTimer || this._closed) return;
+    if (this._closed) return;
+    // A flush debounced while this request was in flight would otherwise fire
+    // before the backoff.
+    if (this._flushTimer) {
+      clearTimeout(this._flushTimer);
+      this._flushTimer = null;
+    }
+    if (this._retryTimer) return;
     this._retryTimer = setTimeout(
       () => {
         this._retryTimer = null;
@@ -1676,6 +1703,16 @@ export class SessionSyncClient {
         if (!this._hadSnapshot) {
           this._hadSnapshot = true;
           if (this.handlers.onReady) this.handlers.onReady(data.seq);
+          if (
+            typeof data.seq === 'number' &&
+            typeof this._loadedSeq === 'number' &&
+            data.seq > this._loadedSeq &&
+            this.handlers.onResync
+          ) {
+            // Name the session: during a session switch the host's handler can
+            // still be bound to the previous one when this snapshot arrives.
+            this.handlers.onResync(this.sessionId);
+          }
         } else {
           this._readvertiseSelection();
           this._readvertiseLeases();

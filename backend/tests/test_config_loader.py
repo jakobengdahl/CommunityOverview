@@ -278,7 +278,7 @@ class TestConfigLoader:
         assert presentation["language_policy"]["mode"] == "required"
         assert presentation["language_policy"]["primary_language"] == "en"
         assert presentation["language_policy"]["allowed_languages"] == ["en"]
-        assert presentation["capabilities"] == [
+        assert presentation["capabilities"][:2] == [
             {
                 "id": "graph_export",
                 "name": "Graph export",
@@ -291,6 +291,9 @@ class TestConfigLoader:
                 "description": "Provides configuration for guided assistant interactions.",
                 "enabled": False,
             },
+        ]
+        assert [c["id"] for c in presentation["capabilities"][2:]] == [
+            "animated_layout"
         ]
 
         del os.environ["SCHEMA_FILE"]
@@ -371,6 +374,389 @@ class TestConfigLoader:
 
         assert [c["id"] for c in capabilities] == ["animated_layout"]
         assert capabilities[0]["enabled"] is False
+
+    def _load_capability_config(self, tmp_path, capabilities):
+        from backend.config import config_loader
+
+        config_path = tmp_path / "schema_config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "schema": {
+                        "node_types": {
+                            "Widget": {
+                                "fields": ["name"],
+                                "description": "A widget",
+                                "color": "#123456",
+                            }
+                        },
+                        "relationship_types": {},
+                    },
+                    "presentation": {
+                        "title": "Capability Test Graph",
+                        "colors": {"Widget": "#abcdef"},
+                        "capabilities": capabilities,
+                    },
+                }
+            )
+        )
+        os.environ["SCHEMA_FILE"] = str(config_path)
+        config_loader.reset_loader()
+        return config_loader
+
+    @pytest.mark.parametrize("name", ["<absent>", "", None])
+    def test_capability_without_name_keeps_schema_and_its_disabled_flag(
+        self, tmp_path, name
+    ):
+        """The exact override that used to discard the whole config."""
+        entry = {"id": "animated_layout", "enabled": False}
+        if name != "<absent>":
+            entry["name"] = name
+        config_loader = self._load_capability_config(tmp_path, [entry])
+
+        assert "Widget" in config_loader.get_node_type_names()
+        presentation = config_loader.get_presentation()
+        assert presentation["title"] == "Capability Test Graph"
+        assert presentation["colors"]["Widget"] == "#abcdef"
+        capabilities = config_loader.get_capabilities()["capabilities"]
+        assert capabilities == [
+            {
+                "id": "animated_layout",
+                "name": "animated_layout",
+                "description": "",
+                "enabled": False,
+            }
+        ]
+
+    def test_invalid_capability_entry_is_dropped_alone(self, tmp_path, caplog):
+        config_loader = self._load_capability_config(
+            tmp_path,
+            [
+                {"id": "search", "name": "Search", "enabled": True},
+                {"name": "No id", "enabled": True},
+                "not-an-object",
+                {"id": "broken", "enabled": None},
+                {"id": "export", "name": "Export", "enabled": False},
+            ],
+        )
+
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            node_type_names = config_loader.get_node_type_names()
+
+        assert "Widget" in node_type_names
+        presentation = config_loader.get_presentation()
+        assert presentation["title"] == "Capability Test Graph"
+        assert presentation["colors"]["Widget"] == "#abcdef"
+        capabilities = config_loader.get_capabilities()["capabilities"]
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("search", True),
+            ("export", False),
+            ("animated_layout", True),
+        ]
+        skipped = [
+            r.getMessage()
+            for r in caplog.records
+            if "Skipping invalid presentation.capabilities" in r.getMessage()
+        ]
+        assert len(skipped) == 3
+        assert "capabilities[1]" in skipped[0]
+        assert "capabilities[2]" in skipped[1]
+        assert "capabilities[3]" in skipped[2]
+
+    def test_invalid_override_of_default_capability_reports_it_disabled(self, tmp_path):
+        """A declared-but-broken override must not read as the enabled default."""
+        config_loader = self._load_capability_config(
+            tmp_path, [{"id": "animated_layout", "enabled": None}]
+        )
+
+        assert config_loader.get_presentation()["title"] == "Capability Test Graph"
+        capabilities = config_loader.get_capabilities()["capabilities"]
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("animated_layout", False)
+        ]
+
+    @pytest.mark.parametrize(
+        "capabilities",
+        [
+            {"id": "animated_layout", "enabled": False},
+            {"id": "animated_layout", "name": "Animated layout"},
+            {"animated_layout": {"enabled": False}},
+        ],
+    )
+    def test_non_list_capabilities_is_ignored_not_fatal(
+        self, tmp_path, caplog, capabilities
+    ):
+        config_loader = self._load_capability_config(tmp_path, capabilities)
+
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            node_type_names = config_loader.get_node_type_names()
+
+        assert "Widget" in node_type_names
+        assert any(
+            "presentation.capabilities must be a list" in r.getMessage()
+            for r in caplog.records
+        )
+        assert config_loader.get_presentation()["title"] == "Capability Test Graph"
+        capabilities = config_loader.get_capabilities()["capabilities"]
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("animated_layout", False)
+        ]
+        assert config_loader.get_presentation()["capabilities"] == capabilities
+
+    @pytest.mark.parametrize("capabilities", [True, 5, "animated_layout"])
+    def test_scalar_capabilities_is_ignored_not_fatal(
+        self, tmp_path, caplog, capabilities
+    ):
+        """A scalar declares no id, so the default stays enabled and the rest loads."""
+        config_loader = self._load_capability_config(tmp_path, capabilities)
+
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            node_type_names = config_loader.get_node_type_names()
+
+        assert "Widget" in node_type_names
+        assert any(
+            "presentation.capabilities must be a list" in r.getMessage()
+            for r in caplog.records
+        )
+        assert config_loader.get_presentation()["title"] == "Capability Test Graph"
+        capabilities = config_loader.get_capabilities()["capabilities"]
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("animated_layout", True)
+        ]
+        assert config_loader.get_declared_capability_count() == 0
+
+    @pytest.mark.parametrize("valid_first", [False, True])
+    def test_valid_entry_wins_over_a_dropped_entry_for_the_same_id(
+        self, tmp_path, valid_first
+    ):
+        entries = [
+            {"id": "animated_layout", "enabled": None},
+            {"id": "animated_layout", "enabled": True},
+        ]
+        if valid_first:
+            entries.reverse()
+        config_loader = self._load_capability_config(tmp_path, entries)
+
+        capabilities = config_loader.get_capabilities()["capabilities"]
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("animated_layout", True)
+        ]
+        assert config_loader.get_declared_capability_count() == 1
+
+    @pytest.mark.parametrize("breakage", ["missing", "invalid-json"])
+    def test_reload_to_a_default_config_forgets_a_previously_dropped_override(
+        self, tmp_path, breakage
+    ):
+        config_loader = self._load_capability_config(
+            tmp_path, [{"id": "animated_layout", "enabled": None}]
+        )
+        assert config_loader.get_capabilities()["capabilities"][0]["enabled"] is False
+
+        config_path = tmp_path / "schema_config.json"
+        if breakage == "missing":
+            config_path.unlink()
+        else:
+            config_path.write_text("{not json")
+        config_loader.reload_config()
+
+        assert "Widget" not in config_loader.get_node_type_names()
+        capabilities = config_loader.get_capabilities()["capabilities"]
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("animated_layout", True)
+        ]
+
+    def _load_capability_config_with_fatal_error(self, tmp_path, capabilities):
+        config_loader = self._load_capability_config(tmp_path, capabilities)
+        config_path = tmp_path / "schema_config.json"
+        broken = json.loads(config_path.read_text())
+        broken["schema"]["node_types"] = "not-an-object"
+        config_path.write_text(json.dumps(broken))
+        config_loader.reset_loader()
+        return config_loader
+
+    def test_fatal_fallback_keeps_a_valid_capability_override(self, tmp_path, caplog):
+        config_loader = self._load_capability_config_with_fatal_error(
+            tmp_path,
+            [
+                {"id": "search", "name": "Search"},
+                {"id": "animated_layout", "enabled": False},
+            ],
+        )
+
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            node_type_names = config_loader.get_node_type_names()
+
+        assert "Widget" not in node_type_names
+        assert any("Error loading config" in r.getMessage() for r in caplog.records)
+        capabilities = config_loader.get_capabilities()["capabilities"]
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("search", True),
+            ("animated_layout", False),
+        ]
+        assert config_loader.get_declared_capability_count() == 2
+
+    def test_fatal_fallback_reports_a_broken_override_disabled(self, tmp_path):
+        config_loader = self._load_capability_config_with_fatal_error(
+            tmp_path, [{"id": "animated_layout", "enabled": None}]
+        )
+
+        capabilities = config_loader.get_capabilities()["capabilities"]
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("animated_layout", False)
+        ]
+
+    def test_fatal_fallback_on_non_object_config_uses_server_defaults(self, tmp_path):
+        from backend.config import config_loader
+
+        config_path = tmp_path / "schema_config.json"
+        config_path.write_text(json.dumps([{"id": "animated_layout"}]))
+        os.environ["SCHEMA_FILE"] = str(config_path)
+        config_loader.reset_loader()
+
+        capabilities = config_loader.get_capabilities()["capabilities"]
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("animated_layout", True)
+        ]
+
+    def test_unreadable_config_path_uses_server_defaults(self, tmp_path, caplog):
+        """A directory is neither missing nor JSON: the generic fallback handles it."""
+        from backend.config import config_loader
+
+        os.environ["SCHEMA_FILE"] = str(tmp_path)
+        config_loader.reset_loader()
+
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            capabilities = config_loader.get_capabilities()["capabilities"]
+
+        assert any("Error loading config" in r.getMessage() for r in caplog.records)
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("animated_layout", True)
+        ]
+        assert config_loader.get_declared_capability_count() == 0
+
+    def _write_raw_config(self, tmp_path, raw):
+        from backend.config import config_loader
+
+        config_path = tmp_path / "schema_config.json"
+        config_path.write_text(json.dumps(raw))
+        os.environ["SCHEMA_FILE"] = str(config_path)
+        config_loader.reset_loader()
+        return config_loader
+
+    def test_fatal_fallback_without_a_capabilities_key_uses_server_defaults(
+        self, tmp_path
+    ):
+        config_loader = self._write_raw_config(
+            tmp_path,
+            {
+                "schema": {"node_types": "not-an-object"},
+                "presentation": {"title": "No Capabilities Declared"},
+            },
+        )
+
+        assert config_loader.get_presentation()["title"] != "No Capabilities Declared"
+        capabilities = config_loader.get_capabilities()["capabilities"]
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("animated_layout", True)
+        ]
+        assert config_loader.get_declared_capability_count() == 0
+
+    def test_fatal_fallback_on_non_object_presentation_uses_server_defaults(
+        self, tmp_path, caplog
+    ):
+        config_loader = self._write_raw_config(
+            tmp_path, {"presentation": "not-an-object"}
+        )
+
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            capabilities = config_loader.get_capabilities()["capabilities"]
+
+        assert any("Error loading config" in r.getMessage() for r in caplog.records)
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("animated_layout", True)
+        ]
+        assert config_loader.get_declared_capability_count() == 0
+
+    def test_fatal_error_inside_presentation_keeps_the_capability_override(
+        self, tmp_path, caplog
+    ):
+        config_loader = self._write_raw_config(
+            tmp_path,
+            {
+                "presentation": {
+                    "title": "Broken Presentation",
+                    "colors": "not-an-object",
+                    "capabilities": [
+                        {"id": "search", "name": "Search"},
+                        {"id": "animated_layout", "enabled": False},
+                    ],
+                }
+            },
+        )
+
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            presentation = config_loader.get_presentation()
+
+        assert any("Error loading config" in r.getMessage() for r in caplog.records)
+        assert presentation["title"] != "Broken Presentation"
+        capabilities = config_loader.get_capabilities()["capabilities"]
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("search", True),
+            ("animated_layout", False),
+        ]
+        assert presentation["capabilities"] == capabilities
+        assert config_loader.get_declared_capability_count() == 2
+
+    def test_fatal_fallback_treats_duplicate_ids_like_a_clean_load(self, tmp_path):
+        """Whatever the loader does with repeated ids, the fallback must not differ,
+        and the declared count must describe the declared part of the manifest."""
+        duplicates = [
+            {"id": "search", "name": "Search"},
+            {"id": "search", "enabled": False},
+            {"id": "animated_layout", "enabled": False},
+            {"id": "animated_layout", "enabled": None},
+            {"id": "animated_layout"},
+        ]
+        clean_loader = self._load_capability_config(tmp_path, duplicates)
+        clean_manifest = clean_loader.get_capabilities()["capabilities"]
+        clean_count = clean_loader.get_declared_capability_count()
+
+        fallback_loader = self._load_capability_config_with_fatal_error(
+            tmp_path, duplicates
+        )
+        assert "Widget" not in fallback_loader.get_node_type_names()
+
+        assert fallback_loader.get_capabilities()["capabilities"] == clean_manifest
+        assert fallback_loader.get_declared_capability_count() == clean_count
+        # animated_layout is declared, so no default is appended.
+        assert clean_count == len(clean_manifest)
+
+    def test_presentation_capabilities_match_the_discovery_manifest(self, tmp_path):
+        config_loader = self._load_capability_config(
+            tmp_path, [{"id": "search", "name": "Search"}]
+        )
+
+        manifest = config_loader.get_capabilities()["capabilities"]
+        assert [c["id"] for c in manifest] == ["search", "animated_layout"]
+        assert config_loader.get_presentation()["capabilities"] == manifest
+        assert config_loader.get_declared_capability_count() == 1
+
+    def test_reload_after_fixing_a_broken_override_restores_the_default(self, tmp_path):
+        config_loader = self._load_capability_config(
+            tmp_path, [{"id": "animated_layout", "enabled": None}]
+        )
+        assert config_loader.get_capabilities()["capabilities"][0]["enabled"] is False
+
+        config_path = tmp_path / "schema_config.json"
+        fixed = json.loads(config_path.read_text())
+        fixed["presentation"]["capabilities"] = []
+        config_path.write_text(json.dumps(fixed))
+        config_loader.reload_config()
+
+        capabilities = config_loader.get_capabilities()["capabilities"]
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("animated_layout", True)
+        ]
 
     def test_get_runtime_info_defaults_to_standalone(self):
         """Test runtime metadata defaults to standalone mode with no extensions."""

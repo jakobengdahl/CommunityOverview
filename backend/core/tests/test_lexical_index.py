@@ -128,7 +128,7 @@ class TestTheCorpusNoticesEveryWayItCanGoStale:
 
     def test_a_node_added_after_the_first_search_is_found(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        storage = GraphStorage()
+        storage = GraphStorage(json_path=str(tmp_path / "graph.json"))
         storage.add_nodes([_node("a", "first node")], [])
         assert [n.id for n in storage.search_nodes(query="first")] == ["a"]
 
@@ -139,7 +139,7 @@ class TestTheCorpusNoticesEveryWayItCanGoStale:
         self, tmp_path, monkeypatch
     ):
         monkeypatch.chdir(tmp_path)
-        storage = GraphStorage()
+        storage = GraphStorage(json_path=str(tmp_path / "graph.json"))
         storage.add_nodes([_node("a", "before")], [])
         assert [n.id for n in storage.search_nodes(query="before")] == ["a"]
 
@@ -149,7 +149,7 @@ class TestTheCorpusNoticesEveryWayItCanGoStale:
 
     def test_a_deleted_node_stops_being_found(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        storage = GraphStorage()
+        storage = GraphStorage(json_path=str(tmp_path / "graph.json"))
         storage.add_nodes([_node("a", "doomed"), _node("b", "surviving")], [])
         assert [n.id for n in storage.search_nodes(query="doomed")] == ["a"]
 
@@ -315,6 +315,47 @@ class TestWhatGoesIntoTheMatchedText:
         text = build_match_fields(node, TYPE_TEXT).text
         assert "abcd" not in text
         assert "ab cd" in text
+
+
+class TestTypeLabelsReachEveryType:
+    """The type-text lookup is keyed on the schema's type name. Legacy enum
+    types used to look themselves up as ``str(NodeType.ACTOR)`` -
+    ``'NodeType.ACTOR'`` - and miss, while schema-only string types hit, so
+    localized labels were reachable for some types and not others."""
+
+    LABELLED = {
+        "Actor": "actor aktör",
+        "CustomerSegment": "customersegment kundsegment",
+        "Market": "market marknad",
+    }
+
+    @pytest.mark.parametrize(
+        "node_type,label",
+        [
+            (NodeType.ACTOR, "aktör"),
+            # Schema-only types stay plain strings; "Actor" would be coerced to
+            # the enum and repeat the case above.
+            ("CustomerSegment", "kundsegment"),
+            ("Market", "marknad"),
+        ],
+    )
+    def test_the_localized_label_is_searchable(self, node_type, label):
+        fields = build_match_fields(
+            Node(id="a", type=node_type, name="x"), self.LABELLED
+        )
+        assert label in fields.text
+        assert fields.type_text == self.LABELLED[fields.type_key]
+
+    @pytest.mark.parametrize("node_type", ["CustomerSegment", "Market"])
+    def test_the_schema_only_cases_really_are_strings(self, node_type):
+        assert not isinstance(Node(id="a", type=node_type, name="x").type, NodeType)
+
+    def test_an_enum_type_does_not_match_its_python_repr(self):
+        fields = build_match_fields(
+            Node(id="a", type=NodeType.ACTOR, name="x"), self.LABELLED
+        )
+        assert fields.type_name == "actor"
+        assert "nodetype" not in fields.text
 
 
 class TestTheRankingKeptItsOrderAndItsTieBreak:
@@ -646,7 +687,7 @@ class TestTheIndexAlwaysCoversTheNodesItAnswersFor:
         cwd = os.getcwd()
         os.chdir(tmp_path)
         try:
-            storage = GraphStorage()
+            storage = GraphStorage(json_path=str(tmp_path / "graph.json"))
         finally:
             os.chdir(cwd)
             # Building a GraphStorage resolves the config loader against the
@@ -793,7 +834,6 @@ class TestAReloadLeavesTheIndexIteratingInStepWithTheNodes:
     """
 
     def test_equal_scoring_nodes_come_back_in_the_reloaded_order(self, tmp_path):
-        import json
         import os
 
         from backend.config.config_loader import reset_loader
@@ -803,26 +843,20 @@ class TestAReloadLeavesTheIndexIteratingInStepWithTheNodes:
         cwd = os.getcwd()
         os.chdir(tmp_path)
         try:
-            storage = GraphStorage()
+            storage = GraphStorage(json_path=str(tmp_path / "graph.json"))
             storage.add_nodes([_node(i, f"{i} widget") for i in ids], [])
 
             for _ in range(15):  # make the corpus worth rebuilding
                 storage.search_nodes(query="widget", limit=50)
 
-            (tmp_path / "graph.json").write_text(
-                json.dumps(
-                    {
-                        "nodes": [
-                            {"id": i, "type": "Actor", "name": f"{i} widget"}
-                            for i in reversed(ids)
-                        ],
-                        "edges": [],
-                    }
-                )
+            _write_store(
+                storage,
+                tmp_path,
+                [
+                    {"id": i, "type": "Actor", "name": f"{i} widget"}
+                    for i in reversed(ids)
+                ],
             )
-            for stray in ("graph.journal.ndjson", "graph.history.ndjson"):
-                if (tmp_path / stray).exists():
-                    (tmp_path / stray).unlink()
             storage.load()
 
             assert list(storage._searchable_text_cache) == list(storage.nodes)
@@ -902,7 +936,7 @@ class TestTwoWritesInFlightCannotHideEachOther:
         cwd = os.getcwd()
         os.chdir(tmp_path)
         try:
-            storage = GraphStorage()
+            storage = GraphStorage(json_path=str(tmp_path / "graph.json"))
             seen = []
             real = LexicalIndex.__setitem__
 
@@ -983,7 +1017,15 @@ class TestEveryWritePathOrdersTheIndexAgainstTheNodes:
         cwd = os.getcwd()
         os.chdir(tmp_path)
         try:
-            return GraphStorage(), cwd, reset_loader
+            # An absolute graph path, not the relative default: the write
+            # lands on a background worker that can run after the caller has
+            # restored the working directory, and a relative path then puts
+            # the journal and history files in the repository root.
+            return (
+                GraphStorage(json_path=str(tmp_path / "graph.json")),
+                cwd,
+                reset_loader,
+            )
         except Exception:
             os.chdir(cwd)
             raise
@@ -1165,3 +1207,667 @@ class TestARenameLandingMidScanDoesNotReturnANonMatch:
         assert found == [], (
             f"returned {[n.id for n in found]} for a term none of them contain"
         )
+
+
+def _index_with(nodes, type_text):
+    index = LexicalIndex()
+    for node in nodes:
+        index[node.id] = build_match_fields(node, type_text)
+    return index
+
+
+class _StorageIn:
+    """A GraphStorage rooted in a scratch directory, with the process-wide
+    config loader reset on the way out - see
+    `test_every_storage_write_path_keeps_the_index_a_superset` for why.
+
+    The graph path is absolute: writes land on a background worker that can
+    run after the working directory is restored, and a relative path would
+    then put the journal and history files in the repository root."""
+
+    def __init__(self, directory):
+        self._directory = directory
+
+    def __enter__(self):
+        import os
+
+        self._cwd = os.getcwd()
+        os.chdir(self._directory)
+        try:
+            return GraphStorage(json_path=str(self._directory / "graph.json"))
+        except Exception:
+            self.__exit__(None, None, None)
+            raise
+
+    def __exit__(self, *exc):
+        import os
+
+        from backend.config.config_loader import reset_loader
+
+        os.chdir(self._cwd)
+        reset_loader()
+        return False
+
+
+def _write_store(storage, directory, nodes):
+    """Replace the store behind `storage`'s back, as another writer would.
+
+    Drains `storage`'s own queued writes first: one landing after the rewrite
+    appends to a journal written against the old graph.json, and `load` then
+    refuses the store instead of reading it."""
+    import json
+
+    storage.flush()
+    (directory / "graph.json").write_text(json.dumps({"nodes": nodes, "edges": []}))
+    for stray in ("graph.journal.ndjson", "graph.history.ndjson"):
+        if (directory / stray).exists():
+            (directory / stray).unlink()
+
+
+def _watch_candidates(monkeypatch, index):
+    """Record what `candidates` answered, for this index only."""
+    answers = []
+    real = LexicalIndex.candidates
+
+    def watching(self, term):
+        answer = real(self, term)
+        if self is index:
+            answers.append(answer)
+        return answer
+
+    monkeypatch.setattr(LexicalIndex, "candidates", watching)
+    return answers
+
+
+class TestTheBandBetweenTheFloorAndTheFraction:
+    """At 200 nodes a quarter is 50, so the floor of 64 is what decides between
+    51 and 64 hits. No fixture sat in that band: the small ones never reach 51
+    hits and the big ones are far past 64. Dropping the floor outright is
+    caught elsewhere, by a two-node graph; lowering it into the band, or
+    cutting the candidate list short, passed every test."""
+
+    @staticmethod
+    def _graph(hits):
+        # Hits spread through the graph, so a list cut short at either end is
+        # visible, not just one that loses its tail.
+        hit_slots = set(range(0, 200, 3)[:hits]) if hits <= 67 else set(range(hits))
+        assert len(hit_slots) == hits
+        return [
+            _node(f"n{i:03d}", f"bandterm {i}" if i in hit_slots else f"filler {i}")
+            for i in range(200)
+        ]
+
+    @pytest.mark.parametrize("hits", [51, 60, 64])
+    def test_every_hit_in_the_band_is_offered(self, hits):
+        nodes = self._graph(hits)
+        index = _index(nodes)
+        _let_the_index_rebuild(index)
+
+        expected = [n.id for n in nodes if n.name.startswith("bandterm")]
+        assert index.candidates("bandterm") == expected, (
+            f"{hits} hits out of 200 sit under the floor and must be answered "
+            f"in full, in insertion order"
+        )
+
+    @pytest.mark.parametrize("hits", [51, 60, 64])
+    def test_a_search_in_the_band_returns_every_hit(self, hits, monkeypatch):
+        nodes = self._graph(hits)
+        index = _index(nodes)
+        _let_the_index_rebuild(index)
+        answers = _watch_candidates(monkeypatch, index)
+
+        found = search_nodes(
+            {node.id: node for node in nodes},
+            index,
+            TYPE_TEXT,
+            query="bandterm",
+            limit=200,
+        )
+
+        assert answers and answers[0] is not None, "the index was not the path"
+        assert len(found) == hits
+
+    def test_one_past_the_floor_is_declined(self):
+        """The gate declines on `>`, so 64 is answered and 65 is not."""
+        index = _index(self._graph(65))
+        _let_the_index_rebuild(index)
+        assert index.candidates("bandterm") is None
+
+
+class TestGraphStorageSearchesThroughTheIndex:
+    """`TestTheIndexIsActuallyConsulted` hands `search_nodes` an index it built
+    itself, so GraphStorage could pass a plain copy, the read-only view, or
+    nothing index-shaped at all - the results would be identical and nothing
+    would fail."""
+
+    def test_a_selective_storage_search_is_answered_by_its_index(
+        self, tmp_path, monkeypatch
+    ):
+        with _StorageIn(tmp_path) as storage:
+            storage.add_nodes(
+                [_node(f"n{i}", f"node {i}") for i in range(100)]
+                + [_node("needle", "findmehere")],
+                [],
+            )
+            answers = _watch_candidates(monkeypatch, storage._searchable_text_cache)
+
+            found = storage.search_nodes(query="findmehere")
+
+        assert [n.id for n in found] == ["needle"]
+        assert answers == [["needle"]], (
+            f"GraphStorage's own index answered {answers}; the search did not "
+            f"go through it"
+        )
+
+
+class TestAnyTermWithOneTermStillUsesTheIndex:
+    """`any_term` with a single distinct term is the substring query, and takes
+    the index. Gating the index on the match mode instead of on the number of
+    terms would send it to the walk - same answer, the whole cost back."""
+
+    @pytest.mark.parametrize("query", ["findmehere", "findmehere findmehere"])
+    def test_a_single_term_any_term_query_does_not_walk(self, query):
+        nodes = [_node(f"n{i}", f"node number {i}") for i in range(200)]
+        nodes.append(_node("needle", "findmehere"))
+        walked = []
+
+        class _CountingNodes(dict):
+            def values(self):
+                walked.append(True)
+                return dict.values(self)
+
+        found = search_nodes(
+            _CountingNodes({node.id: node for node in nodes}),
+            _index(nodes),
+            TYPE_TEXT,
+            query=query,
+            limit=10,
+            match_mode="any_term",
+        )
+
+        assert [n.id for n in found] == ["needle"]
+        assert not walked, f"{query!r} in any_term mode walked every node"
+
+
+class TestAReloadIndexesArchivedNodesToo:
+    """`nodes` holds archived nodes; the search filters them. If `load` left
+    them out of the index, the index would be shorter than `nodes` for as long
+    as one archived node existed, and the size test would switch the index off
+    for good - silently, since the walk gives the same answer."""
+
+    def test_the_index_covers_an_archived_node_and_still_answers(
+        self, tmp_path, monkeypatch
+    ):
+        with _StorageIn(tmp_path) as storage:
+            _write_store(
+                storage,
+                tmp_path,
+                [
+                    {"id": f"n{i}", "type": "Actor", "name": f"node {i}"}
+                    for i in range(100)
+                ]
+                + [
+                    {
+                        "id": "shelved",
+                        "type": "Actor",
+                        "name": "shelved findmehere",
+                        "archived": True,
+                    },
+                    {"id": "live", "type": "Actor", "name": "live findmehere"},
+                ],
+            )
+            storage.load()
+            index = storage._searchable_text_cache
+            assert storage.nodes["shelved"].archived, "the fixture lost its flag"
+            assert set(index) == set(storage.nodes)
+
+            answers = _watch_candidates(monkeypatch, index)
+            found = storage.search_nodes(query="findmehere")
+            with_archived = storage.search_nodes(
+                query="findmehere", include_archived=True
+            )
+
+        assert [n.id for n in found] == ["live"]
+        assert [n.id for n in with_archived] == ["shelved", "live"]
+        assert answers == [["shelved", "live"]] * 2, (
+            f"the index answered {answers} after a reload holding an archived node"
+        )
+
+
+class TestTheRecordViewIsLive:
+    """The scan reads records through `records`. Read-only is half of what it
+    must be; the other half is that it shows the records as they are NOW. A
+    snapshot - `MappingProxyType(dict(...))` - would be read-only too, and every
+    record written after construction would be missing from it, so the scan
+    would rebuild each one per query. Same answers; the prepared-fields cache
+    quietly gone."""
+
+    def test_a_record_written_after_construction_is_visible_through_the_view(self):
+        index = LexicalIndex()
+        view = index.records
+        fields = build_match_fields(_node("a", "alpha"), TYPE_TEXT)
+
+        index["a"] = fields
+        assert view.get("a") is fields
+
+        index.pop("a")
+        assert view.get("a") is None
+
+        index.update({"b": fields})
+        assert view.get("b") is fields
+
+    def test_the_scan_does_not_rebuild_records_the_index_holds(self, monkeypatch):
+        from backend.core import storage_search
+
+        nodes = [_node(f"n{i}", f"widget {i}") for i in range(5)]
+        index = LexicalIndex()
+        for node in nodes:  # written after the view exists, like GraphStorage
+            index[node.id] = build_match_fields(node, TYPE_TEXT)
+
+        built = []
+        real = storage_search.build_match_fields
+        monkeypatch.setattr(
+            storage_search,
+            "build_match_fields",
+            lambda node, text: built.append(node.id) or real(node, text),
+        )
+        found = search_nodes(
+            {n.id: n for n in nodes}, index, TYPE_TEXT, query="widget", limit=10
+        )
+
+        assert len(found) == 5
+        assert built == [], f"the scan rebuilt {built}; the view did not show them"
+
+
+def _tier_node(node_id, **kwargs):
+    kwargs.setdefault("name", f"plain {node_id}")
+    kwargs.setdefault("type", NodeType.ACTOR)
+    return Node(id=node_id, **kwargs)
+
+
+class TestEveryTierBeatsTheOneBelowItWhenInsertedSecond:
+    """Equal scores keep insertion order, so a pair inserted stronger-first
+    still comes out right after the stronger tier collapses onto the one below
+    it. Here every adjacent pair goes in weaker-first: the stronger node wins
+    only by actually scoring higher."""
+
+    @pytest.mark.parametrize(
+        "query,weaker,stronger",
+        [
+            pytest.param(
+                "widget",
+                {"name": "widget tool"},
+                {"name": "widget"},
+                id="name exact over name prefix",
+            ),
+            pytest.param(
+                "widget",
+                {"name": "the widget"},
+                {"name": "widget tool"},
+                id="name prefix over name contains",
+            ),
+            pytest.param(
+                "widget",
+                {"aliases": ["widget"]},
+                {"name": "the widget"},
+                id="name contains over alias exact",
+            ),
+            pytest.param(
+                "widget",
+                {"aliases": ["widget tool"]},
+                {"aliases": ["widget"]},
+                id="alias exact over alias prefix",
+            ),
+            pytest.param(
+                "widget",
+                {"aliases": ["the widget"]},
+                {"aliases": ["widget tool"]},
+                id="alias prefix over alias contains",
+            ),
+            pytest.param(
+                "widget",
+                {"tags": ["widget"], "subtypes": ["widget"], "description": "widget"},
+                {"aliases": ["the widget"]},
+                id="alias contains over every secondary signal",
+            ),
+            pytest.param(
+                "widget",
+                {"tags": ["widgets"]},
+                {"tags": ["widget"]},
+                id="tag exact over tag contains",
+            ),
+            pytest.param(
+                "widget",
+                {"subtypes": ["widget"]},
+                {"tags": ["widgets"]},
+                id="tag contains over subtype",
+            ),
+            pytest.param(
+                "widget",
+                {"description": "a widget"},
+                {"subtypes": ["widget"]},
+                id="subtype over description",
+            ),
+            # A query that spans two fields matches the joined text and scores
+            # nothing, which is the only way to put a node below 200.
+            pytest.param(
+                "alpha beta",
+                {"name": "alpha", "description": "beta"},
+                {"description": "alpha beta"},
+                id="description over no field",
+            ),
+            pytest.param(
+                "alpha beta",
+                {"name": "alpha", "description": "beta"},
+                {"summary": "alpha beta"},
+                id="summary over no field",
+            ),
+            # Every field is lowered once when the record is prepared; each of
+            # these only scores its tier if that lowering still happens.
+            pytest.param(
+                "widget",
+                {"aliases": ["widget"]},
+                {"name": "WIDGET"},
+                id="unlowered name",
+            ),
+            pytest.param(
+                "widget",
+                {"tags": ["widget"]},
+                {"aliases": ["WIDGET"]},
+                id="unlowered alias",
+            ),
+            pytest.param(
+                "widget",
+                {"description": "widget"},
+                {"tags": ["WIDGET"]},
+                id="unlowered tag",
+            ),
+            pytest.param(
+                "widget",
+                {"description": "widget"},
+                {"subtypes": ["WIDGET"]},
+                id="unlowered subtype",
+            ),
+            pytest.param(
+                "alpha beta",
+                {"name": "alpha", "description": "beta"},
+                {"description": "ALPHA BETA"},
+                id="unlowered description",
+            ),
+            pytest.param(
+                "alpha beta",
+                {"name": "alpha", "description": "beta"},
+                {"summary": "ALPHA BETA"},
+                id="unlowered summary",
+            ),
+        ],
+    )
+    def test_the_stronger_node_ranks_first(self, query, weaker, stronger):
+        weak = _tier_node("weaker", **weaker)
+        strong = _tier_node("stronger", **stronger)
+        by_id = {"weaker": weak, "stronger": strong}
+
+        found = search_nodes(
+            by_id, _index([weak, strong]), TYPE_TEXT, query=query, limit=10
+        )
+
+        assert [n.id for n in found] == ["stronger", "weaker"], (
+            "the stronger tier did not outscore the weaker one; it only ever "
+            "won on insertion order"
+        )
+
+    # Node types are schema-defined strings, so one type can carry the query
+    # as its whole name, another as a prefix, and a third only in its label.
+    TYPE_LABELS = {"Gadget": "gadget widget"}
+
+    @pytest.mark.parametrize(
+        "weaker,stronger",
+        [
+            pytest.param(
+                {"type": "WidgetKind"},
+                {"type": "Widget"},
+                id="type exact over type prefix",
+            ),
+            pytest.param(
+                {"type": "Gadget"},
+                {"type": "WidgetKind"},
+                id="type prefix over type label",
+            ),
+            pytest.param(
+                {"tags": ["widget"]},
+                {"type": "Gadget"},
+                id="type label over tag exact",
+            ),
+        ],
+    )
+    def test_the_stronger_type_tier_ranks_first(self, weaker, stronger):
+        weak = _tier_node("weaker", **weaker)
+        strong = _tier_node("stronger", **stronger)
+        by_id = {"weaker": weak, "stronger": strong}
+
+        found = search_nodes(
+            by_id,
+            _index_with([weak, strong], self.TYPE_LABELS),
+            self.TYPE_LABELS,
+            query="widget",
+            limit=10,
+        )
+
+        assert [n.id for n in found] == ["stronger", "weaker"], (
+            "the stronger type tier did not outscore the weaker one"
+        )
+
+
+class TestLocalizedTypeLabelsRankEndToEnd:
+    """A localized type label, run through `search_nodes` itself: the label has
+    to reach the record's text, and the search has to rank by it at the type
+    tier - above a description match inserted first."""
+
+    LABELS = {"Actor": "actor aktör"}
+
+    def test_a_label_match_is_found_and_outranks_a_description_match(self):
+        described = Node(
+            id="described", type="Market", name="x", description="an aktör here"
+        )
+        labelled = Node(id="labelled", type=NodeType.ACTOR, name="y")
+        by_id = {"described": described, "labelled": labelled}
+
+        found = search_nodes(
+            by_id,
+            _index_with([described, labelled], self.LABELS),
+            self.LABELS,
+            query="aktör",
+            limit=10,
+        )
+
+        assert [n.id for n in found] == ["labelled", "described"], (
+            "the type label scores 600 and a description 200; the label match "
+            "was not found, or not ranked by its type"
+        )
+
+    def test_a_label_is_searchable_through_graph_storage(self, tmp_path):
+        """GraphStorage builds each record with its own label lookup; a record
+        built without it has no label in its text."""
+        with _StorageIn(tmp_path) as storage:
+            storage._type_searchable_text.update(self.LABELS)
+            storage.add_nodes(
+                [
+                    Node(id="market", type="Market", name="beta"),
+                    _node("actor", "alpha"),
+                ],
+                [],
+            )
+
+            found = storage.search_nodes(query="aktör")
+
+        assert [n.id for n in found] == ["actor"]
+
+
+class TestAReloadOfAnyShapeKeepsTheIndexInStep:
+    """`TestAReloadLeavesTheIndexIteratingInStepWithTheNodes` pins one shape: the
+    same ids, reversed. A reload can also drop ids, bring new ones in between
+    survivors, and carry archived nodes - and pruning departed ids before a
+    plain `update` gets the reversed case wrong and this one wrong differently,
+    with the newcomers appended rather than in their slots."""
+
+    def test_dropped_added_and_shuffled_ids_follow_the_store(self, tmp_path):
+        with _StorageIn(tmp_path) as storage:
+            storage.add_nodes([_node(i, f"{i} widget") for i in "abcde"], [])
+            for _ in range(15):  # make the corpus worth rebuilding
+                storage.search_nodes(query="widget", limit=50)
+
+            _write_store(
+                storage,
+                tmp_path,
+                [
+                    {"id": "c", "type": "Actor", "name": "c widget"},
+                    {"id": "new1", "type": "Actor", "name": "new1 widget"},
+                    {"id": "a", "type": "Actor", "name": "a widget", "archived": True},
+                    {"id": "new2", "type": "Actor", "name": "new2 widget"},
+                    {"id": "e", "type": "Actor", "name": "e widget"},
+                ],
+            )
+            storage.load()
+
+            assert list(storage._searchable_text_cache) == list(storage.nodes)
+            assert list(storage.nodes) == ["c", "new1", "a", "new2", "e"]
+            for _ in range(15):
+                found = [n.id for n in storage.search_nodes(query="widget", limit=3)]
+                assert found == ["c", "new1", "new2"]
+
+
+class TestAReaderInsideTheReloadSwapIsNotAnsweredFromTheOldGraph:
+    """`load` empties the index BEFORE it refills `nodes`, so for the whole swap
+    the index is shorter and the size test sends a reader to the walk. Emptying
+    it after instead leaves the old index - and its live corpus - beside the new
+    `nodes` at the same size, and the candidate path answers for a graph that
+    is no longer there. Nothing asserted what a reader sees in that window."""
+
+    def test_a_search_between_the_nodes_swap_and_the_index_refill(self, tmp_path):
+        from backend.core import storage_search
+
+        ids = [f"n{i}" for i in range(20)]
+        mid_swap = []
+
+        with _StorageIn(tmp_path) as storage:
+            storage.add_nodes(
+                [_node(i, f"{i} widget") for i in ids] + [_node("r", "before")], []
+            )
+            for _ in range(15):  # a live corpus for the OLD graph
+                storage.search_nodes(query="widget", limit=50)
+
+            class _ReaderLandsAfterTheNodesSwap(dict):
+                def update(self, *args, **kwargs):
+                    dict.update(self, *args, **kwargs)
+                    # Lock-free, as search_nodes is; the storage lock is held.
+                    mid_swap.append(
+                        storage_search.search_nodes(
+                            storage.nodes,
+                            storage._searchable_text_cache,
+                            storage._type_searchable_text,
+                            "afterward",
+                        )
+                    )
+
+            storage.nodes = _ReaderLandsAfterTheNodesSwap(storage.nodes)
+            _write_store(
+                storage,
+                tmp_path,
+                [{"id": i, "type": "Actor", "name": f"{i} widget"} for i in ids]
+                + [{"id": "r", "type": "Actor", "name": "afterward"}],
+            )
+            storage.load()
+
+        assert len(mid_swap) == 1, "the reader never landed inside the swap"
+        assert [n.id for n in mid_swap[0]] == ["r"], (
+            "a reader inside the reload was answered from the previous graph's "
+            "corpus and missed the node as it now is"
+        )
+
+
+class TestTheSmallerStepsEachHaveATest:
+    """One test per step, so each fails on its own name. Sort-then-truncate and
+    the replacing `update` were unpinned before these; the guard, the
+    searchsorted side and the offset step were already caught, but only
+    indirectly, by tests about something else."""
+
+    def test_the_ranking_sorts_before_it_truncates(self):
+        """Cutting to `limit` in scan order and sorting what is left returns
+        the first few matches, not the best ones."""
+        nodes = [_node(f"weak{i}", "plain", f"widget {i}") for i in range(5)]
+        nodes.append(_node("strong", "widget"))
+        by_id = {node.id: node for node in nodes}
+
+        for match_mode in ("substring", "any_term"):
+            found = search_nodes(
+                by_id,
+                _index(nodes),
+                TYPE_TEXT,
+                query="widget",
+                limit=1,
+                match_mode=match_mode,
+            )
+            assert [n.id for n in found] == ["strong"], match_mode
+
+    def test_update_replaces_a_record_it_already_holds(self):
+        """`update` must replace, like `dict.update`, for any caller. `load`
+        does not depend on it today - it empties the index before refilling -
+        so this pins the method rather than a reload: with `setdefault`
+        semantics an id already present would keep matching its old text."""
+        index = _index([_node("a", "oldtext")])
+        index.update({"a": build_match_fields(_node("a", "newtext"), TYPE_TEXT)})
+        _let_the_index_rebuild(index)
+
+        assert "newtext" in index["a"].text
+        assert index.candidates("newtext") == ["a"]
+        assert index.candidates("oldtext") == []
+
+    def test_an_empty_answer_from_the_index_is_not_a_walk(self):
+        """`[]` is an answer - nothing matches - and `None` is a refusal. A
+        truthiness test in place of `is not None` would walk every node for
+        every query that matches nothing: same result, the whole cost back."""
+        nodes = [_node(f"n{i}", f"node number {i}") for i in range(200)]
+        index = _index(nodes)
+        walked = []
+
+        class _CountingNodes(dict):
+            def values(self):
+                walked.append(True)
+                return dict.values(self)
+
+        found = search_nodes(
+            _CountingNodes({node.id: node for node in nodes}),
+            index,
+            TYPE_TEXT,
+            query="nothingmatchesthis",
+            limit=10,
+        )
+
+        assert found == []
+        assert index._built is not None, "the index declined; nothing was tested"
+        assert not walked, "an empty answer from the index was walked anyway"
+
+    def test_a_term_at_the_very_start_of_a_node_maps_to_that_node(self):
+        """Each node's text starts exactly at its offset, so a hit there sits
+        ON the boundary. `searchsorted(side='left')` puts it in the node
+        before - and the first node's hits in the last node."""
+        nodes = [_node(f"n{i}", f"head{i:02d} tail") for i in range(30)]
+        index = _index(nodes)
+
+        for i in (0, 1, 15, 29):
+            assert index.candidates(f"head{i:02d}") == [f"n{i}"]
+        assert index.candidates("tail") == [n.id for n in nodes]
+
+    def test_the_offset_step_counts_the_separator(self):
+        """Offsets advance by the text plus one separator. Short texts, so an
+        error of one character per node reaches the next node within a few
+        nodes - at a term in the MIDDLE of the text, which the start-of-text
+        test above does not probe."""
+        nodes = [_node(f"n{i}", f"a{i:02d}") for i in range(60)]
+        index = _index(nodes)
+
+        for node in nodes:
+            fields = index[node.id]
+            middle = fields.text[1:4]
+            expected = [n.id for n in nodes if middle in index[n.id].text]
+            assert index.candidates(middle) == expected, middle

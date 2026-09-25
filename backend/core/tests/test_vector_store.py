@@ -6,7 +6,11 @@ which may take time on first run. Tests are designed to be skippable
 if the model is not available.
 """
 
+import json
+import subprocess
 import sys
+from pathlib import Path
+
 import pytest
 from unittest.mock import patch
 import numpy as np
@@ -331,6 +335,29 @@ class TestVectorStorePersistenceSeam:
         assert results[0][0] == "alpha"
         assert results[0][1] < 1.0
 
+    def test_reloading_the_same_ids_in_a_new_order_rebuilds_the_row_order(self):
+        """The test above builds a fresh index. A reload of the SAME id set in
+        a different order is the case a rebuild could skip: `node_ids` would
+        still name every row, so nothing crashes, but the tie order would be
+        the previous load's rather than this one's - or, if the matrix were
+        restacked while `node_ids` was kept, a row's score would carry another
+        row's id."""
+
+        class _Model:
+            def encode(self, text):
+                return np.asarray([1.0, 0.0], dtype=np.float32)
+
+        store = VectorStore()
+        store.load_vectors({"a": [1.0, 0.0], "b": [1.0, 0.0], "c": [0.0, 1.0]})
+        store.load_vectors({"c": [1.0, 0.0], "b": [0.0, 1.0], "a": [1.0, 0.0]})
+        store.model = _Model()
+
+        assert store.node_ids == ["c", "b", "a"]
+        # c and a tie at 1.0, so they come back in this load's order; b now
+        # points away and is below the floor.
+        results = store.search(query_text="anything", limit=3, threshold=0.5)
+        assert [node_id for node_id, _ in results] == ["c", "a"]
+
     def test_revision_advances_on_every_change(self):
         store = self._store()
         start = store.revision
@@ -463,14 +490,53 @@ def test_absorb_refuses_a_mixed_width_batch_and_leaves_the_index_alone():
     sidecar silently unwritable — with nothing failing at the time."""
     store = VectorStore()
     store.load_vectors({"a": np.ones(4, dtype=np.float32)})
-    before = store.export_vectors()
+    # export_vectors hands out the live arrays; copy them, or an in-place
+    # write to "a" would change the snapshot too and could never fail below.
+    before = {k: v.copy() for k, v in store.export_vectors().items()}
 
-    with pytest.raises(ValueError):
-        store._absorb({"b": [1.0, 2.0], "c": [1.0, 2.0, 3.0]})
+    # "a" rides in the refused batch at its own width, so an absorb that wrote
+    # matching rows in place before checking the batch would change it.
+    with pytest.raises(ValueError, match="mixed widths"):
+        store._absorb({"a": [2.0, 2.0, 2.0, 2.0], "c": [1.0, 2.0, 3.0]})
 
     after = store.export_vectors()
     assert set(after) == set(before), "a refused batch still changed the index"
     np.testing.assert_allclose(after["a"], before["a"])
+
+
+def test_compute_node_embeddings_returns_vectors_without_touching_the_index():
+    """The import worker encodes with this and commits only if no later
+    import has replaced the graph meanwhile. A compute that also wrote to the
+    index would land the vectors before that check, whatever it decided."""
+
+    class _FakeModel:
+        def encode(self, texts):
+            return [
+                np.full(3, float(i + 2), dtype=np.float32) for i in range(len(texts))
+            ]
+
+    store = VectorStore()
+    store.load_vectors({"held": np.array([1.0, 0.0, 0.0], dtype=np.float32)})
+    store.model = _FakeModel()
+    # A copy: export_vectors() hands back the live arrays, so comparing
+    # against it would not see an in-place write.
+    before = {k: v.copy() for k, v in store.export_vectors().items()}
+    revision_before = store.revision
+
+    computed = store.compute_node_embeddings(
+        [
+            Node(id="held", type=NodeType.ACTOR, name="Held"),
+            Node(id="fresh", type=NodeType.ACTOR, name="Fresh"),
+        ]
+    )
+
+    assert set(computed) == {"held", "fresh"}
+    np.testing.assert_allclose(computed["held"], [2.0, 2.0, 2.0])
+    assert not store.has_embedding("fresh")
+    assert store.revision == revision_before
+    after = store.export_vectors()
+    assert set(after) == set(before)
+    np.testing.assert_allclose(after["held"], before["held"])
 
 
 class TestSearchCostsNothingItDoesNotHaveTo:
@@ -500,10 +566,37 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         what a bytes-derived budget let through - with a second assertion that
         the budget is far under the index, so it cannot pass by being
         generous."""
-        import tracemalloc
+        # tracemalloc's peak is process-wide: it counts every thread's
+        # allocations, not just this search's. By the time the full suite
+        # reaches this file it has left hundreds of live threads behind
+        # (event-delivery workers, executor threads), and one of them waking
+        # inside the window put 16-18 KB on a 70 KB peak - which failed this
+        # budget on main twice in a fortnight. A fresh interpreter has no such
+        # threads, so the measurement runs there, and the child reports its
+        # thread count so that isolation is checked rather than assumed.
+        repo_root = Path(__file__).resolve().parents[3]
+        child = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import json\n"
+                "from backend.core.tests.test_vector_store import "
+                "_measure_search_peaks\n"
+                "print(json.dumps(_measure_search_peaks()))",
+            ],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert child.returncode == 0, child.stderr
+        measured = json.loads(child.stdout.strip().splitlines()[-1])
+        assert measured["threads"] == 1, (
+            f"the measuring process had {measured['threads']} threads, so its "
+            f"peak is not this search's alone"
+        )
 
-        store = self._store(4000, dim=256)
-        rows = len(store.node_ids)
+        rows = measured["rows"]
         # What a query legitimately needs is proportional to the NUMBER of
         # nodes - the similarities, their negation, and the argsort's output -
         # and not to the size of the index. So the budget is sized to the
@@ -518,54 +611,31 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         # tried, which is the budget shape this one exists to reject.
         budget = rows * 20
 
-        probe_node = Node(id="n0", type=NodeType.ACTOR, name="n0")
-        # The FIRST search after the index was built, inside the measurement.
-        # A warm-up outside it hides anything cached per index revision - and
-        # `_update_matrix` runs on every add and every remove, so a workload
-        # that writes between searches pays such a cache every time. Measured,
-        # caching the transposed matrix per revision peaks at 155 MB on a cold
-        # search at 100k x 384 and at nothing at all on a warm one.
-        tracemalloc.start()
-        store.search(query_node=probe_node, limit=10)
-        _, peak = tracemalloc.get_traced_memory()
-        tracemalloc.stop()
-
+        peak = measured["peak"]
         assert peak < budget, (
             f"one search allocated {peak} bytes for {rows} rows, over the "
             f"{budget}-byte budget: it is allocating per node rather than per "
             f"query, or copying the matrix again"
         )
 
-        # Again at the shapes production asks for. The measurement above uses
-        # the default threshold of 0.0, and so did every other allocation
-        # budget here - so a pre-filter gated on `threshold > 0` allocated 33
-        # bytes a row against this 20-byte budget and no test looked.
-        #
-        # EVERY production floor is measured, not one and not two.
-        # `semantic_search_nodes` asks for 200 rows above 0.3.
-        # `find_similar_nodes` asks for 5 above `max(0.4, threshold - 0.2)`,
-        # and both ends of that expression matter: 0.5 is what its own default
-        # of 0.7 gives, but 0.4 is the CLAMP, which every threshold of 0.6 or
-        # below lands on - so the clamp is the common case and the derived
-        # value is the rare one. Measuring 0.5 alone left a pre-filter gated on
-        # `0.4 <= threshold < 0.5` allocating 28 bytes a row against this
-        # 20-byte budget, bit-identical in its results and costing a constant
-        # number of Python lines, so the tracer could not see it either.
-        for floor, floored_limit in ((0.3, 200), (0.4, 5), (0.5, 5)):
-            tracemalloc.start()
-            store.search(query_node=probe_node, limit=floored_limit, threshold=floor)
-            _, floored_peak = tracemalloc.get_traced_memory()
-            tracemalloc.stop()
-
+        # Again at the shapes production asks for - see `_FLOORED_SEARCHES`.
+        for floor, floored_limit, floored_peak in measured["floored"]:
             assert floored_peak < budget, (
                 f"a search for {floored_limit} rows above a {floor} floor "
                 f"allocated {floored_peak} bytes for {rows} rows, over the "
                 f"{budget}-byte budget: the floor is being applied by building "
                 f"something the size of the index"
             )
+        # A literal, not `_FLOORED_SEARCHES`: the child iterates that same
+        # tuple, so comparing against it cannot fail when an entry is dropped.
+        assert [[f, lim] for f, lim, _ in measured["floored"]] == [
+            [0.3, 200],
+            [0.4, 5],
+            [0.5, 5],
+        ]
         # And the budget is not passing by being generous: the index it is
         # measured against is far larger than it.
-        assert budget < store.unit_matrix.nbytes / 8
+        assert budget < measured["matrix_nbytes"] / 8
 
     def test_results_are_what_the_normalise_per_query_form_returned(self):
         """Equivalence with the form this replaced, computed here rather than
@@ -621,6 +691,14 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         ]
         assert [node_id for node_id, _ in every_row] == full_expected, (
             "the ranking past the head does not match the form this replaced"
+        )
+        # And its scores: the order above holds for any scores that sort the
+        # same way, so a tail scored wrongly but monotonically passes it.
+        np.testing.assert_allclose(
+            [score for _, score in every_row],
+            [float(sims[store.node_ids.index(node_id)]) for node_id in full_expected],
+            rtol=1e-5,
+            atol=1e-6,
         )
 
     def test_the_text_path_scores_what_the_node_path_would_have(self):
@@ -910,6 +988,26 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         store = VectorStore()
         store.load_vectors({"a": [1.0, 0.0], "b": [0.0, 1.0]})
 
+        assert store.unit_matrix.dtype == np.float32
+
+    def test_generated_vectors_are_stored_as_float32(self):
+        """The test above loads through `load_vectors`, and so do the budget
+        fixtures; vectors produced by the model enter through `_absorb`
+        instead. Both shapes the model path hands it are covered: a float64
+        array, and the Python list `generate_embedding` returns, which numpy
+        would otherwise read as float64."""
+
+        class _Model:
+            def encode(self, text):
+                return np.asarray([0.0, 1.0], dtype=np.float64)
+
+        store = VectorStore()
+        store.model = _Model()
+        store.absorb_embeddings({"array": np.asarray([1.0, 0.0], dtype=np.float64)})
+        store.update_node_embedding(Node(id="listed", type=NodeType.ACTOR, name="L"))
+
+        assert store.embeddings["array"].dtype == np.float32
+        assert store.embeddings["listed"].dtype == np.float32
         assert store.unit_matrix.dtype == np.float32
 
     def test_a_query_with_no_direction_is_not_a_nan_either(self):
@@ -1436,6 +1534,24 @@ class TestSearchCostsNothingItDoesNotHaveTo:
                 f"either the order or the set of rows changed"
             )
 
+    def test_a_limit_above_every_power_of_two_boundary_reaches_every_row(self):
+        """Whole-ranking membership is otherwise asserted on indexes of at most
+        2000 rows, so a walk capped at a fixed rank such as 2048 or 4096 - the
+        natural chunk sizes for a selection step - passes all of them. 5000
+        rows clears both."""
+        store = self._store(5000, dim=16, seed=11)
+        vector = np.asarray(store.embeddings["n0"])
+
+        class _Model:
+            def encode(self, text):
+                return vector
+
+        store.model = _Model()
+
+        results = store.search(query_text="anything", limit=5000, threshold=-1.0)
+        assert len(results) == 5000, f"reached {len(results)} of 5000 rows"
+        assert {node_id for node_id, _ in results} == set(store.node_ids)
+
     def test_a_search_does_not_rewrite_the_vectors_it_reads(self):
         """`embeddings` is the source of truth - what `export_vectors` returns
         and what the sidecar persists - and a read must not touch it.
@@ -1586,3 +1702,58 @@ class TestSearchCostsNothingItDoesNotHaveTo:
                         f"({first_score} vs {second_score}). That is a real "
                         f"reordering, not the width running out of resolution"
                     )
+
+
+# The first measurement uses the default threshold of 0.0, and so did every
+# other allocation budget here - so a pre-filter gated on `threshold > 0`
+# allocated 33 bytes a row against the 20-byte budget and no test looked.
+#
+# EVERY production floor is measured, not one and not two.
+# `semantic_search_nodes` asks for 200 rows above 0.3.
+# `find_similar_nodes` asks for 5 above `max(0.4, threshold - 0.2)`, and both
+# ends of that expression matter: 0.5 is what its own default of 0.7 gives, but
+# 0.4 is the CLAMP, which every threshold of 0.6 or below lands on - so the
+# clamp is the common case and the derived value is the rare one. Measuring 0.5
+# alone left a pre-filter gated on `0.4 <= threshold < 0.5` allocating 28 bytes
+# a row against the 20-byte budget, bit-identical in its results and costing a
+# constant number of Python lines, so the tracer could not see it either.
+_FLOORED_SEARCHES = ((0.3, 200), (0.4, 5), (0.5, 5))
+
+
+def _measure_search_peaks():
+    """Run in a fresh interpreter by
+    `test_a_query_allocates_nothing_the_size_of_the_index`, which asserts on
+    what this returns."""
+    import threading
+    import tracemalloc
+
+    store = TestSearchCostsNothingItDoesNotHaveTo._store(4000, dim=256)
+    probe_node = Node(id="n0", type=NodeType.ACTOR, name="n0")
+    threads = threading.active_count()
+
+    # The FIRST search after the index was built, inside the measurement.
+    # A warm-up outside it hides anything cached per index revision - and
+    # `_update_matrix` runs on every add and every remove, so a workload
+    # that writes between searches pays such a cache every time. Measured,
+    # caching the transposed matrix per revision peaks at 155 MB on a cold
+    # search at 100k x 384 and at nothing at all on a warm one.
+    tracemalloc.start()
+    store.search(query_node=probe_node, limit=10)
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    floored = []
+    for floor, floored_limit in _FLOORED_SEARCHES:
+        tracemalloc.start()
+        store.search(query_node=probe_node, limit=floored_limit, threshold=floor)
+        _, floored_peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        floored.append((floor, floored_limit, floored_peak))
+
+    return {
+        "threads": max(threads, threading.active_count()),
+        "rows": len(store.node_ids),
+        "peak": peak,
+        "floored": floored,
+        "matrix_nbytes": store.unit_matrix.nbytes,
+    }

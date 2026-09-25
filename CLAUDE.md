@@ -355,7 +355,13 @@ below, every round. Without them a reviewer has no contract to classify
 findings against, and the loop has nothing to terminate on.
 
 **A round is two reviewers, not one.** Both, every round, on the full diff from
-main:
+main. **Spawn the mutation reviewer with `isolation: "worktree"`**, never
+sharing the correctness reviewer's checkout: the correctness reviewer only
+reads the tree, so it can share, but running both against one checkout lets
+the mutation reviewer's in-progress production-code edits show up under the
+correctness reviewer as unexplained working-tree changes — which it may then
+revert (e.g. `git checkout --`), destroying the mutation reviewer's edit
+mid-run and corrupting both reports.
 
 ```
 Agent(   # 1. correctness — its findings decide whether the loop continues
@@ -381,6 +387,7 @@ Agent(   # 1. correctness — its findings decide whether the loop continues
 )
 
 Agent(   # 2. mutation — its survivors are residue, not blockers
+  isolation: "worktree",  # own worktree — never the correctness reviewer's checkout
   prompt="""In /path/to/repo on branch <name>: edit the CHANGED PRODUCTION
             code to try to violate one of the guarantees below, and report
             which edits the test suite lets through.
@@ -820,8 +827,10 @@ only other language with full coverage today.
 - **Never hardcode display strings** in React components. Use the `useI18n()` hook
   and look up a key from the JSON files.
 - **Always add new keys to both** `frontend/web/src/i18n/en.json` **and**
-  `frontend/web/src/i18n/sv.json`. Missing a language file key causes the UI to
-  fall back to the key name, not English.
+  `frontend/web/src/i18n/sv.json`. A key missing from `sv.json` silently falls
+  back to English; one missing from `en.json` renders as the `fallback` argument
+  passed to `t()`, or the raw key name when there is none, in English and in any
+  language that lacks it too.
 - **`packages/ui-graph-canvas`** has no access to the host app's i18n system.
   All user-visible text in that package must be accepted as props with English
   defaults. Wire new props through `App.jsx` (translating with `t()`) and add the
@@ -834,9 +843,23 @@ only other language with full coverage today.
 ### Adding support for a new language
 
 1. Create `frontend/web/src/i18n/<lang>.json` mirroring the structure of `en.json`.
-2. Add `'<lang>'` to `SUPPORTED_LANGUAGES` in `frontend/web/src/i18n/index.jsx`.
+2. In `frontend/web/src/i18n/index.jsx`, import the new file, add it to the
+   `translations` map, and add `'<lang>'` to `SUPPORTED_LANGUAGES`.
 3. Add a `menu.language_<lang>` key to both `en.json` and `sv.json` (and the new file).
-4. The language selector in `FloatingHeader.jsx` will pick it up automatically.
+4. Add a button for it to the language selector in
+   `frontend/web/src/components/SettingsDialog.jsx` — the selector lists each
+   language explicitly and does not read `SUPPORTED_LANGUAGES`.
+5. Update the tests that pin the language set: `frontend/web/src/i18n/index.test.jsx`
+   asserts `SUPPORTED_LANGUAGES` equals `['en', 'sv']`, and
+   `frontend/web/src/i18n/keyParity.test.js` compares only `en.json` with
+   `sv.json`, so extend it to cover the new file.
+
+`LANGUAGE_SWITCHING_ENABLED` in `index.jsx` is currently `false`: the UI is held
+English-only and the selector in `SettingsDialog.jsx` is not rendered, so a new
+language's button stays hidden until that flag is flipped. Flipping it also means
+replacing the tests that pin the English-only state: the "interim English-only
+lock" block in `frontend/web/src/i18n/index.test.jsx` and the hidden-selector
+test in `frontend/web/tests/SettingsDialog.test.jsx`.
 
 ---
 
