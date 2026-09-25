@@ -7,6 +7,7 @@ and that the shape is one a backend can store and a later load can rebuild
 the graph from.
 """
 
+import copy
 import json
 import os
 import tempfile
@@ -204,6 +205,8 @@ class _NotifyingBackend(_IncrementalBackend):
         self.listener = None
         self.subscribes = 0
         self.unsubscribes = 0
+        # Teardown steps, in the order they reached the backend.
+        self.lifecycle = []
         self._on_subscribe = on_subscribe
         # When set, every write also reports one - from inside the write,
         # which is the application's own writer thread.
@@ -223,8 +226,13 @@ class _NotifyingBackend(_IncrementalBackend):
             self._on_subscribe(listener)
 
     def stop_change_notification(self):
+        self.lifecycle.append("stop_change_notification")
         self.listener = None
         self.unsubscribes += 1
+
+    def checkpoint(self):
+        self.lifecycle.append("checkpoint")
+        super().checkpoint()
 
     def _report_from_write(self):
         if self.report_from_writes is not None and self.listener is not None:
@@ -393,9 +401,57 @@ class TestChangeNotificationWiring:
         backend = _NotifyingBackend()
         storage = GraphStorage(persistence_backend=backend)
         assert backend.subscribes == 1
+        backend.lifecycle.clear()
         storage.shutdown_events()
         assert backend.unsubscribes == 1
         assert backend.listener is None
+        # Before the final checkpoint, not merely at some point: a report
+        # arriving while the writes drain would refresh a model mid-teardown.
+        assert backend.lifecycle == ["stop_change_notification", "checkpoint"]
+
+    def test_a_stop_that_raises_does_not_abort_the_teardown(self):
+        """The rest of shutdown is what makes the graph durable. A backend
+        failing to unsubscribe must not cost the pending write, the final
+        checkpoint or the executor shutdown."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        storage.flush()
+
+        def refuse():
+            backend.lifecycle.append("stop_change_notification")
+            raise ConnectionError("notification channel already gone")
+
+        backend.stop_change_notification = refuse
+        backend.lifecycle.clear()
+        storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+
+        storage.shutdown_events()
+
+        assert backend.lifecycle == ["stop_change_notification", "checkpoint"]
+        assert "a" in backend.nodes
+        with pytest.raises(RuntimeError):
+            storage._io_executor.submit(lambda: None)
+
+    def test_a_report_after_shutdown_raises_nothing_into_the_backend(self):
+        """A backend that reports after stop has broken its contract, but the
+        thread the refresh would raise into is the backend's own. The drain
+        finds the executor shut down; with nothing left to wait for, the
+        refresh goes ahead."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        listener = backend.listener
+        storage.shutdown_events()
+
+        listener(
+            ExternalChange.entities(
+                [EntityOperation.upsert_node(_node_payload("b", "Beacon"))]
+            )
+        )
+        assert storage.get_node("b").name == "Beacon"
+
+        backend.nodes = {"z": _node_payload("z", "Zulu")}
+        listener(ExternalChange.unknown())
+        assert {n.id for n in storage.get_all_nodes()} == {"z"}
 
     def test_a_refresh_is_never_written_back(self):
         """The change is already in the store. Persisting it would hand the
@@ -425,6 +481,41 @@ class TestChangeNotificationWiring:
         finally:
             storage.shutdown_events()
 
+    def test_a_refresh_leaves_the_backend_s_record_as_reported(self):
+        """The payload belongs to the backend, which may still hold the record
+        it reported. Parsing copies only the top level, so the node's nested
+        metadata values ARE the backend's objects: nothing may change them in
+        place - not the refresh, and not a later local write to that node."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        node_payload = dict(
+            _node_payload("b", "Beacon"), metadata={"owner": {"teams": ["core"]}}
+        )
+        edge_payload = _edge_payload(
+            "bc", "b", "c", metadata={"weight": {"history": [1]}}
+        )
+        reported = [
+            EntityOperation.upsert_node(node_payload),
+            EntityOperation.upsert_node(_node_payload("c", "Cedar")),
+            EntityOperation.upsert_edge(edge_payload),
+        ]
+        as_reported = copy.deepcopy([op.payload for op in reported])
+        try:
+            backend.listener(ExternalChange.entities(reported))
+            assert storage.get_node("b").metadata == {"owner": {"teams": ["core"]}}
+            assert [op.payload for op in reported] == as_reported
+
+            storage.update_node(
+                "b", {"metadata": {"owner": {"teams": ["edge"]}}}, metadata_merge=True
+            )
+            storage.update_edge("bc", {"metadata": {"weight": {"history": [2]}}})
+            storage.flush()
+            assert storage.get_node("b").metadata == {"owner": {"teams": ["edge"]}}
+            assert storage.edges["bc"].metadata == {"weight": {"history": [2]}}
+            assert [op.payload for op in reported] == as_reported
+        finally:
+            storage.shutdown_events()
+
     def test_a_refresh_emits_events_marked_as_someone_else_s_write(self):
         """Subscriptions, agents and the history see external changes too -
         and can tell them from this instance's own work, or an agent that
@@ -441,6 +532,10 @@ class TestChangeNotificationWiring:
             )
             assert [e.event_type for e in seen] == [EventType.NODE_CREATE]
             assert seen[0].origin.event_origin == EXTERNAL_CHANGE_ORIGIN
+            # The wire value, spelled out once: subscriptions name it in
+            # `ignore_origins` and the docs publish it, so renaming the
+            # constant's value breaks them while every comparison above holds.
+            assert seen[0].origin.event_origin == "external-change"
             assert seen[0].entity.after["name"] == "Beacon"
             # The same spelling every local emit site produces, or a
             # subscription filtered on the type silently never fires. The
@@ -2101,7 +2196,24 @@ class TestExternalRefreshFailureModes:
         backend = _NotifyingBackend()
         storage = GraphStorage(persistence_backend=backend)
         settled_without_the_lock = []
+        drained_without_the_lock = []
         original = storage._settle_before_refresh
+        submit = storage._io_executor.submit
+        draining = threading.Event()
+
+        def probed_submit(fn, *args, **kwargs):
+            # The entry probe below cannot see a settle that lets go of the
+            # lock while it waits on the queue. This one runs on the writer
+            # thread in the middle of that wait.
+            def task():
+                if draining.is_set():
+                    got = storage._lock.acquire(blocking=False)
+                    drained_without_the_lock.append(got)
+                    if got:
+                        storage._lock.release()
+                return fn(*args, **kwargs)
+
+            return submit(task)
 
         def watched():
             def probe():
@@ -2115,9 +2227,14 @@ class TestExternalRefreshFailureModes:
             elsewhere = threading.Thread(target=probe)
             elsewhere.start()
             elsewhere.join(5)
-            return original()
+            draining.set()
+            try:
+                return original()
+            finally:
+                draining.clear()
 
         storage._settle_before_refresh = watched
+        storage._io_executor.submit = probed_submit
         # The settle mutates the index, so it needs the lock for the same
         # reason the drain does: a reader let in mid-batch sees neither the
         # old index nor the new one.
@@ -2151,9 +2268,12 @@ class TestExternalRefreshFailureModes:
             # one that named entities. The reload path returns before there
             # is anything to settle.
             assert settled_without_the_lock == [False, False, False]
+            # One drain per report, each held throughout.
+            assert drained_without_the_lock == [False, False]
         finally:
             storage._settle_before_refresh = original
             storage._settle_vector_index = settle
+            del storage._io_executor.submit
             storage.shutdown_events()
 
     @pytest.mark.parametrize("change", _RESYNCING_CHANGES, ids=_RESYNC_IDS)
