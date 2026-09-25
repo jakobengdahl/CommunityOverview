@@ -330,6 +330,14 @@
     "unlock_canvas": "Lås upp visualiseringen",
     "settings": "Inställningar"
   },
+  "app_install": {
+    "install": "Installera app",
+    "ios_hint": "Använd Dela och sedan Lägg till på hemskärmen.",
+    "dismiss_hint": "Stäng installationstips"
+  },
+  "offline": {
+    "read_only": "Offline — endast visning. Återanslut innan du redigerar grafen."
+  },
   "settings": {
     "title": "Inställningar",
     "close": "Stäng inställningar",

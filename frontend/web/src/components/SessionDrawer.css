@@ -230,6 +230,47 @@
   flex-shrink: 0;
 }
 
+.session-drawer-install-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 6px;
+  padding: 9px 10px;
+  color: #d9e1ff;
+  background: rgba(100, 108, 255, 0.14);
+  border: 1px solid rgba(170, 180, 255, 0.26);
+  border-radius: 6px;
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.session-drawer-install-hint span {
+  flex: 1;
+  min-width: 0;
+}
+
+.session-drawer-install-hint-dismiss {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  color: #d9e1ff;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.session-drawer-install-hint-dismiss:hover,
+.session-drawer-install-hint-dismiss:focus-visible {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+  outline: none;
+}
+
 /* Touch targets: rows and the close button grow to the 44px floor via
    min-height/min-width so the drawer simply reflows taller in touch mode;
    desktop sizing (no min-height set) is untouched. */

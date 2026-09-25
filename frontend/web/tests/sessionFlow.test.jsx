@@ -186,6 +186,26 @@ describe('Server-backed session lifecycle', () => {
       fn.mockReset();
       fn.mockImplementation(impl);
     });
+    Object.defineProperty(window.navigator, 'onLine', {
+      configurable: true,
+      value: true,
+    });
+  });
+
+  it('shows a clear read-only offline state when the network is gone', async () => {
+    renderApp();
+
+    act(() => {
+      Object.defineProperty(window.navigator, 'onLine', {
+        configurable: true,
+        value: false,
+      });
+      window.dispatchEvent(new Event('offline'));
+    });
+
+    expect(
+      await screen.findByText('Offline — viewing only. Reconnect before editing the graph.')
+    ).toBeInTheDocument();
   });
 
   it('toolbar Save View still opens the naming dialog and emits ops to the server', async () => {

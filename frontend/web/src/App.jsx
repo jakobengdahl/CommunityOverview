@@ -11,6 +11,7 @@ import ActivityDrawer from './components/ActivityDrawer';
 import NodeHistoryPanel from './components/NodeHistoryPanel';
 import AppDialogs from './components/AppDialogs';
 import ConfirmDialog from './components/ConfirmDialog';
+import AppInstallPrompt from './components/AppInstallPrompt';
 import * as api from './services/api';
 import * as sessionStore from './services/sessionStore';
 import {
@@ -150,6 +151,7 @@ function App() {
   const { enterFullscreenCanvas, exitFullscreenCanvas, fullscreenCanvasActive } =
     useFullscreenCanvas(appRef);
   const [notification, setNotification] = useState(null);
+  const [isOffline, setIsOffline] = useState(() => window.navigator?.onLine === false);
   const [saveViewDialog, setSaveViewDialog] = useState(null);
   const [showSubscriptionDialog, setShowSubscriptionDialog] = useState(false);
   const [editingSubscriptionData, setEditingSubscriptionData] = useState(null);
@@ -1051,6 +1053,17 @@ function App() {
   const showNotification = useCallback((type, message) => {
     setNotification({ type, message });
     setTimeout(() => setNotification(null), 3000);
+  }, []);
+
+  useEffect(() => {
+    const syncOfflineState = () => setIsOffline(window.navigator?.onLine === false);
+    window.addEventListener('online', syncOfflineState);
+    window.addEventListener('offline', syncOfflineState);
+    syncOfflineState();
+    return () => {
+      window.removeEventListener('online', syncOfflineState);
+      window.removeEventListener('offline', syncOfflineState);
+    };
   }, []);
 
   // Callback: Selection changed in GraphCanvas
@@ -2847,6 +2860,11 @@ function App() {
           <button onClick={() => setNotification(null)}>×</button>
         </div>
       )}
+      {isOffline && (
+        <div className="app-offline-banner" role="status">
+          {t('offline.read_only')}
+        </div>
+      )}
 
       <AppDialogs
         dialogs={dialogs}
@@ -2879,6 +2897,7 @@ function App() {
       />
 
       <GuideOverlay />
+      <AppInstallPrompt />
     </div>
   );
 }
