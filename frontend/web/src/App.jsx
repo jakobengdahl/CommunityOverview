@@ -11,6 +11,7 @@ import ActivityDrawer from './components/ActivityDrawer';
 import NodeHistoryPanel from './components/NodeHistoryPanel';
 import AppDialogs from './components/AppDialogs';
 import ConfirmDialog from './components/ConfirmDialog';
+import AppInstallPrompt from './components/AppInstallPrompt';
 import * as api from './services/api';
 import * as sessionStore from './services/sessionStore';
 import {
@@ -2879,6 +2880,7 @@ function App() {
       />
 
       <GuideOverlay />
+      <AppInstallPrompt />
     </div>
   );
 }
