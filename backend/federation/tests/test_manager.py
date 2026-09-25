@@ -297,7 +297,18 @@ def test_search_matches_a_localized_type_label():
 
 @pytest.mark.parametrize(
     "query",
-    ["aktör", "act", "act\t", "nordic", " nordic ", "network", "dokument", "x", "*"],
+    [
+        "aktör",
+        "act",
+        "act\t",
+        "nordic",
+        " nordic ",
+        "network",
+        "dokument",
+        "x",
+        "*",
+        "   ",
+    ],
 )
 def test_search_returns_what_local_search_returns_in_the_same_order(query):
     """Local and federated search must match and rank the same nodes the same

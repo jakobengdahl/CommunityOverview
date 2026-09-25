@@ -11,7 +11,11 @@ the untrimmed path relies on the access filter having done it first.
 import pytest
 
 from backend.core import Edge, GraphStorage, Node, NodeType, RelationshipType
-from backend.core.storage_search import MATCH_MODE_ANY_TERM, MATCH_MODE_SUBSTRING
+from backend.core.storage_search import (
+    MATCH_MODE_ANY_TERM,
+    MATCH_MODE_SUBSTRING,
+    MAX_ANY_TERM_TERMS,
+)
 from backend.federation.config import FederationFileConfig
 from backend.federation.manager import FederationManager
 from backend.service import GraphService
@@ -80,6 +84,8 @@ def _local_service(tmp_path, nodes, edges=()):
                 type=NodeType(n["type"]),
                 name=n["name"],
                 description=n.get("description", ""),
+                tags=n.get("tags", []),
+                aliases=n.get("aliases", []),
             )
             for n in nodes
         ],
@@ -114,6 +120,18 @@ def _origin_ids(result):
         (
             "pricing",
             MATCH_MODE_SUBSTRING,
+            ["exact", "two_terms", "desc_one", "desc_two"],
+        ),
+        # Runs of whitespace and tabs separate terms; neither yields an empty
+        # term, which would match every node including "unrelated".
+        (
+            "pricing  rollout",
+            MATCH_MODE_ANY_TERM,
+            ["exact", "two_terms", "desc_one", "desc_two"],
+        ),
+        (
+            "pricing\trollout",
+            MATCH_MODE_ANY_TERM,
             ["exact", "two_terms", "desc_one", "desc_two"],
         ),
     ],
@@ -163,3 +181,75 @@ def test_edge_to_a_node_outside_the_results_is_dropped_without_a_trim(
 
     assert sorted(_origin_ids(result)) == ["hub", "spoke"]
     assert [e["id"].rsplit("::", 1)[-1] for e in result["edges"]] == ["inside-edge"]
+
+
+def test_federated_search_defaults_to_substring_matching():
+    result = _manager(NODES).search_nodes(query=QUERY, node_types=None, limit=10)
+
+    assert result["nodes"] == []
+
+
+def test_federated_search_keeps_the_match_mode_when_semantic_is_requested(tmp_path):
+    """Semantic ranking replaces the lexical mode for local results only; the
+    federated half is still matched lexically in the requested mode."""
+    result = _federated_service(tmp_path, NODES).search_graph(
+        query=QUERY, match_mode=MATCH_MODE_ANY_TERM, semantic=True
+    )
+
+    assert _origin_ids(result) == ["exact", "two_terms", "desc_two", "desc_one"]
+
+
+# "strong" hits one term on the name and another on the description; "alias"
+# hits one term on an alias. Ranking by the best term puts "strong" first;
+# ranking by the weakest would put its description hit below the alias.
+TIER_NODES = [
+    {"id": "alias", "type": "Actor", "name": "Zed", "aliases": ["rollout"]},
+    {"id": "strong", "type": "Actor", "name": "Pricing", "description": "rollout"},
+]
+
+# Both are description-tier hits on one distinct term each, so scan order must
+# decide; a repeated query word counted twice would lift "second" above "first".
+REPEAT_NODES = [
+    {"id": "first", "type": "Actor", "name": "Alpha", "description": "pricing"},
+    {"id": "second", "type": "Actor", "name": "Beta", "description": "catalogue"},
+]
+
+
+@pytest.mark.parametrize(
+    "nodes, query, expected",
+    [
+        (TIER_NODES, "pricing rollout", ["strong", "alias"]),
+        (REPEAT_NODES, "catalogue catalogue pricing", ["first", "second"]),
+        # Only the first MAX_ANY_TERM_TERMS distinct terms are matched, so a
+        # term past the cap matches nothing.
+        (
+            REPEAT_NODES,
+            " ".join(f"q{i}" for i in range(MAX_ANY_TERM_TERMS)) + " pricing",
+            [],
+        ),
+    ],
+)
+def test_federated_any_term_ranks_and_caps_terms_like_local_search(
+    tmp_path, nodes, query, expected
+):
+    local = _local_service(tmp_path / "local", nodes).search_graph(
+        query=query, match_mode=MATCH_MODE_ANY_TERM
+    )
+    federated = _federated_service(tmp_path / "fed", nodes).search_graph(
+        query=query, match_mode=MATCH_MODE_ANY_TERM
+    )
+
+    assert _origin_ids(local) == expected
+    assert _origin_ids(federated) == expected
+
+
+def test_edge_to_a_node_cut_by_the_limit_trim_is_dropped(tmp_path):
+    """A tag filter widens the federated window past the limit, so both matches
+    come back and the trim cuts one: the edge between them must go with it."""
+    nodes = [dict(n, tags=["t"]) for n in EDGE_NODES]
+    result = _federated_service(tmp_path, nodes, EDGES).search_graph(
+        query="alpha", limit=1, tags_any=["t"]
+    )
+
+    assert len(result["nodes"]) == 1
+    assert result["edges"] == []
