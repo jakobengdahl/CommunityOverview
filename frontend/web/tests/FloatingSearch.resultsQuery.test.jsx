@@ -34,6 +34,7 @@ function renderSearch() {
 }
 
 const actor = { id: 'n1', type: 'Actor', name: 'Alpha actor', metadata: {} };
+const savedView = { id: 'v1', type: 'SavedView', name: 'Alpha view', metadata: { node_ids: [] } };
 
 describe('FloatingSearch data-results-query', () => {
   beforeEach(() => {
@@ -76,12 +77,10 @@ describe('FloatingSearch data-results-query', () => {
     await waitFor(() => expect(api.searchGraph).toHaveBeenCalledWith('al', expect.anything()));
     await user.type(input, 'p');
     expect(input).toHaveValue('alp');
+    await waitFor(() => expect(api.searchGraph).toHaveBeenCalledWith('alp', expect.anything()));
 
     first.resolve({ nodes: [actor], edges: [] });
     await waitFor(() => expect(screen.getByText('Alpha actor')).toBeInTheDocument());
-    expect(root).toHaveAttribute(ATTR, 'al');
-
-    await waitFor(() => expect(api.searchGraph).toHaveBeenCalledWith('alp', expect.anything()));
     expect(root).toHaveAttribute(ATTR, 'al');
 
     second.resolve({ nodes: [], edges: [] });
@@ -111,6 +110,26 @@ describe('FloatingSearch data-results-query', () => {
 
     await user.click(screen.getByText('Alpha actor'));
     await waitFor(() => expect(input).toHaveValue(''));
+    expect(root).not.toHaveAttribute(ATTR);
+  });
+
+  it('is removed after a saved view is picked from results that outlived the query', async () => {
+    const search = deferred();
+    api.searchGraph.mockReturnValueOnce(search.promise);
+    const { root, input, user } = renderSearch();
+
+    await user.type(input, 'al');
+    await waitFor(() => expect(api.searchGraph).toHaveBeenCalledWith('al', expect.anything()));
+    // Emptying the input before the search settles means the pick's setQuery('') is a no-op,
+    // so only the SavedView branch's own clear can remove the attribute.
+    await user.clear(input);
+
+    search.resolve({ nodes: [savedView], edges: [] });
+    await waitFor(() => expect(root).toHaveAttribute(ATTR, 'al'));
+    expect(input).toHaveValue('');
+
+    await user.click(screen.getByText('Alpha view'));
+    await waitFor(() => expect(screen.queryByText('Alpha view')).not.toBeInTheDocument());
     expect(root).not.toHaveAttribute(ATTR);
   });
 
