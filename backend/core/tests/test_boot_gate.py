@@ -264,13 +264,6 @@ class TestTheBufferIsBounded:
         gate(_change("later"))
         assert _names(seen[3:]) == ["later"], "the gate stayed shut after the reload"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "open() re-requests the reload on every call after an overflow; "
-            "harmless today because GraphStorage opens exactly once"
-        ),
-    )
     def test_a_second_open_after_an_overflow_requests_no_second_reload(self):
         seen = []
         gate = _BootGate(seen.append)
