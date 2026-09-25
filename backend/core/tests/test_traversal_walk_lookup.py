@@ -22,10 +22,10 @@ class _VanishingOnLookup(dict):
     """Loses one key on one observation, and counts every observation.
 
     Eight routes are instrumented - `in`, `.get()`, `[]`, `.keys()`,
-    iteration, `.items()`, `.values()` and `.copy()` - so a check-then-use
-    spelled through any of them is caught: observation number `vanish_at`
-    (the first, by default) answers "present" and removes the key, and a later
-    one misses. `observations` counts how often the victim was observed,
+    iteration, `.items()`, `.values()` and `.copy()`. Observation number
+    `vanish_at` (the first, by default) answers "present" and removes the key,
+    and a later one misses, so a single-key check-then-use is caught; one whose
+    check is a whole-dict read is not (see below). `observations` counts how often the victim was observed,
     present or not; the whole-dict routes observe every key, so each counts as
     one observation of the victim.
 
@@ -35,8 +35,9 @@ class _VanishingOnLookup(dict):
     right after a whole-dict read is answered from that read's snapshot, as
     part of the same observation - otherwise the fixture raises KeyError out
     of a copy that on a plain dict is atomic. A Python loop doing keys-then-
-    index looks the same from here and is treated the same; single-key
-    check-then-use (`in` or `.get()`, then `[]`) is still caught.
+    index, or `d[k] for k in ids if k in d.keys()`, looks the same from here
+    and is treated the same, so it is not caught; single-key check-then-use
+    (`in` or `.get()`, then `[]`) still is.
     """
 
     def __init__(self, *args, victim=None, vanish_at=1, **kwargs):

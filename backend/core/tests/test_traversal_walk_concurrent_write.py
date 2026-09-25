@@ -84,7 +84,9 @@ class TestAWriteMidWalk:
         The deterministic test above lands a write between loop steps; this
         one also covers a write landing while an adjacency is being copied,
         which a copy made by iterating a networkx view (rather than copying
-        the dict itself) leaves open.
+        the dict itself) leaves open. It churns both levels of that adjacency:
+        whole neighbours come and go, and so do parallel edges to neighbours
+        that stay, which changes the per-pair key dicts in place.
         """
         nodes = {"hub": _node("hub")}
         edges: dict = {}
@@ -94,25 +96,40 @@ class TestAWriteMidWalk:
             nodes[f"n{i}"] = _node(f"n{i}")
             _add(graph, edges, _edge(f"e{i}", "hub", f"n{i}"))
             _add(graph, edges, _edge(f"r{i}", f"n{i}", "hub"))
+        # Wide key dicts on the pairs the writer churns, so copying one of
+        # them takes long enough for a write to land mid-copy.
+        for i in range(100):
+            _add(graph, edges, _edge(f"pe{i}", "hub", "n0"))
+            _add(graph, edges, _edge(f"pr{i}", "n1", "hub"))
 
         stop = threading.Event()
+        writes = []
+        writer_errors = []
 
         def writer():
-            i = 0
-            while not stop.is_set():
-                other = f"churn{i % 50}"
-                _add(graph, {}, _edge(f"c{i}-out", "hub", other))
-                _add(graph, {}, _edge(f"c{i}-in", other, "hub"))
-                graph.remove_node(other)
-                i += 1
+            try:
+                i = 0
+                while not stop.is_set():
+                    other = f"churn{i % 50}"
+                    _add(graph, {}, _edge(f"c{i}-out", "hub", other))
+                    _add(graph, {}, _edge(f"c{i}-in", other, "hub"))
+                    graph.remove_node(other)
+                    _add(graph, {}, _edge(f"p{i}-out", "hub", "n0"))
+                    _add(graph, {}, _edge(f"p{i}-in", "n1", "hub"))
+                    graph.remove_edge("hub", "n0", key=f"p{i}-out")
+                    graph.remove_edge("n1", "hub", key=f"p{i}-in")
+                    i += 1
+                    writes.append(i)
+            except Exception as exc:  # noqa: BLE001 - surfaced by the assert
+                writer_errors.append(exc)
 
         errors = []
         walks = 0
         interval = sys.getswitchinterval()
-        sys.setswitchinterval(1e-6)
         thread = threading.Thread(target=writer, daemon=True)
-        thread.start()
         try:
+            sys.setswitchinterval(1e-6)
+            thread.start()
             deadline = time.monotonic() + 0.5
             while time.monotonic() < deadline and not errors:
                 walks += 1
@@ -122,8 +139,64 @@ class TestAWriteMidWalk:
                     errors.append(exc)
         finally:
             stop.set()
-            thread.join()
+            if thread.is_alive():
+                thread.join()
             sys.setswitchinterval(interval)
 
+        assert writer_errors == []
         assert walks > 1
+        assert writes
         assert errors == []
+
+
+class TestTheCopyKeepsTheWalksAnswer:
+    """With no write in flight, the copied adjacency must answer exactly as
+    the live one did: every parallel edge, and nothing for an anchor the
+    graph does not hold."""
+
+    def _parallel(self):
+        nodes = {nid: _node(nid) for nid in ("a", "b")}
+        edges: dict = {}
+        graph = nx.MultiDiGraph()
+        for node in nodes.values():
+            graph.add_node(node.id, data=node)
+        _add(graph, edges, _edge("ab1", "a", "b"))
+        _add(
+            graph,
+            edges,
+            Edge(id="ab2", source="a", target="b", type=RelationshipType.PART_OF),
+        )
+        _add(graph, edges, _edge("ba1", "b", "a"))
+        return nodes, edges, graph
+
+    def test_every_parallel_edge_between_a_pair_is_returned(self):
+        nodes, edges, graph = self._parallel()
+
+        result = storage_search.get_related_nodes(nodes, edges, graph, "a")
+
+        assert {e.id for e in result["edges"]} == {"ab1", "ab2", "ba1"}
+
+    def test_a_type_filter_picks_the_matching_parallel_edge(self):
+        nodes, edges, graph = self._parallel()
+
+        result = storage_search.get_related_nodes(
+            nodes, edges, graph, "a", relationship_types=[RelationshipType.PART_OF]
+        )
+
+        assert {e.id for e in result["edges"]} == {"ab2"}
+        assert {n.id for n in result["nodes"]} == {"a", "b"}
+
+    def test_an_anchor_the_graph_does_not_hold_returns_only_itself(self):
+        # networkx's out_edges("ab") on a graph without "ab" iterates the
+        # string, so the live views walked from "a" and "b" instead.
+        nodes = {nid: _node(nid) for nid in ("a", "b", "ab")}
+        edges: dict = {}
+        graph = nx.MultiDiGraph()
+        graph.add_node("a", data=nodes["a"])
+        graph.add_node("b", data=nodes["b"])
+        _add(graph, edges, _edge("e", "a", "b"))
+
+        result = storage_search.get_related_nodes(nodes, edges, graph, "ab")
+
+        assert [n.id for n in result["nodes"]] == ["ab"]
+        assert result["edges"] == []
