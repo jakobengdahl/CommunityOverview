@@ -134,6 +134,11 @@ class TestTheGateHoldsAndReplays:
             # Exactly once, while the first held report is being delivered.
             if not fired:
                 fired.append(True)
+                # Checked first because re-entering a gate that drains under
+                # its own plain Lock deadlocks, and a hang reports nothing.
+                assert _free_to_another_thread(gate._lock), (
+                    "the replay called the listener with the gate lock held"
+                )
                 gate(arrived_late)
 
         gate._listener = listener
@@ -156,6 +161,17 @@ class TestTheGateHoldsAndReplays:
             "the gate did not stay open after replaying, so every later "
             "report would be buffered and never delivered"
         )
+
+    def test_a_second_open_delivers_nothing_again(self):
+        seen = []
+        gate = _BootGate(seen.append)
+        gate(_change("held"))
+        gate.open()
+        seen.clear()
+
+        gate.open()
+
+        assert seen == [], "a second open() replayed what the first already had"
 
 
 class TestTheBufferIsBounded:
@@ -198,6 +214,73 @@ class TestTheBufferIsBounded:
         gate(_change("later"))
 
         assert _names(seen) == ["later"]
+
+    def test_the_overflow_is_announced_once(self, capsys):
+        gate = _BootGate(lambda change: None)
+
+        for i in range(_BOOT_BUFFER_LIMIT + 3):
+            gate(_change(f"held-{i}"))
+
+        out = capsys.readouterr().out
+        assert out.count("dropping them for a whole-graph reload") == 1, (
+            "an overflowed boot must warn exactly once: the reload replacing "
+            f"the dropped reports is best-effort. Output was: {out!r}"
+        )
+
+    def test_an_overflow_during_the_drain_ends_in_one_reload(self, monkeypatch):
+        """Reports that arrive mid-drain are held, so they can overflow too.
+
+        The held ones already delivered stand; the late ones are subsumed by
+        a reload that must still be requested, after them, and the gate must
+        end up open.
+        """
+        monkeypatch.setattr(storage_module, "_BOOT_BUFFER_LIMIT", 2)
+        seen = []
+        gate = _BootGate(None)
+
+        def listener(change):
+            seen.append(change)
+            if len(seen) == 1:
+                assert _free_to_another_thread(gate._lock), (
+                    "the replay called the listener with the gate lock held"
+                )
+                for i in range(3):
+                    gate(_change(f"late-{i}"))
+
+        gate._listener = listener
+        gate(_change("held-0"))
+        gate(_change("held-1"))
+        gate.open()
+
+        assert _names(seen[:2]) == ["held-0", "held-1"]
+        assert len(seen) == 3, (
+            f"expected the two held reports and one reload, got {len(seen)}"
+        )
+        assert seen[2].operations is None and not seen[2].content_read_on_demand(), (
+            "an overflow during the drain must still degrade to unknown()"
+        )
+
+        gate(_change("later"))
+        assert _names(seen[3:]) == ["later"], "the gate stayed shut after the reload"
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "open() re-requests the reload on every call after an overflow; "
+            "harmless today because GraphStorage opens exactly once"
+        ),
+    )
+    def test_a_second_open_after_an_overflow_requests_no_second_reload(self):
+        seen = []
+        gate = _BootGate(seen.append)
+        for i in range(_BOOT_BUFFER_LIMIT + 1):
+            gate(_change(f"held-{i}"))
+        gate.open()
+        seen.clear()
+
+        gate.open()
+
+        assert seen == []
 
 
 class TestTheListenerRunsOutsideTheGateLock:
@@ -346,25 +429,11 @@ class TestGraphStorageClosesTheWindow:
         was protecting.
         """
         backend = _NotifyingDuringLoad()
-        seen_during_load = []
-        real_load = GraphStorage.load
-
-        def spy_apply(self, change):
-            seen_during_load.append(self._loading_now)
-
-        def load_marking(self, *args, **kwargs):
-            self._loading_now = True
-            try:
-                return real_load(self, *args, **kwargs)
-            finally:
-                self._loading_now = False
-
-        monkeypatch.setattr(GraphStorage, "apply_external_change", spy_apply)
-        monkeypatch.setattr(GraphStorage, "load", load_marking)
-        GraphStorage._loading_now = False
+        applied = _spy_on_applies(monkeypatch)
 
         storage = GraphStorage(persistence_backend=backend)
         try:
+            seen_during_load = [during for during, _ in applied]
             assert seen_during_load == [False], (
                 f"expected one report applied after the load, got "
                 f"{seen_during_load} (True means it landed mid-load)"
@@ -398,10 +467,31 @@ class TestGraphStorageClosesTheWindow:
             "written for"
         )
 
-    def test_a_failed_load_stops_notification(self, monkeypatch):
+    @pytest.mark.parametrize("exc_type", [RuntimeError, KeyboardInterrupt, SystemExit])
+    def test_a_failed_load_stops_notification(self, monkeypatch, exc_type):
         """Otherwise the listener outlives the object it reports into, holding
-        its connection and refreshing something nothing will shut down."""
+        its connection and refreshing something nothing will shut down.
+
+        An interrupt mid-load is the likeliest way a boot fails in practice,
+        and it is not an `Exception`."""
         backend = _NotifyingDuringLoad()
+
+        def boom(self, *args, **kwargs):
+            raise exc_type("load failed")
+
+        monkeypatch.setattr(GraphStorage, "load", boom)
+
+        with pytest.raises(exc_type, match="load failed"):
+            GraphStorage(persistence_backend=backend)
+
+        assert backend.stopped, "construction failed with the listener still running"
+
+    def test_a_failed_load_without_notification_raises_its_own_error(
+        self, monkeypatch, tmp_path
+    ):
+        """The file backend has no listener to stop, and no
+        `stop_change_notification` either: the guard must not reach for it and
+        bury the load's error under an AttributeError."""
 
         def boom(self, *args, **kwargs):
             raise RuntimeError("load failed")
@@ -409,9 +499,7 @@ class TestGraphStorageClosesTheWindow:
         monkeypatch.setattr(GraphStorage, "load", boom)
 
         with pytest.raises(RuntimeError, match="load failed"):
-            GraphStorage(persistence_backend=backend)
-
-        assert backend.stopped, "construction failed with the listener still running"
+            GraphStorage(json_path=str(tmp_path / "graph.json"))
 
 
 class TestGraphStorageNeverAppliesMidLoad:
@@ -494,7 +582,15 @@ class TestTheGateIsThreadSafe:
         trials, per_trial = 300, 40
         for trial in range(trials):
             seen = []
-            gate = _BootGate(seen.append)
+
+            def listener(change, seen=seen):
+                # Yield mid-drain so a report let through by a flag raised
+                # too early can overtake the held ones; a drain that finishes
+                # within one interpreter slice would hide that reorder.
+                time.sleep(0)
+                seen.append(change)
+
+            gate = _BootGate(listener)
             # The lost-report race sits between a flag read and the lock
             # acquire - a few bytecodes, which the interpreter almost never
             # switches inside on its own. Yielding at every acquire puts a
@@ -511,9 +607,14 @@ class TestTheGateIsThreadSafe:
 
             reporter = threading.Thread(target=report)
             reporter.start()
-            halfway.wait()
+            assert halfway.wait(timeout=5), (
+                f"trial {trial}: the reporter never got halfway"
+            )
             gate.open()
-            reporter.join()
+            reporter.join(timeout=5)
+            assert not reporter.is_alive(), (
+                f"trial {trial}: the reporter did not finish"
+            )
 
             assert _names(seen) == _names(sent), (
                 f"trial {trial}: delivered {len(seen)} of {per_trial} "
