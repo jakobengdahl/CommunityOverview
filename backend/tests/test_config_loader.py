@@ -525,14 +525,17 @@ class TestConfigLoader:
         ]
         assert config_loader.get_declared_capability_count() == 0
 
-    def test_valid_entry_wins_over_a_dropped_entry_for_the_same_id(self, tmp_path):
-        config_loader = self._load_capability_config(
-            tmp_path,
-            [
-                {"id": "animated_layout", "enabled": None},
-                {"id": "animated_layout", "enabled": True},
-            ],
-        )
+    @pytest.mark.parametrize("valid_first", [False, True])
+    def test_valid_entry_wins_over_a_dropped_entry_for_the_same_id(
+        self, tmp_path, valid_first
+    ):
+        entries = [
+            {"id": "animated_layout", "enabled": None},
+            {"id": "animated_layout", "enabled": True},
+        ]
+        if valid_first:
+            entries.reverse()
+        config_loader = self._load_capability_config(tmp_path, entries)
 
         capabilities = config_loader.get_capabilities()["capabilities"]
         assert [(c["id"], c["enabled"]) for c in capabilities] == [
@@ -659,13 +662,16 @@ class TestConfigLoader:
         assert config_loader.get_declared_capability_count() == 0
 
     def test_fatal_fallback_on_non_object_presentation_uses_server_defaults(
-        self, tmp_path
+        self, tmp_path, caplog
     ):
         config_loader = self._write_raw_config(
             tmp_path, {"presentation": "not-an-object"}
         )
 
-        capabilities = config_loader.get_capabilities()["capabilities"]
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            capabilities = config_loader.get_capabilities()["capabilities"]
+
+        assert any("Error loading config" in r.getMessage() for r in caplog.records)
         assert [(c["id"], c["enabled"]) for c in capabilities] == [
             ("animated_layout", True)
         ]
