@@ -1107,6 +1107,215 @@ describe('Server-backed session lifecycle', () => {
     }
   });
 
+  // Same away-and-back shape, but the reload on returning is already current
+  // (seq 9), so the returning client's first snapshot starts no resync of its
+  // own and nothing supersedes the first visit's call. Its session id matches
+  // the returning client's, so only a client-identity check stops it from
+  // applying its older payload over the return load.
+  it('a slow resync from an earlier visit does not overwrite a current return load', async () => {
+    sessionStore.touchSession('5555-6666');
+    sessionStore.touchSession('7777-8888');
+    FakeEventSource.snapshotSeqByUrl['http://localhost/api/sessions/7777-8888/stream'] = 9;
+    const NODE_C = { id: 'node-c', type: 'Theme', name: 'Theme C' };
+    const emptyState = { positions: {}, hidden_node_ids: [], hidden_edge_ids: [], annotations: [] };
+
+    let releaseFirstResync;
+    const firstResyncGate = new Promise((resolve) => {
+      releaseFirstResync = resolve;
+    });
+    let returningLoads = 0;
+    const originalGetSession = api.getSession.getMockImplementation();
+    api.getSession.mockImplementation(async (id, opts) => {
+      if (id !== '7777-8888') return originalGetSession(id, opts);
+      returningLoads += 1;
+      const call = returningLoads;
+      // 1: first load (seq 3, older than the stream's seq 9) — 2: the resync
+      // that first snapshot triggers, held open — 3: the reload on returning,
+      // already at the stream's seq.
+      if (call === 1) return { id, seq: 3, state: emptyState, resolved: { nodes: [], edges: [] } };
+      if (call === 2) {
+        await firstResyncGate;
+        return { id, seq: 9, state: emptyState, resolved: { nodes: [NODE_A], edges: [] } };
+      }
+      return { id, seq: 9, state: emptyState, resolved: { nodes: [NODE_A, NODE_C], edges: [] } };
+    });
+
+    try {
+      renderApp();
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getByText('7777-8888'));
+      await waitFor(() => expect(returningLoads).toBe(2));
+
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getByText('5555-6666'));
+      await waitFor(() => {
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b']);
+      });
+
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getByText('7777-8888'));
+      await waitFor(() => {
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a', 'node-c']);
+      });
+      // Let the returning client's first snapshot land: it must not start a
+      // resync (seq 9 is not above the load's), or this test proves nothing.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(returningLoads).toBe(3);
+
+      await act(async () => {
+        releaseFirstResync();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a', 'node-c']);
+    } finally {
+      releaseFirstResync();
+      api.getSession.mockImplementation(originalGetSession);
+    }
+  });
+
+  // Materialise a session with a live stream, start a resync whose reload is
+  // held on `gate`, and return the stream so a test can deliver ops while the
+  // reload is in flight.
+  async function startResyncHeldOnGate(gate, loadsById) {
+    const { container } = renderApp();
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+    const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+    fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+    await waitFor(() => screen.getByText('Save View'));
+    const source = await waitFor(() => {
+      const found = FakeEventSource.instances.find(
+        (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')
+      );
+      expect(found).toBeTruthy();
+      return found;
+    });
+    const sessionId = source.url.split('/api/sessions/')[1].split('/')[0];
+    gate.active = true;
+    act(() => {
+      source.onmessage({
+        data: JSON.stringify({
+          type: 'catch_up',
+          seq: 5,
+          ops: [{ op: 'nodes_hidden', node_ids: [] }],
+          roster: [],
+          claims: {},
+        }),
+      });
+    });
+    await waitFor(() => expect(loadsById(sessionId)).toBe(1));
+    return source;
+  }
+
+  // An op that streams in while the resync's reload is in flight is applied
+  // to the canvas and advances the client's applied seq; a reload payload
+  // older than that op must not be applied over it, or the op is lost for
+  // good (the stream never resends it).
+  it('an op streamed in during the resync reload survives: a payload behind the stream is refetched', async () => {
+    let releaseReload;
+    const reloadGate = new Promise((resolve) => {
+      releaseReload = resolve;
+    });
+    const gate = { active: false };
+    const loads = {};
+    const originalGetSession = api.getSession.getMockImplementation();
+    api.getSession.mockImplementation(async (id, opts) => {
+      if (!gate.active) return originalGetSession(id, opts);
+      loads[id] = (loads[id] || 0) + 1;
+      if (loads[id] === 1) {
+        await reloadGate;
+        return { id, seq: 5, state: {}, resolved: { nodes: [NODE_A], edges: [] } };
+      }
+      return { id, seq: 6, state: {}, resolved: { nodes: [NODE_A, NODE_B], edges: [] } };
+    });
+    api.getNodeDetails.mockImplementation(async (id) =>
+      id === 'node-b' ? { node: NODE_B, edges: [] } : { success: false }
+    );
+
+    try {
+      const source = await startResyncHeldOnGate(gate, (id) => loads[id] || 0);
+      act(() => {
+        source.onmessage({
+          data: JSON.stringify({
+            type: 'op',
+            seq: 6,
+            client_id: 'someone-else',
+            op: { op: 'nodes_added', node_ids: ['node-b'] },
+          }),
+        });
+      });
+      await waitFor(() => {
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toContain('node-b');
+      });
+
+      await act(async () => {
+        releaseReload();
+      });
+      await waitFor(() => expect(Object.values(loads)).toEqual([2]));
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a', 'node-b']);
+    } finally {
+      releaseReload();
+      api.getSession.mockImplementation(originalGetSession);
+    }
+  });
+
+  // The refetch is bounded: a stream that stays ahead of every payload must
+  // not keep the resync fetching forever; it applies the last payload.
+  it('a resync refetches a payload behind the stream at most three times in all', async () => {
+    let releaseReload;
+    const reloadGate = new Promise((resolve) => {
+      releaseReload = resolve;
+    });
+    const gate = { active: false };
+    const loads = {};
+    const originalGetSession = api.getSession.getMockImplementation();
+    api.getSession.mockImplementation(async (id, opts) => {
+      if (!gate.active) return originalGetSession(id, opts);
+      loads[id] = (loads[id] || 0) + 1;
+      if (loads[id] === 1) await reloadGate;
+      const nodes = loads[id] >= 3 ? [NODE_B] : [NODE_A];
+      return { id, seq: 5, state: {}, resolved: { nodes, edges: [] } };
+    });
+
+    try {
+      const source = await startResyncHeldOnGate(gate, (id) => loads[id] || 0);
+      act(() => {
+        source.onmessage({
+          data: JSON.stringify({
+            type: 'op',
+            seq: 6,
+            client_id: 'someone-else',
+            op: { op: 'nodes_hidden', node_ids: [] },
+          }),
+        });
+      });
+
+      await act(async () => {
+        releaseReload();
+      });
+      await waitFor(() => {
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b']);
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(Object.values(loads)).toEqual([3]);
+    } finally {
+      releaseReload();
+      api.getSession.mockImplementation(originalGetSession);
+    }
+  });
+
   it('drawer name-refresh does not overwrite a locally kept name with a null server name (R7)', async () => {
     // A session renamed locally before the server ever materialised it (or
     // simply one the server hasn't got a name for) must keep its local name
