@@ -395,8 +395,8 @@ def _stdout_calls(source):
         "import os\nos.sys.stdout.write('x')",
         "import logging\nlogging.sys.__stdout__.write('x')",
         "import os\nm = os.sys\nm.stdout.write('x')",
-        # And in time linear in the path, however many such modules it runs
-        # through.
+        # Without the time growing exponentially in how many such modules
+        # the path runs through.
         "import os\nx" + ".os" * 60 + ".write(1, b'x')",
     ],
 )
