@@ -100,6 +100,14 @@ def reported(caplog, capsys):
             for record in caplog.records
             if record.name == _BACKEND_LOGGER and record.levelno == logging.WARNING
         ]
+        # A report is a WARNING; the same text at ERROR would slip past both
+        # the positive checks here and any check that nothing was reported.
+        louder = [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == _BACKEND_LOGGER and record.levelno > logging.WARNING
+        ]
+        assert not louder, f"reported above WARNING: {louder}"
         caplog.clear()
         out = capsys.readouterr().out
         leaked = [message for message in messages if message in out]
@@ -107,6 +115,21 @@ def reported(caplog, capsys):
         return "\n".join(messages)
 
     return take
+
+
+def _assert_dropped_tail_reported(report: str, journal_path, *, parsed: bool):
+    """The dropped-tail report names the journal it trimmed and, when the line
+    did not parse, why - the path is what an operator goes and looks at."""
+    prefix = (
+        f"dropping the incomplete last record of {journal_path} (interrupted write)"
+    )
+    lines = [line for line in report.splitlines() if line.startswith(prefix)]
+    assert len(lines) == 1, report
+    reason = lines[0][len(prefix) :]
+    if parsed:
+        assert reason == "", lines[0]
+    else:
+        assert reason.startswith(": ") and reason[2:].strip(), lines[0]
 
 
 class TestJournalWrites:
@@ -251,7 +274,7 @@ class TestCrashShapes:
         data = FileGraphPersistenceBackend(backend.json_path).load_graph_data()
 
         assert _ids(data) == {"a", "b", "c"}
-        assert "incomplete last record" in reported()
+        _assert_dropped_tail_reported(reported(), backend.journal_path, parsed=False)
         assert backend.journal_path.read_bytes().endswith(b"\n")
         _appends_still_land_after(backend.json_path, {"a", "b", "c"})
 
@@ -265,7 +288,7 @@ class TestCrashShapes:
         data = FileGraphPersistenceBackend(backend.json_path).load_graph_data()
 
         assert _ids(data) == {"a", "b", "c"}
-        assert "incomplete last record" in reported()
+        _assert_dropped_tail_reported(reported(), backend.journal_path, parsed=False)
         _appends_still_land_after(backend.json_path, {"a", "b", "c"})
 
     def test_an_interrupted_batch_lands_nowhere(self, backend):
@@ -482,7 +505,7 @@ class TestFailureReporting:
         data = FileGraphPersistenceBackend(backend.json_path).load_graph_data()
 
         assert _ids(data) == {"a", "b", "c"}
-        assert "incomplete last record" in reported()
+        _assert_dropped_tail_reported(reported(), backend.journal_path, parsed=True)
 
     def test_flush_surfaces_a_failed_checkpoint(self, tmp, monkeypatch):
         storage = GraphStorage(json_path=str(tmp / "g.json"))
@@ -1880,6 +1903,11 @@ class TestSaveNowFlagHandling:
         assert "graph write at shutdown failed" in capsys.readouterr().out, (
             "_save_now's catch-and-print behavior did not fire as expected "
             "- this test depends on it to reach the assertions below"
+        )
+        assert failures == {"upsert": 0, "save": 0}, (
+            "the first shutdown did not run the documented path (entity write "
+            "fails, heal save fails, _save_now fails) - the stubbed failures "
+            f"were not all spent: {failures}"
         )
         assert storage._resync_pending, (
             "the first shutdown's own fallback write failed too; the flag "
