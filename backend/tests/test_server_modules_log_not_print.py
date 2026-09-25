@@ -68,15 +68,68 @@ def _dotted(node):
     return None
 
 
-# Every way of writing to stdout that bypasses the logger.
-_STDOUT_CALLS = {"print", "builtins.print", "sys.stdout.write"}
+# Every way of writing to stdout that bypasses the logger, by the name it
+# resolves to once imports and plain assignments are followed.
+_STDOUT_CALLS = {
+    "print",
+    "builtins.print",
+    "sys.stdout.write",
+    "sys.__stdout__.write",
+}
+
+
+def _aliases(tree):
+    """Local name -> the dotted name it stands for, from `import x as y`,
+    `from x import y as z` and `y = <dotted name>` anywhere in the module."""
+    aliases = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for name in node.names:
+                if name.asname:
+                    aliases[name.asname] = name.name
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            for name in node.names:
+                aliases[name.asname or name.name] = f"{node.module}.{name.name}"
+        elif isinstance(node, ast.Assign):
+            target = _dotted(node.value)
+            if target:
+                for name in node.targets:
+                    if isinstance(name, ast.Name) and name.id != target:
+                        aliases[name.id] = target
+    return aliases
+
+
+def _resolved(dotted, aliases):
+    seen = set()
+    while dotted:
+        head, _, rest = dotted.partition(".")
+        if head not in aliases or head in seen:
+            return dotted
+        seen.add(head)
+        dotted = aliases[head] + (f".{rest}" if rest else "")
+    return dotted
+
+
+def _writes_to_stdout(call, aliases):
+    name = _resolved(_dotted(call.func), aliases)
+    if name in _STDOUT_CALLS:
+        return True
+    # File descriptor 1 is stdout whatever sys.stdout has been swapped for.
+    return (
+        name == "os.write"
+        and bool(call.args)
+        and isinstance(call.args[0], ast.Constant)
+        and call.args[0].value == 1
+    )
 
 
 def _stdout_calls(source):
+    tree = ast.parse(source)
+    aliases = _aliases(tree)
     return [
         node.lineno
-        for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.Call) and _dotted(node.func) in _STDOUT_CALLS
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _writes_to_stdout(node, aliases)
     ]
 
 
@@ -86,16 +139,33 @@ def _stdout_calls(source):
         "print('x')",
         "import builtins\nbuiltins.print('x')",
         "import sys\nsys.stdout.write('x')",
+        "import sys as s\ns.stdout.write('x')",
+        "from sys import stdout\nstdout.write('x')",
+        "from sys import stdout as out\nout.write('x')",
+        "import sys\nsys.__stdout__.write('x')",
+        "from sys import __stdout__\n__stdout__.write('x')",
+        "import os\nos.write(1, b'x')",
+        "from os import write\nwrite(1, b'x')",
+        "say = print\nsay('x')",
+        "from builtins import print as say\nsay('x')",
+        "import sys\nout = sys.stdout\nout.write('x')",
     ],
 )
 def test_the_guard_catches_each_way_of_writing_to_stdout(source):
     assert _stdout_calls(source) == [source.count("\n") + 1]
 
 
-def test_the_guard_ignores_logger_calls_and_other_streams():
-    source = (
-        "import logging, sys\nlogging.getLogger().warning('x')\nsys.stderr.write('x')"
-    )
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import logging, sys\nlogging.getLogger().warning('x')\nsys.stderr.write('x')",
+        "from sys import stderr\nstderr.write('x')",
+        "import os\nos.write(2, b'x')",
+        "import os\nos.write(fd, b'x')",
+        "handle = open('f', 'w')\nhandle.write('x')",
+    ],
+)
+def test_the_guard_ignores_logger_calls_and_other_streams(source):
     assert _stdout_calls(source) == []
 
 
