@@ -1390,10 +1390,10 @@ class TestWhatTheStoreDecidedIsFilteredByWhatWeReturn:
         """A test of the entry point when the store answers. It swaps
         `storage.nodes` for a dict that loses `b` on its first observation by
         any instrumented route, so a check-then-use in the store engine's node
-        resolution turns into a KeyError here. It says nothing about the
-        walk's resolution: armed from the start, the fixture spends its one
-        observation on the walk's traversal-phase read of `b`. The walk-level
-        tests in `test_traversal_walk_lookup.py` pin that.
+        resolution turns into a KeyError here. It says nothing about the walk:
+        the store answers, its `.get()` of `b` is the fixture's one
+        observation, and the walk is never called. The walk-level tests in
+        `test_traversal_walk_lookup.py` pin the walk.
         """
         from backend.core.postgres_backend import PostgresGraphPersistenceBackend
         from backend.core.storage import GraphStorage
