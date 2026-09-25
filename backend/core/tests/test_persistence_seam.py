@@ -401,13 +401,44 @@ class TestChangeNotificationWiring:
         backend = _NotifyingBackend()
         storage = GraphStorage(persistence_backend=backend)
         assert backend.subscribes == 1
+        storage.flush()
+
+        # A write held on the writer thread until the stop has happened, so
+        # its landing marks where the drain is relative to the stop. A stop
+        # moved behind the drain lets the write land first, after the wait
+        # times out.
+        stopped = threading.Event()
+        stop = backend.stop_change_notification
+
+        def signalling_stop():
+            stop()
+            stopped.set()
+
+        def held(write):
+            def gated(*args):
+                stopped.wait(5)
+                backend.lifecycle.append("write")
+                return write(*args)
+
+            return gated
+
+        backend.stop_change_notification = signalling_stop
+        backend.upsert_node = held(backend.upsert_node)
+        backend.apply_batch = held(backend.apply_batch)
         backend.lifecycle.clear()
+        storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+
         storage.shutdown_events()
         assert backend.unsubscribes == 1
         assert backend.listener is None
-        # Before the final checkpoint, not merely at some point: a report
-        # arriving while the writes drain would refresh a model mid-teardown.
-        assert backend.lifecycle == ["stop_change_notification", "checkpoint"]
+        # Before the drain, not merely at some point: a report arriving while
+        # the writes drain would refresh a model mid-teardown.
+        assert backend.lifecycle == [
+            "stop_change_notification",
+            "write",
+            "checkpoint",
+        ]
+        assert "a" in backend.nodes
 
     def test_a_stop_that_raises_does_not_abort_the_teardown(self):
         """The rest of shutdown is what makes the graph durable. A backend
@@ -485,7 +516,9 @@ class TestChangeNotificationWiring:
         """The payload belongs to the backend, which may still hold the record
         it reported. Parsing copies only the top level, so the node's nested
         metadata values ARE the backend's objects: nothing may change them in
-        place - not the refresh, and not a later local write to that node."""
+        place - not the refresh, and not a later local write to that node.
+        The local half bites on the node, whose merge could write into a
+        shared inner value; update_edge replaces metadata wholesale."""
         backend = _NotifyingBackend()
         storage = GraphStorage(persistence_backend=backend)
         node_payload = dict(
