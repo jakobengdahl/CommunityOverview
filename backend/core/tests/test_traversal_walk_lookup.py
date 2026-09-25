@@ -31,9 +31,10 @@ class _VanishingOnLookup(dict):
 
     A whole-dict read is one observation, and a snapshot of the dict at that
     instant. `dict(d)` and `{**d}` on a dict subclass that overrides iteration
-    are carried out as `d.keys()` and then `d[k]` per key, so a `d[victim]`
-    right after a whole-dict read is answered from that read's snapshot, as
-    part of the same observation - otherwise the fixture raises KeyError out
+    are carried out as `d.keys()` and then `d[k]` per key, so the first
+    `d[victim]` after a whole-dict read, with no other observation of the
+    victim in between, is answered from that read's snapshot as part of the
+    same observation - otherwise the fixture raises KeyError out
     of a copy that on a plain dict is atomic. A Python loop doing keys-then-
     index, or `d[k] for k in ids if k in d.keys()`, looks the same from here
     and is treated the same, so it is not caught; single-key check-then-use

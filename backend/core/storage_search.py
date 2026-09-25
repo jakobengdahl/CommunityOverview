@@ -758,26 +758,42 @@ def semantic_search_nodes(
 # ---------------------------------------------------------------------------
 
 
+def _copied_items(d: Dict[Any, Any]) -> List[Any]:
+    """`list(d.items())`, taken again if a write lands during the copy.
+
+    The copy runs in C, so a thread switch cannot split it at a bytecode
+    boundary. It is still not atomic: each item is a new tuple, a tuple
+    allocation can start a garbage collection, and a collection runs
+    finalizers - Python code, which can hand the GIL to a writer mid-copy.
+    That is rare, and the copy only reads, so it is simply taken again.
+    """
+    while True:
+        try:
+            return list(d.items())
+        except RuntimeError:
+            continue
+
+
 def _adjacent(adjacency: Dict[str, Dict[str, Dict[str, Any]]], node_id: str):
     """Snapshot the (neighbour, edge key, edge data) triples at *node_id*.
 
     The walk takes no lock while every mutator holds one, so the adjacency can
     change under it. networkx's `out_edges` / `in_edges` are Python generators
     over these same dicts: a mutation between two of their steps raises
-    "dictionary changed size during iteration". `list(d.items())` on a plain
-    dict copies it in C without running bytecode, so under the GIL no other
-    thread can interleave with the copy; everything after reads the copies.
-    `list(graph.out_edges(...))` would not do: that list is filled by the same
-    Python generator, one step at a time. The walk cannot take the lock
-    instead: it is handed the dicts, not the storage that owns the lock.
+    "dictionary changed size during iteration". So the walk copies both levels
+    (neighbours, then each pair's parallel-edge keys) with `_copied_items` and
+    reads only the copies. `list(graph.out_edges(...))` would not do: that
+    list is filled by the same Python generator, one step at a time. The walk
+    cannot take the lock instead: it is handed the dicts, not the storage that
+    owns the lock.
     """
     neighbours = adjacency.get(node_id)
     if neighbours is None:
         return []
     return [
         (neighbour, key, data)
-        for neighbour, keydict in list(neighbours.items())
-        for key, data in list(keydict.items())
+        for neighbour, keydict in _copied_items(neighbours)
+        for key, data in _copied_items(keydict)
     ]
 
 
