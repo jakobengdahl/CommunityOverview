@@ -771,6 +771,19 @@ class TestAddNodesToSession:
         assert at_capacity["added"] == ids[:200]
         assert resolved_with == [ids[:200]]
 
+    def test_the_too_large_message_names_the_mcp_budget_not_the_ops_budget(self, tools):
+        tools_map, manager = tools
+        sid = _session(manager)
+        manager._mcp_bucket = _TokenBucket(2.0, 0.0)
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=["alpha", "beta", "gamma"]
+        )
+
+        assert manager.mcp_rate_budget_capacity == 2
+        assert result["error"] == "too_large"
+        assert "at most 2)" in result["message"]
+
     @pytest.mark.asyncio
     async def test_a_busy_session_is_charged_exactly_once(self, tools):
         tools_map, manager = tools

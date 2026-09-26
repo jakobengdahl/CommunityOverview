@@ -2,6 +2,7 @@
 Tests for event delivery worker.
 """
 
+import ipaddress
 import socket
 import time
 from unittest.mock import patch, Mock
@@ -642,8 +643,22 @@ class TestIsSafeUrlClauses:
 
     @pytest.mark.parametrize(
         "ip",
-        ["100.64.0.1", "192.88.99.1", "fec0::1"],
-        ids=["cgnat", "6to4-relay-anycast", "ipv6-site-local"],
+        [
+            "100.64.0.1",
+            "100.127.255.255",
+            "192.88.99.1",
+            "192.88.99.255",
+            "fec0::1",
+            "feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+        ],
+        ids=[
+            "cgnat-bottom",
+            "cgnat-top",
+            "6to4-relay-anycast-bottom",
+            "6to4-relay-anycast-top",
+            "ipv6-site-local-bottom",
+            "ipv6-site-local-top",
+        ],
     )
     def test_internal_range_without_an_ipaddress_flag_is_rejected(
         self, monkeypatch, ip
@@ -659,6 +674,57 @@ class TestIsSafeUrlClauses:
             lambda *a, **k: _addrinfo("93.184.216.34", ip),
         )
         assert is_safe_url("http://mixed.example.com/x") is False
+
+    @pytest.mark.parametrize(
+        "ip", ["100.63.255.255", "100.128.0.0", "192.88.98.255", "192.88.100.0"]
+    )
+    def test_address_just_outside_an_unflagged_range_is_accepted(self, ip):
+        assert is_safe_url(f"http://{ip}/x") is True
+
+    @pytest.mark.parametrize(
+        "embedded",
+        ["100.64.0.1", "192.88.99.1", "10.0.0.1", "127.0.0.1", "169.254.169.254"],
+    )
+    def test_ipv4_mapped_form_of_an_internal_address_is_rejected(
+        self, monkeypatch, embedded
+    ):
+        # A dual-stack socket connecting to ::ffff:a.b.c.d reaches a.b.c.d.
+        mapped = f"::ffff:{embedded}"
+        assert is_safe_url(f"http://[{mapped}]/x") is False
+        monkeypatch.setattr(
+            delivery.socket,
+            "getaddrinfo",
+            lambda *a, **k: _addrinfo("93.184.216.34", mapped),
+        )
+        assert is_safe_url("http://mixed.example.com/x") is False
+
+    def test_ipv4_mapped_form_of_a_public_address_is_judged_as_that_address(
+        self, monkeypatch
+    ):
+        # Python 3.12.3 flags all of ::ffff:0:0/96 is_reserved and 3.11/3.13 do
+        # not; judging the embedded host keeps the verdict the same everywhere.
+        # Forcing the wrapper's flag reproduces 3.12.3 on any interpreter.
+        assert is_safe_url("http://[::ffff:93.184.216.34]/x") is True
+        monkeypatch.setattr(
+            ipaddress.IPv6Address, "is_reserved", property(lambda self: True)
+        )
+        assert is_safe_url("http://[::ffff:93.184.216.34]/x") is True
+        assert is_safe_url("http://[4000::1]/x") is False
+
+    @pytest.mark.parametrize(
+        "sixtofour", ["2002:6440:1::", "2002:c058:6301::", "2002:a00:1::"]
+    )
+    def test_6to4_form_of_an_internal_address_is_rejected(self, monkeypatch, sixtofour):
+        assert is_safe_url(f"http://[{sixtofour}]/x") is False
+        # ipaddress flags all of 2002::/16 is_private today; without that flag
+        # the embedded host alone must still decide.
+        monkeypatch.setattr(
+            ipaddress.IPv6Address, "is_private", property(lambda self: False)
+        )
+        assert is_safe_url(f"http://[{sixtofour}]/x") is False
+
+    def test_6to4_form_of_a_public_address_is_still_rejected_by_its_flags(self):
+        assert is_safe_url("http://[2002:5db8:d822::]/x") is False
 
     def test_dns_failure_is_rejected(self, monkeypatch):
         def fail(*args, **kwargs):
@@ -759,15 +825,23 @@ class TestWebhookRedirectHops:
             "https://second.example.com/dir/next",
         ]
 
+    def test_redirect_cap_is_ten(self):
+        assert MAX_REDIRECTS == 10
+
+    @pytest.mark.parametrize("status", [307, 308])
     @pytest.mark.parametrize(
         "location",
         ["https://loop.example.com/hook", "/loop"],
         ids=["absolute", "relative"],
     )
-    def test_307_cap_holds_for_both_location_flavours(self, monkeypatch, location):
+    def test_method_keeping_cap_holds_for_both_location_flavours(
+        self, monkeypatch, location, status
+    ):
         seen, outcome = self._post(
             monkeypatch,
-            lambda request, index: httpx.Response(307, headers={"location": location}),
+            lambda request, index: httpx.Response(
+                status, headers={"location": location}
+            ),
         )
 
         assert isinstance(outcome, httpx.TooManyRedirects)
@@ -788,3 +862,16 @@ class TestWebhookRedirectHops:
         methods = [method for method, _ in seen]
         assert isinstance(outcome, httpx.TooManyRedirects)
         assert methods == ["POST"] + ["GET"] * (MAX_REDIRECTS - 1)
+
+    def test_method_keeping_hop_after_a_switch_stays_get(self, monkeypatch):
+        def handler(request, index):
+            if index == 0:
+                return httpx.Response(303, headers={"location": "/second"})
+            if index == 1:
+                return httpx.Response(307, headers={"location": "/third"})
+            return httpx.Response(200)
+
+        seen, outcome = self._post(monkeypatch, handler)
+
+        assert outcome.status_code == 200
+        assert [method for method, _ in seen] == ["POST", "GET", "GET"]
