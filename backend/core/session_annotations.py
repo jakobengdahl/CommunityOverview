@@ -120,6 +120,16 @@ _RESERVED_ANNOTATION_KEYS = {
     "field_versions",
 }
 
+# `heatmap` (docs/ANNOTATION_CONTRACT.md's "Heat-map circles"): a soft red
+# circle whose `content.intensity` is an integer 0-10, 0 invisible and 10 the
+# strongest red. Mirrors HEATMAP_* in
+# packages/ui-graph-canvas/src/utils/annotationModel.js.
+HEATMAP_TYPE = "heatmap"
+HEATMAP_MIN_INTENSITY = 0
+HEATMAP_MAX_INTENSITY = 10
+HEATMAP_DEFAULT_INTENSITY = 5
+HEATMAP_DEFAULT_DIAMETER = 160
+
 # The `content.shape` variants a `shape` annotation accepts
 # (docs/ANNOTATION_CONTRACT.md), mirroring
 # `packages/ui-graph-canvas/src/utils/annotationModel.js`'s `ANNOTATION_SHAPES`.
@@ -153,21 +163,15 @@ ATTACHABLE_ANNOTATION_TYPES: FrozenSet[str] = frozenset({"text", "label", "icon"
 # default z at creation", docs/ANNOTATION_CONTRACT.md's "Layer order").
 # Mirrors `DEFAULT_ANNOTATION_Z_BY_TYPE`/`defaultAnnotationZ` in
 # packages/ui-graph-canvas/src/utils/annotationModel.js exactly — see that
-# file's comment for the full reasoning (only `shape` moves, everything else
-# including `note`/`group`/`image` stays at 0) — so an MCP/REST-created
+# file's comment for the full reasoning (only `shape` and `heatmap` move,
+# everything else including `note`/`group`/`image` stays at 0) — so an MCP/REST-created
 # annotation and a GUI-created one of the same kind start on the same layer.
-# `heatmap` (docs/ANNOTATION_CONTRACT.md's "Heat-map circles"): a soft red
-# circle whose `content.intensity` is an integer 0-10, 0 invisible and 10 the
-# strongest red. Mirrors HEATMAP_* in
-# packages/ui-graph-canvas/src/utils/annotationModel.js.
-HEATMAP_TYPE = "heatmap"
-HEATMAP_MIN_INTENSITY = 0
-HEATMAP_MAX_INTENSITY = 10
-HEATMAP_DEFAULT_INTENSITY = 5
-HEATMAP_DEFAULT_DIAMETER = 160
-
+# `heatmap` shares shape's backdrop layer (see annotationModel.js).
 SHAPE_DEFAULT_Z = -1
-DEFAULT_ANNOTATION_Z_BY_TYPE: Dict[str, float] = {"shape": SHAPE_DEFAULT_Z}
+DEFAULT_ANNOTATION_Z_BY_TYPE: Dict[str, float] = {
+    "shape": SHAPE_DEFAULT_Z,
+    HEATMAP_TYPE: SHAPE_DEFAULT_Z,
+}
 
 
 def default_annotation_z(annotation_type: Optional[str]) -> float:

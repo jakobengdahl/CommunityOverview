@@ -1259,7 +1259,8 @@ else — a float, a bool, a string, or a value outside the range. A fresh create
 with no intensity stores the default 5; an upsert-replace that omits it keeps
 the stored value. With no `w`/`h` the circle is 160 across, and with only one
 of them the other matches it. The circle is drawn with diameter `min(w, h)`
-centred in its box. The full rendering rules are in docs/ANNOTATION_CONTRACT.md
+centred in its box. Like `shape`, a heat-map circle defaults to `z = -1`,
+behind graph nodes. The full rendering rules are in docs/ANNOTATION_CONTRACT.md
 under "Heat-map circles".
 
 `note` keeps its own dedicated tool set above and `group` (node-membership

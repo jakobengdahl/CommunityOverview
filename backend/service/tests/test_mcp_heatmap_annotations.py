@@ -127,6 +127,57 @@ class TestHeatmapMcpCrud:
         assert result["error"] == "invalid_content"
         assert tools_map["list_annotations"](session_id=session.id)["annotations"] == []
 
+    @pytest.mark.parametrize("value", [7.5, True, "5", None, -1])
+    def test_create_rejects_every_out_of_contract_intensity(
+        self, annotation_tools, value
+    ):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id,
+            type="heatmap",
+            x=0,
+            y=0,
+            content={"intensity": value},
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "invalid_content"
+        assert tools_map["list_annotations"](session_id=session.id)["annotations"] == []
+
+    @pytest.mark.parametrize("value", [7.5, False, "9", None, 11])
+    def test_update_rejects_every_out_of_contract_intensity(
+        self, annotation_tools, value
+    ):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id, type="heatmap", x=0, y=0, content={"intensity": 4}
+        )
+        annotation_id = created["annotation"]["id"]
+
+        result = tools_map["update_annotation"](
+            session_id=session.id,
+            annotation_id=annotation_id,
+            content={"intensity": value},
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "invalid_content"
+        listed = _listed(tools_map, session.id, annotation_id)
+        assert listed["content"]["intensity"] == 4
+
+    def test_create_starts_behind_graph_nodes(self, annotation_tools):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id, type="heatmap", x=0, y=0
+        )
+
+        assert _listed(tools_map, session.id, result["annotation"]["id"])["z"] == -1
+
     def test_upsert_without_content_keeps_the_stored_intensity(self, annotation_tools):
         tools_map, manager = annotation_tools
         session = manager.create_session()

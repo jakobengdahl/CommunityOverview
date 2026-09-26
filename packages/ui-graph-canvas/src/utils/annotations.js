@@ -271,6 +271,35 @@ export const GENERIC_ANNOTATION_COLORS = Object.freeze([
   '#0f172a',
 ]);
 
+// How a heat-map circle is painted (docs/ANNOTATION_CONTRACT.md's "Heat-map
+// circles"). Every circle is the same red with a radial alpha falloff to fully
+// transparent at its rim, peaking at HEATMAP_PEAK_ALPHA * level / 10 in the
+// centre. Because every circle is the SAME colour, ordinary source-over
+// compositing of two of them is commutative: the combined alpha at a point is
+// 1 - (1 - a1)(1 - a2) whichever is on top. So overlapping circles build one
+// continuous field that only grows denser where they overlap, never an opaque
+// disk, and the picture does not depend on z order or on which client drew
+// which circle first. Level 0 has alpha 0 everywhere: invisible. The peak stays
+// below 1 so graph content under even a level-10 circle remains readable.
+export const HEATMAP_RGB = '220, 38, 38';
+export const HEATMAP_PEAK_ALPHA = 0.85;
+
+export function heatmapPeakAlpha(intensity) {
+  return (HEATMAP_PEAK_ALPHA * normalizeHeatmapIntensity(intensity)) / HEATMAP_MAX_INTENSITY;
+}
+
+// `closest-side` makes the gradient a circle of radius min(w, h) / 2 centred in
+// the box, so a box that is not square still draws a circle, never an ellipse.
+export function heatmapFillStyle(intensity) {
+  const peak = heatmapPeakAlpha(intensity);
+  const mid = Number((peak * 0.55).toFixed(4));
+  return {
+    backgroundImage:
+      `radial-gradient(circle closest-side, rgba(${HEATMAP_RGB}, ${Number(peak.toFixed(4))}) 0%, ` +
+      `rgba(${HEATMAP_RGB}, ${mid}) 50%, rgba(${HEATMAP_RGB}, 0) 100%)`,
+  };
+}
+
 // Default text sizes (px) for note body and label text; overridable per node.
 export const DEFAULT_NOTE_FONT_SIZE = 14;
 export const DEFAULT_LABEL_FONT_SIZE = 16;
@@ -350,35 +379,6 @@ export const TEXT_ALIGN_DEFAULT_BY_KIND = Object.freeze({
 // to make its vertical alignment mean something — is a separate, bigger UX
 // change (the same call 61d5cc7b already made for icon/vote_dot), not part
 // of this task.
-// How a heat-map circle is painted (docs/ANNOTATION_CONTRACT.md's "Heat-map
-// circles"). Every circle is the same red with a radial alpha falloff to fully
-// transparent at its rim, peaking at HEATMAP_PEAK_ALPHA * level / 10 in the
-// centre. Because every circle is the SAME colour, ordinary source-over
-// compositing of two of them is commutative: the combined alpha at a point is
-// 1 - (1 - a1)(1 - a2) whichever is on top. So overlapping circles build one
-// continuous field that only grows denser where they overlap, never an opaque
-// disk, and the picture does not depend on z order or on which client drew
-// which circle first. Level 0 has alpha 0 everywhere: invisible. The peak stays
-// below 1 so graph content under even a level-10 circle remains readable.
-export const HEATMAP_RGB = '220, 38, 38';
-export const HEATMAP_PEAK_ALPHA = 0.85;
-
-export function heatmapPeakAlpha(intensity) {
-  return (HEATMAP_PEAK_ALPHA * normalizeHeatmapIntensity(intensity)) / HEATMAP_MAX_INTENSITY;
-}
-
-// `closest-side` makes the gradient a circle of radius min(w, h) / 2 centred in
-// the box, so a box that is not square still draws a circle, never an ellipse.
-export function heatmapFillStyle(intensity) {
-  const peak = heatmapPeakAlpha(intensity);
-  const mid = Number((peak * 0.55).toFixed(4));
-  return {
-    backgroundImage:
-      `radial-gradient(circle closest-side, rgba(${HEATMAP_RGB}, ${Number(peak.toFixed(4))}) 0%, ` +
-      `rgba(${HEATMAP_RGB}, ${mid}) 50%, rgba(${HEATMAP_RGB}, 0) 100%)`,
-  };
-}
-
 const FLEX_START = 'flex-start';
 const FLEX_END = 'flex-end';
 const CENTER = 'center';

@@ -56,6 +56,10 @@ const EDITABLE_KINDS = new Set([...ROTATABLE_OVERLAY_KINDS, 'heatmap']);
 // The resize-handle accent for a heat-map circle — the field's own red, so the
 // handles read as belonging to it even at a level too faint to see.
 const HEATMAP_ACCENT = `rgb(${HEATMAP_RGB})`;
+const HEATMAP_LEVELS = Array.from(
+  { length: HEATMAP_MAX_INTENSITY - HEATMAP_MIN_INTENSITY + 1 },
+  (_, i) => HEATMAP_MIN_INTENSITY + i
+);
 
 // Which kinds actually get a rotation control in the property bar. A
 // `vote_dot` is a plain circle — every rotation of it looks identical, so the
@@ -618,6 +622,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
       return;
     }
     const intensity = normalizeHeatmapIntensity(next);
+    if (intensity === normalizeHeatmapIntensity(data?.intensity)) return;
     setNodes((nds) => nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, intensity } } : n)));
     notifyChange('style');
   };
@@ -1074,11 +1079,14 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
 
   if (kind === 'heatmap') {
     // Painted as a soft radial gradient (heatmapFillStyle) rather than a
-    // coloured disk, so overlapping circles merge into one field. Level 0 draws
-    // nothing at all, which is the contract — but the circle must still be
-    // findable, so the `is-empty` class gives it a faint dashed rim, and the
+    // coloured disk, so overlapping circles merge into one field. The circle
+    // is its own element, sized to the box's shorter side and centred
+    // (GenericAnnotationNode.css), so it — and the rim and forced-colours
+    // outline drawn on it — stays round in a box that is not square. Level 0
+    // draws nothing, which is the contract; while it is selected or hovered
+    // the `is-empty` class shows a faint dashed rim so it can be found. The
     // selected circle shows its level as a number for anyone who cannot judge
-    // a shade of red. The accessible name carries the level too
+    // a shade of red, and the accessible name carries the level too
     // (computeAnnotationAriaLabel).
     const level = normalizeHeatmapIntensity(data?.intensity);
     return (
@@ -1088,10 +1096,10 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
           className={`graph-generic-annotation-node kind-heatmap${
             level === HEATMAP_MIN_INTENSITY ? ' is-empty' : ''
           }${selectedClass}`}
-          style={heatmapFillStyle(level)}
           data-intensity={level}
           onContextMenu={openContextMenu}
         >
+          <div className="graph-heatmap-circle" style={heatmapFillStyle(level)} />
           {selected && (
             <span className="graph-heatmap-level" aria-hidden="true">
               {level}
@@ -1516,21 +1524,23 @@ function ContextMenuPortal({
           open={openGroup === 'intensity'}
           onToggle={toggleGroup}
         >
-          {/* A native range input: arrow keys, Page Up/Down and Home/End step
-              it with no extra wiring, and screen readers announce its value. */}
+          {/* One button per level rather than a slider: every other property
+              here commits on a discrete choice, and a slider would publish an
+              op, an activity entry and an undo step for every level it passed
+              through on the way. */}
           <div className="context-menu-heatmap-intensity">
-            <input
-              type="range"
-              className="context-menu-heatmap-intensity-input nodrag"
-              min={HEATMAP_MIN_INTENSITY}
-              max={HEATMAP_MAX_INTENSITY}
-              step={1}
-              value={intensity}
-              aria-label={gl('heatmapIntensity', 'Intensity')}
-              aria-valuetext={`${intensity} / ${HEATMAP_MAX_INTENSITY}`}
-              onChange={(e) => onChangeIntensity(Number(e.target.value))}
-            />
-            <output className="context-menu-heatmap-intensity-value">{intensity}</output>
+            {HEATMAP_LEVELS.map((level) => (
+              <button
+                key={level}
+                type="button"
+                className={`heatmap-level-button${level === intensity ? ' active' : ''}`}
+                aria-pressed={level === intensity}
+                aria-label={`${gl('heatmapIntensity', 'Intensity')} ${level}`}
+                onClick={() => onChangeIntensity(level)}
+              >
+                {level}
+              </button>
+            ))}
           </div>
         </AnnotationMenuGroup>
       )}

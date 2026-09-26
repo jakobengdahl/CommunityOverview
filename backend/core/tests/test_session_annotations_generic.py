@@ -125,7 +125,13 @@ class TestBuildAnnotation:
         annotation = build_annotation(type="shape", x=0, y=0)
         assert annotation["z"] == -1
 
-    @pytest.mark.parametrize("kind", sorted(GENERIC_ANNOTATION_TYPES - {"shape"}))
+    def test_heatmap_defaults_to_z_minus_one_like_shape(self):
+        annotation = build_annotation(type="heatmap", x=0, y=0)
+        assert annotation["z"] == -1
+
+    @pytest.mark.parametrize(
+        "kind", sorted(GENERIC_ANNOTATION_TYPES - {"shape", "heatmap"})
+    )
     def test_every_other_generic_type_still_defaults_to_zero(self, kind):
         annotation = build_annotation(type=kind, x=0, y=0)
         assert annotation["z"] == 0

@@ -2972,7 +2972,8 @@ def register_mcp_tools(
             5 on a fresh create. The circle's diameter is min(w, h) (w/h
             default to 160; give one and the other matches it). Overlapping
             circles blend into one field, so the result does not depend on
-            their z order.
+            their z order among themselves; like `shape` it starts at z -1,
+            behind graph nodes.
 
         `locked=True` combined with an attached/anchored binding (an
         attachable type's `attachment`, or a `line`'s `start`/`end`
@@ -3013,17 +3014,19 @@ def register_mcp_tools(
                 rejected — use create_image_annotation).
             x: Model-space x of the annotation's anchor/top-left corner.
             y: Model-space y of the annotation's anchor/top-left corner.
-            w: Optional width in model-space px (no type-specific default;
-                shape usually needs one, line/icon usually don't).
-            h: Optional height in model-space px.
+            w: Optional width in model-space px. No default for most types
+                (shape usually needs one, line/icon usually don't); a
+                `heatmap` defaults to 160, and given only one of w/h the
+                other matches it.
+            h: Optional height in model-space px (same heatmap rule as w).
             rotation: Optional rotation in degrees.
             content: Optional type-specific payload fields (see above).
             style: Optional style dict (color/opacity; for
                 text/shape also fontSize/font/textAlign, and for shape also
                 fill/border — see above).
             z: Optional layer order (higher draws on top). Defaults to 0 for
-                every type except `shape`, which defaults to -1 so a freshly
-                created shape starts one layer behind the rest — the
+                every type except `shape` and `heatmap`, which default to -1
+                so a freshly created one starts one layer behind the rest — the
                 semantic default described in docs/ANNOTATION_CONTRACT.md's
                 "Layer order" section. Applies only when creating (or
                 upsert-replacing without resending `z`); pass an explicit

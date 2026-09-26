@@ -272,7 +272,7 @@ A freshly created annotation (from the toolbox, the right-click "add" menu, or a
 drag-and-drop) is selected and focused immediately, so its Edit button is one Tab away
 without having to click or tap to find it first.
 
-For **Text**, **Shape**, **Icon**, **Vote dot** and **Image** annotations the property
+For **Text**, **Shape**, **Icon**, **Vote dot**, **Heat map** and **Image** annotations the property
 menu is a compact row of small icons rather than a tall list of labelled sections. Each
 icon is one property — colour, fill, border, text alignment, text size, font, shape,
 rotation, opacity, size, layer order — and shows what that property is currently set to,
@@ -289,7 +289,7 @@ on.
 Some kinds' menus offer a few more non-drag controls, useful with a keyboard or on a
 device with no fine pointer:
 
-- **Width/Height fields** — Note, Group, Shape and Image boxes (the kinds with a resize
+- **Width/Height fields** — Note, Group, Shape, Image and Heat map boxes (the kinds with a resize
   handle) also get a numeric width and height in their menu, with an **Apply** button, so
   resizing doesn't require dragging a corner handle precisely.
 - **Attach to…** — Label, Text and Icon annotations (the kinds that can snap onto a node
@@ -331,16 +331,18 @@ places them exactly like a press does.
 
 The **Heat map** tool places a soft red circle for marking where something is
 concentrated — activity, risk, attention. Each circle has an **intensity** from 0 to 10:
-0 is invisible and 10 is the strongest red. New circles start at 5. Circles fade out
+0 is invisible and 10 is the strongest red. New circles start at 5, behind the graph's
+nodes, so the nodes stay readable and clickable on top of the heat. Circles fade out
 towards their edge, so where several overlap or sit close together they merge into one
 continuous heat field that gets redder the more of them cover a spot. The result is the
 same whichever circle is on top. To change the level, open the circle's Edit menu, choose
-**Intensity** (🔥) and move the slider. The arrow keys, Page Up/Down and Home/End work on
-the slider too. While a circle is selected it shows its level as a number in the middle.
-A screen reader reads it as, for example, "Heat-map circle, intensity 7 of 10". A circle
-at intensity 0 keeps a faint dashed outline so you can still find, select and move it.
-Circles resize from their corner handles and stay round. They have no colour, opacity or
-rotation settings: the intensity alone decides how they look.
+**Intensity** (🔥) and pick a number from 0 to 10. While a circle is selected it shows
+its level as a number in the middle. A screen reader reads it as, for example, "Heat-map
+circle, intensity 7 of 10". A circle at intensity 0 draws nothing, but shows a faint
+dashed outline while you hover over it or have it selected, so you can still find and
+move it. Circles resize from their corner handles and stay round. When you draw one by
+dragging, it grows from where you pressed in the direction you drag. Circles have no
+colour, opacity or rotation settings: the intensity alone decides how they look.
 
 ![A heat map built from overlapping circles](images/annotation-heatmap.png)
 

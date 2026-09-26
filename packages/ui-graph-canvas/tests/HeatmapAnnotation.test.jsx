@@ -118,9 +118,9 @@ describe('heat-map accessible name', () => {
       computeAnnotationAriaLabel(
         'heatmap',
         { intensity: 3 },
-        { ariaKindHeatmap: 'Värmekartecirkel, intensitet {level} av {max}' }
+        { ariaKindHeatmap: 'Värmekartcirkel, intensitet {level} av {max}' }
       )
-    ).toBe('Värmekartecirkel, intensitet 3 av 10');
+    ).toBe('Värmekartcirkel, intensitet 3 av 10');
   });
 });
 
@@ -163,7 +163,9 @@ describe('GenericAnnotationNode — heatmap', () => {
   it('paints the level as a radial gradient', () => {
     const { circle } = renderHeatmap({ intensity: 8 });
     expect(circle).toBeTruthy();
-    expect(circle.style.backgroundImage).toContain('radial-gradient');
+    expect(circle.querySelector('.graph-heatmap-circle').style.backgroundImage).toContain(
+      'radial-gradient'
+    );
     expect(circle.getAttribute('data-intensity')).toBe('8');
     expect(circle.classList.contains('is-empty')).toBe(false);
   });
@@ -171,6 +173,13 @@ describe('GenericAnnotationNode — heatmap', () => {
   it('marks a level-0 circle so it stays findable although it paints nothing', () => {
     const { circle } = renderHeatmap({ intensity: 0 });
     expect(circle.classList.contains('is-empty')).toBe(true);
+    expect(heatmapPeakAlpha(0)).toBe(0);
+  });
+
+  it('draws the circle as its own element inside the box', () => {
+    const { circle } = renderHeatmap({ intensity: 3 });
+    expect(circle.style.backgroundImage).toBe('');
+    expect(circle.querySelectorAll('.graph-heatmap-circle')).toHaveLength(1);
   });
 
   it('shows the level as a number only while selected', () => {
@@ -192,19 +201,72 @@ describe('GenericAnnotationNode — heatmap', () => {
     expect(hoisted.resizerProps.at(-1).isVisible).toBe(false);
   });
 
-  it('sets the intensity from the editor and reports it as a style change', () => {
+  it('offers one button per level 0-10, marking the current one', () => {
+    const { circle } = renderHeatmap({ intensity: 5 });
+    fireEvent.contextMenu(circle);
+    fireEvent.click(screen.getByRole('button', { name: 'Intensity' }));
+    const levels = screen.getAllByRole('button', { name: /^Intensity \d+$/ });
+    expect(levels.map((b) => b.textContent)).toEqual([
+      '0',
+      '1',
+      '2',
+      '3',
+      '4',
+      '5',
+      '6',
+      '7',
+      '8',
+      '9',
+      '10',
+    ]);
+    expect(screen.getByRole('button', { name: 'Intensity 5' })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    );
+    expect(screen.getByRole('button', { name: 'Intensity 4' })).toHaveAttribute(
+      'aria-pressed',
+      'false'
+    );
+  });
+
+  it('sets the intensity with one change per choice, reported as a style change', () => {
     const { circle, notifyChange } = renderHeatmap({ intensity: 5 });
     fireEvent.contextMenu(circle);
     fireEvent.click(screen.getByRole('button', { name: 'Intensity' }));
-    const slider = screen.getByRole('slider', { name: 'Intensity' });
-    expect(slider.value).toBe('5');
-    expect(slider.min).toBe('0');
-    expect(slider.max).toBe('10');
-    fireEvent.change(slider, { target: { value: '0' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Intensity 0' }));
+    expect(hoisted.setNodes).toHaveBeenCalledTimes(1);
     const updater = hoisted.setNodes.mock.calls.at(-1)[0];
     const [updated] = updater([{ id: 'h1', type: 'heatmap', data: { intensity: 5 } }]);
     expect(updated.data.intensity).toBe(0);
+    expect(notifyChange).toHaveBeenCalledTimes(1);
     expect(notifyChange).toHaveBeenCalledWith('style');
+  });
+
+  it('publishes nothing when the current level is chosen again', () => {
+    const { circle, notifyChange } = renderHeatmap({ intensity: 5 });
+    fireEvent.contextMenu(circle);
+    fireEvent.click(screen.getByRole('button', { name: 'Intensity' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Intensity 5' }));
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+    expect(notifyChange).not.toHaveBeenCalled();
+  });
+
+  it('refuses an intensity change when another client takes the lease while the menu is open', () => {
+    const notifyRemoteLockedAttempt = vi.fn();
+    const notifyChange = vi.fn();
+    const ui = (data) => (
+      <AnnotationContext.Provider value={{ notifyChange, notifyRemoteLockedAttempt, labels: {} }}>
+        <GenericAnnotationNode id="h1" type="heatmap" data={data} />
+      </AnnotationContext.Provider>
+    );
+    const { container, rerender } = render(ui({ intensity: 5 }));
+    fireEvent.contextMenu(container.querySelector('.kind-heatmap'));
+    fireEvent.click(screen.getByRole('button', { name: 'Intensity' }));
+    rerender(ui({ intensity: 5, remoteLease: { clientId: 'other', displayName: 'Other' } }));
+    fireEvent.click(screen.getByRole('button', { name: 'Intensity 9' }));
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalled();
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+    expect(notifyChange).not.toHaveBeenCalled();
   });
 
   it('offers no rotation or opacity control — intensity is its only transparency', () => {

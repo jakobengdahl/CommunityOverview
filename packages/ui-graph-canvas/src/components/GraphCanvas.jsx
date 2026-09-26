@@ -2168,16 +2168,31 @@ function GraphCanvasInner({
         };
       } else if (kind === 'heatmap') {
         // A circle, so the box is square: a drag-to-draw sweep sizes it by
-        // its longer side, and a plain click gets the default diameter.
+        // its longer side, and a plain click gets the default diameter. The
+        // square keeps the PRESS point as its corner and grows the way the hand
+        // moved: `position` is the swept box's top-left, so a leftward or
+        // upward sweep (the flip flags) moves the square's origin back by the
+        // amount it outgrew the sweep on that axis — otherwise it would extend
+        // past the press point, away from where the user dragged.
         const side = options.box
           ? Math.max(MIN_ANNOTATION_SIZE, options.box.width, options.box.height)
           : HEATMAP_DEFAULT_DIAMETER;
+        const origin = options.box
+          ? {
+              x: options.flipX ? position.x + options.box.width - side : position.x,
+              y: options.flipY ? position.y + options.box.height - side : position.y,
+            }
+          : position;
         newNode = {
           id,
           type: 'heatmap',
-          position,
+          position: origin,
           data: { intensity: HEATMAP_DEFAULT_INTENSITY },
           style: { width: side, height: side },
+          // Behind graph nodes by default, like `shape`: a heat field is a
+          // backdrop, and on top it would tint the nodes it covers and take
+          // their clicks.
+          zIndex: defaultAnnotationZ(kind),
         };
       } else {
         newNode = {
@@ -3828,10 +3843,28 @@ function GraphCanvasInner({
       const placement = placementRef.current;
       const previewEl = placementPreviewRef.current;
       if (!placement || !previewEl) return;
-      const left = Math.min(placement.startX, event.clientX);
-      const top = Math.min(placement.startY, event.clientY);
-      const width = Math.abs(event.clientX - placement.startX);
-      const height = Math.abs(event.clientY - placement.startY);
+      let left = Math.min(placement.startX, event.clientX);
+      let top = Math.min(placement.startY, event.clientY);
+      let width = Math.abs(event.clientX - placement.startX);
+      let height = Math.abs(event.clientY - placement.startY);
+      // A heat-map circle is created as a square anchored at the press point
+      // (see createAnnotation), so the outline shows exactly that square — and
+      // uses the same thresholded direction test as the flip flags it gets.
+      const circle = placement.tool.kind === 'heatmap';
+      if (circle) {
+        const side = Math.max(width, height);
+        left =
+          event.clientX - placement.startX < -MIN_DRAG_PX
+            ? placement.startX - side
+            : placement.startX;
+        top =
+          event.clientY - placement.startY < -MIN_DRAG_PX
+            ? placement.startY - side
+            : placement.startY;
+        width = side;
+        height = side;
+      }
+      previewEl.style.borderRadius = circle ? '50%' : '';
       const rect = wrapper.getBoundingClientRect();
       previewEl.style.display = 'block';
       previewEl.style.left = `${left - rect.left}px`;

@@ -90,7 +90,11 @@ const DEFAULT_FREEHAND_STROKE_WIDTH = 2;
 // Both annotation-creation paths (this model and GraphCanvas.jsx's own node
 // builder) apply the identical mapping, so a GUI-created and an MCP/REST-
 // created shape start on the same layer.
-export const DEFAULT_ANNOTATION_Z_BY_TYPE = Object.freeze({ shape: -1 });
+//
+// `heatmap` starts on the same layer as `shape`, for the same reason: a heat
+// field is a backdrop. Drawn over graph nodes it would tint them and take
+// their clicks, which a marking meant to sit underneath content should not.
+export const DEFAULT_ANNOTATION_Z_BY_TYPE = Object.freeze({ shape: -1, heatmap: -1 });
 
 export function defaultAnnotationZ(type) {
   return DEFAULT_ANNOTATION_Z_BY_TYPE[type] ?? 0;
