@@ -580,10 +580,12 @@ class PostgresGraphPersistenceBackend:
         claimed = metadata.get(GRAPH_IDENTITY_KEY)
         if claimed is None:
             # Conditional, because the read above took no lock: another
-            # instance may have claimed since. An UPDATE that waited on its
-            # row lock re-checks the WHERE against the committed row, so the
-            # loser matches nothing and reads the winner's claim below rather
-            # than overwriting it.
+            # instance may have claimed since. Under READ COMMITTED an UPDATE
+            # that waited on its row lock re-checks the WHERE against the
+            # committed row, so the loser matches nothing and reads the
+            # winner's claim below rather than overwriting it. Under
+            # REPEATABLE READ it fails on serialization instead, which
+            # overwrites nothing either.
             claimed = conn.execute(
                 sql.SQL(
                     "UPDATE {} SET doc = doc || jsonb_build_object(%s::text, %s::text)"

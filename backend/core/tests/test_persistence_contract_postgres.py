@@ -4302,10 +4302,12 @@ class TestPostgresStoreIdentity:
 
         A store saved before identities existed has a metadata row with no
         claim. Two differently named instances booting on it together each
-        read that, each decide to claim, and the second UPDATE - having
-        waited on the first's row lock - overwrote the first's claim. Both
-        returned believing they owned the schema, which is the one outcome
-        GraphIdentityCollision exists to prevent.
+        read that, each decide to claim, and under READ COMMITTED (`exists`)
+        the second UPDATE - having waited on the first's row lock -
+        overwrote the first's claim. Both returned believing they owned the
+        schema, which is the one outcome GraphIdentityCollision exists to
+        prevent. Under REPEATABLE READ (`load_graph_data`) the loser already
+        failed on serialization; that case guards the path, not the fix.
 
         A third connection holds the row so both instances are provably past
         their read and queued on the write before either may proceed; without
@@ -4387,9 +4389,15 @@ class TestPostgresStoreIdentity:
         assert stored.get("_postgres_graph_identity") == owners[0], (
             f"the store names {stored!r} but {owners[0]!r} believes it owns it"
         )
+        assert stored.get("version") == "1.0", (
+            f"claiming the store dropped the rest of its metadata: {stored!r}"
+        )
         loser = "second" if owners[0] == "first" else "first"
-        if call == "exists":
-            assert outcomes[loser].startswith("GraphIdentityCollision"), outcomes
+        expected = {
+            "exists": "GraphIdentityCollision",
+            "load_graph_data": "SerializationFailure",
+        }[call]
+        assert outcomes[loser].startswith(expected), outcomes
 
 
 class _Collector:

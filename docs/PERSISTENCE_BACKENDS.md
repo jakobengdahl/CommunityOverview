@@ -754,11 +754,14 @@ writing a backend of your own against a shared server:
   the graph-identity check that ends migration reads it (and, only when it
   exists without a claim, writes this instance's with one `UPDATE`), and
   `exists()` reads it too. That `UPDATE` is conditional on the row still
-  being unclaimed, because the read before it takes no lock: when two
-  differently named instances claim an unclaimed store at once, the one that
-  waited on the other's row lock matches nothing, reads the winner's claim
-  with one more `SELECT`, and raises `GraphIdentityCollision` rather than
-  overwriting it.
+  being unclaimed, because the read before it takes no lock. When two
+  differently named instances claim an unclaimed store at once, neither
+  overwrites the other: under READ COMMITTED the one that waited on the
+  other's row lock matches nothing, reads the winner's claim with one more
+  `SELECT`, and raises `GraphIdentityCollision`; under REPEATABLE READ (the
+  load and the traversal, or an environment default) its `UPDATE` fails with
+  a serialization failure instead, the check stays incomplete, and its next
+  call raises the collision.
   `_resolve()`, the read behind change notification, inherits the default
   too; it answers each identifier from what the store holds when it reads,
   and a write it sees that is newer than the announcement it is resolving is
