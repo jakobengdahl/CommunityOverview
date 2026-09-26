@@ -535,7 +535,7 @@ class TestFailureReporting:
             storage.flush()
 
     def test_a_failed_checkpoint_at_shutdown_is_reported_not_swallowed(
-        self, tmp, monkeypatch, capsys
+        self, tmp, monkeypatch, storage_log
     ):
         storage = GraphStorage(json_path=str(tmp / "g.json"))
         storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="A")], [])
@@ -546,7 +546,9 @@ class TestFailureReporting:
 
         storage.shutdown_events()  # must not raise out of the shutdown hook
 
-        assert "checkpoint at shutdown failed" in capsys.readouterr().out
+        assert any(
+            "checkpoint at shutdown failed" in m for m in storage_log()[logging.WARNING]
+        )
         # The journal still holds the mutation for the next start.
         assert len(_lines(storage._persistence_backend.journal_path)) == 1
 
@@ -1861,7 +1863,7 @@ class TestResyncFlagLockDiscipline:
 
 class TestSaveNowFlagHandling:
     def test_save_now_keeps_the_flag_raised_until_it_actually_succeeds(
-        self, tmp, capsys
+        self, tmp, storage_log
     ):
         """_save_now is the last-resort synchronous write once the executor
         is gone. If its own write also fails, the flag it leaves must stay
@@ -1870,7 +1872,7 @@ class TestSaveNowFlagHandling:
 
         The first shutdown_events() call below drives _save_now() into a
         write that itself fails (the second `flaky_save` failure). This test
-        relies on _save_now's documented behavior of catching and printing
+        relies on _save_now's documented behavior of catching and logging
         that failure rather than re-raising it (storage.py, _save_now) - that
         is the only reason shutdown_events() returns normally here instead of
         propagating the OSError. Assert that explicitly, so a regression to
@@ -1910,11 +1912,14 @@ class TestSaveNowFlagHandling:
             storage.shutdown_events()
         except Exception as exc:  # pragma: no cover - regression guard
             pytest.fail(
-                "_save_now must catch and print its own failed write, not "
+                "_save_now must catch and log its own failed write, not "
                 f"let it escape shutdown_events(): {exc!r}"
             )
-        assert "graph write at shutdown failed" in capsys.readouterr().out, (
-            "_save_now's catch-and-print behavior did not fire as expected "
+        assert any(
+            "graph write at shutdown failed" in m
+            for m in storage_log()[logging.WARNING]
+        ), (
+            "_save_now's catch-and-log behavior did not fire as expected "
             "- this test depends on it to reach the assertions below"
         )
         assert failures == {"upsert": 0, "save": 0}, (

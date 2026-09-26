@@ -6,6 +6,7 @@ import pytest
 import tempfile
 import os
 import json
+import logging
 
 from backend.core import (
     FileGraphPersistenceBackend,
@@ -135,7 +136,7 @@ class TestGraphStorageInit:
         assert len(new_storage.nodes) == 4
         assert len(new_storage.edges) == 3
 
-    def test_load_skips_edge_with_missing_endpoint(self, capsys):
+    def test_load_skips_edge_with_missing_endpoint(self, storage_log):
         """A stored dangling edge must not make NetworkX invent a blank node."""
         existing = Node(id="present", type=NodeType.ACTOR, name="Present")
         dangling = Edge(
@@ -158,7 +159,9 @@ class TestGraphStorageInit:
         assert "absent" not in storage.nodes
         assert "absent" not in storage.graph
         assert "dangling" not in storage.edges
-        assert "Warning: ignoring stored edge dangling" in capsys.readouterr().out
+        assert any(
+            "ignoring stored edge dangling" in m for m in storage_log()[logging.WARNING]
+        )
 
 
 class TestGraphStorageCRUD:
@@ -1186,7 +1189,7 @@ class TestGraphStoragePersistence:
         assert {"persist-backend-1", "persist-backend-2"}.issubset(persisted_ids)
         assert backend.data["metadata"]["graph_name"] == "in-memory-graph"
 
-    def test_save_through_non_file_backend_does_not_claim_graph_json(self, capsys):
+    def test_save_through_non_file_backend_does_not_claim_graph_json(self, storage_log):
         """The save log line named graph.json even through a backend that
         never wrote a file at all (e.g. PostgreSQL) — see
         smallfix-oc-storage-logs-graph-json-for-every-backend. A backend with
@@ -1196,19 +1199,21 @@ class TestGraphStoragePersistence:
             initial_data={"nodes": [], "edges": [], "metadata": {"version": "1.0"}}
         )
         storage = GraphStorage(persistence_backend=backend)
-        capsys.readouterr()  # discard the initial load's own log line
+        storage_log()  # discard the initial load's own log line
 
         storage.add_nodes(
             [Node(id="non-file-node", type=NodeType.ACTOR, name="Non-file Node")], []
         )
         storage.flush()
 
-        out = capsys.readouterr().out
-        assert "graph.json" not in out
-        assert "Saved 1 nodes and 0 edges" in out
-        assert "in-memory-graph" in out
+        logged = storage_log()
+        assert not [m for ms in logged.values() for m in ms if "graph.json" in m]
+        saved = [m for m in logged[logging.INFO] if "Saved 1 nodes and 0 edges" in m]
+        assert saved and all("in-memory-graph" in m for m in saved), logged
 
-    def test_save_through_file_backend_still_names_its_path(self, temp_storage, capsys):
+    def test_save_through_file_backend_still_names_its_path(
+        self, temp_storage, storage_log
+    ):
         """The fix for the non-file case must not regress the common one:
         the file backend's own whole-graph save still names the real
         json_path. (The file backend is incremental, so add_nodes takes the
@@ -1218,34 +1223,36 @@ class TestGraphStoragePersistence:
             [Node(id="file-backed-node", type=NodeType.ACTOR, name="File Node")], []
         )
         temp_storage.flush()
-        capsys.readouterr()  # discard everything up to here
+        storage_log()  # discard everything up to here
 
         temp_storage.save().result()
 
-        out = capsys.readouterr().out
-        assert f"Saved 1 nodes and 0 edges to {temp_storage.json_path}" in out
+        assert (
+            f"Saved 1 nodes and 0 edges to {temp_storage.json_path}"
+            in storage_log()[logging.INFO]
+        )
 
-    def test_load_through_non_file_backend_does_not_claim_graph_json(self, capsys):
+    def test_load_through_non_file_backend_does_not_claim_graph_json(self, storage_log):
         backend = InMemoryPersistenceBackend(
             initial_data={"nodes": [], "edges": [], "metadata": {"version": "1.0"}}
         )
 
         GraphStorage(persistence_backend=backend)
 
-        out = capsys.readouterr().out
-        assert "graph.json" not in out
-        assert "Loaded 0 nodes and 0 edges" in out
-        assert "in-memory-graph" in out
+        logged = storage_log()
+        assert not [m for ms in logged.values() for m in ms if "graph.json" in m]
+        loaded = [m for m in logged[logging.INFO] if "Loaded 0 nodes and 0 edges" in m]
+        assert loaded and all("in-memory-graph" in m for m in loaded), logged
 
-    def test_missing_non_file_backend_does_not_claim_graph_json(self, capsys):
+    def test_missing_non_file_backend_does_not_claim_graph_json(self, storage_log):
         backend = InMemoryPersistenceBackend(initial_data=None)
 
         GraphStorage(persistence_backend=backend)
 
-        out = capsys.readouterr().out
-        assert "graph.json" not in out
-        assert "No graph data found" in out
-        assert "in-memory-graph" in out
+        logged = storage_log()
+        assert not [m for ms in logged.values() for m in ms if "graph.json" in m]
+        created = [m for m in logged[logging.INFO] if "No graph data found" in m]
+        assert created and all("in-memory-graph" in m for m in created), logged
 
     def test_save_and_reload(self, temp_storage):
         """Test that data persists across storage instances"""
