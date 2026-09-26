@@ -56,6 +56,17 @@ def storage_log(caplog, capsys):
     storage_logger = logging.getLogger(_STORAGE_LOGGER)
     storage_logger.addHandler(collected)
     seen = 0
+    # A test reading capsys itself takes stdout away before the check below
+    # can look at it, so what each such read returns is kept for that check.
+    read_by_the_test = []
+    readouterr = capsys.readouterr
+
+    def read_through():
+        captured = readouterr()
+        read_by_the_test.append(captured.out)
+        return captured
+
+    capsys.readouterr = read_through
 
     def take():
         nonlocal seen
@@ -65,7 +76,8 @@ def storage_log(caplog, capsys):
         for record in fresh:
             if record.name == _STORAGE_LOGGER:
                 logged[record.levelno].append(record.getMessage())
-        out = capsys.readouterr().out
+        out = "".join(read_by_the_test) + readouterr().out
+        read_by_the_test.clear()
         leaked = [m for ms in logged.values() for m in ms if m in out]
         assert not leaked, f"a report went to stdout: {leaked}"
         return logged
@@ -74,4 +86,5 @@ def storage_log(caplog, capsys):
         yield take
         take()
     finally:
+        del capsys.readouterr
         storage_logger.removeHandler(collected)

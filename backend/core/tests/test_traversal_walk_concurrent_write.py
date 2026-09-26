@@ -154,6 +154,7 @@ class TestAWriteMidWalk:
         "level, write, min_retries",
         [
             ("neighbours", "grow", 100),
+            ("narrow_neighbours", "grow", 100),
             ("parallel_keys", "grow", 100),
             ("parallel_keys", "swap", 1),
             ("narrow_keys", "grow", 100),
@@ -168,8 +169,8 @@ class TestAWriteMidWalk:
         is that Python code here, standing in for the writer: with the
         collection threshold at 1, and armed by the adjacency lookup that
         precedes the copy, it lands writes from inside the copy itself - on
-        the hub's neighbour dict, or on the key dict of one pair - a wide
-        one, or one holding a single edge, so the copy is not skipped for a
+        the hub's neighbour dict or on the key dict of one pair, each either
+        wide or holding a single entry, so the copy is not skipped for a
         dict too small to be written mid-copy.
 
         A "grow" write adds an entry, which the copy reports as "dictionary
@@ -181,13 +182,13 @@ class TestAWriteMidWalk:
         swap forces one retry, where a grow forces one per write or two.
         """
         budget_size = 1000
-        base = range(1, 2) if level == "narrow_keys" else range(1, 50)
+        base = range(1, 2) if level.startswith("narrow_") else range(1, 50)
         nodes = {"hub": _node("hub"), "n0": _node("n0")}
         edges: dict = {}
         graph = nx.MultiDiGraph()
         for node in nodes.values():
             graph.add_node(node.id, data=node)
-        if level == "neighbours":
+        if level.endswith("neighbours"):
             for i in base:
                 nodes[f"n{i}"] = _node(f"n{i}")
                 _add(graph, edges, _edge(f"e{i}", "hub", f"n{i}"))
@@ -212,7 +213,7 @@ class TestAWriteMidWalk:
                 copies.append(len(self))
                 return super().items()
 
-        if level == "neighbours":
+        if level.endswith("neighbours"):
             written = graph._succ["hub"] = _CountsCopies(graph._succ["hub"])
         else:
             written = _CountsCopies(graph._succ["hub"]["n0"])
