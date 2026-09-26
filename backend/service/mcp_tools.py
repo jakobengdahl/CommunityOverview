@@ -3245,6 +3245,11 @@ def register_mcp_tools(
         2560px if needed and re-encoded as WebP, preserving PNG/WebP
         transparency.
 
+        The MCP transport refuses request bodies over 4 MiB, so inline
+        `image_data` fits a source image of roughly 3 MiB at most once
+        base64-encoded; pass `image_url` for a larger image (still subject to
+        the ingest limits).
+
         This is a separate tool from `create_annotation` because an embedded
         image is orders of magnitude larger than the generic op-batch cap
         that tool's writes share (see its docstring) — this tool enforces
