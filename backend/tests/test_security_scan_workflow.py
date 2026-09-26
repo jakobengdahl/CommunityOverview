@@ -25,6 +25,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "security-scan.yml"
 
 SCANNERS = ("pip-audit", "npm", "bandit")
+# Stubbed too, so every `run:` step - the installs included - can be executed.
+STUBBED = SCANNERS + ("pip",)
 
 # `|tee`, `| tee` and `|& tee` alike; a spelling the discovery missed would
 # escape every exit-status check below.
@@ -65,10 +67,28 @@ ALLOWED_ACTIONS = {
     "gitleaks/gitleaks-action",
 }
 
-# The only file a `run:` body may write to. `2>&1` and friends are fd dups.
-REDIRECT = re.compile(r"(?<![0-9&])>>?\s*(?!&)(\S+)")
-TEE_TARGET = re.compile(r"\btee\s+(?:-a\s+)?(\S+)")
+# The only file a `run:` body may write to. Only `N>&M` / `>&-` is an fd dup;
+# `N>file`, `&>file` and `>&file` all write to a file.
+REDIRECT = re.compile(r">>?\|?\s*(&?)\s*([^\s;|&]+)")
+FD_DUP = re.compile(r"^[0-9]*-?$")
+TEE_OPERANDS = re.compile(r"\btee\b([^|;&\n]*)")
 STEP_SUMMARY = '"$GITHUB_STEP_SUMMARY"'
+
+
+def _write_targets(body):
+    targets = [t for dup, t in REDIRECT.findall(body) if not (dup and FD_DUP.match(t))]
+    for operands in TEE_OPERANDS.findall(body):
+        targets += [o for o in operands.split() if not o.startswith("-")]
+    return targets
+
+
+def _run_steps():
+    return [
+        pytest.param(step, id=f"{job_id}:{step['name']}")
+        for job_id, job in _workflow()["jobs"].items()
+        for step in job.get("steps", [])
+        if "run" in step
+    ]
 
 
 def _workflow():
@@ -93,7 +113,7 @@ def test_every_scanner_report_step_is_discovered():
 def _run_step(step, tmp_path, scanner_exit):
     stub_dir = tmp_path / "bin"
     stub_dir.mkdir()
-    for name in SCANNERS:
+    for name in STUBBED:
         stub = stub_dir / name
         stub.write_text(f"#!/bin/sh\necho 'stub {name} report'\nexit {scanner_exit}\n")
         stub.chmod(0o755)
@@ -256,11 +276,19 @@ def test_no_env_switches_on_pipefail_behind_the_default_shell():
         for step in job.get("steps", []):
             body = step.get("run", "")
             where = f"{job_id}:{step.get('name')}"
-            # Pinning the only writable target closes GITHUB_ENV however its
-            # name is spelled, which a search for the literal name could not.
-            for target in REDIRECT.findall(body) + TEE_TARGET.findall(body):
+            # A static first line only: shell can reach a file through too many
+            # spellings, so the runtime test below executes every step.
+            for target in _write_targets(body):
                 assert target == STEP_SUMMARY, f"{where} writes to {target}"
             assert "GITHUB_ENV" not in body and "github.env" not in body, where
+            assert not re.search(r"\bGITHUB_STEP_SUMMARY\s*=", body), where
+
+
+@pytest.mark.parametrize("step", _run_steps())
+def test_no_step_writes_to_github_env_when_executed(step, tmp_path):
+    # GITHUB_ENV reaches every later step; _run_step fails on any write to it,
+    # however the body names the file.
+    _run_step(step, tmp_path, scanner_exit=0)
 
 
 def test_only_known_actions_are_used():
