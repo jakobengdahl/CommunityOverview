@@ -301,6 +301,10 @@ class _TokenBucket:
         self._sweep_interval = sweep_interval
         self._last_sweep: float = 0.0
 
+    @property
+    def capacity(self) -> float:
+        return self._capacity
+
     def consume(self, client_id: str, amount: float) -> bool:
         now = self._time()
         if now - self._last_sweep >= self._sweep_interval:
@@ -546,6 +550,15 @@ class SessionManager:
             raise OpError("'rate_limit_label' must be a non-empty string")
         return f"{client_id}:{rate_limit_label}"
 
+    def _consume_mcp_budget(self, key: str, amount: float) -> None:
+        # A cost above the full bucket can never be admitted, however long the
+        # caller waits, so it is a request to change (too large), not a
+        # retryable rate limit.
+        if amount > self._mcp_bucket.capacity:
+            raise OpBatchTooLarge()
+        if not self._mcp_bucket.consume(key, amount):
+            raise RateLimited()
+
     def consume_mcp_rate_budget(
         self,
         client_id: str,
@@ -560,14 +573,14 @@ class SessionManager:
         resolves would otherwise be free. The key is the one the write would
         charge, ``_mcp_rate_limit_key(client_id, rate_limit_label)``; pass
         ``precharged=True`` to the write so it is not charged twice. Raises
-        ``RateLimited`` when the budget is spent.
+        ``RateLimited`` when the budget is spent, and ``OpBatchTooLarge``
+        without charging when ``amount`` exceeds the bucket's capacity.
         """
         if not isinstance(client_id, str) or not client_id:
             raise OpError("'client_id' is required")
-        if not self._mcp_bucket.consume(
+        self._consume_mcp_budget(
             self._mcp_rate_limit_key(client_id, rate_limit_label), amount
-        ):
-            raise RateLimited()
+        )
 
     def check_lookup_rate(self, client_key: str) -> None:
         """Throttle unauthenticated session-id lookups by source.
@@ -611,6 +624,15 @@ class SessionManager:
         instead of paying for it and failing the cap afterwards.
         """
         return self._max_ops
+
+    @property
+    def mcp_rate_budget_capacity(self) -> float:
+        """Full size of an MCP tool's rate budget: the most one call can cost.
+
+        A call costing more is refused as ``OpBatchTooLarge``, not
+        ``RateLimited``, since no amount of waiting would admit it.
+        """
+        return self._mcp_bucket.capacity
 
     def _lock(self, session_id: str) -> asyncio.Lock:
         lock = self._locks.get(session_id)
@@ -1128,10 +1150,9 @@ class SessionManager:
             raise OpBatchTooLarge()
         if len(json.dumps(moves)) > self._max_op_batch_bytes:
             raise OpBatchTooLarge()
-        if not self._mcp_bucket.consume(
+        self._consume_mcp_budget(
             self._mcp_rate_limit_key(client_id, rate_limit_label), max(1, len(moves))
-        ):
-            raise RateLimited()
+        )
 
         # A held lock means an apply_ops batch is mid-flight for this session
         # (see the seq-ordering rationale in this method's docstring).
@@ -1202,7 +1223,8 @@ class SessionManager:
 
         Charges ``max(1, len(node_ids))`` to ``_mcp_bucket`` unless
         ``precharged`` says the caller already paid through
-        ``consume_mcp_rate_budget``.
+        ``consume_mcp_rate_budget``; a charge above the bucket's capacity is
+        ``OpBatchTooLarge``.
         """
         if not is_valid_session_id(session_id):
             raise SessionNotFound()
@@ -1214,11 +1236,11 @@ class SessionManager:
             raise OpBatchTooLarge()
         if len(json.dumps(node_ids)) > self._max_op_batch_bytes:
             raise OpBatchTooLarge()
-        if not precharged and not self._mcp_bucket.consume(
-            self._mcp_rate_limit_key(client_id, rate_limit_label),
-            max(1, len(node_ids)),
-        ):
-            raise RateLimited()
+        if not precharged:
+            self._consume_mcp_budget(
+                self._mcp_rate_limit_key(client_id, rate_limit_label),
+                max(1, len(node_ids)),
+            )
 
         # A held lock means an apply_ops batch is mid-flight for this session
         # (see apply_layout's docstring for the seq-ordering rationale).

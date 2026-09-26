@@ -95,6 +95,8 @@ class _UnhashingDict(dict):
 
 
 class _RecordingBucket:
+    capacity = float("inf")
+
     def __init__(self):
         self.consumed = []
         self.keys = []
@@ -670,7 +672,8 @@ class TestAddNodesToSession:
             nodes=[{"id": "alpha", "type": "Initiative", "name": "Alpha"}], edges=[]
         )
         sid = _session(manager)
-        manager._mcp_bucket = _TokenBucket(0.0, 0.0)
+        manager._mcp_bucket = _TokenBucket(1.0, 0.0)
+        assert manager._mcp_bucket.consume("mcp-agent:add_nodes_to_session", 1.0)
         resolved_with = []
         original = service.resolve_session_node_semantics
 
@@ -690,23 +693,101 @@ class TestAddNodesToSession:
         assert resolved_with == []
         assert manager.get_session(sid).state["node_refs"] == []
 
-    def test_a_call_refused_before_the_resolve_draws_nothing(self, tmp_path):
+    def test_a_call_refused_before_the_resolve_draws_nothing(
+        self, tmp_path, monkeypatch
+    ):
         storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
         service = GraphService(storage)
-        tools_map, manager = _wire(storage, service, max_ops_per_batch=1)
+        tools_map, manager = _wire(
+            storage, service, max_ops_per_batch=1, max_op_batch_bytes=20
+        )
         sid = _session(manager)
         buckets = _record_every_bucket(manager)
+        add = tools_map["add_nodes_to_session"]
 
-        unknown = tools_map["add_nodes_to_session"](
-            session_id="1234-5678-9012-3456", node_ids=["alpha"]
-        )
-        too_many = tools_map["add_nodes_to_session"](
-            session_id=sid, node_ids=["alpha", "beta"]
-        )
+        invalid = add(session_id="not-a-session", node_ids=["alpha"])
+        unknown = add(session_id="1234-5678-9012-3456", node_ids=["alpha"])
+        empty = add(session_id=sid, node_ids=[])
+        not_a_list = add(session_id=sid, node_ids="alpha")
+        too_many = add(session_id=sid, node_ids=["alpha", "beta"])
+        too_many_bytes = add(session_id=sid, node_ids=["x" * 30])
+        monkeypatch.setenv(AUTHORIZATION_MODE_ENV, "read-only")
+        denied = add(session_id=sid, node_ids=["alpha"])
 
+        assert invalid["success"] is False
+        assert "Invalid session ID" in invalid["error"]
         assert "not found" in unknown["error"]
+        assert (
+            empty["error"]
+            == not_a_list["error"]
+            == ("'node_ids' must be a non-empty list")
+        )
         assert too_many["error"] == "too_large"
+        assert too_many_bytes["error"] == "too_large"
+        assert "size cap" in too_many_bytes["message"]
+        assert denied.get("error_code") == "access_denied"
         assert all(bucket.consumed == [] for bucket in buckets.values())
+
+    def test_a_call_costing_more_than_the_whole_budget_is_too_large_not_rate_limited(
+        self, tmp_path
+    ):
+        """At default settings the budget holds 200 while the id cap is 500, so
+        201-500 distinct ids could never be admitted however long the caller
+        waited: that is a request to change, not a retryable rate limit. It is
+        refused before the resolve and draws nothing, so a call at the full
+        budget still goes through afterwards."""
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        service = GraphService(storage)
+        tools_map, manager = _wire(storage, service, bucket_refill_per_sec=0.0)
+        tools_map["add_nodes"](
+            nodes=[
+                {"id": f"n{i}", "type": "Actor", "name": f"N{i}"} for i in range(201)
+            ],
+            edges=[],
+        )
+        sid = _session(manager)
+        capacity = manager.mcp_rate_budget_capacity
+        assert capacity == 200 < manager.max_ops_per_batch
+        resolved_with = []
+        original = service.resolve_session_node_semantics
+
+        def spy(node_ids, **kwargs):
+            resolved_with.append(list(node_ids))
+            return original(node_ids, **kwargs)
+
+        service.resolve_session_node_semantics = spy
+        ids = [f"n{i}" for i in range(201)]
+
+        over = tools_map["add_nodes_to_session"](session_id=sid, node_ids=ids)
+        at_capacity = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=ids[:200]
+        )
+
+        assert over["success"] is False
+        assert over["error"] == "too_large"
+        assert "rate budget" in over["message"]
+        assert "200" in over["message"]
+        assert at_capacity["success"] is True
+        assert at_capacity["added"] == ids[:200]
+        assert resolved_with == [ids[:200]]
+
+    @pytest.mark.asyncio
+    async def test_a_busy_session_is_charged_exactly_once(self, tools):
+        tools_map, manager = tools
+        sid = _session(manager)
+        buckets = _record_every_bucket(manager)
+        lock = manager._lock(sid)
+        await lock.acquire()
+        try:
+            result = tools_map["add_nodes_to_session"](
+                session_id=sid, node_ids=["alpha", "ghost"]
+            )
+        finally:
+            lock.release()
+
+        assert result["error"] == "busy"
+        assert buckets["_mcp_bucket"].consumed == [2]
+        assert manager.get_session(sid).state["node_refs"] == []
 
     def test_a_revision_conflict_is_charged_exactly_once(self, tools):
         tools_map, manager = tools

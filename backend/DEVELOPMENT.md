@@ -1063,7 +1063,10 @@ A repeated id counts once: the tool deduplicates `node_ids` before checking the
 tool, not per client — every MCP client on the instance draws from the same one —
 and it is charged one unit per distinct id sent (at least one), before any id is
 resolved: resolving costs a node lookup per id, so ids reported in `skipped` are
-charged too, and so is a call that returns `no_resolvable_nodes`. Both caps are
+charged too, and so is a call that returns `no_resolvable_nodes`. A call with
+more distinct ids than the full budget (200 at default settings) could never be
+admitted by waiting, so it returns `too_large` rather than the retryable
+`rate_limited`, and draws nothing. Both caps are
 checked before any id is resolved and return `too_large`, with a `message` that
 names which cap was hit; a call refused there, or before it (invalid or unknown
 session, not authorized, empty `node_ids`), draws nothing. An unknown session is reported as not found before any
@@ -1114,10 +1117,13 @@ computed from `assumed_node_size` (`{width, height}` from the read tool) plus a
 gap — offset by the full node size, not half, to leave a visible gutter. Read the
 layout first to get `assumed_node_size` and the current `revision`, then pass that
 `revision` as `expected_revision` on the write. A single write is capped at 500
-moves / 256 KiB (`too_large` beyond that) and additionally draws from the tool's
+moves / 256 KiB (`too_large` beyond that), and a write that passes those caps and
+fits the full budget draws from the tool's
 rate budget (per tool, shared by every MCP client on the instance) sized to the
 number of moves, so a very large arrange can hit
-`rate_limited` first — either way, split it across successive writes and thread the
+`rate_limited` first, and one with more moves than the full budget (200 at
+default settings) returns `too_large` and draws nothing, since waiting would never
+admit it — either way, split it across successive writes and thread the
 returned `revision` into the next `expected_revision`.
 
 - **Horizontal (left-to-right) DAG.** Rank each node by its longest path from a
