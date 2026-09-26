@@ -329,7 +329,6 @@ class GraphStorage:
         # The VectorStore owns the vectors in memory; GraphStorage persists them
         # through the embedding sidecar (see _load_embeddings / _serialize_nodes).
         self.vector_store = VectorStore()
-        self.vector_store.preload_model()  # Start loading embedding model in background
 
         self.graph = (
             nx.MultiDiGraph()
@@ -384,6 +383,9 @@ class GraphStorage:
             if boot_gate is not None:
                 boot_gate.open()
             self._maybe_backfill_missing_embeddings_async()
+            # Last, so no failure path is left holding a thread already
+            # running: a model load cannot be cancelled once it has begun.
+            self.vector_store.preload_model()
         except BaseException:
             # The replay is inside the guard, not after it. A raise out of
             # `open()` leaves the rest of the buffer undelivered AND the gate
@@ -396,8 +398,15 @@ class GraphStorage:
             # Failing construction is the honest outcome: an instance that
             # could not apply what it was told while loading would otherwise
             # serve a graph with silent gaps in it.
-            if boot_gate is not None:
-                self._persistence_backend.stop_change_notification()
+            #
+            # The listener stops first: it is the one that can still call
+            # into this half-built object. The writer goes whatever that
+            # does, or its thread outlives an instance nothing can reach.
+            try:
+                if boot_gate is not None:
+                    self._persistence_backend.stop_change_notification()
+            finally:
+                self._io_executor.shutdown(wait=False)
             raise
 
     def _mark_writer_thread(self) -> None:
@@ -2257,14 +2266,7 @@ class GraphStorage:
                 # `self.nodes[nid]` turns a traversal into a KeyError out of
                 # the API. One dict lookup per id, its result carried forward,
                 # makes the check and the use the same observation.
-                #
-                # Not copied from the walk - the walk has the same window.
-                # `storage_search.get_related_nodes` resolves with
-                # `if nid in nodes` and then indexes, which is the same
-                # check-then-use; that guard is there for the dangling-endpoint
-                # rule, not for a concurrent delete, and feeding it a dict that
-                # loses the key between the two raises KeyError exactly as this
-                # path used to. That is pre-existing and left alone here.
+                # `storage_search.get_related_nodes` resolves the same way.
                 nodes = []
                 for nid in found["node_ids"]:
                     node = self.nodes.get(nid)
