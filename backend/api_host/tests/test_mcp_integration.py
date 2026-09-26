@@ -400,3 +400,174 @@ class TestMountRelativePath:
             _mount_relative_path({"path": "/mcpadmin/keys", "root_path": "/mcp"})
             == "/mcpadmin/keys"
         )
+
+
+# The mcp SDK's RequestBodyLimitMiddleware default. It is the only body-size
+# guard in front of /mcp, and it caps inline base64 image_data for
+# create_image_annotation well below the REST image-ingest limit.
+MCP_TRANSPORT_MAX_BODY_BYTES = 4 * 1024 * 1024
+
+
+def _raw_post(client: TestClient, path: str, chunks, query_string: bytes = b""):
+    """POST *chunks* as separate ASGI body messages with no Content-Length.
+
+    TestClient collapses any request body into a single message, which would
+    leave the SDK's streamed-body counter untested for a chunked upload.
+    """
+
+    async def call():
+        messages = [
+            {"type": "http.request", "body": chunk, "more_body": True}
+            for chunk in chunks
+        ] + [{"type": "http.request", "body": b"", "more_body": False}]
+        sent = []
+
+        async def receive():
+            if messages:
+                return messages.pop(0)
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            sent.append(message)
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": path,
+            "raw_path": path.encode(),
+            "root_path": "",
+            "query_string": query_string,
+            "headers": [
+                (b"host", b"testserver"),
+                (b"content-type", b"application/json"),
+                (b"accept", b"application/json, text/event-stream"),
+                (b"transfer-encoding", b"chunked"),
+            ],
+            "client": ("testclient", 50000),
+            "server": ("testserver", 80),
+        }
+        await client.app(scope, receive, send)
+        start = next(m for m in sent if m["type"] == "http.response.start")
+        body = b"".join(
+            m.get("body", b"") for m in sent if m["type"] == "http.response.body"
+        )
+        return start["status"], body
+
+    return client.portal.call(call)
+
+
+class TestMcpTransportBodySizeLimit:
+    """Oversized bodies to either MCP transport are refused before parsing."""
+
+    _client = TestStreamableHttpTransport._client
+    _initialize = TestStreamableHttpTransport._initialize
+
+    _SSE_MESSAGES_QUERY = "session_id=0123456789abcdef0123456789abcdef"
+
+    def test_streamable_http_rejects_oversized_content_length(
+        self, app_config, mock_llm_provider
+    ):
+        with self._client(app_config, mock_llm_provider) as client:
+            response = client.post(
+                "/mcp/",
+                content=b" " * (MCP_TRANSPORT_MAX_BODY_BYTES + 1),
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
+                },
+            )
+
+        assert response.status_code == 413
+        assert response.text == "Request body too large"
+
+    def test_streamable_http_rejects_oversized_chunked_body(
+        self, app_config, mock_llm_provider
+    ):
+        chunk = b" " * (1024 * 1024)
+        with self._client(app_config, mock_llm_provider) as client:
+            status, body = _raw_post(client, "/mcp/", [chunk] * 5)
+
+        assert status == 413
+        assert body == b"Request body too large"
+
+    def test_sse_messages_rejects_oversized_content_length(
+        self, app_config, mock_llm_provider
+    ):
+        with self._client(app_config, mock_llm_provider) as client:
+            response = client.post(
+                f"/mcp/messages/?{self._SSE_MESSAGES_QUERY}",
+                content=b" " * (MCP_TRANSPORT_MAX_BODY_BYTES + 1),
+                headers={"Content-Type": "application/json"},
+            )
+
+        assert response.status_code == 413
+        assert response.text == "Request body too large"
+
+    def test_sse_messages_rejects_oversized_chunked_body(
+        self, app_config, mock_llm_provider
+    ):
+        chunk = b" " * (1024 * 1024)
+        with self._client(app_config, mock_llm_provider) as client:
+            status, body = _raw_post(
+                client,
+                "/mcp/messages/",
+                [chunk] * 5,
+                query_string=self._SSE_MESSAGES_QUERY.encode(),
+            )
+
+        assert status == 413
+        assert body == b"Request body too large"
+
+    def test_streamable_http_accepts_a_body_at_the_limit(
+        self, app_config, mock_llm_provider
+    ):
+        """A call padded to exactly the cap still initializes normally."""
+        message = (
+            b'{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": '
+            b'{"protocolVersion": "2025-03-26", "capabilities": {}, '
+            b'"clientInfo": {"name": "test", "version": "1.0"}}}'
+        )
+        padded = message + b" " * (MCP_TRANSPORT_MAX_BODY_BYTES - len(message))
+        with self._client(app_config, mock_llm_provider) as client:
+            response = client.post(
+                "/mcp/",
+                content=padded,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
+                },
+            )
+
+        assert response.status_code == 200
+        assert response.headers.get("mcp-session-id")
+        assert '"protocolVersion"' in response.text
+
+    def test_sse_messages_passes_a_normal_body_to_the_transport(
+        self, app_config, mock_llm_provider
+    ):
+        """A small body reaches the message handler, which then looks up the session."""
+        with self._client(app_config, mock_llm_provider) as client:
+            response = client.post(
+                f"/mcp/messages/?{self._SSE_MESSAGES_QUERY}",
+                json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
+            )
+
+        assert response.status_code == 404
+        assert "session" in response.text.lower()
+
+
+def test_requirements_pin_an_mcp_release_with_the_transport_body_limit():
+    """mcp < 1.29.1 has no body-size guard on either transport."""
+    requirements = (
+        Path(__file__).resolve().parents[2] / "requirements.txt"
+    ).read_text()
+    pins = [
+        line.split("#")[0].strip()
+        for line in requirements.splitlines()
+        if line.split("#")[0].strip().startswith("mcp")
+        and line.split("#")[0].strip()[3:4] in ("=", ">", "<", "~", "!", "")
+    ]
+    assert pins == ["mcp>=1.29.1,<2"]

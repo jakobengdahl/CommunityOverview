@@ -1396,6 +1396,20 @@ WebP), and stores the result as an embedded data URI in `content.image.url` —
 never the original remote link — so the annotation keeps rendering after the
 source disappears. Only PNG, JPEG and WebP are accepted.
 
+Inline `image_data` is smaller over MCP than over REST. Both MCP transports
+(`POST /mcp` and `POST /mcp/messages/`) sit behind the mcp SDK's
+`RequestBodyLimitMiddleware`, which answers `413` to any request body over
+4 MiB — by declared `Content-Length` or, for a chunked upload, by counted
+bytes — before the JSON-RPC message is parsed. `backend/requirements.txt`
+pins `mcp>=1.29.1` because that is the first release that guards both
+transports; there is no other body-size guard in front of `/mcp`. Base64
+inflates bytes by 4/3, so the largest source image that fits inline in one
+tool call is roughly 3 MiB, against the 20 MiB
+(`DEFAULT_MAX_SOURCE_IMAGE_BYTES`) the REST endpoint
+`POST /api/sessions/{id}/annotations/image` accepts. `image_url` is not
+affected: the server fetches that image itself, subject only to the ingest
+limits.
+
 Because one embedded image is far bigger than the small generic op-batch cap
 the other annotation writes share, `create_image_annotation` does not apply
 that cap at all; instead `SessionManager.upsert_image_annotation` enforces
