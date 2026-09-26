@@ -14,6 +14,7 @@ masking unnoticed.
 """
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -25,6 +26,20 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "security-scan.yml"
 
 SCANNERS = ("pip-audit", "npm", "bandit")
 
+# `|tee`, `| tee` and `|& tee` alike; a spelling the discovery missed would
+# escape every exit-status check below.
+TEE = re.compile(r"\|&?\s*tee\b")
+
+# Bash reads these at startup. SHELLOPTS and BASH_ENV can switch pipefail on
+# without a `shell:` key - and under pipefail `-e` kills the bandit step at the
+# pipeline, before it closes its summary fence. BASHOPTS carries only `shopt`
+# options, not pipefail, but it too changes the shell the steps run under.
+SHELL_STARTUP_VARS = ("SHELLOPTS", "BASHOPTS", "BASH_ENV")
+
+# Owner decision: bandit stays reporting-only until its last findings on main
+# are cleared. Every other scanner blocks. Promoting bandit edits this set.
+REPORTING_ONLY_STEPS = {("bandit", "Run bandit (medium+ severity, non-blocking)")}
+
 
 def _workflow():
     return yaml.safe_load(WORKFLOW.read_text())
@@ -34,7 +49,7 @@ def _teed_steps():
     steps = []
     for job_id, job in _workflow()["jobs"].items():
         for step in job.get("steps", []):
-            if "| tee" in step.get("run", ""):
+            if TEE.search(step.get("run", "")):
                 steps.append(pytest.param(step, id=f"{job_id}:{step['name']}"))
     return steps
 
@@ -56,8 +71,9 @@ def _run_step(step, tmp_path, scanner_exit):
     summary.touch()
     script = tmp_path / "step.sh"
     script.write_text(step["run"])
+    inherited = {k: v for k, v in os.environ.items() if k not in SHELL_STARTUP_VARS}
     env = dict(
-        os.environ,
+        inherited,
         PATH=f"{stub_dir}{os.pathsep}{os.environ['PATH']}",
         GITHUB_STEP_SUMMARY=str(summary),
     )
@@ -104,7 +120,7 @@ def test_dependency_audits_are_blocking(job_id):
     workflow = _workflow()
     job = workflow["jobs"][job_id]
     assert not job.get("continue-on-error", False)
-    audits = [s for s in job["steps"] if "| tee" in s.get("run", "")]
+    audits = [s for s in job["steps"] if TEE.search(s.get("run", ""))]
     assert audits, f"no audit step found in job {job_id!r}"
     for step in audits:
         assert not step.get("continue-on-error", False), (
@@ -113,11 +129,70 @@ def test_dependency_audits_are_blocking(job_id):
     assert "--ignore-vuln" not in str(job)
 
 
-def test_pull_request_trigger_names_no_retired_branch():
+def _triggers(workflow):
     # PyYAML reads the bare `on:` key as boolean True.
+    return workflow.get("on", workflow.get(True))
+
+
+def test_pull_request_trigger_names_no_retired_branch():
     workflow = _workflow()
-    triggers = workflow.get("on", workflow.get(True))
-    assert "dev" not in triggers["pull_request"]["branches"]
+    assert "dev" not in _triggers(workflow)["pull_request"]["branches"]
+
+
+def test_trigger_set_is_pinned():
+    triggers = _triggers(_workflow())
+    assert set(triggers) == {"pull_request", "schedule", "workflow_dispatch"}
+    assert triggers["pull_request"] == {"branches": ["main", "preview"]}
+    assert triggers["schedule"], "the weekly re-audit of unchanged deps is gone"
+
+
+def test_exactly_the_expected_steps_are_reporting_only():
+    workflow = _workflow()
+    assert not workflow.get("continue-on-error", False)
+    reporting_only = set()
+    for job_id, job in workflow["jobs"].items():
+        assert not job.get("continue-on-error", False), (
+            f"job {job_id!r} is reporting-only"
+        )
+        for step in job.get("steps", []):
+            if step.get("continue-on-error", False):
+                reporting_only.add((job_id, step.get("name")))
+    assert reporting_only == REPORTING_ONLY_STEPS
+
+
+def test_gitleaks_cannot_be_switched_off_by_a_condition():
+    job = _workflow()["jobs"]["gitleaks"]
+    assert "if" not in job
+    for step in job["steps"]:
+        assert "if" not in step, f"gitleaks:{step.get('name')} is conditional"
+
+
+def test_gitleaks_checks_out_the_full_history():
+    # A shallow clone leaves the scheduled scan nothing but the tip commit.
+    steps = _workflow()["jobs"]["gitleaks"]["steps"]
+    checkout = [s for s in steps if s.get("uses", "").startswith("actions/checkout")]
+    assert len(checkout) == 1
+    assert checkout[0].get("with", {}).get("fetch-depth") == 0
+
+
+def test_no_env_switches_on_pipefail_behind_the_default_shell():
+    workflow = _workflow()
+    scopes = [("workflow", workflow)]
+    for job_id, job in workflow["jobs"].items():
+        scopes.append((job_id, job))
+        for step in job.get("steps", []):
+            scopes.append((f"{job_id}:{step.get('name')}", step))
+    for where, scope in scopes:
+        for var in SHELL_STARTUP_VARS:
+            assert var not in (scope.get("env") or {}), f"{where} sets {var}"
+    for job_id, job in workflow["jobs"].items():
+        for step in job.get("steps", []):
+            body = step.get("run", "")
+            for var in SHELL_STARTUP_VARS:
+                writes_env = "GITHUB_ENV" in body or "github.env" in body
+                assert not (var in body and writes_env), (
+                    f"{job_id}:{step.get('name')} may export {var} via GITHUB_ENV"
+                )
 
 
 def test_teed_steps_run_under_the_default_shell_the_test_executes():
