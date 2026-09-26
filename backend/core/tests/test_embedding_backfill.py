@@ -12,6 +12,7 @@ pattern `test_embedding_persistence.py` uses, so they exercise production
 code without the optional ML stack CI does not install.
 """
 
+import logging
 import os
 import tempfile
 import threading
@@ -184,13 +185,13 @@ class TestStartupBackfillPass:
         storage.flush()
 
     def test_stays_silent_and_starts_no_thread_when_ml_stack_is_absent(
-        self, tmpdir_path, monkeypatch, capsys
+        self, tmpdir_path, monkeypatch, storage_log
     ):
         storage = _make_storage(tmpdir_path)
         _add_node_without_embedding(
             storage, Node(id="a", type=NodeType.ACTOR, name="Alpha")
         )
-        capsys.readouterr()
+        storage_log()
 
         monkeypatch.setattr(
             storage_module.importlib.util, "find_spec", lambda name: None
@@ -201,18 +202,18 @@ class TestStartupBackfillPass:
 
         after = {t.ident for t in threading.enumerate()}
         assert after == before
-        assert "have no" in capsys.readouterr().out
+        assert any("have no" in m for m in storage_log()[logging.WARNING])
         assert not storage.vector_store.has_embedding("a")
         storage.flush()
 
     def test_backfills_in_the_background_when_the_ml_stack_is_available(
-        self, tmpdir_path, monkeypatch, capsys
+        self, tmpdir_path, monkeypatch, storage_log
     ):
         storage = _make_storage(tmpdir_path)
         _add_node_without_embedding(
             storage, Node(id="a", type=NodeType.ACTOR, name="Alpha")
         )
-        capsys.readouterr()
+        storage_log()
 
         monkeypatch.setattr(
             storage_module.importlib.util, "find_spec", lambda name: object()
@@ -230,11 +231,11 @@ class TestStartupBackfillPass:
             time.sleep(0.01)
 
         assert storage.embedding_coverage() == (1, 1)
-        assert "Backfilled 1" in capsys.readouterr().out
+        assert any("Backfilled 1" in m for m in storage_log()[logging.INFO])
         storage.flush()
 
     def test_a_broken_find_spec_probe_does_not_propagate(
-        self, tmpdir_path, monkeypatch, capsys
+        self, tmpdir_path, monkeypatch, storage_log
     ):
         """The synchronous portion of the startup pass - the find_spec probe
         and the Thread(...).start() call - runs from inside GraphStorage
@@ -245,7 +246,7 @@ class TestStartupBackfillPass:
         _add_node_without_embedding(
             storage, Node(id="a", type=NodeType.ACTOR, name="Alpha")
         )
-        capsys.readouterr()
+        storage_log()
 
         def _raise(name):
             raise RuntimeError("broken import hook")
@@ -255,17 +256,20 @@ class TestStartupBackfillPass:
         # Must not raise.
         storage._maybe_backfill_missing_embeddings_async()
 
-        assert "could not start embedding backfill" in capsys.readouterr().out
+        assert any(
+            "could not start embedding backfill" in m
+            for m in storage_log()[logging.WARNING]
+        )
         storage.flush()
 
     def test_a_thread_start_failure_does_not_propagate(
-        self, tmpdir_path, monkeypatch, capsys
+        self, tmpdir_path, monkeypatch, storage_log
     ):
         storage = _make_storage(tmpdir_path)
         _add_node_without_embedding(
             storage, Node(id="a", type=NodeType.ACTOR, name="Alpha")
         )
-        capsys.readouterr()
+        storage_log()
 
         monkeypatch.setattr(
             storage_module.importlib.util, "find_spec", lambda name: object()
@@ -279,7 +283,10 @@ class TestStartupBackfillPass:
         # Must not raise.
         storage._maybe_backfill_missing_embeddings_async()
 
-        assert "could not start embedding backfill" in capsys.readouterr().out
+        assert any(
+            "could not start embedding backfill" in m
+            for m in storage_log()[logging.WARNING]
+        )
         storage.flush()
 
     def test_construction_survives_a_broken_backfill_probe(
