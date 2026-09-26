@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 import { render, screen, fireEvent } from '@testing-library/react';
 import GenericAnnotationNode from '../src/components/GenericAnnotationNode';
 import { AnnotationContext } from '../src/components/AnnotationContext';
@@ -332,5 +335,30 @@ describe('GenericAnnotationNode — heatmap', () => {
     fireEvent.contextMenu(container.querySelector('.kind-heatmap'));
     expect(notifyRemoteLockedAttempt).toHaveBeenCalled();
     expect(hoisted.setNodes).not.toHaveBeenCalled();
+  });
+});
+
+// jsdom never loads stylesheets or evaluates media queries, so the one CSS
+// rule a guarantee rests on is checked as text: under forced colours a level-0
+// circle must not get the permanent outline visible circles get.
+describe('heat-map stylesheet', () => {
+  const css = readFileSync(
+    path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      '../src/components/GenericAnnotationNode.css'
+    ),
+    'utf-8'
+  );
+
+  it('keeps level-0 circles out of the forced-colours outline', () => {
+    const block = css.slice(css.indexOf('@media (forced-colors: active)'));
+    const rule = block.slice(0, block.indexOf('{', block.indexOf('{') + 1));
+    expect(rule).toContain('.kind-heatmap:not(.is-empty) .graph-heatmap-circle');
+  });
+
+  it('shows the level-0 rim only while selected or hovered', () => {
+    expect(css).toMatch(/\.kind-heatmap\.is-empty\.selected \.graph-heatmap-circle,/);
+    expect(css).toMatch(/\.kind-heatmap\.is-empty:hover \.graph-heatmap-circle \{/);
+    expect(css).not.toMatch(/\.kind-heatmap\.is-empty \{/);
   });
 });
