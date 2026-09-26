@@ -247,7 +247,7 @@ def _validate_generic_content(
 
     Deliberately narrow: only the fields the v1 contract actually
     type-constrains are checked (`shape`, `icon`, `attachment`, a `line`'s
-    `start`/`end`) — everything else in `content` stays the free-form,
+    `start`/`end`, a `heatmap`'s `intensity`) — everything else in `content` stays the free-form,
     verbatim payload `build_annotation`'s docstring describes. A `shape` or
     `icon` name outside its documented set is *not* an error (see
     `ANNOTATION_SHAPES`'s docstring); only its type is checked, so a caller

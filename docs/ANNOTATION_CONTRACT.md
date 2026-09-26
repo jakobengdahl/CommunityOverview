@@ -784,7 +784,9 @@ hand (the transparent-fill-standing-in-for-`frame` case); this makes it the
 shape's starting position rather than a step a user or agent has to take
 themselves.
 
-**Why only `shape`.** A shape is the decorative kind most often used as a
+**Why only `shape` (at the time).** This paragraph is the reasoning from
+before `heatmap` existed; the next paragraph adds it as a second backdrop
+kind on its own grounds. A shape is the decorative kind most often used as a
 background or frame that other annotations get drawn over — the merged-in
 `frame` look (a transparent fill with a coloured border) is the clearest
 case, but even a filled shape is commonly a backdrop a label or icon sits on
@@ -814,8 +816,8 @@ layers purely because of when each was created — the old one at 0, the new
 one at -1 — which is a real, visible difference: the newer shape now renders
 *behind* the older one by default, opposite of the usual last-created-is-
 on-top expectation. This is judged acceptable rather than confusing because
-(a) `shape` is the one kind this section deliberately treats as a
-backdrop, so "the newest shape is furthest back" reads as the feature working
+(a) `shape` and `heatmap` are the two kinds this section deliberately treats
+as backdrops, so "the newest shape is furthest back" reads as the feature working
 as intended, not as a bug, and (b) the manual layer row
 (`AnnotationLayerControls`, described above) still works exactly as before on
 both — a user who wants the new shape back in front of the old one just
@@ -829,11 +831,12 @@ shape exactly as any two same-era annotations already could.
 
 **Both creation paths agree.** The GUI's one-click/drag-to-create toolbox
 path (`GraphCanvas.jsx`'s own node-builder `createAnnotation`, which sets
-`zIndex` explicitly only on the `shape` branch it builds) and the MCP/REST
+`zIndex` explicitly only on the `shape` and `heatmap` branches it builds) and the MCP/REST
 creation path (`create_annotation`, `create_image_annotation`, and the image
 REST ingest endpoint, all funnelling through `session_annotations.py`'s
-`build_annotation`) apply the identical `shape → -1, everything else → 0`
-mapping, so a GUI-created and an MCP-created shape start on the same layer.
+`build_annotation`) apply the identical `shape`/`heatmap` → -1, everything
+else → 0 mapping, so a GUI-created and an MCP-created shape or heat-map
+circle start on the same layer.
 `packages/ui-graph-canvas/src/utils/annotationModel.js`'s `createAnnotation` —
 the shared client-side model both the canvas's document normalizer and the
 session save/restore translators route through — carries the same mapping

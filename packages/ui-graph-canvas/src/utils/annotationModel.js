@@ -72,7 +72,7 @@ const DEFAULT_FREEHAND_STROKE_WIDTH = 2;
 // Semantic default layer at creation (task-annotation-render-direct-
 // manipulation's remaining scope: "semantic default layers - a per-kind
 // default z at creation", docs/ANNOTATION_CONTRACT.md's "Layer order").
-// Every kind still starts at 0 except `shape`: a shape is the decorative
+// Every kind still starts at 0 except `shape` (and `heatmap`, below): a shape is the decorative
 // kind most often used as a background/frame other annotations get drawn
 // over (the merged-in `frame` look — a transparent fill with a coloured
 // border — being the clearest case), so it starts one layer below the 0
