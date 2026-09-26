@@ -7,6 +7,9 @@ ensuring consistency across both interfaces.
 
 import os
 from pathlib import Path
+
+import anyio
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -354,6 +357,19 @@ class TestStreamableHttpTransport:
         assert response.status_code == 200
         assert response.headers.get("mcp-session-id")
 
+    def test_a_broken_streamable_transport_fails_startup(
+        self, app_config, mock_llm_provider
+    ):
+        """No silent downgrade to an SSE-only /mcp when the SDK cannot build it."""
+        from unittest.mock import patch
+
+        with patch(
+            "backend.api_host.server.FastMCP.streamable_http_app",
+            side_effect=TypeError("broken transport"),
+        ):
+            with pytest.raises(TypeError, match="broken transport"):
+                self._client(app_config, mock_llm_provider)
+
     def test_browser_get_still_returns_the_info_payload(
         self, app_config, mock_llm_provider
     ):
@@ -408,11 +424,22 @@ class TestMountRelativePath:
 MCP_TRANSPORT_MAX_BODY_BYTES = 4 * 1024 * 1024
 
 
-def _raw_post(client: TestClient, path: str, chunks, query_string: bytes = b""):
-    """POST *chunks* as separate ASGI body messages with no Content-Length.
+def _raw_post(
+    client: TestClient,
+    path: str,
+    chunks,
+    query_string: bytes = b"",
+    content_length: int | None = None,
+):
+    """POST *chunks* as separate ASGI body messages.
 
     TestClient collapses any request body into a single message, which would
-    leave the SDK's streamed-body counter untested for a chunked upload.
+    leave the SDK's streamed-body counter untested for a chunked upload. With
+    *content_length* the request declares that length instead of being chunked,
+    whatever the chunks actually add up to.
+
+    Returns ``(status, body, unread)`` where *unread* counts the request body
+    messages the app never pulled from ``receive``.
     """
 
     async def call():
@@ -420,12 +447,18 @@ def _raw_post(client: TestClient, path: str, chunks, query_string: bytes = b""):
             {"type": "http.request", "body": chunk, "more_body": True}
             for chunk in chunks
         ] + [{"type": "http.request", "body": b"", "more_body": False}]
+        body_messages = len(messages)
+        pulled = 0
         sent = []
 
         async def receive():
+            nonlocal pulled
             if messages:
+                pulled += 1
                 return messages.pop(0)
-            return {"type": "http.disconnect"}
+            # Stay connected like a real client, so a streamed (SSE) response
+            # is not cut short by a disconnect.
+            await anyio.sleep_forever()
 
         async def send(message):
             sent.append(message)
@@ -444,7 +477,9 @@ def _raw_post(client: TestClient, path: str, chunks, query_string: bytes = b""):
                 (b"host", b"testserver"),
                 (b"content-type", b"application/json"),
                 (b"accept", b"application/json, text/event-stream"),
-                (b"transfer-encoding", b"chunked"),
+                (b"content-length", str(content_length).encode())
+                if content_length is not None
+                else (b"transfer-encoding", b"chunked"),
             ],
             "client": ("testclient", 50000),
             "server": ("testserver", 80),
@@ -454,7 +489,7 @@ def _raw_post(client: TestClient, path: str, chunks, query_string: bytes = b""):
         body = b"".join(
             m.get("body", b"") for m in sent if m["type"] == "http.response.body"
         )
-        return start["status"], body
+        return start["status"], body, body_messages - pulled
 
     return client.portal.call(call)
 
@@ -488,10 +523,13 @@ class TestMcpTransportBodySizeLimit:
     ):
         chunk = b" " * (1024 * 1024)
         with self._client(app_config, mock_llm_provider) as client:
-            status, body = _raw_post(client, "/mcp/", [chunk] * 5)
+            status, body, unread = _raw_post(client, "/mcp/", [chunk] * 8)
 
         assert status == 413
         assert body == b"Request body too large"
+        # Refused as soon as the running total passes the cap, not after
+        # buffering the whole upload.
+        assert unread > 0
 
     def test_sse_messages_rejects_oversized_content_length(
         self, app_config, mock_llm_provider
@@ -511,26 +549,64 @@ class TestMcpTransportBodySizeLimit:
     ):
         chunk = b" " * (1024 * 1024)
         with self._client(app_config, mock_llm_provider) as client:
-            status, body = _raw_post(
+            status, body, unread = _raw_post(
                 client,
                 "/mcp/messages/",
-                [chunk] * 5,
+                [chunk] * 8,
                 query_string=self._SSE_MESSAGES_QUERY.encode(),
             )
 
         assert status == 413
         assert body == b"Request body too large"
+        assert unread > 0
+
+    def test_streamable_http_rejects_on_declared_length_alone(
+        self, app_config, mock_llm_provider
+    ):
+        """An oversized Content-Length is refused before any body is read."""
+        with self._client(app_config, mock_llm_provider) as client:
+            status, body, unread = _raw_post(
+                client,
+                "/mcp/",
+                [b"{}"],
+                content_length=MCP_TRANSPORT_MAX_BODY_BYTES + 1,
+            )
+
+        assert status == 413
+        assert body == b"Request body too large"
+        assert unread == 2
+
+    def test_sse_messages_rejects_on_declared_length_alone(
+        self, app_config, mock_llm_provider
+    ):
+        with self._client(app_config, mock_llm_provider) as client:
+            status, body, unread = _raw_post(
+                client,
+                "/mcp/messages/",
+                [b"{}"],
+                query_string=self._SSE_MESSAGES_QUERY.encode(),
+                content_length=MCP_TRANSPORT_MAX_BODY_BYTES + 1,
+            )
+
+        assert status == 413
+        assert body == b"Request body too large"
+        assert unread == 2
+
+    @staticmethod
+    def _pad_to_limit(message: bytes) -> bytes:
+        return message + b" " * (MCP_TRANSPORT_MAX_BODY_BYTES - len(message))
+
+    _AT_LIMIT_INITIALIZE = (
+        b'{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": '
+        b'{"protocolVersion": "2025-03-26", "capabilities": {}, '
+        b'"clientInfo": {"name": "test", "version": "1.0"}}}'
+    )
 
     def test_streamable_http_accepts_a_body_at_the_limit(
         self, app_config, mock_llm_provider
     ):
         """A call padded to exactly the cap still initializes normally."""
-        message = (
-            b'{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": '
-            b'{"protocolVersion": "2025-03-26", "capabilities": {}, '
-            b'"clientInfo": {"name": "test", "version": "1.0"}}}'
-        )
-        padded = message + b" " * (MCP_TRANSPORT_MAX_BODY_BYTES - len(message))
+        padded = self._pad_to_limit(self._AT_LIMIT_INITIALIZE)
         with self._client(app_config, mock_llm_provider) as client:
             response = client.post(
                 "/mcp/",
@@ -544,6 +620,33 @@ class TestMcpTransportBodySizeLimit:
         assert response.status_code == 200
         assert response.headers.get("mcp-session-id")
         assert '"protocolVersion"' in response.text
+
+    def test_streamable_http_accepts_a_chunked_body_at_the_limit(
+        self, app_config, mock_llm_provider
+    ):
+        padded = self._pad_to_limit(self._AT_LIMIT_INITIALIZE)
+        step = 1024 * 1024
+        chunks = [padded[i : i + step] for i in range(0, len(padded), step)]
+        assert len(chunks) == 4
+        with self._client(app_config, mock_llm_provider) as client:
+            status, body, _ = _raw_post(client, "/mcp/", chunks)
+
+        assert status == 200
+        assert b'"protocolVersion"' in body
+
+    def test_sse_messages_passes_a_body_at_the_limit_to_the_transport(
+        self, app_config, mock_llm_provider
+    ):
+        padded = self._pad_to_limit(b'{"jsonrpc": "2.0", "id": 1, "method": "ping"}')
+        with self._client(app_config, mock_llm_provider) as client:
+            response = client.post(
+                f"/mcp/messages/?{self._SSE_MESSAGES_QUERY}",
+                content=padded,
+                headers={"Content-Type": "application/json"},
+            )
+
+        assert response.status_code == 404
+        assert "session" in response.text.lower()
 
     def test_sse_messages_passes_a_normal_body_to_the_transport(
         self, app_config, mock_llm_provider
