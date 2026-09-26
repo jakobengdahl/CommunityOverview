@@ -14,10 +14,13 @@ Imports are deferred (lazy) so the module loads fast and so the absence of the
 optional ML stack surfaces only when embedding generation is actually attempted.
 """
 
+import logging
 import threading
 from typing import List, Dict, Optional, Tuple, Any
 
 from .models import Node
+
+logger = logging.getLogger(__name__)
 
 # Global references for lazy-loaded modules
 _np = None
@@ -149,9 +152,9 @@ class VectorStore:
         with self._model_lock:
             if self.model is None:
                 SentenceTransformer = _ensure_sentence_transformers()
-                print(f"Loading embedding model: {self.model_name}...")
+                logger.info(f"Loading embedding model: {self.model_name}...")
                 self.model = SentenceTransformer(self.model_name)
-                print("Model loaded.")
+                logger.info("Model loaded.")
 
     def preload_model(self):
         """
@@ -162,9 +165,11 @@ class VectorStore:
         def _load():
             try:
                 self._load_model()
-                print(f"Embedding model '{self.model_name}' preloaded in background.")
+                logger.info(
+                    f"Embedding model '{self.model_name}' preloaded in background."
+                )
             except Exception as e:
-                print(f"Warning: Background model preload failed: {e}")
+                logger.warning(f"background model preload failed: {e}")
 
         t = threading.Thread(target=_load, name="embedding-preload", daemon=True)
         t.start()
@@ -181,7 +186,7 @@ class VectorStore:
         self.load_vectors(
             {node.id: node.embedding for node in nodes if node.embedding is not None}
         )
-        print(f"VectorStore index rebuilt with {len(self.embeddings)} embeddings")
+        logger.info(f"VectorStore index rebuilt with {len(self.embeddings)} embeddings")
 
     def load_vectors(self, vectors: Dict[str, Any]) -> None:
         """Replace the index with vectors read back from persistence.
@@ -193,8 +198,8 @@ class VectorStore:
         np = _ensure_numpy()
         kept = matching_dimension(vectors, dominant_dimension(vectors))
         if len(kept) != len(vectors):
-            print(
-                f"Warning: dropped {len(vectors) - len(kept)} embedding(s) whose "
+            logger.warning(
+                f"dropped {len(vectors) - len(kept)} embedding(s) whose "
                 f"width did not match the rest of the index"
             )
         self.embeddings = {
@@ -226,8 +231,8 @@ class VectorStore:
         width = widths.pop()
         current = self.dimension
         if current is not None and current != width:
-            print(
-                f"Warning: embedding dimension changed from {current} to {width}; "
+            logger.warning(
+                f"embedding dimension changed from {current} to {width}; "
                 f"discarding {len(self.embeddings)} vector(s) that can no longer be "
                 f"compared. Re-run scripts/generate_embeddings.py to rebuild them."
             )
@@ -390,8 +395,8 @@ class VectorStore:
             else:
                 return []
         except ImportError as e:
-            print(
-                f"Warning: semantic search unavailable (embedding model not installed): {e}"
+            logger.warning(
+                f"semantic search unavailable (embedding model not installed): {e}"
             )
             return []
 

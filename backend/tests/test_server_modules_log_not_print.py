@@ -28,6 +28,7 @@ from backend.core.events.models import (
     EventType,
 )
 from backend.core.storage_events import emit_event
+from backend.core.vector_store import VectorStore
 from backend.federation.config import load_federation_config
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -37,8 +38,10 @@ CONVERTED_MODULES = (
     "backend/core/embedding_sidecar.py",
     "backend/core/events/dispatcher.py",
     "backend/core/postgres_backend.py",
+    "backend/core/storage.py",
     "backend/core/storage_backends.py",
     "backend/core/storage_events.py",
+    "backend/core/vector_store.py",
     "backend/federation/config.py",
 )
 
@@ -688,3 +691,35 @@ def test_a_replaced_corrupt_sidecar_is_a_warning(tmp_path, caplog, capsys):
         f"{path} was not a readable sidecar" in m and f"moved it to {spoiled}" in m
         for m in warnings
     ), warnings
+
+
+class TestVectorStore:
+    LOGGER = "backend.core.vector_store"
+
+    def test_dropping_mismatched_vectors_is_a_warning(self, caplog, capsys):
+        caplog.set_level(logging.DEBUG, logger=self.LOGGER)
+
+        VectorStore().load_vectors(
+            {"a": [1.0, 0.0], "b": [0.0, 1.0], "c": [1.0, 0.0, 0.0]}
+        )
+
+        warnings = _logged(caplog, capsys, self.LOGGER, logging.WARNING)
+        assert any("dropped 1 embedding(s)" in m for m in warnings), warnings
+
+    def test_a_changed_model_width_is_a_warning(self, caplog, capsys):
+        store = VectorStore()
+        store.load_vectors({"a": [1.0, 0.0]})
+        caplog.set_level(logging.DEBUG, logger=self.LOGGER)
+
+        store._absorb({"b": [1.0, 0.0, 0.0]})
+
+        warnings = _logged(caplog, capsys, self.LOGGER, logging.WARNING)
+        assert any("dimension changed from 2 to 3" in m for m in warnings), warnings
+
+    def test_a_rebuilt_index_is_info(self, caplog, capsys):
+        caplog.set_level(logging.DEBUG, logger=self.LOGGER)
+
+        VectorStore().rebuild_index([])
+
+        info = _logged(caplog, capsys, self.LOGGER, logging.INFO)
+        assert any("index rebuilt with 0 embeddings" in m for m in info), info

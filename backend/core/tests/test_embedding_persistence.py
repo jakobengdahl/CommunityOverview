@@ -7,6 +7,7 @@ without the optional ML stack.
 """
 
 import json
+import logging
 import os
 import struct
 import threading
@@ -1915,7 +1916,7 @@ def test_a_relative_graph_path_still_owns_its_absolutely_configured_sidecar(
         storage.flush()
 
 
-def test_a_same_named_file_in_another_directory_is_not_ours(tmpdir_path, capsys):
+def test_a_same_named_file_in_another_directory_is_not_ours(tmpdir_path, storage_log):
     """Ownership is the whole path, not the basename. No test configured an
     operator path with our own file's NAME in a different directory, so
     comparing only the last component passed every one of them - while
@@ -1946,7 +1947,7 @@ def test_a_same_named_file_in_another_directory_is_not_ours(tmpdir_path, capsys)
         # separately. The refusal warning itself is the only direct evidence
         # the write was attempted and rejected.
         assert storage.vector_store.export_vectors()
-        assert "refusing to overwrite" in capsys.readouterr().out
+        assert any("refusing to overwrite" in m for m in storage_log()[logging.WARNING])
     finally:
         storage.flush()
 
