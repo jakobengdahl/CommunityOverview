@@ -6,6 +6,12 @@
  * logic, so they are tracked apart from these overlays.
  */
 
+import {
+  HEATMAP_DEFAULT_DIAMETER,
+  HEATMAP_MAX_INTENSITY,
+  normalizeHeatmapIntensity,
+} from './annotationModel';
+
 // text/shape/icon/vote_dot/image/freehand are the rest of the v1
 // annotation model (docs/ANNOTATION_CONTRACT.md) that isn't note/label/
 // arrow/group. text/shape/icon/vote_dot/image render through
@@ -31,6 +37,7 @@ export const GENERIC_OVERLAY_TYPES = new Set([
   'vote_dot',
   'image',
   'freehand',
+  'heatmap',
 ]);
 export const OVERLAY_TYPES = new Set(['note', 'label', 'arrow', ...GENERIC_OVERLAY_TYPES]);
 export const ANNOTATION_TYPES = new Set([
@@ -44,6 +51,8 @@ export const ANNOTATION_TYPES = new Set([
 // Default box size (px) for a generic overlay that carries explicit
 // dimensions (frame/shape/image) but wasn't given a size.
 const DEFAULT_GENERIC_SIZE = { w: 160, h: 96 };
+
+const HEATMAP_DEFAULT_BOX = { w: HEATMAP_DEFAULT_DIAMETER, h: HEATMAP_DEFAULT_DIAMETER };
 
 // Natural on-canvas size (px) of the two fixed-intrinsic-size kinds that a
 // one-click toolbox creation can usefully default to — matches the CSS box
@@ -133,6 +142,10 @@ const GENERIC_OVERLAY_FIELDS = {
   // migration, to make old data render correctly.
   vote_dot: ['color', 'opacity'],
   image: ['image', 'alt', 'color', 'opacity'],
+  // A heat-map circle's only payload is its whole-number intensity. It has no
+  // colour or opacity of its own: both are derived from the intensity
+  // (heatmapFillStyle below), so the level is the single thing a user sets.
+  heatmap: ['intensity'],
   // `points` are node-relative (relative to the node's own `position`, the
   // stroke's anchor/first sampled point) — the same convention arrow's
   // dx/dy uses, so a plain ReactFlow drag (which only updates `position`)
@@ -153,7 +166,7 @@ const GENERIC_OVERLAY_FIELDS = {
 
 // Generic overlay kinds that carry an explicit box size (shape/image);
 // icon/vote_dot/text render at a fixed intrinsic size instead.
-const SIZED_GENERIC_KINDS = new Set(['shape', 'image']);
+const SIZED_GENERIC_KINDS = new Set(['shape', 'image', 'heatmap']);
 
 // The kinds that draw geometry.rotation. The capability baseline names
 // text/headings, labels/callouts, sticky notes, images, icons/dots and basic
@@ -257,6 +270,35 @@ export const GENERIC_ANNOTATION_COLORS = Object.freeze([
   '#a855f7',
   '#0f172a',
 ]);
+
+// How a heat-map circle is painted (docs/ANNOTATION_CONTRACT.md's "Heat-map
+// circles"). Every circle is the same red with a radial alpha falloff to fully
+// transparent at its rim, peaking at HEATMAP_PEAK_ALPHA * level / 10 in the
+// centre. Because every circle is the SAME colour, ordinary source-over
+// compositing of two of them is commutative: the combined alpha at a point is
+// 1 - (1 - a1)(1 - a2) whichever is on top. So overlapping circles build one
+// continuous field that only grows denser where they overlap, never an opaque
+// disk, and the picture does not depend on z order or on which client drew
+// which circle first. Level 0 has alpha 0 everywhere: invisible. The peak stays
+// below 1 so graph content under even a level-10 circle remains readable.
+export const HEATMAP_RGB = '220, 38, 38';
+export const HEATMAP_PEAK_ALPHA = 0.85;
+
+export function heatmapPeakAlpha(intensity) {
+  return (HEATMAP_PEAK_ALPHA * normalizeHeatmapIntensity(intensity)) / HEATMAP_MAX_INTENSITY;
+}
+
+// `closest-side` makes the gradient a circle of radius min(w, h) / 2 centred in
+// the box, so a box that is not square still draws a circle, never an ellipse.
+export function heatmapFillStyle(intensity) {
+  const peak = heatmapPeakAlpha(intensity);
+  const mid = Number((peak * 0.55).toFixed(4));
+  return {
+    backgroundImage:
+      `radial-gradient(circle closest-side, rgba(${HEATMAP_RGB}, ${Number(peak.toFixed(4))}) 0%, ` +
+      `rgba(${HEATMAP_RGB}, ${mid}) 50%, rgba(${HEATMAP_RGB}, 0) 100%)`,
+  };
+}
 
 // Default text sizes (px) for note body and label text; overridable per node.
 export const DEFAULT_NOTE_FONT_SIZE = 14;
@@ -500,9 +542,10 @@ export function overlayToFlowNode(overlay) {
     for (const field of GENERIC_OVERLAY_FIELDS[overlay.kind]) data[field] = overlay[field];
     const node = { ...base, data, draggable: !locked, zIndex };
     if (SIZED_GENERIC_KINDS.has(overlay.kind)) {
+      const fallback = overlay.kind === 'heatmap' ? HEATMAP_DEFAULT_BOX : DEFAULT_GENERIC_SIZE;
       node.style = overlay.size
         ? { width: overlay.size.w, height: overlay.size.h }
-        : { width: DEFAULT_GENERIC_SIZE.w, height: DEFAULT_GENERIC_SIZE.h };
+        : { width: fallback.w, height: fallback.h };
     } else if (overlay.size) {
       // icon/vote_dot/text draw at a fixed intrinsic size (no `style` box, no
       // NodeResizer — RESIZABLE_KINDS in GenericAnnotationNode.jsx), but
@@ -850,6 +893,14 @@ export function computeAnnotationAriaLabel(kind, data, labels = {}) {
     }
     case 'vote_dot':
       return labels.ariaKindVoteDot || 'Vote dot';
+    case 'heatmap': {
+      // The level is part of the name, not a detail behind a hover: it is the
+      // only thing a heat-map circle says, and a screen-reader user or anyone
+      // who cannot tell the shades of red apart must get it without the colour.
+      const level = normalizeHeatmapIntensity(d.intensity);
+      const template = labels.ariaKindHeatmap || 'Heat-map circle, intensity {level} of {max}';
+      return template.replace('{level}', level).replace('{max}', HEATMAP_MAX_INTENSITY);
+    }
     case 'image':
       return withDetail(labels.ariaKindImage || 'Image', text(d.alt));
     case 'arrow':

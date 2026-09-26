@@ -310,6 +310,133 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     expect(voteDot.data.attachment).toBeUndefined();
   });
 
+  it('creates a heat-map circle via the toolbox at the default diameter and intensity', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^heat map$/i }));
+
+    placeOnPane();
+
+    const heatmap = findCreatedNode('heatmap');
+    expect(heatmap).toBeTruthy();
+    expect(heatmap.data.intensity).toBe(5);
+    expect(heatmap.style).toEqual({ width: 160, height: 160 });
+  });
+
+  it('draws a heat-map circle as a square box sized by the longer side of the drag', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^heat map$/i }));
+
+    const pane = screen.getByTestId('pane');
+    fireEvent(pane, pointerEvent('pointerdown', { clientX: 100, clientY: 100 }));
+    fireEvent(pane, pointerEvent('pointermove', { clientX: 160, clientY: 300 }));
+    fireEvent(pane, pointerEvent('pointerup', { clientX: 160, clientY: 300 }));
+
+    const heatmap = findCreatedNode('heatmap');
+    expect(heatmap.style).toEqual({ width: 200, height: 200 });
+    expect(heatmap.position).toEqual({ x: 100, y: 100 });
+  });
+
+  it('sizes a drawn heat-map circle by the width when the sweep is wider than tall', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^heat map$/i }));
+
+    const pane = screen.getByTestId('pane');
+    fireEvent(pane, pointerEvent('pointerdown', { clientX: 100, clientY: 100 }));
+    fireEvent(pane, pointerEvent('pointermove', { clientX: 300, clientY: 160 }));
+    fireEvent(pane, pointerEvent('pointerup', { clientX: 300, clientY: 160 }));
+
+    expect(findCreatedNode('heatmap').style).toEqual({ width: 200, height: 200 });
+  });
+
+  it('grows a drawn heat-map circle from the press point the way the drag went', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^heat map$/i }));
+
+    const pane = screen.getByTestId('pane');
+    fireEvent(pane, pointerEvent('pointerdown', { clientX: 100, clientY: 100 }));
+    fireEvent(pane, pointerEvent('pointermove', { clientX: 40, clientY: -100 }));
+    fireEvent(pane, pointerEvent('pointerup', { clientX: 40, clientY: -100 }));
+
+    const heatmap = findCreatedNode('heatmap');
+    expect(heatmap.style).toEqual({ width: 200, height: 200 });
+    // The square's bottom-right corner is the press point.
+    expect(heatmap.position).toEqual({ x: -100, y: -100 });
+  });
+
+  it('keeps the press point as the corner when the flipped axis moved less than the minimum', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^heat map$/i }));
+
+    const pane = screen.getByTestId('pane');
+    fireEvent(pane, pointerEvent('pointerdown', { clientX: 100, clientY: 100 }));
+    fireEvent(pane, pointerEvent('pointermove', { clientX: 80, clientY: 300 }));
+    fireEvent(pane, pointerEvent('pointerup', { clientX: 80, clientY: 300 }));
+
+    const heatmap = findCreatedNode('heatmap');
+    expect(heatmap.style).toEqual({ width: 200, height: 200 });
+    // Leftward by 20: the square's right edge is the press point, x 100.
+    expect(heatmap.position).toEqual({ x: -100, y: 100 });
+  });
+
+  it('anchors an upward, wider-than-tall drag at the press point', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^heat map$/i }));
+
+    const pane = screen.getByTestId('pane');
+    fireEvent(pane, pointerEvent('pointerdown', { clientX: 100, clientY: 100 }));
+    fireEvent(pane, pointerEvent('pointermove', { clientX: -100, clientY: 40 }));
+    fireEvent(pane, pointerEvent('pointerup', { clientX: -100, clientY: 40 }));
+
+    const heatmap = findCreatedNode('heatmap');
+    expect(heatmap.style).toEqual({ width: 200, height: 200 });
+    // Bottom-right corner is the press point on both axes.
+    expect(heatmap.position).toEqual({ x: -100, y: -100 });
+  });
+
+  it('does not flip a drawn heat-map circle for a few pixels of sideways jitter', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^heat map$/i }));
+
+    const pane = screen.getByTestId('pane');
+    fireEvent(pane, pointerEvent('pointerdown', { clientX: 100, clientY: 100 }));
+    fireEvent(pane, pointerEvent('pointermove', { clientX: 97, clientY: 300 }));
+    fireEvent(pane, pointerEvent('pointerup', { clientX: 97, clientY: 300 }));
+
+    const heatmap = findCreatedNode('heatmap');
+    expect(heatmap.style).toEqual({ width: 200, height: 200 });
+    expect(heatmap.position).toEqual({ x: 100, y: 100 });
+  });
+
+  it('still places a note drawn up and to the left at the swept box, not at the press point', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^note$/i }));
+
+    const pane = screen.getByTestId('pane');
+    fireEvent(pane, pointerEvent('pointerdown', { clientX: 300, clientY: 300 }));
+    fireEvent(pane, pointerEvent('pointermove', { clientX: 100, clientY: 200 }));
+    fireEvent(pane, pointerEvent('pointerup', { clientX: 100, clientY: 200 }));
+
+    const note = findCreatedNode('note');
+    expect(note.position).toEqual({ x: 100, y: 200 });
+    expect(note.style).toEqual({ width: 200, height: 100 });
+  });
+
+  it('starts a heat-map circle behind graph nodes', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^heat map$/i }));
+    placeOnPane();
+    expect(findCreatedNode('heatmap').zIndex).toBe(-1);
+  });
+
   it('creates a label annotation via the toolbox', () => {
     render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));

@@ -86,6 +86,7 @@ class TestAnnotationTypeMatrixFixture:
             "vote_dot",
             "image",
             "freehand",
+            "heatmap",
         }
         assert types.count("shape") == 2
 

@@ -11,7 +11,26 @@ export const ANNOTATION_TYPES = Object.freeze([
   'vote_dot',
   'image',
   'freehand',
+  'heatmap',
 ]);
+
+// A heat-map circle's intensity is a whole level from 0 (invisible) to 10
+// (strongest red) — docs/ANNOTATION_CONTRACT.md's "Heat-map circles".
+// Mirrors HEATMAP_* in backend/core/session_annotations.py.
+export const HEATMAP_MIN_INTENSITY = 0;
+export const HEATMAP_MAX_INTENSITY = 10;
+export const HEATMAP_DEFAULT_INTENSITY = 5;
+export const HEATMAP_DEFAULT_DIAMETER = 160;
+
+// Clamp and round whatever is stored into a whole level. A browser's op batch
+// reaches the store without the MCP tool's strict check, so a stored value can
+// be anything; reading it this way means every client draws the same level
+// for the same stored value. Anything non-numeric reads as the default.
+export function normalizeHeatmapIntensity(value) {
+  const number = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+  if (typeof number !== 'number' || !Number.isFinite(number)) return HEATMAP_DEFAULT_INTENSITY;
+  return Math.min(HEATMAP_MAX_INTENSITY, Math.max(HEATMAP_MIN_INTENSITY, Math.round(number)));
+}
 
 // The shape variants `content.shape` accepts (docs/ANNOTATION_CONTRACT.md).
 // Every one renders as its own distinct visual in GenericAnnotationNode.
@@ -53,7 +72,7 @@ const DEFAULT_FREEHAND_STROKE_WIDTH = 2;
 // Semantic default layer at creation (task-annotation-render-direct-
 // manipulation's remaining scope: "semantic default layers - a per-kind
 // default z at creation", docs/ANNOTATION_CONTRACT.md's "Layer order").
-// Every kind still starts at 0 except `shape`: a shape is the decorative
+// Every kind still starts at 0 except `shape` (and `heatmap`, below): a shape is the decorative
 // kind most often used as a background/frame other annotations get drawn
 // over (the merged-in `frame` look — a transparent fill with a coloured
 // border — being the clearest case), so it starts one layer below the 0
@@ -71,7 +90,11 @@ const DEFAULT_FREEHAND_STROKE_WIDTH = 2;
 // Both annotation-creation paths (this model and GraphCanvas.jsx's own node
 // builder) apply the identical mapping, so a GUI-created and an MCP/REST-
 // created shape start on the same layer.
-export const DEFAULT_ANNOTATION_Z_BY_TYPE = Object.freeze({ shape: -1 });
+//
+// `heatmap` starts on the same layer as `shape`, for the same reason: a heat
+// field is a backdrop. Drawn over graph nodes it would tint them and take
+// their clicks, which a marking meant to sit underneath content should not.
+export const DEFAULT_ANNOTATION_Z_BY_TYPE = Object.freeze({ shape: -1, heatmap: -1 });
 
 export function defaultAnnotationZ(type) {
   return DEFAULT_ANNOTATION_Z_BY_TYPE[type] ?? 0;
@@ -123,9 +146,9 @@ function normalizeSize(size, fallback = DEFAULT_SIZE) {
   };
 }
 
-function normalizeGeometry(annotation) {
+function normalizeGeometry(annotation, fallbackSize = DEFAULT_SIZE) {
   const position = normalizePoint(annotation.position || annotation.geometry);
-  const size = normalizeSize(annotation.size || annotation.geometry, DEFAULT_SIZE);
+  const size = normalizeSize(annotation.size || annotation.geometry, fallbackSize);
   const geometry = isPlainObject(annotation.geometry) ? annotation.geometry : {};
   return {
     x: finiteNumber(geometry.x, position.x),
@@ -236,6 +259,9 @@ function withTypePayload(annotation, type, geometry) {
     // yet) — rather than carried forward unread.
     return {};
   }
+  if (type === 'heatmap') {
+    return { intensity: normalizeHeatmapIntensity(annotation.intensity) };
+  }
   if (type === 'image') {
     return {
       image: clone(annotation.image || {}),
@@ -268,7 +294,10 @@ export function createAnnotation(input = {}) {
   const id =
     input.id || `annotation-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const type = normalizeType(input);
-  const geometry = normalizeGeometry(input);
+  const geometry = normalizeGeometry(
+    input,
+    type === 'heatmap' ? { w: HEATMAP_DEFAULT_DIAMETER, h: HEATMAP_DEFAULT_DIAMETER } : DEFAULT_SIZE
+  );
   const style = clone(input.style) || {};
   if (input.color !== undefined && style.color === undefined) style.color = input.color;
   const payload = withTypePayload(input, type, geometry);

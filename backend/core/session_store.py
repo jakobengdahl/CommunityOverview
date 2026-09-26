@@ -62,6 +62,7 @@ _ANNOTATION_TYPES = {
     "vote_dot",
     "image",
     "freehand",
+    "heatmap",
 }
 _LEGACY_ANNOTATION_ALIASES = {"arrow": "line"}
 _DEFAULT_MAX_ANNOTATIONS = 2000
