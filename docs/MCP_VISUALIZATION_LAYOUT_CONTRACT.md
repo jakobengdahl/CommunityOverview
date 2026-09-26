@@ -379,6 +379,13 @@ differ between the open core and the hosted layer.
   itself part of the defect: a field named for nodes that hands back edge ids
   breaks the caller that reads it as its name reads. Widening a field, or
   renaming one, is breaking and needs a new version.
+- Reporting a write with more moves than the full rate budget (§6) as
+  `too_large` instead of `rate_limited` is likewise a **correction, not a
+  version bump**. The two batch caps did not change, and neither did what is
+  admitted: a bucket that holds 200 tokens never admitted a larger write, so the
+  effective limit was always the smaller of the two. Only the classification
+  changed. A `rate_limited` that no amount of waiting could clear contradicted
+  §11's promise that `rate_limited` is retryable.
 - The requirement node `req-mcp-layout-contract` and the decision
   `dec-visualization-layout-contract` in the Corp planning graph govern this
   document; status and evidence live there, not here.

@@ -1569,9 +1569,9 @@ def register_mcp_tools(
         ``x``/``y`` = node top-left), exactly as ``get_visualization_layout``
         reports them. Only the nodes you name move; a write is a partial update of
         the position map, not a replacement. A batch is capped at 500 moves and
-        256 KiB of payload (``too_large`` above that), and each write within
-        those caps also draws from this tool's rate budget, sized to the number
-        of moves — so a single very large arrange may return ``rate_limited``
+        256 KiB of payload (``too_large`` above that), and each write that
+        passes those caps and fits the full budget draws from this tool's rate
+        budget, sized to the number of moves — so a single very large arrange may return ``rate_limited``
         before the hard cap, and one with more moves than the full budget (200
         at default settings) returns ``too_large`` and draws nothing, since
         waiting would never admit it. The

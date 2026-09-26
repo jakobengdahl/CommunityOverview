@@ -1117,7 +1117,8 @@ computed from `assumed_node_size` (`{width, height}` from the read tool) plus a
 gap — offset by the full node size, not half, to leave a visible gutter. Read the
 layout first to get `assumed_node_size` and the current `revision`, then pass that
 `revision` as `expected_revision` on the write. A single write is capped at 500
-moves / 256 KiB (`too_large` beyond that) and, within those caps, draws from the tool's
+moves / 256 KiB (`too_large` beyond that), and a write that passes those caps and
+fits the full budget draws from the tool's
 rate budget (per tool, shared by every MCP client on the instance) sized to the
 number of moves, so a very large arrange can hit
 `rate_limited` first, and one with more moves than the full budget (200 at
