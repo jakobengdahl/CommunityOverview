@@ -40,6 +40,36 @@ SHELL_STARTUP_VARS = ("SHELLOPTS", "BASHOPTS", "BASH_ENV")
 # are cleared. Every other scanner blocks. Promoting bandit edits this set.
 REPORTING_ONLY_STEPS = {("bandit", "Run bandit (medium+ severity, non-blocking)")}
 
+# A step invokes an audit when a line of its body starts with the scanner, so
+# `pip install pip-audit` is not one and a step that stops teeing still is.
+AUDIT_INVOCATION = re.compile(r"^\s*(?:pip-audit|npm\s+audit)\b.*$", re.M)
+
+# The exact audit command lines, per job. Scope is what makes an audit blocking
+# mean anything: a swapped `-r` file, `--no-deps`, `--audit-level=critical` or a
+# single `--workspace` each keep the job green over advisories it no longer sees.
+AUDIT_COMMANDS = {
+    "pip-audit": [
+        'pip-audit -r backend/requirements.txt -f markdown 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"',
+        'pip-audit -r backend/requirements-dev.txt -f markdown 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"',
+        'pip-audit -r services/mcp_oauth_gateway/requirements.txt -f markdown 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"',
+    ],
+    "npm-audit": ['npm audit --omit=dev 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"'],
+}
+
+# Actions the workflow may use. A third-party action can export SHELLOPTS or
+# BASH_ENV through GITHUB_ENV where no `run:` body shows it.
+ALLOWED_ACTIONS = {
+    "actions/checkout",
+    "actions/setup-python",
+    "actions/setup-node",
+    "gitleaks/gitleaks-action",
+}
+
+# The only file a `run:` body may write to. `2>&1` and friends are fd dups.
+REDIRECT = re.compile(r"(?<![0-9&])>>?\s*(?!&)(\S+)")
+TEE_TARGET = re.compile(r"\btee\s+(?:-a\s+)?(\S+)")
+STEP_SUMMARY = '"$GITHUB_STEP_SUMMARY"'
+
 
 def _workflow():
     return yaml.safe_load(WORKFLOW.read_text())
@@ -69,6 +99,8 @@ def _run_step(step, tmp_path, scanner_exit):
         stub.chmod(0o755)
     summary = tmp_path / "summary.md"
     summary.touch()
+    github_env = tmp_path / "github_env"
+    github_env.touch()
     script = tmp_path / "step.sh"
     script.write_text(step["run"])
     inherited = {k: v for k, v in os.environ.items() if k not in SHELL_STARTUP_VARS}
@@ -76,6 +108,7 @@ def _run_step(step, tmp_path, scanner_exit):
         inherited,
         PATH=f"{stub_dir}{os.pathsep}{os.environ['PATH']}",
         GITHUB_STEP_SUMMARY=str(summary),
+        GITHUB_ENV=str(github_env),
     )
     result = subprocess.run(
         ["bash", "-e", str(script)],
@@ -84,6 +117,9 @@ def _run_step(step, tmp_path, scanner_exit):
         capture_output=True,
         text=True,
         timeout=30,
+    )
+    assert github_env.read_text() == "", (
+        f"step {step['name']!r} wrote to GITHUB_ENV, which reaches every later step"
     )
     return result.returncode, summary.read_text()
 
@@ -115,18 +151,49 @@ def test_gitleaks_is_blocking():
     assert not _workflow()["jobs"]["gitleaks"].get("continue-on-error", False)
 
 
-@pytest.mark.parametrize("job_id", ["pip-audit", "npm-audit"])
+def _audit_steps(job):
+    return [s for s in job["steps"] if AUDIT_INVOCATION.search(s.get("run", ""))]
+
+
+@pytest.mark.parametrize("job_id", sorted(AUDIT_COMMANDS))
 def test_dependency_audits_are_blocking(job_id):
     workflow = _workflow()
     job = workflow["jobs"][job_id]
     assert not job.get("continue-on-error", False)
-    audits = [s for s in job["steps"] if TEE.search(s.get("run", ""))]
+    audits = _audit_steps(job)
     assert audits, f"no audit step found in job {job_id!r}"
     for step in audits:
         assert not step.get("continue-on-error", False), (
             f"{job_id}:{step['name']} is reporting-only; dependency audits block"
         )
     assert "--ignore-vuln" not in str(job)
+
+
+@pytest.mark.parametrize("job_id", sorted(AUDIT_COMMANDS))
+def test_dependency_audits_cannot_be_skipped(job_id):
+    # A skipped job or step reports success, so a condition is a quiet off-switch.
+    job = _workflow()["jobs"][job_id]
+    assert "if" not in job, f"job {job_id!r} is conditional"
+    assert "needs" not in job, f"job {job_id!r} is skipped when what it needs fails"
+    for step in job["steps"]:
+        assert "if" not in step, f"{job_id}:{step.get('name')} is conditional"
+
+
+@pytest.mark.parametrize("job_id", sorted(AUDIT_COMMANDS))
+def test_dependency_audit_scope_is_pinned(job_id):
+    job = _workflow()["jobs"][job_id]
+    commands = [
+        m.group(0).strip()
+        for step in _audit_steps(job)
+        for m in AUDIT_INVOCATION.finditer(step["run"])
+    ]
+    assert sorted(commands) == sorted(AUDIT_COMMANDS[job_id])
+
+
+def test_audits_run_nowhere_but_their_own_jobs():
+    for job_id, job in _workflow()["jobs"].items():
+        if job_id not in AUDIT_COMMANDS:
+            assert not _audit_steps(job), f"{job_id!r} runs an unpinned audit"
 
 
 def _triggers(workflow):
@@ -188,11 +255,30 @@ def test_no_env_switches_on_pipefail_behind_the_default_shell():
     for job_id, job in workflow["jobs"].items():
         for step in job.get("steps", []):
             body = step.get("run", "")
-            for var in SHELL_STARTUP_VARS:
-                writes_env = "GITHUB_ENV" in body or "github.env" in body
-                assert not (var in body and writes_env), (
-                    f"{job_id}:{step.get('name')} may export {var} via GITHUB_ENV"
-                )
+            where = f"{job_id}:{step.get('name')}"
+            # Pinning the only writable target closes GITHUB_ENV however its
+            # name is spelled, which a search for the literal name could not.
+            for target in REDIRECT.findall(body) + TEE_TARGET.findall(body):
+                assert target == STEP_SUMMARY, f"{where} writes to {target}"
+            assert "GITHUB_ENV" not in body and "github.env" not in body, where
+
+
+def test_only_known_actions_are_used():
+    used = {
+        step["uses"].split("@")[0]
+        for job in _workflow()["jobs"].values()
+        for step in job.get("steps", [])
+        if "uses" in step
+    }
+    assert used == ALLOWED_ACTIONS
+
+
+def test_bandit_reporting_only_state_is_marked_temporary():
+    # Parsed YAML drops comments, so read the raw text around the key.
+    lines = WORKFLOW.read_text().splitlines()
+    step = lines.index("      - name: Run bandit (medium+ severity, non-blocking)")
+    assert lines[step + 1].strip().startswith("# Temporary: reporting-only until")
+    assert lines[step + 2].strip() == "continue-on-error: true"
 
 
 def test_teed_steps_run_under_the_default_shell_the_test_executes():
