@@ -231,16 +231,17 @@ option (b) is the cheapest partial add and can be reopened as a new item.
 - **Definition of done:** `enable_pr_auto_merge` works on a `dev` PR; a red
   PR cannot merge.
 - **Effort:** XS (settings) — mostly a Jakob action; do together with A1.
-- **When marking checks required (noted during C5, PR #234):** every workflow
-  here — `ci.yml` (test + lint jobs) and the C5 `Security Scan` — sets
-  `paths-ignore` (`**.md`, `docs/**`, `SMALL_FIXES.md`) on its triggers, so a
-  docs-only PR never runs them. That is fine while the checks are non-required,
-  but GitHub treats a *required* check that is skipped (never reported) as
-  perpetually pending, which blocks merge — the standard `required check` +
-  `paths-ignore` footgun. Before promoting any check to required, drop
-  `paths-ignore` from that workflow (or add a required-status shim job that
-  reports success on the skipped paths); note this affects the test jobs too,
-  not just the security/lint ones.
+- **When marking checks required (noted during C5, PR #234):** GitHub treats a
+  *required* check that is skipped (never reported) as perpetually pending,
+  which blocks merge — the standard `required check` + `paths-ignore` footgun.
+  So no workflow may set `paths-ignore` on a `pull_request` trigger that
+  reports a required check; path-scoping belongs in the jobs instead, behind a
+  gate job that always reports. Current state: PR #243 removed the
+  `pull_request` `paths-ignore` from `ci.yml`, whose `detect-changes` job and
+  always-running `*-tests` gates now do the path-scoping. `ci.yml` keeps
+  `paths-ignore` (`**.md`, `docs/**`) on its `push` trigger only, where no
+  merge gate applies. The C5 `Security Scan` workflow sets no `paths-ignore`
+  on any trigger, so it runs on every PR to `main` or `preview`.
 
 ---
 
