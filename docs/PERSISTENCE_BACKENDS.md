@@ -700,7 +700,16 @@ writing a backend of your own against a shared server:
   that the server's `max_connections` covers
   `instance_count × (pool_size + 1)`. The `+ 1` is notification: a listener
   cannot return its connection to a pool and still be listening, so it holds
-  one further connection open per instance for as long as it runs.
+  one further connection open per instance for as long as it runs. That
+  formula counts one graph per instance — true of this repository's own
+  `build_persistence_backend`, which constructs exactly one backend per
+  process — but each `PostgresGraphPersistenceBackend` opens its own pool and
+  its own listening connection regardless of who constructs it, and nothing
+  here shares either across two of them. A process built to hold more than
+  one schema at once (the schema seam above exists precisely so one database
+  can hold several graphs) pays this cost once per graph it holds, not once
+  per process; see *Sizing it: what an instance costs*, below, for the full
+  multiplier and a worked example.
 
 - **A load is one moment, under `REPEATABLE READ`.** Nodes, edges and metadata
   read as three queries are three moments: PostgreSQL takes its snapshot per
@@ -1240,33 +1249,83 @@ is how the listening thread reads its channel while still noticing a stop.
 
 ### Sizing it: what an instance costs
 
-One instance costs **`pool_size + 1`** server connections while notification is
-running — the pool, plus the listening connection that cannot go back to a pool
-and still be listening. So a deployment needs
-`instance_count × (pool_size + 1)`, and it needs it at the instance count it
-*scales to*, not the one it was tested at. Getting this wrong is not a slow
-deployment: the instance that cannot get a connection fails to boot.
+One instance costs **`pool_size + 1`** server connections *per graph it
+holds* while notification is running — the pool, plus the listening
+connection that cannot go back to a pool and still be listening.
+`PostgresGraphPersistenceBackend.__init__` builds its own `ConnectionPool`
+and opens its own listening connection on every construction; nothing here
+pools or shares either across two instances of the class, so a process
+holding N graphs (N schemas) holds N of both.
+
+Every deployment this repository ships holds one graph per process: the
+running server calls `build_persistence_backend`
+(`backend/api_host/persistence.py`) exactly once at boot, and that function
+constructs exactly one backend, bound to the one schema
+`GRAPH_POSTGRES_SCHEMA` names — there is no second call in the server's own
+boot path. (`scripts/graph_file_to_postgres.py` and
+`scripts/measure_capacity.py` also construct the class directly, for
+importing a graph and for benchmarking; neither runs inside the server
+process or holds more than one graph at a time, so neither changes this.) So
+for a single-graph deployment — Corp's own, and every deployment of this
+open-core app as it ships today — "instance" and "graph" already coincide,
+graph_count is 1, and the arithmetic and table below are exactly as they were:
+a deployment needs `instance_count × (pool_size + 1)`, checked at the instance
+count it *scales to*, not the one it was tested at.
+
+The schema seam exists precisely so **one database can hold several graphs**,
+one per schema (see `GRAPH_POSTGRES_SCHEMA` above) — and a deployment that
+puts more than one graph behind a single process, holding one
+`PostgresGraphPersistenceBackend` per graph it serves, pays this cost once per
+graph as well as once per instance:
+
+```
+instance_count × (pool_size + 1) × graph_count
+```
+
+checked at the instance count *and* the graph count the deployment scales to.
+Getting either wrong is not a slow deployment: the instance that cannot get a
+connection fails to boot.
 
 Against a stock server — `max_connections` 100, three reserved for superusers,
 so 97 available:
 
-| Instances | `pool_size` | Connections | Fits in 97 |
-|---:|---:|---:|:--|
-| 1 | 4 (default) | 5 | yes |
-| 10 | 4 (default) | 50 | yes, with room for psql and a migration |
-| 10 | 8 | 90 | yes, with 7 spare — a psql session and a migration, and no more |
-| 20 | 4 (default) | 100 | **no** |
-| 20 | 2 | 60 | yes |
+| Instances | Graphs/instance | `pool_size` | Connections | Fits in 97 |
+|---:|---:|---:|---:|:--|
+| 1 | 1 | 4 (default) | 5 | yes |
+| 10 | 1 | 4 (default) | 50 | yes, with room for psql and a migration |
+| 10 | 1 | 8 | 90 | yes, with 7 spare — a psql session and a migration, and no more |
+| 20 | 1 | 4 (default) | 100 | **no** |
+| 20 | 1 | 2 | 60 | yes |
+| 5 | 4 | 4 (default) | 100 | **no** — the entire stock ceiling, before the three superuser-reserved connections |
 
-Two things worth reading off that table. Raising `pool_size` costs
-`instance_count` connections per step, not one — it is the multiplied number,
-which is why the default is deliberately small. And scaling out is cheaper per
-instance at a small pool than at a large one, so an autoscaling deployment
-should lower `pool_size` before it raises `max_connections`.
+Worked example for that last row: at `DEFAULT_POOL_SIZE = 4`, one instance
+holding one graph takes `4 + 1 = 5` connections. Five instances each holding
+four graphs take `(4 + 1) × 5 × 4 = 100` — the whole stock ceiling, with
+nothing left for a `psql` session or a migration.
+
+Three things worth reading off that table. Raising `pool_size` costs
+`instance_count × graph_count` connections per step, not one — it is the
+fully multiplied number, which is why the default is deliberately small.
+Adding a graph to every instance costs exactly as much as adding an
+instance — the two dimensions multiply rather than add, so a deployment
+serving many small graphs behind few instances reaches the ceiling far
+sooner than the instance count alone suggests. And scaling out is cheaper per
+instance at a small pool than at a large one, so a deployment adding
+instances or graphs should lower `pool_size` before it raises
+`max_connections`.
 
 `backend/core/tests/test_multi_instance_postgres.py` asserts the per-instance
-half of this against a running server, so the number above is measured rather
-than argued.
+half of this — several instances sharing one graph — against a running
+server, so that part of the number above is measured rather than argued. The
+per-graph multiplier is not exercised by that test, or by any acceptance run
+in this repository: it follows directly from
+`PostgresGraphPersistenceBackend.__init__` (`backend/core/postgres_backend.py`)
+opening an independent pool and listening connection on every construction,
+with no pooling or sharing across instances of the class — not from a
+multi-graph deployment this repository runs or tests today. Which shape a
+deployment should actually use to hold many graphs behind few instances is a
+separate question this document does not answer; the arithmetic above holds
+regardless of that choice.
 
 ### The acceptance test
 
