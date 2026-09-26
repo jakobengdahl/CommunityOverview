@@ -187,6 +187,38 @@ class TestApplyOps:
                 s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["c"]}]
             )
 
+    async def test_a_batch_costing_more_than_the_whole_bucket_is_too_large_and_charges_nothing(
+        self,
+    ):
+        mgr = _manager(bucket_capacity=2, bucket_refill_per_sec=0)
+        # A roomier MCP bucket, so a check reading the wrong bucket would pass.
+        mgr._mcp_bucket = _TokenBucket(10.0, 0.0)
+        s = mgr.create_session()
+        three = [{"op": "nodes_added", "node_ids": [n]} for n in ("a", "b", "c")]
+
+        with pytest.raises(OpBatchTooLarge):
+            await mgr.apply_ops(s.id, "c1", 0, three)
+        await mgr.apply_ops(s.id, "c1", 0, three[:2])
+        with pytest.raises(RateLimited):
+            await mgr.apply_ops(s.id, "c1", 0, three[2:])
+        assert s.state["node_refs"] == ["a", "b"]
+
+    async def test_at_default_settings_a_batch_over_the_burst_is_too_large_not_rate_limited(
+        self,
+    ):
+        """The bucket holds 200 while the op-count cap is 500, so a 201-500 op
+        batch passes both caps but could never be admitted by backing off."""
+        mgr = _manager(bucket_refill_per_sec=0)
+        s = mgr.create_session()
+        assert mgr._bucket.capacity == 200 < mgr.max_ops_per_batch
+        ops = [{"op": "nodes_added", "node_ids": [f"n{i}"]} for i in range(201)]
+
+        with pytest.raises(OpBatchTooLarge):
+            await mgr.apply_ops(s.id, "c1", 0, ops)
+        res = await mgr.apply_ops(s.id, "c1", 0, ops[:200])
+
+        assert res["seq"] == 200
+
     async def test_lookup_rate_limit_throttles_per_key(self):
         """Session-id lookups are throttled per source and refill over time."""
         mgr = _manager(lookup_bucket_capacity=2, lookup_refill_per_sec=0)
@@ -3352,6 +3384,20 @@ class TestApplyLayout:
         with pytest.raises(RateLimited):
             mgr.apply_layout(s.id, "mcp-agent", positions={"a": {"x": 2, "y": 2}})
 
+    @pytest.mark.parametrize(
+        "caps", [{"max_ops_per_batch": 2}, {"max_op_batch_bytes": 32}]
+    )
+    async def test_a_write_over_a_batch_cap_is_too_large_before_any_charge(self, caps):
+        mgr = _manager(**caps)
+        s = mgr.create_session()
+        bucket = _recording_mcp_bucket(mgr)
+        moves = {n: {"x": 1, "y": 1} for n in ("a", "b", "c")}
+
+        with pytest.raises(OpBatchTooLarge):
+            mgr.apply_layout(s.id, "mcp-agent", positions=moves)
+
+        assert bucket.calls == []
+
     async def test_deltas_resolve_against_current_positions(self):
         mgr = _manager()
         s = mgr.create_session()
@@ -3691,6 +3737,21 @@ class TestAddNodeRefs:
         )
 
         assert bucket.calls == [("mcp-agent:add_nodes_to_session", 2)]
+
+    @pytest.mark.parametrize(
+        "caps", [{"max_ops_per_batch": 2}, {"max_op_batch_bytes": 12}]
+    )
+    async def test_an_uncharged_write_over_a_batch_cap_is_too_large_before_any_charge(
+        self, caps
+    ):
+        mgr = _manager(**caps)
+        s = mgr.create_session()
+        bucket = _recording_mcp_bucket(mgr)
+
+        with pytest.raises(OpBatchTooLarge):
+            mgr.add_node_refs(s.id, "mcp-agent", ["a", "b", "c"])
+
+        assert bucket.calls == []
 
     async def test_an_uncharged_write_above_the_bucket_capacity_is_too_large(self):
         mgr = _manager()
