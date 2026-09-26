@@ -366,3 +366,25 @@ node change" and an edge report dropped on its own would otherwise go
 unnoticed. It does not reach the *ordering* invariant between the two, because
 `add_nodes` emits nodes and edges as two separate announcements;
 `test_persistence_contract_postgres.py` holds that.
+
+### What this means for a process holding several graphs
+
+The four criteria above, and the connection-budget arithmetic in
+`PERSISTENCE_BACKENDS.md` (*Sizing it: what an instance costs*), are both
+stated for one graph. `PostgresGraphPersistenceBackend` builds its own
+connection pool and its own LISTEN connection on every construction, with
+nothing shared across two of them, so `instance_count × (pool_size + 1)`
+against a stock server's 97 available connections is exactly right for this
+repository's own deployments, where one process holds one graph — Corp's
+included.
+
+A process built to hold more than one graph at once — one schema each, which
+is exactly what the seam `GRAPH_POSTGRES_SCHEMA` exists for ("one database can
+hold several graphs, one per schema") — pays that connection cost once per
+graph as well as once per instance: `instance_count × (pool_size + 1) ×
+graph_count`. At `DEFAULT_POOL_SIZE = 4`, five instances each holding four
+graphs already take `(4 + 1) × 5 × 4 = 100` connections — the entire stock
+ceiling, before the three superuser-reserved connections — with no change in
+instance count at all. The full arithmetic and worked table live in
+`PERSISTENCE_BACKENDS.md`, kept there as the one copy so there is only one to
+keep true; nothing here repeats them.
