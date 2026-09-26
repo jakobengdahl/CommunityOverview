@@ -37,8 +37,10 @@ import { applyIngestedImageOptimistically } from './utils/imageIngestApply';
 import { shouldPersistSnapshot } from './utils/sessionSnapshotGuard';
 import './App.css';
 
-// Ceiling on how long resyncFromServer's api.getSession() call may stay
-// in flight before its reentrancy guard self-heals. api.js's fetch carries
+// Ceiling on how long one resyncFromServer call may stay in flight before its
+// reentrancy guard self-heals. The call spans up to RESYNC_MAX_FETCHES
+// api.getSession() requests plus the replay's node fetches, and the timer
+// covers all of them together, not each request. api.js's fetch carries
 // no timeout (unlike SessionSyncClient's own outbound ops POST, which bounds
 // itself against exactly this: "SSE deployments commonly sit behind Cloud
 // Run / an ingress that can hold a half-open request open indefinitely" —
@@ -274,9 +276,12 @@ function App() {
   // the sync baseline as if it had synced successfully, and gets replayed
   // onto the canvas — silently undoing the very rejection the "change not
   // saved" notice just reported. The reentrancy guard suppresses onDropped's
-  // *own* resync call while one is already in flight, so the in-flight call
-  // is the only thing that will ever act on this — it reads and clears this
-  // set for itself right before finalising which ops to fold/replay.
+  // *own* resync call while one is already in flight for the same sync
+  // client, so that in-flight call is the only thing that will ever act on
+  // this — it reads and clears this set for itself right before finalising
+  // which ops to fold/replay. A resync for a newer client is not suppressed:
+  // it supersedes the replaced client's call, which stops at its next
+  // checkpoint, so whichever call reads this set next is the newer one.
   const recentlyDroppedOpsRef = useRef(new Set());
   // MCP tool-result push application (external AI agent commands → canvas) and
   // the legacy SSE push stream. The op-stream `command` events are wired below
@@ -672,7 +677,8 @@ function App() {
         // that flushes and gets fully confirmed *during* that request).
         const pendingOpsBefore = capturePendingOps();
         // Stream ops keep arriving while the GET is in flight, and each one
-        // is applied to the canvas and advances the client's appliedSeq. A
+        // is applied to the canvas and advances the client's appliedSeq (so
+        // does this client's own echo, which is not re-applied). A
         // payload whose seq is below that predates them, and the wholesale
         // reload below would wipe them for good (the stream never resends
         // them), so fetch again instead. Bounded: under a steady op stream

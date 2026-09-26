@@ -1628,18 +1628,20 @@ describe('Server-backed session lifecycle', () => {
     }
   });
 
-  // Holds back every timeout of the request-timeout length (App's resync
-  // guard timer among them) so a test can fire them by hand instead of
-  // waiting out the real delay. The ops POST timers share that length and are
-  // cleared once their request settles; a cleared timer is dropped here too,
-  // so only the timers still scheduled are ever fired.
+  // Holds back App's resync guard timers so a test can fire them by hand
+  // instead of waiting out the real delay. The sync client's ops POST timers
+  // share the guard's length, so length alone cannot tell them apart; a guard
+  // timer is the one of that length scheduled from App.jsx, and anything else
+  // runs on the real clock. A cleared timer is dropped here too, so only the
+  // guard timers still scheduled are ever fired.
   function holdRequestTimeouts() {
     const held = new Map();
     let nextId = 0;
     const realSetTimeout = globalThis.setTimeout;
     const realClearTimeout = globalThis.clearTimeout;
+    const scheduledFromApp = () => /[\\/]src[\\/]App\.jsx/.test(new Error().stack || '');
     const setSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation((cb, ms, ...args) => {
-      if (ms === DEFAULT_REQUEST_TIMEOUT_MS) {
+      if (ms === DEFAULT_REQUEST_TIMEOUT_MS && scheduledFromApp()) {
         nextId -= 1;
         held.set(nextId, cb);
         return nextId;
