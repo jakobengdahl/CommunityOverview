@@ -56,6 +56,8 @@ from backend.core.session_annotations import (
     ALL_ANNOTATION_TYPES,
     ATTACHABLE_ANNOTATION_TYPES,
     GENERIC_ANNOTATION_TYPES,
+    HEATMAP_DEFAULT_INTENSITY,
+    HEATMAP_TYPE,
     IMAGE_TYPE,
     annotation_type_of,
     build_annotation,
@@ -2790,7 +2792,7 @@ def register_mcp_tools(
     # ==================== Generic Annotations ====================
     #
     # These tools extend note-only MCP annotation access to the rest of the
-    # v1 model: text, label, line/arrow, shape, icon, vote_dot, image.
+    # v1 model: text, label, line/arrow, shape, icon, vote_dot, image, heatmap.
     # `note` keeps its dedicated tool set above (list_sticky_notes / ...);
     # `group` (node-membership boxes) keeps its own dedicated tool set below
     # (create_group_annotation / update_group_members) — folding it into a
@@ -2942,7 +2944,7 @@ def register_mcp_tools(
 
         Covers every v1 annotation type except `note`, `group` and `image`:
         `text`, `label`, `line` (`arrow` accepted as an alias),
-        `shape`, `icon`, `vote_dot`, `freehand`. Use `create_sticky_note` for notes,
+        `shape`, `icon`, `vote_dot`, `freehand`, `heatmap`. Use `create_sticky_note` for notes,
         `create_group_annotation` for groups, and `create_image_annotation`
         for images (an image's pixel content must be ingested server-side, so
         it cannot be created from a bare envelope here). An image annotation
@@ -2965,6 +2967,12 @@ def register_mcp_tools(
           - icon: {"icon": "flag"}
           - vote_dot: a plain coloured dot — no type-specific content field of
             its own; use `style.color` to set its colour, same as `icon`
+          - heatmap: {"intensity": 7} — a soft red heat-map circle; intensity
+            is an integer 0-10 (0 invisible, 10 strongest red) and defaults to
+            5 on a fresh create. The circle's diameter is min(w, h) (w/h
+            default to 160; give one and the other matches it). Overlapping
+            circles blend into one field, so the result does not depend on
+            their z order.
 
         `locked=True` combined with an attached/anchored binding (an
         attachable type's `attachment`, or a `line`'s `start`/`end`
@@ -3000,7 +3008,7 @@ def register_mcp_tools(
 
         Args:
             session_id: The session ID shown in the browser header (e.g. "8244-1742")
-            type: One of text/label/line/shape/icon/vote_dot/freehand
+            type: One of text/label/line/shape/icon/vote_dot/freehand/heatmap
                 ("arrow" accepted as an alias for "line"; "image" is
                 rejected — use create_image_annotation).
             x: Model-space x of the annotation's anchor/top-left corner.
@@ -3098,6 +3106,17 @@ def register_mcp_tools(
                                 "first or use a new annotation_id."
                             ),
                         }
+        # A fresh heat-map circle gets its default intensity stored, so a
+        # later `list_annotations` reports the level the canvas draws. Only
+        # on a fresh create: an upsert-replace that omits it keeps the stored
+        # intensity under the store's shallow merge.
+        if (
+            normalized_type == HEATMAP_TYPE
+            and existing_annotation is None
+            and (content is None or isinstance(content, dict))
+            and "intensity" not in (content or {})
+        ):
+            content = {**(content or {}), "intensity": HEATMAP_DEFAULT_INTENSITY}
         try:
             annotation = build_annotation(
                 type=normalized_type,

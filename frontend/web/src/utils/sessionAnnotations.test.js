@@ -651,3 +651,33 @@ describe('label/line style keys the canvas has no control for', () => {
     }
   });
 });
+
+describe('heat-map annotations survive the server <-> overlay round trip', () => {
+  it.each([0, 7, 10])('keeps intensity %i and the circle size', (intensity) => {
+    const server = {
+      id: 'heat-1',
+      type: 'heatmap',
+      position: { x: 5, y: 6 },
+      geometry: { x: 5, y: 6, w: 240, h: 240, rotation: 0 },
+      intensity,
+      z: 0,
+      locked: false,
+    };
+    const overlays = annotationsToOverlays([server]);
+    expect(overlays).toHaveLength(1);
+    expect(overlays[0].kind).toBe('heatmap');
+    expect(overlays[0].intensity).toBe(intensity);
+    const [back] = overlaysToAnnotations(overlays);
+    expect(back.type).toBe('heatmap');
+    expect(back.intensity).toBe(intensity);
+    expect(back.geometry.w).toBe(240);
+    expect(back.geometry.h).toBe(240);
+  });
+
+  it('reads an out-of-range stored intensity as a clamped whole level', () => {
+    const [overlay] = annotationsToOverlays([
+      { id: 'heat-2', type: 'heatmap', position: { x: 0, y: 0 }, intensity: 14.2 },
+    ]);
+    expect(overlay.intensity).toBe(10);
+  });
+});

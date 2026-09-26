@@ -1233,6 +1233,39 @@ describe('describeActivity', () => {
       ).toBe('history.desc.annotation_updated_text');
     });
 
+    it.each([
+      { name: '5 to 3', before: { intensity: 5 }, after: { intensity: 3 } },
+      { name: '5 to 0', before: { intensity: 5 }, after: { intensity: 0 } },
+      { name: 'unset to 0', before: {}, after: { intensity: 0 } },
+      { name: '0 to 10', before: { intensity: 0 }, after: { intensity: 10 } },
+    ])('reports a heat-map intensity change from $name', ({ before, after }) => {
+      const base = { id: 'h1', geometry: { x: 0, y: 0, w: 160, h: 160, rotation: 0 } };
+      expect(
+        describeActivity(
+          record({
+            op: 'annotation_updated',
+            before: { ...base, type: 'heatmap', ...before },
+            after: { ...base, type: 'heatmap', ...after },
+          })
+        ).key
+      ).toBe('history.desc.annotation_updated_intensity');
+    });
+
+    it('does not report the browser filling in a heat-map default intensity as an edit', () => {
+      const base = { id: 'h1', geometry: { x: 0, y: 0, w: 160, h: 160, rotation: 0 } };
+      const r = record({
+        op: 'annotation_updated',
+        before: { ...base, type: 'heatmap' },
+        after: { ...base, type: 'heatmap', intensity: 5 },
+      });
+      expect(describeActivity(r).key).not.toBe('history.desc.annotation_updated_intensity');
+    });
+
+    it('names a heat-map circle in a created record', () => {
+      const r = record({ op: 'annotation_created', after: { id: 'h1', type: 'heatmap' } });
+      expect(describeActivity(r).params.type).toBe('history.annotation_type.heatmap');
+    });
+
     it('keeps 0 equivalent to unset for non-vote_dot materialized defaults', () => {
       const r = record({
         op: 'annotation_updated',

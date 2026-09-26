@@ -77,7 +77,11 @@ import {
   NEARBY_ATTACH_OFFSET,
 } from '../utils/annotations';
 import { DEFAULT_ANNOTATION_ICON } from '../utils/annotationIcons';
-import { defaultAnnotationZ } from '../utils/annotationModel';
+import {
+  defaultAnnotationZ,
+  HEATMAP_DEFAULT_DIAMETER,
+  HEATMAP_DEFAULT_INTENSITY,
+} from '../utils/annotationModel';
 import {
   directNeighborIds,
   neighborStartPositions,
@@ -581,6 +585,8 @@ function GraphCanvasInner({
     ariaKindShape: 'shape',
     ariaKindIcon: 'icon',
     ariaKindVoteDot: 'Vote dot',
+    ariaKindHeatmap: 'Heat-map circle, intensity {level} of {max}',
+    heatmapIntensity: 'Intensity',
     ariaKindImage: 'Image',
     ariaKindArrow: 'Arrow',
     ariaKindFreehand: 'Freehand stroke',
@@ -1072,6 +1078,8 @@ function GraphCanvasInner({
         ariaKindShape: cml.ariaKindShape,
         ariaKindIcon: cml.ariaKindIcon,
         ariaKindVoteDot: cml.ariaKindVoteDot,
+        ariaKindHeatmap: cml.ariaKindHeatmap,
+        heatmapIntensity: cml.heatmapIntensity,
         ariaKindImage: cml.ariaKindImage,
         ariaKindArrow: cml.ariaKindArrow,
         ariaKindFreehand: cml.ariaKindFreehand,
@@ -1151,6 +1159,8 @@ function GraphCanvasInner({
       cml.ariaKindShape,
       cml.ariaKindIcon,
       cml.ariaKindVoteDot,
+      cml.ariaKindHeatmap,
+      cml.heatmapIntensity,
       cml.ariaKindImage,
       cml.ariaKindArrow,
       cml.ariaKindFreehand,
@@ -2155,6 +2165,19 @@ function GraphCanvasInner({
             color: options.color,
             size: { ...VOTE_DOT_INTRINSIC_SIZE },
           },
+        };
+      } else if (kind === 'heatmap') {
+        // A circle, so the box is square: a drag-to-draw sweep sizes it by
+        // its longer side, and a plain click gets the default diameter.
+        const side = options.box
+          ? Math.max(MIN_ANNOTATION_SIZE, options.box.width, options.box.height)
+          : HEATMAP_DEFAULT_DIAMETER;
+        newNode = {
+          id,
+          type: 'heatmap',
+          position,
+          data: { intensity: HEATMAP_DEFAULT_INTENSITY },
+          style: { width: side, height: side },
         };
       } else {
         newNode = {
@@ -3673,7 +3696,7 @@ function GraphCanvasInner({
     // icon, a label and a text annotation have a fixed or content-driven size
     // (RESIZABLE_KINDS/SIZED_GENERIC_KINDS exclude them), so a drag would have
     // nothing to apply; those place at the press point and ignore the rest.
-    const SIZABLE = new Set(['shape', 'note']);
+    const SIZABLE = new Set(['shape', 'note', 'heatmap']);
     const MIN_DRAG_PX = 6;
     // Matches GenericAnnotationNode's own MIN_SIZE, so a drawn box can never
     // be smaller than the resizer would allow it to be dragged to.
@@ -4870,6 +4893,7 @@ function GraphCanvasInner({
       shape: guard(GenericAnnotationNode, 'shape'),
       icon: guard(GenericAnnotationNode, 'icon'),
       vote_dot: guard(GenericAnnotationNode, 'vote_dot'),
+      heatmap: guard(GenericAnnotationNode, 'heatmap'),
       image: guard(GenericAnnotationNode, 'image'),
       freehand: guard(FreehandAnnotationNode, 'freehand'),
     };

@@ -167,6 +167,59 @@
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
 }
 
+/* Heat-map circle: the fill is an inline radial gradient (heatmapFillStyle in
+   utils/annotations.js). The box itself stays unpainted so only the circle
+   inside it shows. */
+.graph-generic-annotation-node.kind-heatmap {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  position: relative;
+  box-sizing: border-box;
+}
+
+/* Level 0 is invisible by contract; a faint rim keeps it findable. */
+.graph-generic-annotation-node.kind-heatmap.is-empty {
+  border: 1px dashed rgba(220, 38, 38, 0.45);
+}
+
+.graph-heatmap-level {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  min-width: 20px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.85);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  pointer-events: none;
+}
+
+/* Forced-colours modes drop background images, which would erase every
+   circle; draw each one as an outline instead so it stays visible. */
+@media (forced-colors: active) {
+  .graph-generic-annotation-node.kind-heatmap {
+    border: 2px solid CanvasText;
+  }
+}
+
+.context-menu-heatmap-intensity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+}
+
+.context-menu-heatmap-intensity-value {
+  min-width: 2ch;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 .graph-generic-annotation-node.kind-image {
   display: block;
   object-fit: contain;

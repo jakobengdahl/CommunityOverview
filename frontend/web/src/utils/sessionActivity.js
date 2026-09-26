@@ -32,7 +32,18 @@ const ANNOTATION_TYPE_KEYS = new Set([
   'vote_dot',
   'image',
   'freehand',
+  'heatmap',
 ]);
+
+// Top-level fields where 0 is a real value rather than "unset":
+// `vote_dot.value` (a vote count) and `heatmap.intensity` (level 0 is a
+// deliberate, invisible circle, and a stored absent intensity reads as the
+// default 5 — so 0 and absent are different pictures).
+const ZERO_IS_VALUE_FIELDS = Object.freeze({ vote_dot: 'value', heatmap: 'intensity' });
+
+function zeroIsValue(path, annotationType) {
+  return path.length === 1 && ZERO_IS_VALUE_FIELDS[annotationType] === path[0];
+}
 
 /** i18n key for an annotation's "a sticky note" / "a shape" phrase. */
 function annotationTypeKey(annotation) {
@@ -67,13 +78,13 @@ function isEmptyValue(value, { zeroIsEmpty = true } = {}) {
 
 function sameValueOptions(path, annotationType) {
   return {
-    zeroIsEmpty: !(annotationType === 'vote_dot' && path.length === 1 && path[0] === 'value'),
+    zeroIsEmpty: !zeroIsValue(path, annotationType),
   };
 }
 
 /**
  * Deep value equality, with every "unset" spelling treated as one value.
- * `vote_dot.value` is the exception: 0 is a real vote value there, not an
+ * ZERO_IS_VALUE_FIELDS are the exception: 0 is a real value there, not an
  * omitted default.
  */
 function sameValue(a, b, path = [], annotationType) {
@@ -206,12 +217,7 @@ function browserWriteBack(annotation) {
  */
 function userChanged(before, after, normalised, path = [], annotationType) {
   if (sameValue(before, after, path, annotationType)) return false;
-  if (
-    annotationType === 'vote_dot' &&
-    path.length === 1 &&
-    path[0] === 'value' &&
-    (before === 0 || after === 0)
-  ) {
+  if (zeroIsValue(path, annotationType) && (before === 0 || after === 0)) {
     return true;
   }
   return !sameValue(after, normalised, path, annotationType);
@@ -369,6 +375,7 @@ function computeAnnotationUpdateKind(record) {
     const raised = (record.after.z || 0) > (record.before.z || 0);
     return raised ? 'raised' : 'lowered';
   }
+  if (changed.has('intensity')) return 'intensity';
   if (changed.has('style') && !olderBuildStyleWriteBack(record.before, record.after)) {
     return 'style';
   }

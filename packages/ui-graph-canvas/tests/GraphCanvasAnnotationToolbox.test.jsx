@@ -310,6 +310,34 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     expect(voteDot.data.attachment).toBeUndefined();
   });
 
+  it('creates a heat-map circle via the toolbox at the default diameter and intensity', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^heat map$/i }));
+
+    placeOnPane();
+
+    const heatmap = findCreatedNode('heatmap');
+    expect(heatmap).toBeTruthy();
+    expect(heatmap.data.intensity).toBe(5);
+    expect(heatmap.style).toEqual({ width: 160, height: 160 });
+  });
+
+  it('draws a heat-map circle as a square box sized by the longer side of the drag', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^heat map$/i }));
+
+    const pane = screen.getByTestId('pane');
+    fireEvent(pane, pointerEvent('pointerdown', { clientX: 100, clientY: 100 }));
+    fireEvent(pane, pointerEvent('pointermove', { clientX: 160, clientY: 300 }));
+    fireEvent(pane, pointerEvent('pointerup', { clientX: 160, clientY: 300 }));
+
+    const heatmap = findCreatedNode('heatmap');
+    expect(heatmap.style).toEqual({ width: 200, height: 200 });
+    expect(heatmap.position).toEqual({ x: 100, y: 100 });
+  });
+
   it('creates a label annotation via the toolbox', () => {
     render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));

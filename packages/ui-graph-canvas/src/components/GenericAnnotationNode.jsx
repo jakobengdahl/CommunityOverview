@@ -19,7 +19,14 @@ import {
   withAnnotationDraggability,
   ATTACHABLE_OVERLAY_KINDS,
   GENERIC_ANNOTATION_COLORS,
+  HEATMAP_RGB,
+  heatmapFillStyle,
 } from '../utils/annotations';
+import {
+  HEATMAP_MAX_INTENSITY,
+  HEATMAP_MIN_INTENSITY,
+  normalizeHeatmapIntensity,
+} from '../utils/annotationModel';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
 import AnnotationOpacityControl, { useAnnotationOpacity } from './AnnotationOpacityControl';
@@ -40,7 +47,15 @@ const DEFAULT_COLOR = '#94a3b8';
 // dot-simplify): it no longer has a value to edit, only its colour. (`shape`,
 // `icon` and `vote_dot` are all already members of ROTATABLE_OVERLAY_KINDS,
 // so this is exactly that set.)
-const EDITABLE_KINDS = ROTATABLE_OVERLAY_KINDS;
+//
+// `heatmap` is the one editable generic kind that is not rotatable: it is a
+// circle, so a rotation would change nothing. It still needs the editor for
+// its intensity, size, layer and actions.
+const EDITABLE_KINDS = new Set([...ROTATABLE_OVERLAY_KINDS, 'heatmap']);
+
+// The resize-handle accent for a heat-map circle — the field's own red, so the
+// handles read as belonging to it even at a level too faint to see.
+const HEATMAP_ACCENT = `rgb(${HEATMAP_RGB})`;
 
 // Which kinds actually get a rotation control in the property bar. A
 // `vote_dot` is a plain circle — every rotation of it looks identical, so the
@@ -211,7 +226,7 @@ function normalizeAngle(deg) {
 // (SIZED_GENERIC_KINDS in utils/annotations.js) and are the only ones
 // resizable in this slice; text/icon/vote_dot render at a fixed intrinsic
 // size, so resizing them has no model-space geometry to change.
-const RESIZABLE_KINDS = new Set(['shape', 'image']);
+const RESIZABLE_KINDS = new Set(['shape', 'image', 'heatmap']);
 const MIN_SIZE = 40;
 
 // Every `content.shape` variant the contract accepts, as the CSS that draws
@@ -350,13 +365,15 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
   const shapeFill = data?.fill ?? DEFAULT_SHAPE_FILL;
   const shapeBorder = data?.border ?? DEFAULT_SHAPE_BORDER;
   const color =
-    kind === 'shape'
-      ? shapeFill !== 'transparent'
-        ? shapeFill
-        : shapeBorder !== 'transparent'
-          ? shapeBorder
-          : DEFAULT_COLOR
-      : data?.color || DEFAULT_COLOR;
+    kind === 'heatmap'
+      ? HEATMAP_ACCENT
+      : kind === 'shape'
+        ? shapeFill !== 'transparent'
+          ? shapeFill
+          : shapeBorder !== 'transparent'
+            ? shapeBorder
+            : DEFAULT_COLOR
+        : data?.color || DEFAULT_COLOR;
   const locked = Boolean(data?.locked);
   const {
     notifyChange,
@@ -595,6 +612,16 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     notifyChange('style');
   };
 
+  const changeIntensity = (next) => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    const intensity = normalizeHeatmapIntensity(next);
+    setNodes((nds) => nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, intensity } } : n)));
+    notifyChange('style');
+  };
+
   const changeLayer = useAnnotationLayer(id, data);
   const duplicate = useAnnotationDuplicate(id, data);
   const changeOpacity = useAnnotationOpacity(id, data);
@@ -713,8 +740,11 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
   // a drag can start: creation and the subtype switch both size it from
   // regularShapeSize. Passing a number here would be silently truthy and read
   // as "lock whatever it currently is", which is what it already does.
+  // A heat-map circle keeps its box square under the drag handles, so the box a
+  // user sees while resizing is the circle's own extent.
   const lockedAspect =
-    kind === 'shape' ? regularShapeAspect(data?.shape || 'rectangle') !== null : false;
+    kind === 'heatmap' ||
+    (kind === 'shape' ? regularShapeAspect(data?.shape || 'rectangle') !== null : false);
   const resizer = RESIZABLE_KINDS.has(kind) && (
     <NodeResizer
       minWidth={MIN_SIZE}
@@ -793,6 +823,8 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
       fontSize={textFontSize}
       font={data?.font}
       opacity={opacity}
+      intensity={normalizeHeatmapIntensity(data?.intensity)}
+      onChangeIntensity={changeIntensity}
       onChangeShape={changeShape}
       onChangeIcon={changeIcon}
       onChangeColor={changeColor}
@@ -1040,6 +1072,39 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     );
   }
 
+  if (kind === 'heatmap') {
+    // Painted as a soft radial gradient (heatmapFillStyle) rather than a
+    // coloured disk, so overlapping circles merge into one field. Level 0 draws
+    // nothing at all, which is the contract — but the circle must still be
+    // findable, so the `is-empty` class gives it a faint dashed rim, and the
+    // selected circle shows its level as a number for anyone who cannot judge
+    // a shade of red. The accessible name carries the level too
+    // (computeAnnotationAriaLabel).
+    const level = normalizeHeatmapIntensity(data?.intensity);
+    return (
+      <>
+        {resizer}
+        <div
+          className={`graph-generic-annotation-node kind-heatmap${
+            level === HEATMAP_MIN_INTENSITY ? ' is-empty' : ''
+          }${selectedClass}`}
+          style={heatmapFillStyle(level)}
+          data-intensity={level}
+          onContextMenu={openContextMenu}
+        >
+          {selected && (
+            <span className="graph-heatmap-level" aria-hidden="true">
+              {level}
+            </span>
+          )}
+        </div>
+        {editTrigger}
+        {menu}
+        {remoteBadge}
+      </>
+    );
+  }
+
   if (kind === 'image') {
     const url = data.image?.url;
     if (!url) {
@@ -1128,6 +1193,8 @@ function ContextMenuPortal({
   fontSize,
   font,
   opacity,
+  intensity,
+  onChangeIntensity,
   onChangeShape,
   onChangeIcon,
   onChangeColor,
@@ -1441,6 +1508,32 @@ function ContextMenuPortal({
           </div>
         </AnnotationMenuGroup>
       )}
+      {kind === 'heatmap' && (
+        <AnnotationMenuGroup
+          groupKey="intensity"
+          label={gl('heatmapIntensity', 'Intensity')}
+          glyph="🔥"
+          open={openGroup === 'intensity'}
+          onToggle={toggleGroup}
+        >
+          {/* A native range input: arrow keys, Page Up/Down and Home/End step
+              it with no extra wiring, and screen readers announce its value. */}
+          <div className="context-menu-heatmap-intensity">
+            <input
+              type="range"
+              className="context-menu-heatmap-intensity-input nodrag"
+              min={HEATMAP_MIN_INTENSITY}
+              max={HEATMAP_MAX_INTENSITY}
+              step={1}
+              value={intensity}
+              aria-label={gl('heatmapIntensity', 'Intensity')}
+              aria-valuetext={`${intensity} / ${HEATMAP_MAX_INTENSITY}`}
+              onChange={(e) => onChangeIntensity(Number(e.target.value))}
+            />
+            <output className="context-menu-heatmap-intensity-value">{intensity}</output>
+          </div>
+        </AnnotationMenuGroup>
+      )}
       {ROTATION_EDITABLE_KINDS.has(kind) && (
         <AnnotationMenuGroup
           groupKey="rotation"
@@ -1477,19 +1570,23 @@ function ContextMenuPortal({
           </div>
         </AnnotationMenuGroup>
       )}
-      <AnnotationMenuGroup
-        groupKey="opacity"
-        label={gl('opacity', 'Opacity')}
-        glyph="◐"
-        open={openGroup === 'opacity'}
-        onToggle={toggleGroup}
-      >
-        <AnnotationOpacityControl
-          labels={labels}
-          opacity={opacity}
-          onChangeOpacity={onChangeOpacity}
-        />
-      </AnnotationMenuGroup>
+      {/* A heat-map circle's transparency IS its intensity; a separate opacity
+          would be a second, unsaved way to say the same thing. */}
+      {kind !== 'heatmap' && (
+        <AnnotationMenuGroup
+          groupKey="opacity"
+          label={gl('opacity', 'Opacity')}
+          glyph="◐"
+          open={openGroup === 'opacity'}
+          onToggle={toggleGroup}
+        >
+          <AnnotationOpacityControl
+            labels={labels}
+            opacity={opacity}
+            onChangeOpacity={onChangeOpacity}
+          />
+        </AnnotationMenuGroup>
+      )}
       {/* Non-drag alternative to the NodeResizer handles `shape`/`image`
           render above — task-annotation-accessible-shared-controls.
           `text`/`icon`/`vote_dot` have no explicit box (RESIZABLE_KINDS

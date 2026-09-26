@@ -225,6 +225,18 @@
    here is only the fallback for a glyph rendered without one. The inset ring
    is dropped: it read as a doughnut rather than as the solid dot the canvas
    actually draws, which defeated the point of previewing the colour. */
+.annotation-toolbox-visual--heatmap {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: radial-gradient(
+    circle closest-side,
+    rgba(220, 38, 38, 0.85) 0%,
+    rgba(220, 38, 38, 0.45) 50%,
+    rgba(220, 38, 38, 0) 100%
+  );
+}
+
 .annotation-toolbox-visual--vote-dot {
   width: 22px;
   height: 22px;
