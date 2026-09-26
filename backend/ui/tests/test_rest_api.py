@@ -225,7 +225,7 @@ class TestUploadEndpoint:
                 side_effect=ValueError("broken"),
             ):
                 failed = post(path, "my notes.txt")
-            assert "broken" in failed["error"], path
+            assert "An internal error occurred" in failed["error"], path
             assert failed["filename"] == "my notes.txt", path
 
     def test_upload_unsupported_format(self, fastapi_test_client):

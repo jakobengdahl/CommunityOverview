@@ -11,6 +11,8 @@ go through ChatService -> GraphService.
 """
 
 import asyncio
+import logging
+
 import os
 import tempfile
 from typing import Optional, Dict, Any
@@ -19,6 +21,7 @@ from pathlib import Path, PurePosixPath
 from backend.ui.document_processor import DocumentProcessor
 
 
+logger = logging.getLogger(__name__)
 class DocumentService:
     """
     Service for handling document uploads and text extraction.
@@ -91,10 +94,11 @@ class DocumentService:
                 "char_count": len(text),
                 "word_count": len(text.split()),
             }
-        except Exception as e:
+        except Exception:
+            logger.exception(f"Error extracting text from {path.name}")
             return {
                 "success": False,
-                "error": f"Error extracting text: {str(e)}",
+                "error": "An internal error occurred while extracting text.",
                 "filename": path.name,
             }
 
@@ -149,10 +153,11 @@ class DocumentService:
                 "filename": filename,
                 "size": len(file_content),
             }
-        except Exception as e:
+        except Exception:
+            logger.exception(f"Error saving file {filename}")
             return {
                 "success": False,
-                "error": f"Error saving file: {str(e)}",
+                "error": "An internal error occurred while saving the file.",
                 "filename": self._display_filename(filename),
             }
 

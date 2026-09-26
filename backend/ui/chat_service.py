@@ -1049,10 +1049,11 @@ Respond with ONLY a JSON array of extracted entities, no other text. Example for
                 "message": f"Found {len(proposed_nodes)} potential entities. Please review before adding.",
             }
 
-        except Exception as e:
+        except Exception:
+            logger.exception("Error in propose_nodes")
             return {
                 "success": False,
-                "error": str(e),
+                "error": "An internal error occurred while proposing nodes.",
                 "proposed_nodes": [],
                 "similar_existing": {},
             }
