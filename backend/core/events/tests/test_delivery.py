@@ -675,6 +675,19 @@ class TestIsSafeUrlClauses:
         )
         assert is_safe_url("http://mixed.example.com/x") is False
 
+    @pytest.mark.parametrize("ip", ["224.0.0.1", "239.1.1.1", "ff02::1"])
+    def test_multicast_address_is_rejected(self, monkeypatch, ip):
+        # ipaddress flags these multicast only, not private or reserved, so
+        # only the is_multicast clause refuses them.
+        literal = f"[{ip}]" if ":" in ip else ip
+        assert is_safe_url(f"http://{literal}/x") is False
+        monkeypatch.setattr(
+            delivery.socket,
+            "getaddrinfo",
+            lambda *a, **k: _addrinfo("93.184.216.34", ip),
+        )
+        assert is_safe_url("http://mixed.example.com/x") is False
+
     @pytest.mark.parametrize(
         "ip", ["100.63.255.255", "100.128.0.0", "192.88.98.255", "192.88.100.0"]
     )
@@ -683,7 +696,14 @@ class TestIsSafeUrlClauses:
 
     @pytest.mark.parametrize(
         "embedded",
-        ["100.64.0.1", "192.88.99.1", "10.0.0.1", "127.0.0.1", "169.254.169.254"],
+        [
+            "100.64.0.1",
+            "192.88.99.1",
+            "10.0.0.1",
+            "127.0.0.1",
+            "169.254.169.254",
+            "224.0.0.1",
+        ],
     )
     def test_ipv4_mapped_form_of_an_internal_address_is_rejected(
         self, monkeypatch, embedded
@@ -705,11 +725,14 @@ class TestIsSafeUrlClauses:
         # not; judging the embedded host keeps the verdict the same everywhere.
         # Forcing the wrapper's flag reproduces 3.12.3 on any interpreter.
         assert is_safe_url("http://[::ffff:93.184.216.34]/x") is True
+        assert is_safe_url("http://[2606:4700::1]/x") is True
         monkeypatch.setattr(
             ipaddress.IPv6Address, "is_reserved", property(lambda self: True)
         )
         assert is_safe_url("http://[::ffff:93.184.216.34]/x") is True
-        assert is_safe_url("http://[4000::1]/x") is False
+        # A normally accepted IPv6 address turning rejected shows the patch
+        # took effect.
+        assert is_safe_url("http://[2606:4700::1]/x") is False
 
     @pytest.mark.parametrize(
         "sixtofour", ["2002:6440:1::", "2002:c058:6301::", "2002:a00:1::"]
@@ -862,6 +885,23 @@ class TestWebhookRedirectHops:
         methods = [method for method, _ in seen]
         assert isinstance(outcome, httpx.TooManyRedirects)
         assert methods == ["POST"] + ["GET"] * (MAX_REDIRECTS - 1)
+
+    @pytest.mark.parametrize("status", [301, 302, 303])
+    def test_get_hop_drops_the_body_headers(self, monkeypatch, status):
+        sent_headers = []
+
+        def handler(request, index):
+            sent_headers.append(request.headers)
+            if index == 0:
+                return httpx.Response(status, headers={"location": "/second"})
+            return httpx.Response(200)
+
+        seen, outcome = self._post(monkeypatch, handler)
+
+        assert outcome.status_code == 200
+        assert [method for method, _ in seen] == ["POST", "GET"]
+        assert sent_headers[0]["content-type"] == "application/json"
+        assert "content-type" not in sent_headers[1]
 
     def test_method_keeping_hop_after_a_switch_stays_get(self, monkeypatch):
         def handler(request, index):
