@@ -1,8 +1,9 @@
 # =============================================================================
-# Security Scan – dependency vulnerability reporting
+# Security Scan – dependency, SAST and secret scanning
 # =============================================================================
 # Runs pip-audit over the Python requirement files and `npm audit` over the
-# JS workspaces to surface known-vulnerable dependencies (STRUCTURE_REVIEW C5).
+# JS workspaces to surface known-vulnerable dependencies (STRUCTURE_REVIEW C5),
+# bandit over the Python source, and gitleaks over the commit history.
 #
 # Triggers:
 #   - pull_request : catches vulnerable dependencies introduced by a change
