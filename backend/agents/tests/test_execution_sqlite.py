@@ -8,7 +8,6 @@ one property the in-memory adapter cannot: state survives a process restart
 (reopening the same database file recovers every job and its state).
 """
 
-import re
 from datetime import timedelta
 
 import pytest
@@ -19,8 +18,9 @@ from backend.agents.execution.models import (
     ExecutionState,
     RetryPolicy,
 )
-from backend.agents.execution.sqlite_store import SqliteExecutionStore
+from backend.agents.execution.sqlite_store import SqliteExecutionStore, _to_epoch
 from backend.agents.execution.store import ExecutionStore
+from backend.agents.tests._sql_recording import RecordingConn, only_statement
 
 
 class TestSqliteExecutionStore(ExecutionStoreContractTests):
@@ -124,38 +124,13 @@ def test_migration_is_idempotent_across_reopens(tmp_path):
         second.close()
 
 
-class _RecordingConn:
-    """Wraps the store's sqlite connection and records every execute() call."""
-
-    def __init__(self, conn):
-        self._conn = conn
-        self.statements = []
-
-    def execute(self, sql, params=()):
-        self.statements.append((sql, list(params)))
-        return self._conn.execute(sql, params)
-
-    def __getattr__(self, name):
-        return getattr(self._conn, name)
-
-
-def _only_statement(recorder, prefix):
-    matching = [
-        (sql, params)
-        for sql, params in recorder.statements
-        if sql.strip().startswith(prefix)
-    ]
-    assert len(matching) == 1, recorder.statements
-    return matching[0]
-
-
 def test_list_jobs_binds_every_filter_value(tmp_path):
     # The f-string SQL carries "nosec B608": this pins that only fixed column
     # clauses and "?" reach the text, and every caller value is a bound param.
     store = SqliteExecutionStore(tmp_path / "execution.db")
     try:
         hostile = "a1' OR '1'='1"
-        recorder = _RecordingConn(store._conn)
+        recorder = RecordingConn(store._conn)
         store._conn = recorder
         store.list_jobs(
             states=[ExecutionState.PENDING, ExecutionState.RUNNING],
@@ -163,11 +138,11 @@ def test_list_jobs_binds_every_filter_value(tmp_path):
             kind=ExecutionKind.SCHEDULED,
             limit=7331,
         )
-        sql, params = _only_statement(recorder, "SELECT * FROM execution_jobs")
+        sql, params = only_statement(recorder, "SELECT * FROM execution_jobs")
         assert params == ["pending", "running", hostile, "scheduled", 7331]
         assert sql.count("?") == len(params)
         assert "'" not in sql
-        assert not re.search(r"\d", sql)
+        assert "7331" not in sql
         for value in ("pending", "running", "scheduled"):
             assert value not in sql
     finally:
@@ -180,13 +155,19 @@ def test_recover_stale_binds_every_job_id(tmp_path):
         jobs = [store.enqueue(_job(idempotency_key=f"k{i}")) for i in range(3)]
         for _ in jobs:
             store.claim_next("w1", now=T0, lease_seconds=60)
-        recorder = _RecordingConn(store._conn)
+        recorder = RecordingConn(store._conn)
         store._conn = recorder
-        recovered = store.recover_stale(now=T0 + timedelta(seconds=90))
+        now = T0 + timedelta(seconds=90)
+        recovered = store.recover_stale(now=now)
         assert len(recovered) == 3
-        sql, params = _only_statement(recorder, "UPDATE execution_jobs")
+        sql, params = only_statement(recorder, "UPDATE execution_jobs")
+        now_ts = _to_epoch(now)
+        assert params[:3] == ["pending", now_ts, now_ts]
         assert sorted(params[3:]) == sorted(j.id for j in jobs)
         assert sql.count("?") == len(params)
+        assert "'" not in sql
+        assert "pending" not in sql
+        assert str(int(now_ts)) not in sql
         for j in jobs:
             assert j.id not in sql
     finally:
