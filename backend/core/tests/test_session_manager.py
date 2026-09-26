@@ -191,6 +191,8 @@ class TestApplyOps:
         self,
     ):
         mgr = _manager(bucket_capacity=2, bucket_refill_per_sec=0)
+        # A roomier MCP bucket, so a check reading the wrong bucket would pass.
+        mgr._mcp_bucket = _TokenBucket(10.0, 0.0)
         s = mgr.create_session()
         three = [{"op": "nodes_added", "node_ids": [n]} for n in ("a", "b", "c")]
 
