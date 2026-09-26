@@ -61,12 +61,16 @@ def as_list(needs):
     return [needs] if isinstance(needs, str) else list(needs)
 
 
+def runs_playwright_tests(step):
+    """Any step that reaches Playwright other than to install a browser - a
+    direct `playwright test` and the web workspace's `test:e2e` script alike,
+    so a job spelled some other way is still discovered."""
+    run = str(step.get("run", ""))
+    return "test:e2e" in run or "playwright" in run.replace("playwright install", "")
+
+
 def playwright_test_steps(job):
-    return [
-        step
-        for step in job.get("steps", [])
-        if "playwright test" in str(step.get("run", ""))
-    ]
+    return [step for step in job.get("steps", []) if runs_playwright_tests(step)]
 
 
 def upload_steps(job):
@@ -98,13 +102,23 @@ class TestE2EJobShape:
     def test_runs_the_intended_specs_from_the_web_workspace(self, workflow, job_id):
         steps = playwright_test_steps(workflow["jobs"][job_id])
         assert len(steps) == 1, f"{job_id}: expected one playwright test step"
-        assert steps[0]["run"].strip() == E2E_JOBS[job_id][1]
-        assert steps[0].get("working-directory") == "frontend/web"
-        assert "if" not in steps[0], f"{job_id}: the test step must not be skippable"
+        step = steps[0]
+        assert step["run"].strip() == E2E_JOBS[job_id][1]
+        assert step.get("working-directory") == "frontend/web"
+        # Exact keys: an `if` makes the step skippable, and a `shell`, `env` or
+        # `continue-on-error` can hide a failure or change which specs run
+        # while the command text above still matches.
+        assert set(step) == {"name", "run", "working-directory"}, (
+            f"{job_id}: unexpected keys on the test step: {sorted(step)}"
+        )
+        job = workflow["jobs"][job_id]
+        assert "env" not in job and "defaults" not in job, (
+            f"{job_id}: a job-level env or defaults reaches the test step"
+        )
 
     def test_timeout_is_bounded(self, workflow, job_id):
         timeout = workflow["jobs"][job_id].get("timeout-minutes")
-        assert isinstance(timeout, int) and 0 < timeout <= MAX_TIMEOUT_MINUTES, (
+        assert type(timeout) is int and 0 < timeout <= MAX_TIMEOUT_MINUTES, (
             f"{job_id}: timeout-minutes={timeout!r}; without a bound a wedged "
             "browser holds a runner for GitHub's six-hour default"
         )
