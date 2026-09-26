@@ -1125,6 +1125,10 @@ class TestLeavesOrigin:
             ("https://h.example/a", "https://h.example/b", False),
             # an upgrade that also changes host is still a departure
             ("http://h.example/a", "https://other.example/b", True),
+            # ...including to a parent or child of the same host, which a
+            # suffix match on the hostname would wrongly treat as the same
+            ("http://a.h.example/a", "https://h.example/b", True),
+            ("http://h.example/a", "https://a.h.example/b", True),
             # an upgrade to a non-default port is not the exception
             ("http://h.example/a", "https://h.example:9443/b", True),
             # ...nor is one from a non-default port
