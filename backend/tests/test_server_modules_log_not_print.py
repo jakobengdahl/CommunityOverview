@@ -449,6 +449,10 @@ def test_the_guard_expands_a_chain_of_route_modules_in_linear_steps(monkeypatch,
 
     monkeypatch.setattr(sys.modules[__name__], "_expansions", counted)
     assert _stdout_calls("import os\nx" + ".os" * links + ".write(1, b'x')") == [2]
+    # One step per link at least, or the count read nothing: a guard that
+    # stopped recursing through the patched name would pass the bound above
+    # without being measured by it.
+    assert steps >= links + 1, f"{steps} expansion steps for {links} links"
 
 
 @pytest.mark.parametrize(
