@@ -26,13 +26,14 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "security-scan.yml"
 
 SCANNERS = ("pip-audit", "npm", "bandit")
 
-# `|tee` and `| tee` alike; a spelling the discovery missed would escape every
-# exit-status check below.
-TEE = re.compile(r"\|\s*tee\b")
+# `|tee`, `| tee` and `|& tee` alike; a spelling the discovery missed would
+# escape every exit-status check below.
+TEE = re.compile(r"\|&?\s*tee\b")
 
-# Bash reads these at startup, so any of them can switch pipefail on without a
-# `shell:` key - and under pipefail `-e` kills the bandit step at the pipeline,
-# before it closes its summary fence.
+# Bash reads these at startup. SHELLOPTS and BASH_ENV can switch pipefail on
+# without a `shell:` key - and under pipefail `-e` kills the bandit step at the
+# pipeline, before it closes its summary fence. BASHOPTS carries only `shopt`
+# options, not pipefail, but it too changes the shell the steps run under.
 SHELL_STARTUP_VARS = ("SHELLOPTS", "BASHOPTS", "BASH_ENV")
 
 # Owner decision: bandit stays reporting-only until its last findings on main
@@ -188,7 +189,8 @@ def test_no_env_switches_on_pipefail_behind_the_default_shell():
         for step in job.get("steps", []):
             body = step.get("run", "")
             for var in SHELL_STARTUP_VARS:
-                assert not (var in body and "GITHUB_ENV" in body), (
+                writes_env = "GITHUB_ENV" in body or "github.env" in body
+                assert not (var in body and writes_env), (
                     f"{job_id}:{step.get('name')} may export {var} via GITHUB_ENV"
                 )
 
