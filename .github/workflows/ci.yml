@@ -25,8 +25,15 @@
 # Tags applied (see "Extract metadata" steps for full logic):
 #   sha-<commit>          immutable, used as the canonical artifact reference
 #   dev                   floating tag, latest successful build from preview branch
-#   latest                floating tag, latest successful build from prod branch
-#   v<semver>             applied only when a version tag is pushed
+#   latest                floating tag, moved by a successful build of the prod
+#                         branch AND by a non-pre-release semver v* tag push,
+#                         whichever ran last: no `flavor:` is set, so
+#                         metadata-action's default `latest=auto` adds it to
+#                         such tag pushes on top of the explicit prod rule
+#   <major>.<minor>.<patch>, <major>.<minor>
+#                         applied only when a version tag is pushed; the
+#                         leading `v` is stripped (v1.2.3 -> 1.2.3 and 1.2),
+#                         and a pre-release tag gets the full version only
 #
 # Cost control (see detect-changes + the *-tests gate jobs below):
 #   - The heavy test jobs run only when service code actually changed and the
