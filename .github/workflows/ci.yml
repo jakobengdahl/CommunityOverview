@@ -2,7 +2,8 @@
 # CI Pipeline – Test, Build, and Publish Docker Images
 # =============================================================================
 # This workflow:
-#   1. Runs tests on every push and pull request
+#   1. Runs tests on pushes to main, preview and prod (and v* tags) and on
+#      pull requests targeting those branches
 #   2. Builds and publishes both application images to GHCR on branch pushes
 #   3. Emits artifact metadata that the infra repo consumes for deployment
 #

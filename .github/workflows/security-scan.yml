@@ -9,10 +9,19 @@
 #   - schedule     : catches newly-disclosed advisories against unchanged deps
 #   - workflow_dispatch : on-demand manual run
 #
-# Reporting-first / non-blocking: each audit step uses `continue-on-error`, so a
-# finding shows a red step and a job summary but never fails the workflow or
-# blocks a merge. Once the baseline is understood these can be flipped to
-# blocking and then added to branch protection if desired.
+# Blocking vs. reporting: gitleaks is blocking - a secret in the range it scans
+# fails the workflow (see the gitleaks job for what that range is). pip-audit,
+# npm audit and bandit are still reporting-only (`continue-on-error`) while the
+# open findings on main - gateway dependencies, npm production dependencies and
+# bandit - are cleared. The two backend pip-audit steps are clean today; they
+# stay reporting-only so the pip-audit job is promoted as one unit with the
+# gateway step.
+#
+# Every scanner step that tees its report into the job summary exits with the
+# SCANNER's status (`exit "${PIPESTATUS[0]}"`), not tee's. Without that the
+# pipeline's status is tee's, so a finding would report a green step even
+# where `continue-on-error` is absent. With `continue-on-error` present a
+# finding marks the step failed while the job still succeeds.
 #
 # CodeQL is intentionally NOT configured here: it is enabled via GitHub's
 # repository-level default setup, not through a committed workflow.
@@ -22,7 +31,7 @@ name: Security Scan
 
 on:
   pull_request:
-    branches: [main, preview, dev]
+    branches: [main, preview]
   schedule:
     # Weekly, Monday 06:00 UTC – re-audits unchanged deps against fresh advisories.
     - cron: '0 6 * * 1'
@@ -58,22 +67,28 @@ jobs:
         run: pip install pip-audit
 
       - name: Audit backend base requirements
+        # Temporary: clean today; reporting-only until promoted with the gateway step below.
         continue-on-error: true
         run: |
           echo "## pip-audit — backend/requirements.txt" >> "$GITHUB_STEP_SUMMARY"
           pip-audit -r backend/requirements.txt -f markdown 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
 
       - name: Audit backend dev requirements
+        # Temporary: clean today; reporting-only until promoted with the gateway step below.
         continue-on-error: true
         run: |
           echo "## pip-audit — backend/requirements-dev.txt" >> "$GITHUB_STEP_SUMMARY"
           pip-audit -r backend/requirements-dev.txt -f markdown 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
 
       - name: Audit gateway requirements
+        # Temporary: reporting-only until the gateway dependency findings on main are cleared.
         continue-on-error: true
         run: |
           echo "## pip-audit — services/mcp_oauth_gateway/requirements.txt" >> "$GITHUB_STEP_SUMMARY"
           pip-audit -r services/mcp_oauth_gateway/requirements.txt -f markdown 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
 
   # ---------------------------------------------------------------------------
   # npm audit – JS dependency advisories. The root lockfile covers every
@@ -94,17 +109,19 @@ jobs:
           node-version: '20'
 
       - name: Audit production dependencies
+        # Temporary: reporting-only until the npm production dependency findings on main are cleared.
         continue-on-error: true
         run: |
           echo "## npm audit (--omit=dev, all workspaces)" >> "$GITHUB_STEP_SUMMARY"
           npm audit --omit=dev 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
 
   # ---------------------------------------------------------------------------
   # bandit – Python static application security testing (SAST). Scans the
   # backend and gateway source for common insecure patterns. Test directories
-  # are excluded (asserts and fixtures produce noise). Reporting-first like the
-  # audits above: -ll limits to medium+ severity and the step never fails the
-  # build, so a finding shows in the job summary without blocking a merge.
+  # are excluded (asserts and fixtures produce noise). -ll limits to medium+
+  # severity. Reporting-only like the audits above for now: a finding marks the
+  # step failed and shows in the job summary without failing the workflow.
   # ---------------------------------------------------------------------------
   bandit:
     name: bandit (Python SAST)
@@ -124,6 +141,7 @@ jobs:
         run: pip install bandit
 
       - name: Run bandit (medium+ severity, non-blocking)
+        # Temporary: reporting-only until the bandit findings on main are cleared.
         continue-on-error: true
         run: |
           echo "## bandit (backend + services, medium+ severity)" >> "$GITHUB_STEP_SUMMARY"
@@ -131,15 +149,18 @@ jobs:
           bandit -r backend services \
             -x '*/tests/*,*/test_*.py' \
             -ll 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          status="${PIPESTATUS[0]}"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
 
   # ---------------------------------------------------------------------------
-  # gitleaks – secret scanning over the full git history. Complements GitHub's
-  # native secret scanning (a repo setting) with a committed, self-contained
-  # check via the maintained gitleaks-action (which manages the binary version).
-  # Reporting-first like the jobs above: continue-on-error keeps a hit from
-  # failing the workflow — it surfaces in the step annotations / logs instead.
-  # Promote to blocking (and add to branch protection) once history is clean.
+  # gitleaks – secret scanning. Complements GitHub's native secret scanning (a
+  # repo setting) with a committed, self-contained check via the maintained
+  # gitleaks-action (which manages the binary version). On pull_request the
+  # action scans only the PR's commits; on schedule and workflow_dispatch it
+  # scans the full history, so a secret already on main is caught by the weekly
+  # run, not by a PR. Blocking: the history is clean, so any hit fails the
+  # workflow.
   # ---------------------------------------------------------------------------
   gitleaks:
     name: gitleaks (secret scan)
@@ -149,11 +170,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v7
         with:
-          # Full history so gitleaks scans every commit, not just the tip.
+          # Full history, so the scheduled scan can cover every commit and a PR
+          # scan can resolve the PR's commit range.
           fetch-depth: 0
 
-      - name: Run gitleaks (non-blocking)
-        continue-on-error: true
+      - name: Run gitleaks
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

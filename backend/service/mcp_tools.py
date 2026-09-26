@@ -1711,12 +1711,12 @@ def register_mcp_tools(
         nothing new on the canvas.
 
         A batch is capped at 500 distinct ids and 256 KiB of ids, and each call
-        also draws from this tool's rate budget, sized to the number of distinct
-        ids that resolve — ids reported in ``skipped`` are not charged, and a
-        call that returns ``no_resolvable_nodes`` draws nothing — so a batch
-        well below the hard caps can still return ``rate_limited``. The budget
-        is per tool, not per client: every MCP client on the instance draws
-        from the same one. A repeated
+        that passes those caps also draws from this tool's rate budget, one unit
+        per distinct id sent (at least one), before any id is resolved — ids
+        reported in ``skipped`` are charged too, and so is a call that returns
+        ``no_resolvable_nodes`` — so a batch well below the hard caps can still
+        return ``rate_limited``. The budget is per tool, not per client: every
+        MCP client on the instance draws from the same one. A repeated
         id counts once against all three. Split
         large sets across successive calls, threading the returned ``revision``
         into the next ``expected_revision``.
@@ -1834,6 +1834,21 @@ def register_mcp_tools(
                 ),
             }
 
+        # Charged before the resolve, which costs one node lookup per id, so a
+        # call where no id resolves is not free.
+        try:
+            session_manager.consume_mcp_rate_budget(
+                _MCP_SESSION_CLIENT_ID,
+                max(1, len(unique_ids)),
+                rate_limit_label="add_nodes_to_session",
+            )
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many session writes; slow down and retry.",
+            }
+
         # Resolve through the projection under the *mutate* decision, not a read
         # one: a hook may narrow the two to different graph scopes, and this call
         # writes the ids into server-owned session state. Filtering by what the
@@ -1881,6 +1896,7 @@ def register_mcp_tools(
                 resolvable,
                 expected_revision=expected_revision,
                 rate_limit_label="add_nodes_to_session",
+                precharged=True,
             )
         except RevisionConflict as exc:
             return {
@@ -1898,12 +1914,6 @@ def register_mcp_tools(
                 "success": False,
                 "error": "busy",
                 "message": "Another change is being applied to this session; retry.",
-            }
-        except RateLimited:
-            return {
-                "success": False,
-                "error": "rate_limited",
-                "message": "Too many session writes; slow down and retry.",
             }
         except OpBatchTooLarge:
             return {
