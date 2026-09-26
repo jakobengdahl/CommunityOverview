@@ -15,6 +15,10 @@
 # Testing
 pytest>=7.0.0
 
+# test_lockfiles.py parses the locks with it; pin it directly rather than
+# relying on pytest to keep pulling it in.
+packaging>=24.0
+
 # The repo-wide `timeout = 300` in the root pyproject.toml applies here too
 # (pytest walks up to find it), but only takes effect with this plugin
 # installed - without it, pytest just warns "Unknown config option: timeout"

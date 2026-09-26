@@ -29,27 +29,51 @@ SECURITY_FLOORS = {
     "starlette": "0.49.1",  # CVE-2025-62727
 }
 
-_ENTRY = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==(\S+)")
-_HASH = re.compile(r"--hash=sha256:([0-9a-f]*)")
+_ENTRY = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==(\S+?)(?: ; (.+?))?(?: \\)?$")
+_HASH_LINE = re.compile(r"^    --hash=(\S+?)(?: \\)?$")
+_VALID_HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def _parse_lock(name):
-    """Return ({package: (version, [hashes])}, header text) for a uv lock file."""
+    """Return ({package: [(version, marker, [hashes])]}, header text) for a uv lock.
+
+    Every line must be a comment, a ``name==version`` entry or one of its
+    ``--hash=`` continuation lines; anything else fails the parse, so an entry
+    the parser cannot read never slips past the checks below.
+    """
     entries = {}
     current = None
     header = []
-    for line in (HERE / name).read_text().splitlines():
+    for number, line in enumerate((HERE / name).read_text().splitlines(), 1):
+        if not line.strip():
+            continue
+        if line.lstrip().startswith("#"):
+            if current is None:
+                header.append(line)
+            continue
         m = _ENTRY.match(line)
         if m:
-            current = canonicalize_name(m.group(1))
-            if current in entries:
-                raise AssertionError(f"{name}: {current} is locked twice")
-            entries[current] = (m.group(2), [])
-        elif current is not None:
-            entries[current][1].extend(_HASH.findall(line))
-        elif line.startswith("#"):
-            header.append(line)
+            package = canonicalize_name(m.group(1))
+            current = (m.group(2), m.group(3), [])
+            markers = [marker for _, marker, _ in entries.get(package, [])]
+            if None in markers or (markers and m.group(3) is None) or m.group(3) in markers:
+                raise AssertionError(f"{name}:{number}: {package} is locked twice for the same environment")
+            entries.setdefault(package, []).append(current)
+            continue
+        h = _HASH_LINE.match(line)
+        if h and current is not None:
+            current[2].append(h.group(1))
+            continue
+        raise AssertionError(f"{name}:{number}: unrecognised lock line {line!r}")
     return entries, "\n".join(header)
+
+
+def _single(lock, package, lock_name):
+    """The one unmarked entry for ``package``; packages that fork by marker are rejected."""
+    entries = lock[package]
+    if len(entries) != 1:
+        raise AssertionError(f"{lock_name}: {package} is split by marker; compare it by hand")
+    return entries[0]
 
 
 def _parse_in(name):
@@ -67,7 +91,15 @@ def _parse_in(name):
 
 
 def _recorded_command(lock, source):
-    return f"uv pip compile --universal --generate-hashes --python-version 3.11 {source} -o {lock}"
+    return f"#    uv pip compile --universal --generate-hashes --python-version 3.11 {source} -o {lock}"
+
+
+def _documented_command(lock, source):
+    return (
+        "#   cd services/mcp_oauth_gateway\n"
+        "#   uv pip compile --universal --generate-hashes --python-version 3.11 \\\n"
+        f"#     {source} -o {lock}\n"
+    )
 
 
 class TestRuntimeLock(unittest.TestCase):
@@ -77,7 +109,9 @@ class TestRuntimeLock(unittest.TestCase):
 
     def test_direct_dependencies_are_exact_pins_matching_the_lock(self):
         self.assertEqual(self.includes, [])
+        self.assertIn("python-multipart", {canonicalize_name(r.name) for r in self.reqs})
         for req in self.reqs:
+            self.assertIsNone(req.marker, f"{req.name} must apply everywhere")
             specs = list(req.specifier)
             self.assertEqual(
                 [s.operator for s in specs], ["=="], f"{req.name} must be exact-pinned in requirements.in"
@@ -85,17 +119,14 @@ class TestRuntimeLock(unittest.TestCase):
             name = canonicalize_name(req.name)
             self.assertIn(name, self.lock, f"{req.name} is missing from requirements.txt")
             self.assertEqual(
-                Version(self.lock[name][0]),
+                Version(_single(self.lock, name, "requirements.txt")[0]),
                 Version(specs[0].version),
                 f"{req.name}: requirements.txt disagrees with requirements.in",
             )
 
     def test_lock_records_the_documented_compile_command(self):
-        self.assertIn(_recorded_command("requirements.txt", "requirements.in"), self.header)
-        self.assertIn(
-            "uv pip compile --universal --generate-hashes --python-version 3.11 \\\n#     requirements.in -o requirements.txt",
-            (HERE / "requirements.in").read_text(),
-        )
+        self.assertIn(_recorded_command("requirements.txt", "requirements.in"), self.header.splitlines())
+        self.assertIn(_documented_command("requirements.txt", "requirements.in"), (HERE / "requirements.in").read_text())
 
 
 class TestDevLock(unittest.TestCase):
@@ -108,14 +139,18 @@ class TestDevLock(unittest.TestCase):
         self.assertEqual(includes, ["requirements.in"])
 
     def test_every_runtime_pin_is_locked_identically_for_the_tests(self):
-        for name, (version, _) in self.runtime.items():
+        for name, entries in self.runtime.items():
             self.assertIn(name, self.dev, f"{name} is in requirements.txt but not requirements-dev.txt")
-            self.assertEqual(self.dev[name][0], version, f"{name}: the two locks disagree")
+            self.assertEqual(
+                sorted((Version(v), m) for v, m, _ in self.dev[name]),
+                sorted((Version(v), m) for v, m, _ in entries),
+                f"{name}: the two locks disagree",
+            )
 
     def test_lock_records_the_documented_compile_command(self):
-        self.assertIn(_recorded_command("requirements-dev.txt", "requirements-dev.in"), self.header)
+        self.assertIn(_recorded_command("requirements-dev.txt", "requirements-dev.in"), self.header.splitlines())
         self.assertIn(
-            "uv pip compile --universal --generate-hashes --python-version 3.11 \\\n#     requirements-dev.in -o requirements-dev.txt",
+            _documented_command("requirements-dev.txt", "requirements-dev.in"),
             (HERE / "requirements-dev.in").read_text(),
         )
 
@@ -125,20 +160,24 @@ class TestLockIntegrity(unittest.TestCase):
         for lock_name in ("requirements.txt", "requirements-dev.txt"):
             lock, _ = _parse_lock(lock_name)
             self.assertTrue(lock, f"{lock_name} parsed to nothing")
-            for name, (_, hashes) in lock.items():
-                self.assertTrue(hashes, f"{lock_name}: {name} has no --hash")
-                for h in hashes:
-                    self.assertRegex(h, r"^[0-9a-f]{64}$", f"{lock_name}: {name} has a malformed hash")
+            for name, entries in lock.items():
+                for _, _, hashes in entries:
+                    self.assertTrue(hashes, f"{lock_name}: {name} has no --hash")
+                    for h in hashes:
+                        self.assertRegex(h, _VALID_HASH, f"{lock_name}: {name} has a malformed hash")
 
     def test_security_floors_hold_in_both_locks(self):
         for lock_name in ("requirements.txt", "requirements-dev.txt"):
             lock, _ = _parse_lock(lock_name)
             for name, floor in SECURITY_FLOORS.items():
                 self.assertIn(name, lock, f"{lock_name}: floor package {name} is not locked")
+                version, marker, _ = _single(lock, name, lock_name)
+                # A marker could keep the fixed version off the image's platform.
+                self.assertIsNone(marker, f"{lock_name}: floor package {name} is locked under a marker")
                 self.assertGreaterEqual(
-                    Version(lock[name][0]),
+                    Version(version),
                     Version(floor),
-                    f"{lock_name}: {name} {lock[name][0]} is below the security floor {floor}",
+                    f"{lock_name}: {name} {version} is below the security floor {floor}",
                 )
 
 
