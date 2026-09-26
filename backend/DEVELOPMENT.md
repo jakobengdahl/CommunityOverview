@@ -1242,8 +1242,8 @@ convention for the same fields; `locked` defaults to `False`.
 `delete_annotation` / `reorder_annotation` / `set_annotation_lock` /
 `duplicate_annotation` extend MCP annotation access to the rest of the v1
 model: `text`, `label`, `line` (`arrow` accepted as a legacy alias),
-`shape`, `icon`, `vote_dot`, `freehand` — plus `image`, for everything except
-creating one (see the image annotation tool below). They share the
+`shape`, `icon`, `vote_dot`, `freehand`, `heatmap` — plus `image`, for everything
+except creating one (see the image annotation tool below). They share the
 sticky-note tools' session/revision contract — model-space coordinates,
 `revision` / `expected_revision` optimistic concurrency, `revision_conflict`
 on a stale write, `lease_conflict` on a live human edit lease — over the same
@@ -1251,6 +1251,17 @@ annotation document. `create_group_annotation`/`update_group_members`/
 `delete_group_annotation` and `create_image_annotation` (below) share it too;
 all thirteen MCP tools that can mutate an existing annotation check the same
 lease at the actual mutation boundary and never acquire one themselves.
+
+A `heatmap` is a soft red heat-map circle whose only payload field is
+`content.intensity`, an integer 0–10 (0 invisible, 10 strongest red).
+`create_annotation`/`update_annotation` return `invalid_content` for anything
+else — a float, a bool, a string, or a value outside the range. A fresh create
+with no intensity stores the default 5; an upsert-replace that omits it keeps
+the stored value. With no `w`/`h` the circle is 160 across, and with only one
+of them the other matches it. The circle is drawn with diameter `min(w, h)`
+centred in its box. Like `shape`, a heat-map circle defaults to `z = -1`,
+behind graph nodes. The full rendering rules are in docs/ANNOTATION_CONTRACT.md
+under "Heat-map circles".
 
 `note` keeps its own dedicated tool set above and `group` (node-membership
 boxes) keeps its own below ("Group annotation tools"); neither is exposed
