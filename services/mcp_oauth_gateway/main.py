@@ -412,7 +412,7 @@ async def token(request: Request) -> JSONResponse:
     if "application/json" in content_type:
         try:
             body = await request.json()
-        except ValueError:
+        except (ValueError, RecursionError):
             return _invalid_request("request body is not valid JSON")
         if not isinstance(body, dict):
             return _invalid_request("request body must be a JSON object")

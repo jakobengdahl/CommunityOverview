@@ -365,6 +365,14 @@ class TestTokenEndpointMalformedBody(unittest.TestCase):
         )
         self._assert_invalid_request(resp)
 
+    def test_deeply_nested_json_is_invalid_request(self):
+        for payload in (b"[" * 100000 + b"]" * 100000,
+                        b'{"code": ' + b"[" * 100000 + b"]" * 100000 + b"}"):
+            resp = client.post(
+                "/token", content=payload, headers={"Content-Type": "application/json"},
+            )
+            self._assert_invalid_request(resp)
+
     def test_non_object_json_is_invalid_request(self):
         for payload in (b"[1, 2]", b'"authorization_code"', b"42", b"null"):
             resp = client.post(
@@ -434,6 +442,23 @@ class TestProxyResponsePassthrough(unittest.TestCase):
             assert resp.headers["mcp-session-id"] == "sess-1", path
             params = list(upstream_post.await_args.kwargs["params"])
             assert params == [("session_id", "s1"), ("tag", "x"), ("tag", "y")], path
+
+    def test_client_accept_encoding_is_not_forwarded(self):
+        """Only httpx's own Accept-Encoding may reach the upstream: a coding it
+        cannot decode would otherwise arrive still encoded but unlabelled."""
+        import proxy as proxy_module
+
+        upstream_post = AsyncMock(return_value=self._upstream_response())
+        with patch.object(proxy_module._client, "post", new=upstream_post):
+            resp = client.post(
+                "/messages",
+                headers={"Authorization": "Bearer static-test-api-key",
+                         "Accept-Encoding": "br, zstd"},
+                content=b"{}",
+            )
+        assert resp.status_code == 200
+        sent = {k.lower() for k in upstream_post.await_args.kwargs["headers"]}
+        assert "accept-encoding" not in sent
 
     def test_response_filter_keeps_every_repeated_header(self):
         import httpx2 as httpx

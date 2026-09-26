@@ -210,6 +210,9 @@ _HOP_BY_HOP = frozenset({
     "upgrade",
     "proxy-authorization",
     "proxy-authenticate",
+    # Left out so httpx advertises only the codings it can decode: the response
+    # filter drops content-encoding on the assumption the body arrived decoded.
+    "accept-encoding",
 })
 
 
