@@ -154,13 +154,30 @@ class MCPLoader:
 
             # Try info endpoint
             info_url = f"{base_url}/info"
-            response = httpx.get(info_url, timeout=5, follow_redirects=True)
-            if response.status_code == 200:
-                info = response.json()
-                # Our graph MCP includes tools in the info endpoint
-                if "endpoints" in info:
-                    # We know our graph MCP tools
-                    tools = self._get_graph_mcp_tools(integration)
+
+            if not is_safe_url(info_url):
+                raise ValueError(f"URL resolves to a disallowed address: {info_url}")
+
+            with httpx.Client(timeout=5, follow_redirects=False) as client:
+                current_url = info_url
+                for _ in range(MAX_REDIRECTS):
+                    response = client.get(current_url)
+                    if not response.is_redirect:
+                        break
+                    location = str(response.headers.get("location", ""))
+                    next_url = urllib.parse.urljoin(current_url, location)
+                    if not is_safe_url(next_url):
+                        raise ValueError(f"Redirected to unsafe URL: {next_url}")
+                    current_url = next_url
+                else:
+                    raise ValueError(f"Too many redirects (limit {MAX_REDIRECTS})")
+
+                if response.status_code == 200:
+                    info = response.json()
+                    # Our graph MCP includes tools in the info endpoint
+                    if "endpoints" in info:
+                        # We know our graph MCP tools
+                        tools = self._get_graph_mcp_tools(integration)
 
         except (httpx.RequestError, httpx.InvalidURL, ValueError) as e:
             # requests folded both a non-JSON-body decode error and a malformed-URL
