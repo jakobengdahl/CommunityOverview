@@ -127,7 +127,10 @@ class TestBackfillMissingEmbeddings:
         """A restart is exactly the case the task calls out as unrepaired
         today (`VectorStore.rebuild_index` only reads vectors a node already
         carries). Backfilling must persist through the sidecar, not just
-        update the in-memory index."""
+        update the in-memory index - so this waits for backfill's OWN
+        fire-and-forget `save()` to land (via `flush()`) instead of calling
+        `save()` again itself, which would mask whether
+        `backfill_missing_embeddings()` persists on its own."""
         storage = _make_storage(tmpdir_path)
         storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
         _add_node_without_embedding(
@@ -135,7 +138,7 @@ class TestBackfillMissingEmbeddings:
         )
 
         assert storage.backfill_missing_embeddings() == 1
-        storage.save().result()
+        storage.flush()
 
         reloaded = GraphStorage(json_path=os.path.join(tmpdir_path, "graph.json"))
         assert reloaded.embedding_coverage() == (2, 2)
@@ -302,6 +305,196 @@ class TestStartupBackfillPass:
         reloaded = GraphStorage(json_path=os.path.join(tmpdir_path, "graph.json"))
         reloaded.vector_store.model = _FakeEncoder()
         reloaded.flush()
+
+    def test_a_save_failure_during_the_startup_backfill_does_not_abort_construction(
+        self, tmpdir_path, monkeypatch
+    ):
+        """`backfill_missing_embeddings()` calls `self.save()` without
+        waiting on or checking its result - fire-and-forget, per this
+        module's own docstring - and nothing in it guards that call with a
+        try/except of its own. This simulates `save()` itself raising
+        synchronously (the same shape as `ThreadPoolExecutor.submit` raising
+        `RuntimeError` when the executor is already shut down) and checks
+        two things: the raise must not escape the background startup pass
+        `__init__` starts and so must not abort construction; and, because
+        the vector was already computed and put in the index before `save()`
+        was even called, it must not be lost - any later successful `save()`
+        reissues the whole graph and so recovers it, the general
+        resync-on-next-save behaviour `__init__` leans on here."""
+        from backend.core import vector_store as vector_store_module
+
+        class _FakeSentenceTransformer:
+            def __init__(self, model_name):
+                self._encoder = _FakeEncoder()
+
+            def encode(self, text):
+                return self._encoder.encode(text)
+
+        storage = _make_storage(tmpdir_path)
+        _add_node_without_embedding(
+            storage, Node(id="a", type=NodeType.ACTOR, name="Alpha")
+        )
+        storage.save().result()
+        storage.flush()
+
+        monkeypatch.setattr(
+            vector_store_module,
+            "_ensure_sentence_transformers",
+            lambda: _FakeSentenceTransformer,
+        )
+        monkeypatch.setattr(
+            storage_module.importlib.util, "find_spec", lambda name: object()
+        )
+
+        original_save = storage_module.GraphStorage.save
+        calls = {"n": 0}
+
+        def _fail_first_save(self):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("simulated save failure mid-backfill")
+            return original_save(self)
+
+        monkeypatch.setattr(storage_module.GraphStorage, "save", _fail_first_save)
+
+        # Must not raise - the same tolerance the other startup-pass failure
+        # modes in this class already pin, extended to the async body itself.
+        reloaded = GraphStorage(json_path=os.path.join(tmpdir_path, "graph.json"))
+
+        deadline = time.monotonic() + 5
+        while calls["n"] < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert calls["n"] == 1, "backfill's save() was never even attempted"
+
+        # The vector was computed and put in the index even though the
+        # call that would have persisted it raised.
+        assert reloaded.vector_store.has_embedding("a")
+
+        # The resync-on-next-save mechanism: a later, successful save
+        # recovers it on disk.
+        reloaded.save().result()
+        assert calls["n"] == 2
+
+        restarted = GraphStorage(json_path=os.path.join(tmpdir_path, "graph.json"))
+        assert restarted.embedding_coverage() == (1, 1)
+        assert restarted.vector_store.has_embedding("a")
+        restarted.flush()
+        reloaded.flush()
+        storage.flush()
+
+    def test_construction_actually_triggers_the_backfill_end_to_end(
+        self, tmpdir_path, monkeypatch
+    ):
+        """Every other test in this class calls
+        `_maybe_backfill_missing_embeddings_async` directly on an
+        already-built instance, so none of them proves the automatic wiring
+        `GraphStorage.__init__` calls it from ever fires the way a real
+        restart would trigger it. This goes through real `GraphStorage()`
+        construction, with the optional ML stack faked as installed at the
+        seam `TestLoadModelConcurrency` below patches (not by assigning
+        `vector_store.model` by hand, which construction has no chance to do
+        before its own background thread needs it), and checks the backfill
+        both runs and persists as a side effect of construction alone."""
+        from backend.core import vector_store as vector_store_module
+
+        class _FakeSentenceTransformer:
+            def __init__(self, model_name):
+                self._encoder = _FakeEncoder()
+
+            def encode(self, text):
+                return self._encoder.encode(text)
+
+        # Seed a graph on disk with a node missing its embedding, the same
+        # way the other startup-pass tests do.
+        storage = _make_storage(tmpdir_path)
+        _add_node_without_embedding(
+            storage, Node(id="a", type=NodeType.ACTOR, name="Alpha")
+        )
+        storage.save().result()
+        storage.flush()
+
+        monkeypatch.setattr(
+            vector_store_module,
+            "_ensure_sentence_transformers",
+            lambda: _FakeSentenceTransformer,
+        )
+        monkeypatch.setattr(
+            storage_module.importlib.util, "find_spec", lambda name: object()
+        )
+
+        # Real construction - no direct call to the private method, and no
+        # fake model assigned by hand: the automatic __init__ wiring and the
+        # real `_load_model()` path are what does the work.
+        reloaded = GraphStorage(json_path=os.path.join(tmpdir_path, "graph.json"))
+
+        deadline = time.monotonic() + 5
+        while (
+            reloaded.embedding_coverage() != (1, 1) or not reloaded.vectors_persisted
+        ) and time.monotonic() < deadline:
+            reloaded.flush()
+            time.sleep(0.01)
+
+        assert reloaded.embedding_coverage() == (1, 1)
+        assert reloaded.vectors_persisted
+        reloaded.flush()
+
+        restarted = GraphStorage(json_path=os.path.join(tmpdir_path, "graph.json"))
+        assert restarted.embedding_coverage() == (1, 1)
+        assert restarted.vector_store.has_embedding("a")
+        restarted.flush()
+        storage.flush()
+
+    def test_the_backfill_pass_runs_on_a_background_thread_not_synchronously(
+        self, tmpdir_path, monkeypatch
+    ):
+        """`test_backfills_in_the_background_when_the_ml_stack_is_available`
+        above only ever observes the RESULT (coverage becomes complete, a
+        message is printed) - with the fake encoder that finishes so fast
+        that a synchronous implementation would produce the exact same
+        observations. This uses a deliberately slow encoder that blocks
+        until released, so a synchronous call would still be blocked inside
+        it when this test checks: the call returning while the encoder is
+        still blocked is what only a background thread can produce."""
+        storage = _make_storage(tmpdir_path)
+        _add_node_without_embedding(
+            storage, Node(id="a", type=NodeType.ACTOR, name="Alpha")
+        )
+
+        release = threading.Event()
+
+        class _SlowEncoder:
+            def encode(self, text):
+                release.wait(timeout=5)
+                return _FakeEncoder().encode(text)
+
+        storage.vector_store.model = _SlowEncoder()
+
+        monkeypatch.setattr(
+            storage_module.importlib.util, "find_spec", lambda name: object()
+        )
+
+        before = {t.ident: t.name for t in threading.enumerate()}
+        storage._maybe_backfill_missing_embeddings_async()
+        after_call = {t.ident: t.name for t in threading.enumerate()}
+
+        # A synchronous implementation would still be running `.encode()`
+        # (blocked on `release`) on THIS thread at this point, so no new
+        # thread would exist yet.
+        new_threads = {
+            ident: name for ident, name in after_call.items() if ident not in before
+        }
+        assert new_threads, (
+            "no new thread appeared after the call returned - the startup "
+            "pass may be running synchronously on the caller's thread"
+        )
+        assert "embedding-backfill" in new_threads.values()
+
+        release.set()
+        deadline = time.monotonic() + 5
+        while storage.embedding_coverage() != (1, 1) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert storage.embedding_coverage() == (1, 1)
+        storage.flush()
 
 
 class TestLoadModelConcurrency:
