@@ -156,11 +156,57 @@ def test_the_listener_stops_first_and_a_failed_stop_still_releases_the_writer(
     )
 
 
-def test_a_construction_that_succeeds_still_preloads_the_model(monkeypatch, tmp_path):
+@pytest.mark.usefixtures("model_load_never_returns")
+@pytest.mark.parametrize("notifying", [True, False], ids=["notifying", "file"])
+def test_an_interrupt_in_the_backfill_step_leaves_no_thread_running(
+    monkeypatch, tmp_path, notifying
+):
+    """The backfill starter catches only Exception, so an interrupt there
+    fails construction after the load succeeded - the one failure on which a
+    preload started any earlier than last would already be running."""
+    before = _preload_threads()
+    captured = _Captured()
+    real_load = GraphStorage.load
+
+    def load(self, *args, **kwargs):
+        captured.storage = self
+        captured.writer = self._io_executor.submit(threading.current_thread).result()
+        return real_load(self, *args, **kwargs)
+
+    def interrupted(self):
+        raise KeyboardInterrupt("backfill interrupted")
+
+    monkeypatch.setattr(GraphStorage, "load", load)
+    monkeypatch.setattr(
+        GraphStorage, "_maybe_backfill_missing_embeddings_async", interrupted
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="backfill interrupted"):
+        if notifying:
+            GraphStorage(persistence_backend=_NotifyingDuringLoad())
+        else:
+            GraphStorage(json_path=str(tmp_path / "graph.json"))
+
+    captured.writer.join(_JOIN_TIMEOUT)
+    assert not captured.writer.is_alive(), (
+        "construction failed with the writer thread still running"
+    )
+    assert _preload_threads() <= before, (
+        "construction failed with the model preload still running"
+    )
+
+
+@pytest.mark.parametrize("notifying", [True, False], ids=["notifying", "file"])
+def test_a_construction_that_succeeds_still_preloads_the_model(
+    monkeypatch, tmp_path, notifying
+):
     calls = []
     monkeypatch.setattr(VectorStore, "preload_model", lambda self: calls.append(self))
 
-    storage = GraphStorage(json_path=str(tmp_path / "graph.json"))
+    if notifying:
+        storage = GraphStorage(persistence_backend=_NotifyingDuringLoad())
+    else:
+        storage = GraphStorage(json_path=str(tmp_path / "graph.json"))
     try:
         assert calls == [storage.vector_store]
     finally:
