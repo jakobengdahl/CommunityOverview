@@ -187,12 +187,15 @@ apply_visualization_layout(
 - **All-or-nothing rollback.** If persistence fails, in-memory state, `seq`,
   `updated_at` and the op ring buffer are rolled back to their pre-call values;
   the caller sees an error and the session is unchanged.
-- **Maximum batch size.** A single write is bounded by **two** independent caps,
-  either of which triggers a `too_large` error (§11):
-  - at most **500** node moves (`_DEFAULT_MAX_OPS_PER_BATCH`), and
+- **Maximum batch size.** A single write is bounded by **three** independent
+  limits, any of which triggers a `too_large` error (§11):
+  - at most **500** node moves (`_DEFAULT_MAX_OPS_PER_BATCH`),
   - at most **256 KiB** of serialized move payload
-    (`_DEFAULT_MAX_OP_BATCH_BYTES`).
-  An agent laying out a session larger than the node cap must split the work into
+    (`_DEFAULT_MAX_OP_BATCH_BYTES`), and
+  - no more moves than the tool's full rate budget holds (**200** at default
+    settings, `_DEFAULT_BUCKET_CAPACITY`; see Rate limiting below).
+  So at default settings the largest write that can be admitted is 200 moves.
+  An agent laying out a session larger than that must split the work into
   successive writes, threading the returned `revision` into the next call's
   `expected_revision`.
 - **Rate limiting.** Writes consume from this tool's token bucket, sized to the

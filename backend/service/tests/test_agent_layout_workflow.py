@@ -439,6 +439,7 @@ class TestErrorModel:
         ids = [f"n{i}" for i in range(201)]
         session = _session_with_nodes(manager, ids)
         assert manager.mcp_rate_budget_capacity == 200 < manager.max_ops_per_batch
+        manager._mcp_bucket = _TokenBucket(200.0, 0.0)  # default size, no refill
 
         over = tools_map["apply_visualization_layout"](
             session_id=session.id, positions={n: {"x": 0, "y": 0} for n in ids}

@@ -1569,11 +1569,12 @@ def register_mcp_tools(
         ``x``/``y`` = node top-left), exactly as ``get_visualization_layout``
         reports them. Only the nodes you name move; a write is a partial update of
         the position map, not a replacement. A batch is capped at 500 moves and
-        256 KiB of payload (``too_large`` above that), and each write also draws
-        from this tool's rate budget, sized to the number of moves — so a single
-        very large arrange may return ``rate_limited`` before the hard cap, and
-        one with more moves than the full budget (200 at default settings)
-        returns ``too_large``, since waiting would never admit it. The
+        256 KiB of payload (``too_large`` above that), and each write within
+        those caps also draws from this tool's rate budget, sized to the number
+        of moves — so a single very large arrange may return ``rate_limited``
+        before the hard cap, and one with more moves than the full budget (200
+        at default settings) returns ``too_large`` and draws nothing, since
+        waiting would never admit it. The
         budget is per tool, not per client: every MCP client on the instance
         draws from the same one. Either
         way, split a large session across successive writes, threading the
@@ -1713,13 +1714,13 @@ def register_mcp_tools(
         nothing new on the canvas.
 
         A batch is capped at 500 distinct ids and 256 KiB of ids, and each call
-        that passes those caps also draws from this tool's rate budget, one unit
-        per distinct id sent (at least one), before any id is resolved — ids
-        reported in ``skipped`` are charged too, and so is a call that returns
-        ``no_resolvable_nodes`` — so a batch well below the hard caps can still
-        return ``rate_limited``, and one with more distinct ids than the full
-        budget (200 at default settings) returns ``too_large``, since waiting
-        would never admit it. The budget is per tool, not per client: every
+        that passes those caps and fits the full budget also draws from this
+        tool's rate budget, one unit per distinct id sent (at least one), before
+        any id is resolved — ids reported in ``skipped`` are charged too, and so
+        is a call that returns ``no_resolvable_nodes`` — so a batch well below
+        the hard caps can still return ``rate_limited``. One with more distinct
+        ids than the full budget (200 at default settings) returns ``too_large``
+        and draws nothing, since waiting would never admit it. The budget is per tool, not per client: every
         MCP client on the instance draws from the same one. A repeated
         id counts once against all three. Split
         large sets across successive calls, threading the returned ``revision``

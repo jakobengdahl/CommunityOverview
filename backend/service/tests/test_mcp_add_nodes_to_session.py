@@ -738,7 +738,7 @@ class TestAddNodesToSession:
         budget still goes through afterwards."""
         storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
         service = GraphService(storage)
-        tools_map, manager = _wire(storage, service)
+        tools_map, manager = _wire(storage, service, bucket_refill_per_sec=0.0)
         tools_map["add_nodes"](
             nodes=[
                 {"id": f"n{i}", "type": "Actor", "name": f"N{i}"} for i in range(201)
@@ -771,16 +771,19 @@ class TestAddNodesToSession:
         assert at_capacity["added"] == ids[:200]
         assert resolved_with == [ids[:200]]
 
-    def test_a_busy_session_is_charged_exactly_once(self, tools):
+    @pytest.mark.asyncio
+    async def test_a_busy_session_is_charged_exactly_once(self, tools):
         tools_map, manager = tools
         sid = _session(manager)
         buckets = _record_every_bucket(manager)
         lock = manager._lock(sid)
-        lock._locked = True
-
-        result = tools_map["add_nodes_to_session"](
-            session_id=sid, node_ids=["alpha", "ghost"]
-        )
+        await lock.acquire()
+        try:
+            result = tools_map["add_nodes_to_session"](
+                session_id=sid, node_ids=["alpha", "ghost"]
+            )
+        finally:
+            lock.release()
 
         assert result["error"] == "busy"
         assert buckets["_mcp_bucket"].consumed == [2]
