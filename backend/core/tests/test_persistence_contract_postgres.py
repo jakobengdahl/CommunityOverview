@@ -4179,6 +4179,89 @@ class TestPostgresMigrationBuildsTheDocumentedSchema:
         assert checked > 0, "graph_metadata lost its CHECK (only_row) constraint"
 
 
+def _race_to_claim_an_unclaimed_store(schema, backends, call, names):
+    """Run `call` on one instance per name against a store with an unclaimed
+    metadata row, both queued on the claim at once; return a
+    (graph name, "owns" or the exception) pair per instance.
+
+    A third connection holds the row so both instances are provably past
+    their read and queued on the write before either may proceed; without
+    that the race is a timing accident, and a test of it passes by luck.
+    Threads are named "a" and "b", not after the graph, so two instances of
+    one name stay two racers.
+    """
+    racers = {
+        thread_name: PostgresGraphPersistenceBackend(
+            DSN, schema=schema, graph_name=graph_name
+        )
+        for thread_name, graph_name in zip(("a", "b"), names)
+    }
+    backends.extend(racers.values())
+    # Migrated while there is no metadata row, so neither has claimed or
+    # checked anything yet.
+    for backend in racers.values():
+        assert not backend.exists()
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        conn.execute(
+            f'INSERT INTO "{schema}".graph_metadata (doc) VALUES (%s)',
+            (psycopg.types.json.Jsonb({"version": "1.0"}),),
+        )
+
+    outcomes = {}
+    pids = {}
+    real_execute = psycopg.Connection.execute
+
+    def spy(conn, query, *args, **kwargs):
+        name = threading.current_thread().name
+        if name in racers:
+            pids.setdefault(name, conn.info.backend_pid)
+        return real_execute(conn, query, *args, **kwargs)
+
+    def run(backend):
+        name = threading.current_thread().name
+        try:
+            getattr(backend, call)()
+            outcomes[name] = "owns"
+        except Exception as exc:
+            outcomes[name] = f"{type(exc).__name__}: {exc}"
+
+    with psycopg.connect(DSN) as holder:
+        holder.execute(f'SELECT 1 FROM "{schema}".graph_metadata FOR UPDATE')
+        psycopg.Connection.execute = spy
+        try:
+            threads = [
+                threading.Thread(target=run, args=(backend,), name=name)
+                for name, backend in racers.items()
+            ]
+            for thread in threads:
+                thread.start()
+            # Blocked on anything is enough: the first queues on the
+            # holder, and the second on the first's place in that queue.
+            deadline = time.monotonic() + 30
+            with psycopg.connect(DSN, autocommit=True) as watcher:
+                while True:
+                    blocked = [
+                        pid
+                        for pid in pids.values()
+                        if watcher.execute(
+                            "SELECT pg_blocking_pids(%s)", (pid,)
+                        ).fetchone()[0]
+                    ]
+                    if len(blocked) == 2:
+                        break
+                    assert time.monotonic() < deadline, (
+                        f"both instances never queued on the claim: {pids}"
+                    )
+                    time.sleep(0.02)
+        finally:
+            psycopg.Connection.execute = real_execute
+        holder.commit()
+    for thread in threads:
+        thread.join(30)
+        assert not thread.is_alive()
+    return [(racers[name]._graph_name, outcomes[name]) for name in racers]
+
+
 class TestPostgresStoreIdentity:
     def test_the_tables_existing_is_not_a_graph_existing(self, schema, backends):
         """`exists()` must answer for the graph, not for the migration.
@@ -4313,73 +4396,11 @@ class TestPostgresStoreIdentity:
         their read and queued on the write before either may proceed; without
         that the race is a timing accident, and a test of it passes by luck.
         """
-        first = PostgresGraphPersistenceBackend(DSN, schema=schema, graph_name="first")
-        second = PostgresGraphPersistenceBackend(
-            DSN, schema=schema, graph_name="second"
-        )
-        backends.extend([first, second])
-        # Migrated while there is no metadata row, so neither has claimed or
-        # checked anything yet.
-        assert not first.exists()
-        assert not second.exists()
-        with psycopg.connect(DSN, autocommit=True) as conn:
-            conn.execute(
-                f'INSERT INTO "{schema}".graph_metadata (doc) VALUES (%s)',
-                (psycopg.types.json.Jsonb({"version": "1.0"}),),
+        outcomes = dict(
+            _race_to_claim_an_unclaimed_store(
+                schema, backends, call, ("first", "second")
             )
-
-        outcomes = {}
-        pids = {}
-        real_execute = psycopg.Connection.execute
-
-        def spy(conn, query, *args, **kwargs):
-            name = threading.current_thread().name
-            if name in ("first", "second"):
-                pids.setdefault(name, conn.info.backend_pid)
-            return real_execute(conn, query, *args, **kwargs)
-
-        def run(backend):
-            try:
-                getattr(backend, call)()
-                outcomes[backend._graph_name] = "owns"
-            except Exception as exc:
-                outcomes[backend._graph_name] = f"{type(exc).__name__}: {exc}"
-
-        with psycopg.connect(DSN) as holder:
-            holder.execute(f'SELECT 1 FROM "{schema}".graph_metadata FOR UPDATE')
-            psycopg.Connection.execute = spy
-            try:
-                threads = [
-                    threading.Thread(target=run, args=(b,), name=b._graph_name)
-                    for b in (first, second)
-                ]
-                for thread in threads:
-                    thread.start()
-                # Blocked on anything is enough: the first queues on the
-                # holder, and the second on the first's place in that queue.
-                deadline = time.monotonic() + 30
-                with psycopg.connect(DSN, autocommit=True) as watcher:
-                    while True:
-                        blocked = [
-                            pid
-                            for pid in pids.values()
-                            if watcher.execute(
-                                "SELECT pg_blocking_pids(%s)", (pid,)
-                            ).fetchone()[0]
-                        ]
-                        if len(blocked) == 2:
-                            break
-                        assert time.monotonic() < deadline, (
-                            f"both instances never queued on the claim: {pids}"
-                        )
-                        time.sleep(0.02)
-            finally:
-                psycopg.Connection.execute = real_execute
-            holder.commit()
-        for thread in threads:
-            thread.join(30)
-            assert not thread.is_alive()
-
+        )
         owners = sorted(name for name, outcome in outcomes.items() if outcome == "owns")
         assert len(owners) == 1, f"both instances claimed the schema: {outcomes}"
         with psycopg.connect(DSN, autocommit=True) as conn:
@@ -4398,6 +4419,102 @@ class TestPostgresStoreIdentity:
             "load_graph_data": "SerializationFailure",
         }[call]
         assert outcomes[loser].startswith(expected), outcomes
+
+    def test_two_instances_of_one_graph_claiming_at_once_both_own_it(
+        self, schema, backends
+    ):
+        """The loser of the claim must judge the winner's claim, not its own
+        stale read.
+
+        Its UPDATE matched nothing because someone else claimed first; only a
+        re-read can say whether that someone was the same graph. Comparing
+        the "unclaimed" it read before queueing instead refuses an instance
+        its own store. Only `exists` races here: under REPEATABLE READ the
+        loser fails on serialization whatever the names.
+        """
+        outcomes = _race_to_claim_an_unclaimed_store(
+            schema, backends, "exists", ("first", "first")
+        )
+
+        assert [outcome for _, outcome in outcomes] == ["owns", "owns"], outcomes
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            stored = conn.execute(
+                f'SELECT doc FROM "{schema}".graph_metadata'
+            ).fetchone()[0]
+        assert stored.get("_postgres_graph_identity") == "first", stored
+        assert stored.get("version") == "1.0", stored
+
+    def test_a_claim_whose_row_is_deleted_under_it_owns_nothing(self, schema, backends):
+        """A re-read that finds no row is no claim, and must not be
+        remembered as one.
+
+        The row is deleted while the claim is queued on it, so the UPDATE
+        matches nothing and the re-read finds nothing. Marking the check done
+        there would let this instance skip it for good - and write into the
+        store the next graph claims.
+        """
+        backend = PostgresGraphPersistenceBackend(
+            DSN, schema=schema, graph_name="first"
+        )
+        backends.append(backend)
+        assert not backend.exists()
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                f'INSERT INTO "{schema}".graph_metadata (doc) VALUES (%s)',
+                (psycopg.types.json.Jsonb({"version": "1.0"}),),
+            )
+
+        outcome = {}
+        pids = []
+        real_execute = psycopg.Connection.execute
+
+        def spy(conn, query, *args, **kwargs):
+            if threading.current_thread().name == "claimant" and not pids:
+                pids.append(conn.info.backend_pid)
+            return real_execute(conn, query, *args, **kwargs)
+
+        def run():
+            try:
+                outcome["exists"] = backend.exists()
+            except Exception as exc:
+                outcome["error"] = f"{type(exc).__name__}: {exc}"
+
+        with psycopg.connect(DSN) as holder:
+            holder.execute(f'SELECT 1 FROM "{schema}".graph_metadata FOR UPDATE')
+            psycopg.Connection.execute = spy
+            try:
+                thread = threading.Thread(target=run, name="claimant")
+                thread.start()
+                deadline = time.monotonic() + 30
+                with psycopg.connect(DSN, autocommit=True) as watcher:
+                    while not (
+                        pids
+                        and watcher.execute(
+                            "SELECT pg_blocking_pids(%s)", (pids[0],)
+                        ).fetchone()[0]
+                    ):
+                        assert time.monotonic() < deadline, (
+                            "the instance never queued on the claim"
+                        )
+                        time.sleep(0.02)
+            finally:
+                psycopg.Connection.execute = real_execute
+            holder.execute(f'DELETE FROM "{schema}".graph_metadata')
+            holder.commit()
+        thread.join(30)
+        assert not thread.is_alive()
+
+        assert outcome == {"exists": False}, outcome
+        assert backend._graph_identity_checked is False, (
+            "a claim that found no row was remembered as checked"
+        )
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                f'INSERT INTO "{schema}".graph_metadata (doc) VALUES (%s)',
+                (psycopg.types.json.Jsonb({"_postgres_graph_identity": "other"}),),
+            )
+        with pytest.raises(GraphIdentityCollision):
+            backend.exists()
 
 
 class _Collector:
