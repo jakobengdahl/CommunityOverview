@@ -91,6 +91,13 @@ const VOTE_DOT_SLOT_STORAGE_KEY = 'communityoverview:annotation-toolbox:vote-dot
 const VOTE_DOT_SLOT_ITEM_KEY = 'vote-dot-slot';
 
 const TOOLBOX_ITEMS_TRAILING = [
+  // A heat-map circle. Drag-to-create like every placing item, and — since it
+  // has a real box — drag-to-draw on the canvas too (GraphCanvas's SIZABLE).
+  {
+    kind: 'heatmap',
+    glyph: { kind: 'toolbox-glyph', name: 'heatmap' },
+    labelKey: 'heatmap',
+  },
   // Opens a file picker rather than creating an object directly — there is
   // nothing to pick up and carry, so this item stays click-only (see
   // `isDraggableKind` below).
@@ -473,6 +480,7 @@ function AnnotationToolbox({
     voteDot: 'Vote dot',
     voteDotPickerOpen: 'Choose a vote dot colour',
     voteDotPicker: 'Vote dot colours',
+    heatmap: 'Heat map',
     image: 'Image',
     freehand: 'Freehand',
     select: 'Select',
@@ -491,6 +499,7 @@ function AnnotationToolbox({
     shapeProcessArrowHint: 'Add a process step',
     iconHint: 'Add an icon',
     voteDotHint: 'Add a voting dot',
+    heatmapHint: 'Add a heat-map circle',
     imageHint: 'Add an image from a file',
     freehandHint: 'Draw a freehand stroke',
     selectHint: 'Select and move objects',
