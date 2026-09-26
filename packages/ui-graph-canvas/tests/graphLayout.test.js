@@ -31,7 +31,9 @@ describe('getLayoutedElements — dagre layout', () => {
     expect(pos.b.x).toBeCloseTo(pos.c.x, 5);
     // ranksep 200 + node height 100 between consecutive ranks.
     expect(pos.b.y - pos.a.y).toBeCloseTo(300, 5);
-    // marginy 50: the first rank's top-left corner sits at the margin.
+    // marginx/marginy 50: the single column's top-left corner sits at the margin,
+    // which also pins the centre-to-corner offset dagre positions are converted by.
+    expect(pos.a.x).toBeCloseTo(50, 5);
     expect(pos.a.y).toBeCloseTo(50, 5);
   });
 
