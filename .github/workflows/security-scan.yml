@@ -9,19 +9,18 @@
 #   - schedule     : catches newly-disclosed advisories against unchanged deps
 #   - workflow_dispatch : on-demand manual run
 #
-# Blocking vs. reporting: gitleaks is blocking - a secret in the range it scans
-# fails the workflow (see the gitleaks job for what that range is). pip-audit,
-# npm audit and bandit are still reporting-only (`continue-on-error`) while the
-# open findings on main - gateway dependencies, npm production dependencies and
-# bandit - are cleared. The two backend pip-audit steps are clean today; they
-# stay reporting-only so the pip-audit job is promoted as one unit with the
-# gateway step.
+# Blocking vs. reporting: gitleaks, pip-audit and npm audit are blocking - a
+# secret in the range gitleaks scans (see the gitleaks job for what that range
+# is) or a known-vulnerable dependency fails the workflow. bandit is still
+# reporting-only (`continue-on-error`) while its last open findings on main - one
+# hardcoded temp directory used in two places, pending an open change to one of
+# those files - are cleared.
 #
 # Every scanner step that tees its report into the job summary exits with the
 # SCANNER's status (`exit "${PIPESTATUS[0]}"`), not tee's. Without that the
 # pipeline's status is tee's, so a finding would report a green step even
-# where `continue-on-error` is absent. With `continue-on-error` present a
-# finding marks the step failed while the job still succeeds.
+# where `continue-on-error` is absent. With `continue-on-error` present (bandit)
+# a finding marks the step failed while the job still succeeds.
 #
 # CodeQL is intentionally NOT configured here: it is enabled via GitHub's
 # repository-level default setup, not through a committed workflow.
@@ -67,24 +66,18 @@ jobs:
         run: pip install pip-audit
 
       - name: Audit backend base requirements
-        # Temporary: clean today; reporting-only until promoted with the gateway step below.
-        continue-on-error: true
         run: |
           echo "## pip-audit — backend/requirements.txt" >> "$GITHUB_STEP_SUMMARY"
           pip-audit -r backend/requirements.txt -f markdown 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
           exit "${PIPESTATUS[0]}"
 
       - name: Audit backend dev requirements
-        # Temporary: clean today; reporting-only until promoted with the gateway step below.
-        continue-on-error: true
         run: |
           echo "## pip-audit — backend/requirements-dev.txt" >> "$GITHUB_STEP_SUMMARY"
           pip-audit -r backend/requirements-dev.txt -f markdown 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
           exit "${PIPESTATUS[0]}"
 
       - name: Audit gateway requirements
-        # Temporary: reporting-only until the gateway dependency findings on main are cleared.
-        continue-on-error: true
         run: |
           echo "## pip-audit — services/mcp_oauth_gateway/requirements.txt" >> "$GITHUB_STEP_SUMMARY"
           pip-audit -r services/mcp_oauth_gateway/requirements.txt -f markdown 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
@@ -109,8 +102,6 @@ jobs:
           node-version: '20'
 
       - name: Audit production dependencies
-        # Temporary: reporting-only until the npm production dependency findings on main are cleared.
-        continue-on-error: true
         run: |
           echo "## npm audit (--omit=dev, all workspaces)" >> "$GITHUB_STEP_SUMMARY"
           npm audit --omit=dev 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
@@ -120,8 +111,8 @@ jobs:
   # bandit – Python static application security testing (SAST). Scans the
   # backend and gateway source for common insecure patterns. Test directories
   # are excluded (asserts and fixtures produce noise). -ll limits to medium+
-  # severity. Reporting-only like the audits above for now: a finding marks the
-  # step failed and shows in the job summary without failing the workflow.
+  # severity. Reporting-only for now, unlike the audits above: a finding marks
+  # the step failed and shows in the job summary without failing the workflow.
   # ---------------------------------------------------------------------------
   bandit:
     name: bandit (Python SAST)
@@ -141,7 +132,7 @@ jobs:
         run: pip install bandit
 
       - name: Run bandit (medium+ severity, non-blocking)
-        # Temporary: reporting-only until the bandit findings on main are cleared.
+        # Temporary: reporting-only until the remaining B108 findings on main are cleared.
         continue-on-error: true
         run: |
           echo "## bandit (backend + services, medium+ severity)" >> "$GITHUB_STEP_SUMMARY"
