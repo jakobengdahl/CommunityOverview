@@ -753,18 +753,27 @@ writing a backend of your own against a shared server:
   guard against. The one graph row they do touch is the `graph_metadata` row:
   the graph-identity check that ends migration reads it (and, only when it
   exists without a claim, writes this instance's with one `UPDATE`), and
-  `exists()` reads it too.
+  `exists()` reads it too. That `UPDATE` is conditional on the row still
+  being unclaimed, because the read before it takes no lock. When two
+  differently named instances claim an unclaimed store at once, neither
+  overwrites the other: under READ COMMITTED the one that waited on the
+  other's row lock matches nothing, reads the winner's claim with one more
+  `SELECT`, and raises `GraphIdentityCollision`; under REPEATABLE READ (the
+  load and the traversal, or an environment default) its `UPDATE` fails with
+  a serialization failure instead, the check stays incomplete, and its next
+  call raises the collision.
   `_resolve()`, the read behind change notification, inherits the default
   too; it answers each identifier from what the store holds when it reads,
   and a write it sees that is newer than the announcement it is resolving is
   followed by that write's own announcement. So does the transaction
   `start_change_notification()` opens before it starts listening, which
   holds only the graph-identity check (`_claim_or_check_graph_identity()`):
-  at most one read of the metadata row — none once this backend's check has
+  at most one read of the metadata row before any claim — none once this backend's check has
   completed, which, on this backend's first migration, the `_ensure_schema()`
   call just before it does if the row was there to find —
-  and, only when that row exists without a claim, one `UPDATE` writing this
-  instance's. It states no level of its own.
+  and, only when that row exists without a claim, one conditional `UPDATE`
+  writing this instance's, followed by a second read of the row only when
+  another instance claimed it first. It states no level of its own.
   What migration and `exists()`
   actually send
   depends on whether the store has been migrated before. Cold (nothing
@@ -777,7 +786,8 @@ writing a backend of your own against a shared server:
   single `SELECT`. The last thing a cold migration sends, in a transaction of
   its own after the lock is released, is the graph-identity check: one
   `SELECT doc` from `graph_metadata`, plus the claiming `UPDATE` described
-  above when the row exists unclaimed. Once a process has migrated once,
+  above when the row exists unclaimed, and its re-read when that `UPDATE`
+  loses to another instance's claim. Once a process has migrated once,
   `self._migrated`
   short-circuits every later call on that backend object: no advisory lock,
   no catalog lookup, nothing sent to the server. `exists()` then runs the

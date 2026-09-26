@@ -4294,6 +4294,111 @@ class TestPostgresStoreIdentity:
             second.upsert_node(node_payload("b"))
         assert [n["id"] for n in first.load_graph_data()["nodes"]] == ["a"]
 
+    @pytest.mark.parametrize("call", ["exists", "load_graph_data"])
+    def test_two_instances_claiming_an_unclaimed_store_at_once_cannot_both_own_it(
+        self, schema, backends, call
+    ):
+        """The claim is a read then a write, and both can read "unclaimed".
+
+        A store saved before identities existed has a metadata row with no
+        claim. Two differently named instances booting on it together each
+        read that, each decide to claim, and under READ COMMITTED (`exists`)
+        the second UPDATE - having waited on the first's row lock -
+        overwrote the first's claim. Both returned believing they owned the
+        schema, which is the one outcome GraphIdentityCollision exists to
+        prevent. Under REPEATABLE READ (`load_graph_data`) the loser already
+        failed on serialization; that case guards the path, not the fix.
+
+        A third connection holds the row so both instances are provably past
+        their read and queued on the write before either may proceed; without
+        that the race is a timing accident, and a test of it passes by luck.
+        """
+        first = PostgresGraphPersistenceBackend(DSN, schema=schema, graph_name="first")
+        second = PostgresGraphPersistenceBackend(
+            DSN, schema=schema, graph_name="second"
+        )
+        backends.extend([first, second])
+        # Migrated while there is no metadata row, so neither has claimed or
+        # checked anything yet.
+        assert not first.exists()
+        assert not second.exists()
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                f'INSERT INTO "{schema}".graph_metadata (doc) VALUES (%s)',
+                (psycopg.types.json.Jsonb({"version": "1.0"}),),
+            )
+
+        outcomes = {}
+        pids = {}
+        real_execute = psycopg.Connection.execute
+
+        def spy(conn, query, *args, **kwargs):
+            name = threading.current_thread().name
+            if name in ("first", "second"):
+                pids.setdefault(name, conn.info.backend_pid)
+            return real_execute(conn, query, *args, **kwargs)
+
+        def run(backend):
+            try:
+                getattr(backend, call)()
+                outcomes[backend._graph_name] = "owns"
+            except Exception as exc:
+                outcomes[backend._graph_name] = f"{type(exc).__name__}: {exc}"
+
+        with psycopg.connect(DSN) as holder:
+            holder.execute(f'SELECT 1 FROM "{schema}".graph_metadata FOR UPDATE')
+            psycopg.Connection.execute = spy
+            try:
+                threads = [
+                    threading.Thread(target=run, args=(b,), name=b._graph_name)
+                    for b in (first, second)
+                ]
+                for thread in threads:
+                    thread.start()
+                # Blocked on anything is enough: the first queues on the
+                # holder, and the second on the first's place in that queue.
+                deadline = time.monotonic() + 30
+                with psycopg.connect(DSN, autocommit=True) as watcher:
+                    while True:
+                        blocked = [
+                            pid
+                            for pid in pids.values()
+                            if watcher.execute(
+                                "SELECT pg_blocking_pids(%s)", (pid,)
+                            ).fetchone()[0]
+                        ]
+                        if len(blocked) == 2:
+                            break
+                        assert time.monotonic() < deadline, (
+                            f"both instances never queued on the claim: {pids}"
+                        )
+                        time.sleep(0.02)
+            finally:
+                psycopg.Connection.execute = real_execute
+            holder.commit()
+        for thread in threads:
+            thread.join(30)
+            assert not thread.is_alive()
+
+        owners = sorted(name for name, outcome in outcomes.items() if outcome == "owns")
+        assert len(owners) == 1, f"both instances claimed the schema: {outcomes}"
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            stored = conn.execute(
+                f'SELECT doc FROM "{schema}".graph_metadata'
+            ).fetchone()[0]
+        assert stored.get("_postgres_graph_identity") == owners[0], (
+            f"the store names {stored!r} but {owners[0]!r} believes it owns it"
+        )
+        assert stored.get("version") == "1.0", (
+            f"claiming the store dropped the rest of its metadata: {stored!r}"
+        )
+        loser = "second" if owners[0] == "first" else "first"
+        expected = {
+            "exists": "GraphIdentityCollision",
+            "load_graph_data": "SerializationFailure",
+        }[call]
+        assert outcomes[loser].startswith(expected), outcomes
+
 
 class _Collector:
     """A listener that records what it was handed, for tests about the report.
