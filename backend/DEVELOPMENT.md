@@ -1056,11 +1056,12 @@ arrange" three deterministic calls.
 A repeated id counts once: the tool deduplicates `node_ids` before checking the
 500-id cap, the 256 KiB byte cap and the tool's rate budget. That budget is per
 tool, not per client — every MCP client on the instance draws from the same one —
-and it is charged one unit per distinct id that resolves, not per id sent: ids reported
-in `skipped` are not charged, and a call that returns `no_resolvable_nodes`
-draws nothing. Both caps are
+and it is charged one unit per distinct id sent (at least one), before any id is
+resolved: resolving costs a node lookup per id, so ids reported in `skipped` are
+charged too, and so is a call that returns `no_resolvable_nodes`. Both caps are
 checked before any id is resolved and return `too_large`, with a `message` that
-names which cap was hit. An unknown session is reported as not found before any
+names which cap was hit; a call refused there, or before it (invalid or unknown
+session, not authorized, empty `node_ids`), draws nothing. An unknown session is reported as not found before any
 id is resolved, so it is never masked by `no_resolvable_nodes`. That error is
 returned when the session exists but none of the ids resolve, and it lists them
 in `skipped`.

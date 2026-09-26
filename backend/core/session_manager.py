@@ -546,6 +546,29 @@ class SessionManager:
             raise OpError("'rate_limit_label' must be a non-empty string")
         return f"{client_id}:{rate_limit_label}"
 
+    def consume_mcp_rate_budget(
+        self,
+        client_id: str,
+        amount: float,
+        *,
+        rate_limit_label: Optional[str] = None,
+    ) -> None:
+        """Charge ``amount`` tokens to ``_mcp_bucket`` ahead of a write.
+
+        For an MCP tool that must pay for work it does before the write itself —
+        ``add_nodes_to_session`` resolves every id first, so a call where none
+        resolves would otherwise be free. The key is the one the write would
+        charge, ``_mcp_rate_limit_key(client_id, rate_limit_label)``; pass
+        ``precharged=True`` to the write so it is not charged twice. Raises
+        ``RateLimited`` when the budget is spent.
+        """
+        if not isinstance(client_id, str) or not client_id:
+            raise OpError("'client_id' is required")
+        if not self._mcp_bucket.consume(
+            self._mcp_rate_limit_key(client_id, rate_limit_label), amount
+        ):
+            raise RateLimited()
+
     def check_lookup_rate(self, client_key: str) -> None:
         """Throttle unauthenticated session-id lookups by source.
 
@@ -1158,6 +1181,7 @@ class SessionManager:
         *,
         expected_revision: Optional[int] = None,
         rate_limit_label: Optional[str] = None,
+        precharged: bool = False,
     ) -> Dict[str, Any]:
         """Add node references to a session **synchronously** (the MCP write path).
 
@@ -1175,6 +1199,10 @@ class SessionManager:
         Ids already in the session are not re-added and do not advance the
         session's revision: when the set adds nothing new the call is a no-op
         that broadcasts nothing.
+
+        Charges ``max(1, len(node_ids))`` to ``_mcp_bucket`` unless
+        ``precharged`` says the caller already paid through
+        ``consume_mcp_rate_budget``.
         """
         if not is_valid_session_id(session_id):
             raise SessionNotFound()
@@ -1186,7 +1214,7 @@ class SessionManager:
             raise OpBatchTooLarge()
         if len(json.dumps(node_ids)) > self._max_op_batch_bytes:
             raise OpBatchTooLarge()
-        if not self._mcp_bucket.consume(
+        if not precharged and not self._mcp_bucket.consume(
             self._mcp_rate_limit_key(client_id, rate_limit_label),
             max(1, len(node_ids)),
         ):

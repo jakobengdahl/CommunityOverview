@@ -97,10 +97,19 @@ class _UnhashingDict(dict):
 class _RecordingBucket:
     def __init__(self):
         self.consumed = []
+        self.keys = []
 
     def consume(self, key, amount):
         self.consumed.append(amount)
+        self.keys.append(key)
         return True
+
+
+def _record_every_bucket(manager):
+    buckets = {attr: _RecordingBucket() for attr in bucket_attrs(manager)}
+    for attr, bucket in buckets.items():
+        setattr(manager, attr, bucket)
+    return buckets
 
 
 class _NoStringForm(Exception):
@@ -602,12 +611,15 @@ class TestAddNodesToSession:
         assert result["skipped"][0] is first
         assert result["skipped"][1] is second
 
-    def test_only_resolvable_ids_draw_from_the_rate_budget(self, tools):
+    def test_every_distinct_id_the_caps_count_draws_from_the_rate_budget_once(
+        self, tools
+    ):
+        """Skipped ids are charged too (they cost a lookup each); ids with no
+        canonical JSON count against no cap and are not resolved, so they are
+        not. The charge is taken once, not again by the write."""
         tools_map, manager = tools
         sid = _session(manager)
-        buckets = {attr: _RecordingBucket() for attr in bucket_attrs(manager)}
-        for attr, bucket in buckets.items():
-            setattr(manager, attr, bucket)
+        buckets = _record_every_bucket(manager)
         cyclic = []
         cyclic.append(cyclic)
 
@@ -619,8 +631,95 @@ class TestAddNodesToSession:
         assert result["success"] is True
         assert result["added"] == ["alpha", "beta"]
         assert {attr: bucket.consumed for attr, bucket in buckets.items()} == {
-            attr: [2] if attr == "_mcp_bucket" else [] for attr in buckets
+            attr: [3] if attr == "_mcp_bucket" else [] for attr in buckets
         }
+        assert buckets["_mcp_bucket"].keys == ["mcp-agent:add_nodes_to_session"]
+
+    def test_a_no_resolvable_nodes_call_draws_from_the_rate_budget(self, tools):
+        tools_map, manager = tools
+        sid = _session(manager)
+        manager._mcp_bucket = _TokenBucket(2.0, 0.0)
+
+        refused = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=["ghost", "phantom", "ghost"]
+        )
+        spent = tools_map["add_nodes_to_session"](session_id=sid, node_ids=["alpha"])
+
+        assert refused["error"] == "no_resolvable_nodes"
+        assert spent["success"] is False
+        assert spent["error"] == "rate_limited"
+        assert manager.get_session(sid).state["node_refs"] == []
+
+    def test_only_unencodable_ids_still_draw_one_unit(self, tools):
+        tools_map, manager = tools
+        sid = _session(manager)
+        buckets = _record_every_bucket(manager)
+        cyclic = []
+        cyclic.append(cyclic)
+
+        result = tools_map["add_nodes_to_session"](session_id=sid, node_ids=[cyclic])
+
+        assert result["error"] == "no_resolvable_nodes"
+        assert buckets["_mcp_bucket"].consumed == [1]
+
+    def test_a_spent_budget_is_refused_before_any_id_is_resolved(self, tmp_path):
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        service = GraphService(storage)
+        tools_map, manager = _wire(storage, service)
+        tools_map["add_nodes"](
+            nodes=[{"id": "alpha", "type": "Initiative", "name": "Alpha"}], edges=[]
+        )
+        sid = _session(manager)
+        manager._mcp_bucket = _TokenBucket(0.0, 0.0)
+        resolved_with = []
+        original = service.resolve_session_node_semantics
+
+        def spy(node_ids, **kwargs):
+            resolved_with.append(list(node_ids))
+            return original(node_ids, **kwargs)
+
+        service.resolve_session_node_semantics = spy
+
+        result = tools_map["add_nodes_to_session"](session_id=sid, node_ids=["alpha"])
+
+        assert result == {
+            "success": False,
+            "error": "rate_limited",
+            "message": "Too many session writes; slow down and retry.",
+        }
+        assert resolved_with == []
+        assert manager.get_session(sid).state["node_refs"] == []
+
+    def test_a_call_refused_before_the_resolve_draws_nothing(self, tmp_path):
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        service = GraphService(storage)
+        tools_map, manager = _wire(storage, service, max_ops_per_batch=1)
+        sid = _session(manager)
+        buckets = _record_every_bucket(manager)
+
+        unknown = tools_map["add_nodes_to_session"](
+            session_id="1234-5678-9012-3456", node_ids=["alpha"]
+        )
+        too_many = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=["alpha", "beta"]
+        )
+
+        assert "not found" in unknown["error"]
+        assert too_many["error"] == "too_large"
+        assert all(bucket.consumed == [] for bucket in buckets.values())
+
+    def test_a_revision_conflict_is_charged_exactly_once(self, tools):
+        tools_map, manager = tools
+        sid = _session(manager)
+        tools_map["add_nodes_to_session"](session_id=sid, node_ids=["alpha"])
+        buckets = _record_every_bucket(manager)
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=["beta", "ghost"], expected_revision=0
+        )
+
+        assert result["error"] == "revision_conflict"
+        assert buckets["_mcp_bucket"].consumed == [2]
 
     def test_an_id_with_no_canonical_json_counts_against_no_cap_and_is_not_resolved(
         self, tmp_path
@@ -797,6 +896,8 @@ class TestAddNodesToSession:
 
         distinct = 400
         node_ids = [CountingId(f"id-{i}") for i in range(distinct)] * 2
+        # Exactly the distinct count: the repeats must not be charged either.
+        manager._mcp_bucket = _TokenBucket(float(distinct), 0.0)
 
         result = tools_map["add_nodes_to_session"](session_id=sid, node_ids=node_ids)
 
