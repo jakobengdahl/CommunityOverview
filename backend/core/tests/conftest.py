@@ -30,21 +30,36 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_slow)
 
 
+class _Collected(logging.Handler):
+    def __init__(self):
+        super().__init__(level=logging.NOTSET)
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+
 @pytest.fixture
 def storage_log(caplog, capsys):
     """What GraphStorage logged since the previous call, as level -> messages.
 
     None of those messages may also have reached stdout: the storage module
     reports through its logger, and a report printed as well would reach an
-    operator twice, once without a level."""
+    operator twice, once without a level. Checked again at teardown, for
+    whatever was logged after the last call or never read at all."""
     caplog.set_level(logging.DEBUG, logger=_STORAGE_LOGGER)
-    # A cursor rather than caplog.clear(), for the reason given on the file
-    # backend's `reported` fixture in test_file_backend_journal.py.
+    # Collected on a handler of the fixture's own rather than read from
+    # caplog: caplog.clear() and caplog's per-phase lists would otherwise let
+    # a record go unread - one cleared before the first call, or one logged
+    # in a phase other than the one being read.
+    collected = _Collected()
+    storage_logger = logging.getLogger(_STORAGE_LOGGER)
+    storage_logger.addHandler(collected)
     seen = 0
 
     def take():
         nonlocal seen
-        fresh = caplog.records[seen:]
+        fresh = collected.records[seen:]
         seen += len(fresh)
         logged = defaultdict(list)
         for record in fresh:
@@ -55,4 +70,8 @@ def storage_log(caplog, capsys):
         assert not leaked, f"a report went to stdout: {leaked}"
         return logged
 
-    return take
+    try:
+        yield take
+        take()
+    finally:
+        storage_logger.removeHandler(collected)
