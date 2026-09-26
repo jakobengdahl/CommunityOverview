@@ -99,6 +99,20 @@ def test_gitleaks_is_blocking():
     assert not _workflow()["jobs"]["gitleaks"].get("continue-on-error", False)
 
 
+@pytest.mark.parametrize("job_id", ["pip-audit", "npm-audit"])
+def test_dependency_audits_are_blocking(job_id):
+    workflow = _workflow()
+    job = workflow["jobs"][job_id]
+    assert not job.get("continue-on-error", False)
+    audits = [s for s in job["steps"] if "| tee" in s.get("run", "")]
+    assert audits, f"no audit step found in job {job_id!r}"
+    for step in audits:
+        assert not step.get("continue-on-error", False), (
+            f"{job_id}:{step['name']} is reporting-only; dependency audits block"
+        )
+    assert "--ignore-vuln" not in str(job)
+
+
 def test_pull_request_trigger_names_no_retired_branch():
     # PyYAML reads the bare `on:` key as boolean True.
     workflow = _workflow()
