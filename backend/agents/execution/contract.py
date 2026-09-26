@@ -232,6 +232,23 @@ class ExecutionStoreContractTests:
             assert got.state == ExecutionState.PENDING
             assert got.lease_owner is None
 
+    def test_recover_stale_leaves_live_leases_running(self, store):
+        # Expired and live leases side by side: recovery must touch only the
+        # expired set, not every RUNNING row.
+        expired = [store.enqueue(_job(idempotency_key=f"e{i}")) for i in range(2)]
+        for _ in expired:
+            store.claim_next("w1", now=T0, lease_seconds=60)
+        live = store.enqueue(_job(idempotency_key="live"))
+        claimed = store.claim_next(
+            "w2", now=T0 + timedelta(seconds=30), lease_seconds=120
+        )
+        assert claimed.id == live.id
+        recovered = store.recover_stale(now=T0 + timedelta(seconds=90))
+        assert sorted(r.id for r in recovered) == sorted(j.id for j in expired)
+        got = store.get(live.id)
+        assert got.state == ExecutionState.RUNNING
+        assert got.lease_owner == "w2"
+
     def test_claim_next_reclaims_expired_lease(self, store):
         store.enqueue(_job())
         first = store.claim_next("w1", now=T0, lease_seconds=60)
