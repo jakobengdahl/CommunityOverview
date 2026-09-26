@@ -3141,6 +3141,7 @@ class TestRenameDeleteSyncCharges:
         assert deleted == []
         assert published == []
         assert mgr.get_session(s.id) is s
+        assert bad_id not in mgr._locks
 
     async def test_delete_of_a_missing_valid_id_charges_exactly_once(self):
         mgr = _manager()
@@ -3178,6 +3179,40 @@ class TestRenameDeleteSyncCharges:
 
         assert bucket.calls == [("mcp-agent", 1.0)]
         assert mgr.get_session(s.id) is s
+
+    async def test_delete_broadcasts_only_after_the_session_is_gone(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        stored_at_publish = []
+        mgr.bus.publish = lambda session_id, event: stored_at_publish.append(
+            mgr.store.get(session_id)
+        )
+
+        assert mgr.delete_session_sync(s.id, deleted_by="mcp-agent")
+
+        assert stored_at_publish == [None]
+
+    @pytest.mark.parametrize("write", ["rename", "delete"])
+    async def test_an_empty_rate_limit_label_is_refused_and_charges_nothing(
+        self, write
+    ):
+        mgr = _manager()
+        s = mgr.create_session(name="Before")
+        bucket = _recording_mcp_bucket(mgr)
+
+        with pytest.raises(OpError):
+            if write == "rename":
+                mgr.rename_session_sync(
+                    s.id, "After", client_id="mcp-agent", rate_limit_label=""
+                )
+            else:
+                mgr.delete_session_sync(
+                    s.id, deleted_by="mcp-agent", rate_limit_label=""
+                )
+
+        assert bucket.calls == []
+        assert mgr.get_session(s.id) is s
+        assert s.name == "Before"
 
 
 class TestDeleteRenameLocking:
@@ -3602,6 +3637,61 @@ class TestAddNodeRefs:
         with pytest.raises(RateLimited):
             mgr.apply_layout(s.id, "mcp-agent", positions={"a": {"x": 1, "y": 2}})
 
+    async def test_a_precharged_write_is_not_charged_again(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        bucket = _recording_mcp_bucket(mgr)
+
+        res = mgr.add_node_refs(
+            s.id,
+            "mcp-agent",
+            ["a", "b"],
+            rate_limit_label="add_nodes_to_session",
+            precharged=True,
+        )
+
+        assert res["added"] == ["a", "b"]
+        assert bucket.calls == []
+
+    async def test_an_uncharged_write_charges_one_token_per_id(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        bucket = _recording_mcp_bucket(mgr)
+
+        mgr.add_node_refs(
+            s.id, "mcp-agent", ["a", "b"], rate_limit_label="add_nodes_to_session"
+        )
+
+        assert bucket.calls == [("mcp-agent:add_nodes_to_session", 2)]
+
+
+class TestConsumeMcpRateBudget:
+    async def test_charges_the_amount_under_the_labelled_key(self):
+        mgr = _manager()
+        bucket = _recording_mcp_bucket(mgr)
+
+        mgr.consume_mcp_rate_budget("mcp-agent", 3, rate_limit_label="tool")
+
+        assert bucket.calls == [("mcp-agent:tool", 3)]
+
+    async def test_a_spent_budget_raises(self):
+        mgr = _manager()
+        mgr._mcp_bucket = _TokenBucket(2.0, 0.0)
+
+        mgr.consume_mcp_rate_budget("mcp-agent", 2, rate_limit_label="tool")
+        with pytest.raises(RateLimited):
+            mgr.consume_mcp_rate_budget("mcp-agent", 1, rate_limit_label="tool")
+
+    @pytest.mark.parametrize("client_id", ["", None])
+    async def test_a_missing_client_id_is_refused_and_charges_nothing(self, client_id):
+        mgr = _manager()
+        bucket = _recording_mcp_bucket(mgr)
+
+        with pytest.raises(OpError):
+            mgr.consume_mcp_rate_budget(client_id, 1, rate_limit_label="tool")
+
+        assert bucket.calls == []
+
 
 def _seed_annotations(mgr, sid):
     for ann_id in ("note-1", "note-2"):
@@ -3615,6 +3705,9 @@ _MCP_BUCKET_WRITES = {
     ),
     "add_node_refs": lambda mgr, sid, i, label: mgr.add_node_refs(
         sid, "mcp-agent", [f"n{i}"], rate_limit_label=label
+    ),
+    "consume_mcp_rate_budget": lambda mgr, sid, i, label: mgr.consume_mcp_rate_budget(
+        "mcp-agent", 1, rate_limit_label=label
     ),
     "upsert_annotation": lambda mgr, sid, i, label: mgr.upsert_annotation(
         sid, "mcp-agent", {"id": f"new-{i}", "type": "note"}, rate_limit_label=label
