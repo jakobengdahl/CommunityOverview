@@ -393,6 +393,14 @@ async def callback(
 # Token endpoint
 # ---------------------------------------------------------------------------
 
+def _invalid_request(description: str) -> JSONResponse:
+    """RFC 6749 §5.2 error response for a token request that cannot be parsed."""
+    return JSONResponse(
+        {"error": "invalid_request", "error_description": description},
+        status_code=400,
+    )
+
+
 @app.post("/token")
 async def token(request: Request) -> JSONResponse:
     """Exchange an authorization code + PKCE verifier for a gateway JWT.
@@ -402,11 +410,22 @@ async def token(request: Request) -> JSONResponse:
     content_type = request.headers.get("content-type", "")
 
     if "application/json" in content_type:
-        body = await request.json()
+        try:
+            body = await request.json()
+        except (ValueError, RecursionError):
+            return _invalid_request("request body is not valid JSON")
+        if not isinstance(body, dict):
+            return _invalid_request("request body must be a JSON object")
     else:
         # Default: form-encoded
         form = await request.form()
         body = dict(form)
+
+    # A JSON body can carry any type; a non-string code would reach the
+    # code-store lookup as an unhashable key and surface as a 500.
+    fields = ("grant_type", "code", "code_verifier", "redirect_uri")
+    if any(not isinstance(body.get(f, ""), str) for f in fields):
+        return _invalid_request("grant_type, code, code_verifier and redirect_uri must be strings")
 
     grant_type = body.get("grant_type", "")
     code = body.get("code", "")
