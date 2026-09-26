@@ -3,6 +3,7 @@ Tests for basic agent governance: autonomy levels, the tool gate, the durable
 proposal store, and the approve/reject/apply manager, plus worker wiring.
 """
 
+import re
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -124,6 +125,59 @@ class TestStores:
             assert got.input_args == {"nodes": [1]}
         finally:
             reopened.close()
+
+    def test_sqlite_list_proposals_matches_quote_bearing_agent_id_literally(
+        self, tmp_path
+    ):
+        store = SqliteProposalStore(tmp_path / "gov.db")
+        try:
+            hostile = "a1' OR '1'='1"
+            target = store.create(
+                Proposal(hostile, "graph.add_nodes", {}, AutonomyLevel.PROPOSE)
+            )
+            store.create(Proposal("a1", "graph.add_nodes", {}, AutonomyLevel.PROPOSE))
+            assert [p.id for p in store.list_proposals(agent_id=hostile)] == [target.id]
+            assert store.list_proposals(agent_id="x' OR '1'='1") == []
+        finally:
+            store.close()
+
+    def test_sqlite_list_proposals_binds_every_filter_value(self, tmp_path):
+        # The f-string SQL carries "nosec B608": this pins that only fixed
+        # column clauses and "?" reach the text, and every caller value is a
+        # bound param.
+        store = SqliteProposalStore(tmp_path / "gov.db")
+        try:
+            hostile = "a1' OR '1'='1"
+            recorded = []
+            real_conn = store._conn
+
+            class _RecordingConn:
+                def execute(self, sql, params=()):
+                    recorded.append((sql, list(params)))
+                    return real_conn.execute(sql, params)
+
+                def __getattr__(self, name):
+                    return getattr(real_conn, name)
+
+            store._conn = _RecordingConn()
+            store.list_proposals(
+                agent_id=hostile,
+                statuses=[ProposalStatus.PENDING, ProposalStatus.APPLY_FAILED],
+                limit=7331,
+            )
+            selects = [
+                r for r in recorded if r[0].startswith("SELECT * FROM proposals")
+            ]
+            assert len(selects) == 1, recorded
+            sql, params = selects[0]
+            assert params == [hostile, "pending", "apply_failed", 7331]
+            assert sql.count("?") == len(params)
+            assert "'" not in sql
+            assert not re.search(r"\d", sql)
+            for value in ("pending", "apply_failed"):
+                assert value not in sql
+        finally:
+            store.close()
 
 
 # -- gate -------------------------------------------------------------------
