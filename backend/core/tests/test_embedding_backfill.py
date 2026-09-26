@@ -219,16 +219,17 @@ class TestStartupBackfillPass:
             storage_module.importlib.util, "find_spec", lambda name: object()
         )
 
+        before = set(threading.enumerate())
         storage._maybe_backfill_missing_embeddings_async()
 
-        # The backfill runs on a background thread; with the fake encoder it
-        # finishes almost immediately, so by the time this returns the
-        # thread may already be gone rather than still enumerable - poll
-        # coverage instead of trying to join a thread that could have
-        # already exited.
-        deadline = time.monotonic() + 5
-        while storage.embedding_coverage() != (1, 1) and time.monotonic() < deadline:
-            time.sleep(0.01)
+        # Joined, not polled on coverage: coverage is complete before the
+        # thread saves and logs "Backfilled", so a poll on it can read the
+        # log first. `start()` returns once the thread runs, so a backfill
+        # thread absent from this enumeration has already finished.
+        for thread in set(threading.enumerate()) - before:
+            if thread.name == "embedding-backfill":
+                thread.join(timeout=5)
+                assert not thread.is_alive(), "the backfill did not finish"
 
         assert storage.embedding_coverage() == (1, 1)
         assert any("Backfilled 1" in m for m in storage_log()[logging.INFO])
@@ -480,26 +481,28 @@ class TestStartupBackfillPass:
             storage_module.importlib.util, "find_spec", lambda name: object()
         )
 
-        before = {t.ident: t.name for t in threading.enumerate()}
+        # Thread objects, not idents: an ident is reused once its thread
+        # exits, so a thread that ended between the two enumerations could
+        # hand the new one an ident already in `before` and hide it.
+        before = set(threading.enumerate())
         storage._maybe_backfill_missing_embeddings_async()
-        after_call = {t.ident: t.name for t in threading.enumerate()}
+        after_call = set(threading.enumerate())
 
         # A synchronous implementation would still be running `.encode()`
         # (blocked on `release`) on THIS thread at this point, so no new
         # thread would exist yet.
-        new_threads = {
-            ident: name for ident, name in after_call.items() if ident not in before
-        }
+        new_threads = after_call - before
         assert new_threads, (
             "no new thread appeared after the call returned - the startup "
             "pass may be running synchronously on the caller's thread"
         )
-        assert "embedding-backfill" in new_threads.values()
+        backfill = [t for t in new_threads if t.name == "embedding-backfill"]
+        assert backfill
 
         release.set()
-        deadline = time.monotonic() + 5
-        while storage.embedding_coverage() != (1, 1) and time.monotonic() < deadline:
-            time.sleep(0.01)
+        for thread in backfill:
+            thread.join(timeout=5)
+            assert not thread.is_alive(), "the backfill did not finish"
         assert storage.embedding_coverage() == (1, 1)
         storage.flush()
 
