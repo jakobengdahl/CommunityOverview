@@ -337,9 +337,10 @@ E2E tests include:
 - `mobile-smoke.spec.js` - Phone-viewport smoke tests (see below)
 
 The e2e graph file starts empty, so the desktop specs seed the nodes they need
-through `POST /api/nodes` (helpers in `tests/e2e/helpers.js`). Only
-`mobile-smoke.spec.js` runs in CI (the non-required `mobile-e2e` job); the three
-desktop specs run locally only, under the `chromium` project. Tests marked
+through `POST /api/nodes` (helpers in `tests/e2e/helpers.js`). In CI,
+`mobile-smoke.spec.js` runs in the non-required `mobile-e2e` job and the desktop
+specs (every spec the `chromium` project selects) run in the non-required
+`desktop-e2e` job. Tests marked
 `test.fixme` pin a known product defect and name the tracking item.
 
 Playwright starts the backend and the vite dev server itself (the `webServer`
@@ -422,7 +423,7 @@ kept separate so a failure points at the layer that broke:
   pinned dependencies.
 
 Two lint jobs (`Python lint (ruff)` and `Frontend lint (eslint + prettier)`) run
-alongside them, and one further job is **non-required**:
+alongside them, and two further jobs are **non-required**:
 
 - **Mobile e2e (non-required)** — `mobile-smoke.spec.js` on the `mobile-iphone`
   and `mobile-pixel` projects. It carries no gate job, is not part of branch
@@ -430,6 +431,10 @@ alongside them, and one further job is **non-required**:
   reported without blocking a merge or a release. Like the test jobs it is
   gated on `detect-changes`, so a docs-only PR skips it. On failure the run
   uploads the Playwright HTML report as the `mobile-e2e-report` artifact.
+- **Desktop e2e (non-required)** — every spec the `chromium` project selects
+  (`smoke.spec.js`, `chat.spec.js`, `shared-session.spec.js`), on the same
+  non-required terms and the same `detect-changes`/draft gating as Mobile e2e.
+  On failure it uploads the `desktop-e2e-report` artifact.
 
 The Docker build/publish job runs only on `preview`/`prod` pushes (and version
 tags) and depends on the three test jobs. `main` is the integration branch:
