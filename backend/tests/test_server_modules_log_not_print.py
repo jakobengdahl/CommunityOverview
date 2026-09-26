@@ -11,6 +11,7 @@ import ast
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -405,6 +406,25 @@ def _stdout_calls(source):
 )
 def test_the_guard_catches_each_way_of_writing_to_stdout(source):
     assert _stdout_calls(source) == [source.count("\n") + 1]
+
+
+@pytest.mark.parametrize("links", [10, 60])
+def test_the_guard_expands_a_chain_of_route_modules_in_linear_steps(monkeypatch, links):
+    """A return to expanding every route-module suffix fails here by name,
+    at a bounded number of steps, rather than only through the suite-wide
+    timeout once the exponential expansion has run for five minutes."""
+    budget = 4 * (links + 1)
+    steps = 0
+    expand = _expansions
+
+    def counted(*args, **kwargs):
+        nonlocal steps
+        steps += 1
+        assert steps <= budget, f"over {budget} expansion steps for {links} links"
+        return expand(*args, **kwargs)
+
+    monkeypatch.setattr(sys.modules[__name__], "_expansions", counted)
+    assert _stdout_calls("import os\nx" + ".os" * links + ".write(1, b'x')") == [2]
 
 
 @pytest.mark.parametrize(
