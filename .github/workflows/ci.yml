@@ -381,7 +381,17 @@ jobs:
         run: pip install -r services/mcp_oauth_gateway/requirements-dev.txt
 
       - name: Run gateway tests
-        run: pytest test_oauth_flow.py -q
+        run: pytest test_oauth_flow.py test_upstream_auth.py test_lockfiles.py -q
+        working-directory: services/mcp_oauth_gateway
+
+      # The Docker image installs the runtime lock with --require-hashes, but
+      # images build only on deploy-branch pushes; install it the same way in a
+      # clean venv here so a bad hash or an unresolvable lock fails at PR time.
+      - name: Verify the runtime lock installs with hashes
+        run: |
+          python -m venv "$RUNNER_TEMP/gw-runtime"
+          "$RUNNER_TEMP/gw-runtime/bin/pip" install --require-hashes -r requirements.txt
+          "$RUNNER_TEMP/gw-runtime/bin/pip" check
         working-directory: services/mcp_oauth_gateway
 
   # Gate carrying the required-check name "Gateway tests". Same semantics as the

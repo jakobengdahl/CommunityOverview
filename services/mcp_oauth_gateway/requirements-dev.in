@@ -3,9 +3,11 @@
 # requirements-dev.txt is GENERATED from this file with fully-pinned,
 # hash-verified dependencies. After editing this file, regenerate the lock:
 #
-#   uv pip compile --universal --generate-hashes \
-#     services/mcp_oauth_gateway/requirements-dev.in \
-#     -o services/mcp_oauth_gateway/requirements-dev.txt
+#   cd services/mcp_oauth_gateway
+#   uv pip compile --universal --generate-hashes --python-version 3.11 \
+#     requirements-dev.in -o requirements-dev.txt
+#
+# test_lockfiles.py checks the pins, hashes and the recorded command offline.
 
 # Includes the pinned runtime requirements.
 -r requirements.in
