@@ -13,6 +13,7 @@ nothing is delivered against a model that does not exist yet, which is what
 the original ordering existed to guarantee.
 """
 
+import logging
 import threading
 import time
 
@@ -215,17 +216,20 @@ class TestTheBufferIsBounded:
 
         assert _names(seen) == ["later"]
 
-    def test_the_overflow_is_announced_once(self, capsys):
+    def test_the_overflow_is_announced_once(self, storage_log):
         gate = _BootGate(lambda change: None)
 
         for i in range(_BOOT_BUFFER_LIMIT + 3):
             gate(_change(f"held-{i}"))
         gate.open()
 
-        out = capsys.readouterr().out
-        assert out.count("dropping them for a whole-graph reload") == 1, (
+        warnings = storage_log()[logging.WARNING]
+        announced = [
+            m for m in warnings if "dropping them for a whole-graph reload" in m
+        ]
+        assert len(announced) == 1, (
             "an overflowed boot must warn exactly once: the reload replacing "
-            f"the dropped reports is best-effort. Output was: {out!r}"
+            f"the dropped reports is best-effort. Warnings were: {warnings!r}"
         )
 
     def test_an_overflow_during_the_drain_ends_in_one_reload(self, monkeypatch):
