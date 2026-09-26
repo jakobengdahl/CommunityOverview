@@ -7,7 +7,12 @@ test here pins the exact level together with a stable part of the message.
 """
 
 import logging
+import subprocess
+import sys
+import textwrap
 import threading
+from pathlib import Path
+from xml.etree import ElementTree
 
 import pytest
 
@@ -50,13 +55,25 @@ def _join_new_threads(before, name):
 
 
 @pytest.fixture
-def make_storage():
+def make_storage(storage_log, monkeypatch):
     """Storages built here are shut down at teardown, so no writer thread
-    outlives the test that started it."""
+    outlives the test that started it. Depending on `storage_log` tears them
+    down first, so what the shutdown logs is still checked at its teardown.
+
+    The embedding model is held out, so an install with the ML extra neither
+    loads a real one nor leaves the preload thread each storage starts
+    running past the test."""
+    monkeypatch.setattr(
+        vector_store_module,
+        "_ensure_sentence_transformers",
+        _raise(ImportError("No module named 'sentence_transformers'")),
+    )
     made = []
 
     def make(**kwargs):
+        before = set(threading.enumerate())
         storage = GraphStorage(**kwargs)
+        _join_new_threads(before, "embedding-preload")
         storage.flush()
         made.append(storage)
         return storage
@@ -447,3 +464,97 @@ class TestStorageLogFixture:
 
         with pytest.raises(AssertionError, match="went to stdout"):
             storage_log()
+
+    def test_a_printed_report_the_test_read_off_capsys_still_fails(
+        self, capsys, storage_log
+    ):
+        logging.getLogger("backend.core.storage").warning("printed too")
+        print("printed too")
+
+        assert "printed too" in capsys.readouterr().out
+        with pytest.raises(AssertionError, match="went to stdout"):
+            storage_log()
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+# Run in a pytest of their own: what the fixtures check at teardown can only
+# fail after the test body has passed, where no pytest.raises reaches.
+_TEARDOWN_CASES = textwrap.dedent(
+    """
+    import logging
+
+    from backend.core.tests.conftest import storage_log  # noqa: F401
+    from backend.core.tests.test_storage_report_levels import (  # noqa: F401
+        make_storage,
+    )
+    from backend.core.tests.test_persistence_seam import _SnapshotBackend
+
+    report = logging.getLogger("backend.core.storage").warning
+
+
+    def test_clean(storage_log):
+        report("logged only")
+        storage_log()
+        report("logged only, after the last read")
+
+
+    def test_printed_after_the_last_read(storage_log):
+        storage_log()
+        report("printed too")
+        print("printed too")
+
+
+    def test_printed_at_shutdown(make_storage, storage_log):
+        storage = make_storage(persistence_backend=_SnapshotBackend())
+
+        def shutdown_events():
+            report("printed at shutdown")
+            print("printed at shutdown")
+
+        storage.shutdown_events = shutdown_events
+    """
+)
+
+
+def test_a_report_printed_after_the_last_read_or_at_shutdown_fails_at_teardown(
+    tmp_path,
+):
+    cases = tmp_path / "test_teardown_cases.py"
+    cases.write_text(_TEARDOWN_CASES)
+    report = tmp_path / "report.xml"
+
+    run = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(cases),
+            "-p",
+            "no:cacheprovider",
+            f"--junitxml={report}",
+        ],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    problems = {
+        case.get("name"): [
+            f"{e.tag}: {e.get('message', '')}"
+            for e in case
+            if e.tag in ("error", "failure", "skipped")
+        ]
+        for case in ElementTree.parse(report).iter("testcase")
+    }
+    assert problems.keys() == {
+        "test_clean",
+        "test_printed_after_the_last_read",
+        "test_printed_at_shutdown",
+    }, run.stdout
+    assert problems["test_clean"] == [], run.stdout
+    for name in ("test_printed_after_the_last_read", "test_printed_at_shutdown"):
+        [problem] = problems[name]
+        assert problem.startswith("error: failed on teardown"), problem
+        assert "a report went to stdout" in problem, problem
