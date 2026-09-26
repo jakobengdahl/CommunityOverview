@@ -1614,7 +1614,8 @@ describe('SessionSyncClient', () => {
     vi.useFakeTimers();
     try {
       const fetchImpl = makeFetch([
-        { ok: true, status: 200, json: async () => ({ seq: 500 }) },
+        { ok: true, status: 200, json: async () => ({ seq: 200 }) },
+        { ok: true, status: 200, json: async () => ({ seq: 400 }) },
         { ok: true, status: 200, json: async () => ({ seq: 600 }) },
       ]);
       const { client } = makeClient({ fetchImpl });
@@ -1622,7 +1623,8 @@ describe('SessionSyncClient', () => {
       FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
 
       // 600 distinct annotation_created ops — one op per annotation id — well
-      // over the server's 500-op-per-batch cap but nowhere near the byte cap.
+      // over the server's 200-op rate burst (and its 500-op batch cap) but
+      // nowhere near the byte cap.
       const annotations = Array.from({ length: 600 }, (_, i) => ({
         id: `ann-${i}`,
         kind: 'note',
@@ -1635,9 +1637,10 @@ describe('SessionSyncClient', () => {
       // reschedules the next one while the queue is non-empty).
       await vi.advanceTimersByTimeAsync(50);
 
-      expect(fetchImpl.calls).toHaveLength(2);
-      expect(fetchImpl.calls[0].body.ops).toHaveLength(500);
-      expect(fetchImpl.calls[1].body.ops).toHaveLength(100);
+      expect(fetchImpl.calls).toHaveLength(3);
+      expect(fetchImpl.calls[0].body.ops).toHaveLength(200);
+      expect(fetchImpl.calls[1].body.ops).toHaveLength(200);
+      expect(fetchImpl.calls[2].body.ops).toHaveLength(200);
     } finally {
       vi.useRealTimers();
     }
