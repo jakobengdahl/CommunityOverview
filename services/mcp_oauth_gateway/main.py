@@ -438,6 +438,8 @@ async def token(request: Request) -> JSONResponse:
         raise HTTPException(status_code=400, detail="code is required")
     if not code_verifier:
         raise HTTPException(status_code=400, detail="code_verifier is required")
+    if not auth.is_valid_code_verifier(code_verifier):
+        return _invalid_request("code_verifier must be 43-128 characters of [A-Za-z0-9-._~]")
     if not redirect_uri:
         raise HTTPException(status_code=400, detail="redirect_uri is required")
 
