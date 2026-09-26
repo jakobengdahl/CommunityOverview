@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import base64
 import importlib
+import json
 import os
 import sys
 import time
@@ -630,6 +631,32 @@ class TestDcrStoreBounds(unittest.TestCase):
             assert resp.status_code == 201
         assert len(main.dcr_clients) <= main.MAX_DCR_CLIENTS
         main.dcr_clients.clear()
+
+
+class TestRegisterContentType(unittest.TestCase):
+    """RFC 7591 registration requests must declare application/json.
+
+    FastAPI's strict_content_type default (on since the dependency bump) rejects a
+    body without the header; pinning it here makes a change in that default visible.
+    """
+
+    def setUp(self):
+        import main
+
+        main.dcr_clients.clear()
+        main._register_buckets.clear()
+
+    def test_json_content_type_registers(self):
+        resp = client.post(
+            "/register",
+            content=json.dumps({"redirect_uris": ["https://a/cb"]}),
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 201
+
+    def test_body_without_content_type_is_rejected(self):
+        resp = client.post("/register", content=json.dumps({"redirect_uris": ["https://a/cb"]}))
+        assert resp.status_code == 422
 
 
 class TestRegisterRateLimit(unittest.TestCase):
