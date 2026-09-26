@@ -35,10 +35,12 @@ const LAYOUT_BATCH_THRESHOLD = 20;
 // Mirror the server's per-batch caps (design §3.9) so an oversized queue is
 // chunked proactively (R9) instead of only after the server rejects a
 // too-large batch and the client falls back to one-op-at-a-time recovery.
-// Kept comfortably under the server's actual limits (500 ops / 256 KB) to
-// leave margin for JSON encoding differences between JSON.stringify and the
-// server's json.dumps.
-const MAX_OPS_PER_BATCH = 500;
+// The op count is the server's per-client rate-bucket burst (200), not its
+// 500-op batch cap: a batch costing more than the whole bucket is refused as
+// 413 however long the client waits. The byte cap is kept comfortably under
+// the server's 256 KB to leave margin for JSON encoding differences between
+// JSON.stringify and the server's json.dumps.
+const MAX_OPS_PER_BATCH = 200;
 const MAX_BATCH_BYTES = 240 * 1024;
 
 // A single `POST /ops` that never settles (a hung connection through a proxy —

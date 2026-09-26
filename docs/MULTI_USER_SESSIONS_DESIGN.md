@@ -274,7 +274,9 @@ transition and removed in the final step.
 
 - Body caps per op batch (`_DEFAULT_MAX_OP_BATCH_BYTES`, 256 KB → `413`), max ops
   per batch (`_DEFAULT_MAX_OPS_PER_BATCH`, 500), max annotations per session, max
-  ops/second per client (token bucket) with `429` + client backoff.
+  ops/second per client (token bucket) with `429` + client backoff. A batch
+  costing more than the bucket's full burst is refused as `413`, not `429`: no
+  backoff could ever admit it.
   - **Image/session/document budgets, coordinated with the flat cap
     (fixed).** The flat cap above and `image_ingest.py`'s image-specific
     budgets (2 MB/image, 20 MB/session, 25 MB/document) used to be two
