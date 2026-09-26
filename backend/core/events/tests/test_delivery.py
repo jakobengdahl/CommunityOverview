@@ -2,6 +2,7 @@
 Tests for event delivery worker.
 """
 
+import ipaddress
 import socket
 import time
 from unittest.mock import patch, Mock
@@ -697,16 +698,33 @@ class TestIsSafeUrlClauses:
         )
         assert is_safe_url("http://mixed.example.com/x") is False
 
-    def test_ipv4_mapped_form_of_a_public_address_is_judged_as_that_address(self):
+    def test_ipv4_mapped_form_of_a_public_address_is_judged_as_that_address(
+        self, monkeypatch
+    ):
         # Python 3.12.3 flags all of ::ffff:0:0/96 is_reserved and 3.11/3.13 do
         # not; judging the embedded host keeps the verdict the same everywhere.
+        # Forcing the wrapper's flag reproduces 3.12.3 on any interpreter.
         assert is_safe_url("http://[::ffff:93.184.216.34]/x") is True
+        monkeypatch.setattr(
+            ipaddress.IPv6Address, "is_reserved", property(lambda self: True)
+        )
+        assert is_safe_url("http://[::ffff:93.184.216.34]/x") is True
+        assert is_safe_url("http://[4000::1]/x") is False
 
     @pytest.mark.parametrize(
         "sixtofour", ["2002:6440:1::", "2002:c058:6301::", "2002:a00:1::"]
     )
-    def test_6to4_form_of_an_internal_address_is_rejected(self, sixtofour):
+    def test_6to4_form_of_an_internal_address_is_rejected(self, monkeypatch, sixtofour):
         assert is_safe_url(f"http://[{sixtofour}]/x") is False
+        # ipaddress flags all of 2002::/16 is_private today; without that flag
+        # the embedded host alone must still decide.
+        monkeypatch.setattr(
+            ipaddress.IPv6Address, "is_private", property(lambda self: False)
+        )
+        assert is_safe_url(f"http://[{sixtofour}]/x") is False
+
+    def test_6to4_form_of_a_public_address_is_still_rejected_by_its_flags(self):
+        assert is_safe_url("http://[2002:5db8:d822::]/x") is False
 
     def test_dns_failure_is_rejected(self, monkeypatch):
         def fail(*args, **kwargs):

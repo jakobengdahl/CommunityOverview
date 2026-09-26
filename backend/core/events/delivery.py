@@ -57,6 +57,8 @@ def _is_safe_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
         if ip.ipv4_mapped is not None:
             return _is_safe_ip(ip.ipv4_mapped)
         # A 6to4 address (2002::/16) is relayed to its embedded IPv4 host.
+        # ipaddress currently flags all of 2002::/16 is_private, so this is
+        # defense in depth: the guard does not rest on that classification.
         if ip.sixtofour is not None and not _is_safe_ip(ip.sixtofour):
             return False
     if any(ip in network for network in _UNFLAGGED_INTERNAL_NETWORKS):
