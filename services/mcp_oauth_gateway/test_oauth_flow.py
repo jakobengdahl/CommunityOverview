@@ -399,6 +399,62 @@ class TestTokenEndpointMalformedBody(unittest.TestCase):
         # The code was never consumed by the rejected requests.
         assert client.post("/token", json=body).status_code == 200
 
+    def _issue(self):
+        verifier, challenge = _make_pkce_pair()
+        redirect = "https://chatgpt.com/callback"
+        code = auth.issue_auth_code(
+            email="alice@example.com", code_challenge=challenge, redirect_uri=redirect,
+        )
+        return {
+            "grant_type": "authorization_code",
+            "code": code,
+            "code_verifier": verifier,
+            "redirect_uri": redirect,
+        }
+
+    def test_code_verifier_outside_rfc7636_is_invalid_request(self):
+        body = self._issue()
+        valid = body["code_verifier"]
+        bad_verifiers = (
+            "\u00e9" * 43,           # non-ASCII: used to raise UnicodeEncodeError -> 500
+            valid + "\u00e9",
+            "a" * 42,                 # one below the minimum length
+            "a" * 129,                # one above the maximum length
+            valid + " ",
+            valid + "\n",
+            valid + "+",
+            valid[:-1] + "/",
+        )
+        for bad in bad_verifiers:
+            for send in (lambda b: client.post("/token", json=b),
+                         lambda b: client.post("/token", data=b)):
+                resp = send({**body, "code_verifier": bad})
+                self._assert_invalid_request(resp)
+        assert client.post("/token", data=body).status_code == 200
+
+    def test_code_verifier_length_bounds_are_inclusive(self):
+        for length in (43, 128):
+            verifier = ("aZ09-._~" * 16)[:length]
+            code = auth.issue_auth_code(
+                "alice@example.com", auth.compute_s256_challenge(verifier), "https://app/cb",
+            )
+            resp = client.post("/token", data={
+                "grant_type": "authorization_code", "code": code,
+                "code_verifier": verifier, "redirect_uri": "https://app/cb",
+            })
+            assert resp.status_code == 200, (length, resp.text)
+
+    def test_multipart_file_part_is_invalid_request(self):
+        body = self._issue()
+        for field in ("grant_type", "code", "code_verifier", "redirect_uri"):
+            data = {k: v for k, v in body.items() if k != field}
+            resp = client.post(
+                "/token", data=data,
+                files={field: ("f.txt", body[field].encode(), "text/plain")},
+            )
+            self._assert_invalid_request(resp)
+        assert client.post("/token", data=body).status_code == 200
+
 
 class TestProxyResponsePassthrough(unittest.TestCase):
     """Buffered POST proxies relay upstream headers and query params faithfully."""
@@ -459,6 +515,18 @@ class TestProxyResponsePassthrough(unittest.TestCase):
         assert resp.status_code == 200
         sent = {k.lower() for k in upstream_post.await_args.kwargs["headers"]}
         assert "accept-encoding" not in sent
+
+    def test_response_filter_drops_framing_headers(self):
+        import httpx2 as httpx
+
+        import proxy as proxy_module
+
+        headers = httpx.Headers([
+            ("Transfer-Encoding", "chunked"), ("Connection", "keep-alive"),
+            ("Content-Length", "3"), ("x-kept", "1"),
+        ])
+        filtered = proxy_module._response_headers(headers)
+        assert {k.lower() for k in filtered} == {"x-kept"}
 
     def test_response_filter_keeps_every_repeated_header(self):
         import httpx2 as httpx
@@ -526,13 +594,24 @@ class TestProxyResponsePassthrough(unittest.TestCase):
         assert seen["params"] == [("tag", "x"), ("tag", "y")]
 
 
+# The only application routes a client may call without a gateway credential.
+_PUBLIC_PATHS = frozenset({
+    "/register", "/authorize", "/callback", "/token",
+    "/.well-known/oauth-protected-resource", "/.well-known/oauth-authorization-server",
+})
+
+
 def _proxied_routes():
-    """Every (method, path) the app serves by handing the request to ``proxy``."""
-    from starlette.routing import Route
+    """Every (method, path) the app serves other than the public OAuth endpoints.
+
+    Enumerating by exclusion means a newly added route is treated as proxied,
+    and so must require auth, however it reaches the upstream.
+    """
+    from fastapi.routing import APIRoute
 
     found = []
     for route in app.routes:
-        if not isinstance(route, Route) or "proxy" not in route.endpoint.__code__.co_names:
+        if not isinstance(route, APIRoute) or route.path in _PUBLIC_PATHS:
             continue
         path = route.path.replace("{subpath:path}", "messages")
         for method in sorted(route.methods - {"HEAD"}):
@@ -552,6 +631,10 @@ class TestEveryProxiedRouteRequiresAuth(unittest.TestCase):
             ("POST", "/messages"), ("POST", "/messages/"), ("POST", "/mcp/messages/"),
         }
         assert expected <= routes, expected - routes
+        from fastapi.routing import APIRoute
+
+        served = {r.path for r in app.routes if isinstance(r, APIRoute)}
+        assert _PUBLIC_PATHS <= served, _PUBLIC_PATHS - served
 
     def test_unauthenticated_requests_never_reach_the_proxy(self):
         credentials = {
@@ -580,6 +663,100 @@ class TestEveryProxiedRouteRequiresAuth(unittest.TestCase):
             assert main._extract_bearer_token(request) is None, header
 
 
+class TestEveryProxiedRoutePassthrough(unittest.TestCase):
+    """Each proxied route forwards query params in order and drops Accept-Encoding."""
+
+    QUERY = "z=1&a=2&z=3&m=4"
+    PARAMS = [("z", "1"), ("a", "2"), ("z", "3"), ("m", "4")]
+
+    def _fake_upstream(self, captured):
+        import httpx2 as httpx
+
+        import proxy as proxy_module
+
+        def record(kwargs):
+            captured.append((list(kwargs["params"]), {k.lower() for k in kwargs["headers"]}))
+
+        async def fake_post(url, **kwargs):
+            record(kwargs)
+            return httpx.Response(200, json={})
+
+        def fake_build_request(method, url, **kwargs):
+            record(kwargs)
+            return MagicMock()
+
+        async def fake_send(request, stream=False):
+            return httpx.Response(200, json={})
+
+        class FakeStream:
+            status_code = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def aiter_bytes(self):
+                yield b"data: x\n\n"
+
+        def fake_stream(method, url, **kwargs):
+            record(kwargs)
+            return FakeStream()
+
+        return patch.multiple(
+            proxy_module._client, post=fake_post, build_request=fake_build_request,
+            send=fake_send, stream=fake_stream,
+        )
+
+    def test_params_and_accept_encoding_on_every_route(self):
+        routes = _proxied_routes()
+        assert routes
+        for method, path in routes:
+            captured = []
+            with self._fake_upstream(captured):
+                resp = client.request(
+                    method, f"{path}?{self.QUERY}",
+                    headers={"Authorization": "Bearer static-test-api-key",
+                             "Accept-Encoding": "br, zstd"},
+                    content=b"{}" if method == "POST" else None,
+                )
+            assert resp.status_code == 200, (method, path, resp.status_code)
+            assert len(captured) == 1, (method, path)
+            params, headers = captured[0]
+            assert params == self.PARAMS, (method, path, params)
+            assert "accept-encoding" not in headers, (method, path)
+
+
+class TestStreamableHttpRepeatedCookies(unittest.TestCase):
+    """POST /mcp relays every Set-Cookie on both the JSON and the SSE branch."""
+
+    def test_repeated_set_cookie_survives_both_branches(self):
+        import httpx2 as httpx
+
+        import proxy as proxy_module
+
+        for content_type, body in (("application/json", b"{}"),
+                                   ("text/event-stream", b"data: x\n\n")):
+            upstream = httpx.Response(200, headers=[
+                ("content-type", content_type),
+                ("set-cookie", "a=1; Path=/"),
+                ("set-cookie", "b=2; Path=/"),
+            ], content=body)
+            with patch.object(proxy_module._client, "build_request", return_value=MagicMock()):
+                with patch.object(proxy_module._client, "send",
+                                  new=AsyncMock(return_value=upstream)):
+                    resp = client.post(
+                        "/mcp", headers={"Authorization": "Bearer static-test-api-key"},
+                        json={},
+                    )
+            assert resp.status_code == 200, content_type
+            assert resp.headers.get_list("set-cookie") == ["a=1; Path=/", "b=2; Path=/"], (
+                content_type
+            )
+            assert resp.content == body, content_type
+
+
 class TestAuthModuleRedirectUri(unittest.TestCase):
     """Unit tests for auth.exchange_code_for_token redirect_uri check."""
 
@@ -606,6 +783,21 @@ class TestAuthModuleRedirectUri(unittest.TestCase):
 
         token = auth.exchange_code_for_token(code, verifier, "")
         assert token is None
+
+
+class TestPkceVerifierValidation(unittest.TestCase):
+    """verify_pkce rejects a non-RFC-7636 verifier instead of raising."""
+
+    def test_non_ascii_verifier_is_rejected_without_raising(self):
+        verifier, challenge = _make_pkce_pair()
+        assert auth.verify_pkce(verifier, challenge) is True
+        assert auth.verify_pkce("\u00e9" * 43, challenge) is False
+
+    def test_exchange_with_non_ascii_verifier_returns_none_and_keeps_code(self):
+        verifier, challenge = _make_pkce_pair()
+        code = auth.issue_auth_code("alice@example.com", challenge, "https://app/cb")
+        assert auth.exchange_code_for_token(code, verifier + "\u00e9", "https://app/cb") is None
+        assert auth.exchange_code_for_token(code, verifier, "https://app/cb") is not None
 
 
 class TestGatewayJwt(unittest.TestCase):
