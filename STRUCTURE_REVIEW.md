@@ -529,6 +529,11 @@ cluster. Decompose them behavior-preservingly, one slice per PR.
   extra-index is slow/fragile to resolve and adds no default-install coverage).
   CodeQL default setup is also now enabled at the repository level (2026-07-14),
   still intentionally outside the committed workflow files.
+- **Note (2026-09-26):** the reporting-first stage is over for everything but
+  bandit. gitleaks, the three `pip-audit` steps and `npm audit` no longer carry
+  `continue-on-error`, so a finding fails the Security Scan workflow; bandit
+  stays reporting-only until its last medium+ findings are cleared. The workflow
+  is not a branch-protection required check.
 
 ### C6. Consolidate the root start scripts
 
