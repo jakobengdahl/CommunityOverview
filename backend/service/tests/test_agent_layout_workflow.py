@@ -419,12 +419,39 @@ class TestErrorModel:
         # client_id), not the browser-facing manager._bucket /ops uses.
         tools_map, manager = layout_tools
         session = _session_with_nodes(manager, ["a"])
-        manager._mcp_bucket = _TokenBucket(0.0, 0.0)  # no tokens, no refill
-        result = tools_map["apply_visualization_layout"](
+        manager._mcp_bucket = _TokenBucket(1.0, 0.0)  # one token, no refill
+        first = tools_map["apply_visualization_layout"](
             session_id=session.id, positions={"a": {"x": 1, "y": 1}}
+        )
+        assert first["success"] is True
+        result = tools_map["apply_visualization_layout"](
+            session_id=session.id, positions={"a": {"x": 2, "y": 2}}
         )
         assert result["success"] is False
         assert result["error"] == "rate_limited"
+
+    def test_more_moves_than_the_whole_budget_is_too_large_not_rate_limited(
+        self, layout_tools
+    ):
+        # At default settings the budget (200) is below the 500-move cap; a
+        # write the full bucket could never admit must not be told to retry.
+        tools_map, manager = layout_tools
+        ids = [f"n{i}" for i in range(201)]
+        session = _session_with_nodes(manager, ids)
+        assert manager.mcp_rate_budget_capacity == 200 < manager.max_ops_per_batch
+
+        over = tools_map["apply_visualization_layout"](
+            session_id=session.id, positions={n: {"x": 0, "y": 0} for n in ids}
+        )
+        at_capacity = tools_map["apply_visualization_layout"](
+            session_id=session.id,
+            positions={n: {"x": 0, "y": 0} for n in ids[:200]},
+        )
+
+        assert over["success"] is False
+        assert over["error"] == "too_large"
+        assert at_capacity["success"] is True
+        assert at_capacity["moved"] == 200
 
     def test_unknown_and_invalid_sessions(self, layout_tools):
         tools_map, _ = layout_tools

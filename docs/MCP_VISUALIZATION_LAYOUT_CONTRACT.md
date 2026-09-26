@@ -197,7 +197,10 @@ apply_visualization_layout(
   `expected_revision`.
 - **Rate limiting.** Writes consume from this tool's token bucket, sized to the
   number of moves. The bucket is per tool, not per client: every MCP client on
-  the instance draws from the same one. Exhaustion yields a `rate_limited` error (§11). Layout writes
+  the instance draws from the same one. Exhaustion yields a `rate_limited` error (§11); a
+  write with more moves than the full bucket holds (200 at default settings,
+  `_DEFAULT_BUCKET_CAPACITY`) could never be admitted, so it yields `too_large`
+  instead and draws nothing. Layout writes
   are expected to be infrequent (agent-driven), so this bounds abuse without
   affecting normal use.
 - **Serialization against realtime edits.** The synchronous layout write must not
@@ -325,7 +328,7 @@ machine-readable `error` and, where useful, a `message` and extra fields:
 | Stale `expected_revision` | `revision_conflict` | `expected_revision`, `current_revision` |
 | Realtime batch mid-flight holds the lock | `busy` | retry guidance |
 | Token bucket exhausted | `rate_limited` | |
-| Over the node or byte cap | `too_large` | split guidance |
+| Over the node or byte cap, or more moves than the full token bucket | `too_large` | split guidance |
 
 A `revision_conflict`, `busy` or `rate_limited` is **retryable**; a validation
 error or `too_large` requires the agent to change the request.

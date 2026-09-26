@@ -1571,7 +1571,9 @@ def register_mcp_tools(
         the position map, not a replacement. A batch is capped at 500 moves and
         256 KiB of payload (``too_large`` above that), and each write also draws
         from this tool's rate budget, sized to the number of moves — so a single
-        very large arrange may return ``rate_limited`` before the hard cap. The
+        very large arrange may return ``rate_limited`` before the hard cap, and
+        one with more moves than the full budget (200 at default settings)
+        returns ``too_large``, since waiting would never admit it. The
         budget is per tool, not per client: every MCP client on the instance
         draws from the same one. Either
         way, split a large session across successive writes, threading the
@@ -1715,7 +1717,9 @@ def register_mcp_tools(
         per distinct id sent (at least one), before any id is resolved — ids
         reported in ``skipped`` are charged too, and so is a call that returns
         ``no_resolvable_nodes`` — so a batch well below the hard caps can still
-        return ``rate_limited``. The budget is per tool, not per client: every
+        return ``rate_limited``, and one with more distinct ids than the full
+        budget (200 at default settings) returns ``too_large``, since waiting
+        would never admit it. The budget is per tool, not per client: every
         MCP client on the instance draws from the same one. A repeated
         id counts once against all three. Split
         large sets across successive calls, threading the returned ``revision``
@@ -1847,6 +1851,16 @@ def register_mcp_tools(
                 "success": False,
                 "error": "rate_limited",
                 "message": "Too many session writes; slow down and retry.",
+            }
+        except OpBatchTooLarge:
+            return {
+                "success": False,
+                "error": "too_large",
+                "message": (
+                    f"More node ids than this tool's rate budget admits in one "
+                    f"call (at most {session_manager.mcp_rate_budget_capacity:g}); "
+                    "split into batches."
+                ),
             }
 
         # Resolve through the projection under the *mutate* decision, not a read
