@@ -309,7 +309,7 @@ device with no fine pointer:
 
 A collapsible toolbox is also anchored to the bottom of the canvas. Click **Add
 annotation** to expand it, then pick a tool: **Select**, **Note**, **Text**, **Label**, a
-**Shape**, **Icon**, **Vote dot**, **Image**, **Freehand**, or **Eraser**. Each is a
+**Shape**, **Icon**, **Vote dot**, **Heat map**, **Image**, **Freehand**, or **Eraser**. Each is a
 single icon with no caption — hover one (or read its name with a screen reader) to see
 what it does. The toolbox is hidden while a focus view is active, since annotations are
 set aside during focus (see [9. On a phone](#9-on-a-phone) for how focus view works).
@@ -322,12 +322,27 @@ the way back to ordinary clicking, dragging and marquee-selection; pressing Esca
 same. You can still drag a tool straight from the toolbox onto the canvas to place a single
 object without arming anything.
 
-**Notes and shapes can be drawn to size.** Instead of pressing and releasing in one spot,
+**Notes, shapes and heat-map circles can be drawn to size.** Instead of pressing and releasing in one spot,
 press and drag: an outline follows the pointer showing the box you are about to get, and
 releasing creates it at that size. Dragging left from where you started mirrors the shape,
 and dragging upwards flips it — which is how a triangle or a process arrow is aimed without
 rotating it afterwards. The other kinds have a fixed or content-driven size, so a drag
 places them exactly like a press does.
+
+The **Heat map** tool places a soft red circle for marking where something is
+concentrated — activity, risk, attention. Each circle has an **intensity** from 0 to 10:
+0 is invisible and 10 is the strongest red. New circles start at 5. Circles fade out
+towards their edge, so where several overlap or sit close together they merge into one
+continuous heat field that gets redder the more of them cover a spot. The result is the
+same whichever circle is on top. To change the level, open the circle's Edit menu, choose
+**Intensity** (🔥) and move the slider. The arrow keys, Page Up/Down and Home/End work on
+the slider too. While a circle is selected it shows its level as a number in the middle.
+A screen reader reads it as, for example, "Heat-map circle, intensity 7 of 10". A circle
+at intensity 0 keeps a faint dashed outline so you can still find, select and move it.
+Circles resize from their corner handles and stay round. They have no colour, opacity or
+rotation settings: the intensity alone decides how they look.
+
+![A heat map built from overlapping circles](images/annotation-heatmap.png)
 
 The **Vote dot** entry is a slot like Shape and Icon, except the choice is the colour: the
 button shows the colour it will place, and its fold-out picker offers the full palette.
