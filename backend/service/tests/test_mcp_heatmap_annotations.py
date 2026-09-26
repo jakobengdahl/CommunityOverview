@@ -112,6 +112,18 @@ class TestHeatmapMcpCrud:
             HEATMAP_DEFAULT_DIAMETER,
         )
 
+    def test_create_with_other_content_still_defaults_intensity(self, annotation_tools):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id, type="heatmap", x=0, y=0, content={"note": "x"}
+        )
+
+        listed = _listed(tools_map, session.id, result["annotation"]["id"])
+        assert listed["content"]["intensity"] == 5
+        assert listed["content"]["note"] == "x"
+
     def test_create_with_explicit_intensity(self, annotation_tools):
         tools_map, manager = annotation_tools
         session = manager.create_session()

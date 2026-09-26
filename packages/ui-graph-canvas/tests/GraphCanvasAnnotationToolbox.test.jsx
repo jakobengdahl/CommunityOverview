@@ -383,6 +383,22 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     expect(heatmap.position).toEqual({ x: -100, y: 100 });
   });
 
+  it('anchors an upward, wider-than-tall drag at the press point', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^heat map$/i }));
+
+    const pane = screen.getByTestId('pane');
+    fireEvent(pane, pointerEvent('pointerdown', { clientX: 100, clientY: 100 }));
+    fireEvent(pane, pointerEvent('pointermove', { clientX: -100, clientY: 40 }));
+    fireEvent(pane, pointerEvent('pointerup', { clientX: -100, clientY: 40 }));
+
+    const heatmap = findCreatedNode('heatmap');
+    expect(heatmap.style).toEqual({ width: 200, height: 200 });
+    // Bottom-right corner is the press point on both axes.
+    expect(heatmap.position).toEqual({ x: -100, y: -100 });
+  });
+
   it('starts a heat-map circle behind graph nodes', () => {
     render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));

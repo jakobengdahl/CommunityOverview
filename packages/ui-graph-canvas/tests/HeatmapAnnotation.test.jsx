@@ -199,6 +199,22 @@ describe('GenericAnnotationNode — heatmap', () => {
     expect(heatmapPeakAlpha(0)).toBe(0);
   });
 
+  it.each([0, 1, 7, 10])('paints exactly the fill for level %i on the circle', (level) => {
+    const { circle } = renderHeatmap({ intensity: level });
+    expect(circle.querySelector('.graph-heatmap-circle').style.backgroundImage).toBe(
+      heatmapFillStyle(level).backgroundImage
+    );
+  });
+
+  it('offers a locked circle only unlock and duplicate, no intensity buttons', () => {
+    const { circle, notifyChange } = renderHeatmap({ intensity: 5, locked: true });
+    fireEvent.contextMenu(circle);
+    expect(screen.queryByRole('button', { name: 'Intensity' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Intensity \d+$/ })).toBeNull();
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+    expect(notifyChange).not.toHaveBeenCalled();
+  });
+
   it('draws the circle as its own element inside the box', () => {
     const { circle } = renderHeatmap({ intensity: 3 });
     expect(circle.style.backgroundImage).toBe('');
