@@ -36,16 +36,16 @@ def storage_log(caplog, capsys):
 
     None of those messages may also have reached stdout: the storage module
     reports through its logger, and a report printed as well would reach an
-    operator twice, once without a level."""
+    operator twice, once without a level. Checked again at teardown, for
+    whatever was logged after the last call or never read at all."""
     caplog.set_level(logging.DEBUG, logger=_STORAGE_LOGGER)
     # A cursor rather than caplog.clear(), for the reason given on the file
-    # backend's `reported` fixture in test_file_backend_journal.py.
-    seen = 0
+    # backend's `reported` fixture in test_file_backend_journal.py. The
+    # records already taken, by identity: a test that clears caplog itself
+    # would otherwise shift new records under the cursor unread.
+    taken = []
 
-    def take():
-        nonlocal seen
-        fresh = caplog.records[seen:]
-        seen += len(fresh)
+    def report(fresh):
         logged = defaultdict(list)
         for record in fresh:
             if record.name == _STORAGE_LOGGER:
@@ -55,4 +55,19 @@ def storage_log(caplog, capsys):
         assert not leaked, f"a report went to stdout: {leaked}"
         return logged
 
-    return take
+    def unread(records):
+        assert records[: len(taken)] == taken, (
+            "caplog was cleared under the storage_log fixture; read reports "
+            "through it instead"
+        )
+        return records[len(taken) :]
+
+    def take():
+        fresh = unread(caplog.records)
+        taken.extend(fresh)
+        return report(fresh)
+
+    yield take
+    # By now caplog.records is the teardown phase's own list, so the test
+    # body's records are read back by phase.
+    report(unread(caplog.get_records("call")) + caplog.get_records("teardown"))
