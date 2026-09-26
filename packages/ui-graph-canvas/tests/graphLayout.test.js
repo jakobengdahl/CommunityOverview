@@ -4,7 +4,98 @@ import {
   positionNewNodes,
   alignNodes,
   distributeNodes,
+  getLayoutedElements,
+  applyLayout,
 } from '../src/utils/graphLayout';
+
+// These call dagre directly rather than through arrangeNodes, so a dagre (or its
+// lodash dependency) upgrade that changes or breaks the layout fails here with a
+// layout assertion instead of only surfacing as an import error.
+describe('getLayoutedElements — dagre layout', () => {
+  const chain = [
+    { id: 'a', position: { x: 0, y: 0 }, data: { label: 'A' } },
+    { id: 'b', position: { x: 0, y: 0 }, data: { label: 'B' } },
+    { id: 'c', position: { x: 0, y: 0 }, data: { label: 'C' } },
+  ];
+  const chainEdges = [
+    { source: 'a', target: 'b' },
+    { source: 'b', target: 'c' },
+  ];
+
+  it('ranks a chain top-to-bottom by default, one rank per edge', () => {
+    const out = getLayoutedElements(chain, chainEdges);
+    const pos = Object.fromEntries(out.map((n) => [n.id, n.position]));
+    expect(pos.a.y).toBeLessThan(pos.b.y);
+    expect(pos.b.y).toBeLessThan(pos.c.y);
+    expect(pos.a.x).toBeCloseTo(pos.b.x, 5);
+    expect(pos.b.x).toBeCloseTo(pos.c.x, 5);
+    // ranksep 200 + node height 100 between consecutive ranks.
+    expect(pos.b.y - pos.a.y).toBeCloseTo(300, 5);
+    // marginx/marginy 50: the single column's top-left corner sits at the margin,
+    // which also pins the centre-to-corner offset dagre positions are converted by.
+    expect(pos.a.x).toBeCloseTo(50, 5);
+    expect(pos.a.y).toBeCloseTo(50, 5);
+  });
+
+  it('ranks a chain left-to-right for direction LR', () => {
+    const out = getLayoutedElements(chain, chainEdges, 'LR');
+    const pos = Object.fromEntries(out.map((n) => [n.id, n.position]));
+    expect(pos.a.x).toBeLessThan(pos.b.x);
+    expect(pos.b.x).toBeLessThan(pos.c.x);
+    expect(pos.a.y).toBeCloseTo(pos.b.y, 5);
+    // ranksep 200 + node width 200 between consecutive ranks.
+    expect(pos.b.x - pos.a.x).toBeCloseTo(400, 5);
+  });
+
+  it('places siblings of one parent side by side without overlap', () => {
+    const nodes = [
+      { id: 'root', position: { x: 0, y: 0 } },
+      { id: 'l', position: { x: 0, y: 0 } },
+      { id: 'r', position: { x: 0, y: 0 } },
+    ];
+    const edges = [
+      { source: 'root', target: 'l' },
+      { source: 'root', target: 'r' },
+    ];
+    const pos = Object.fromEntries(
+      getLayoutedElements(nodes, edges).map((n) => [n.id, n.position])
+    );
+    expect(pos.l.y).toBeCloseTo(pos.r.y, 5);
+    // nodesep 150 + node width 200 between siblings on a rank.
+    expect(Math.abs(pos.r.x - pos.l.x)).toBeCloseTo(350, 5);
+  });
+
+  it('keeps input order and node fields, replacing only the position', () => {
+    const out = getLayoutedElements(chain, chainEdges);
+    expect(out.map((n) => n.id)).toEqual(['a', 'b', 'c']);
+    expect(out[0].data).toEqual({ label: 'A' });
+    expect(out[0]).not.toBe(chain[0]);
+    expect(chain[0].position).toEqual({ x: 0, y: 0 });
+  });
+
+  it('terminates on a cycle and still gives every node a finite position', () => {
+    const cycleEdges = [...chainEdges, { source: 'c', target: 'a' }];
+    const out = getLayoutedElements(chain, cycleEdges);
+    expect(out).toHaveLength(3);
+    for (const n of out) {
+      expect(Number.isFinite(n.position.x)).toBe(true);
+      expect(Number.isFinite(n.position.y)).toBe(true);
+    }
+    expect(new Set(out.map((n) => `${n.position.x},${n.position.y}`)).size).toBe(3);
+  });
+});
+
+describe('applyLayout', () => {
+  it('routes a connected graph through the dagre layout', () => {
+    const nodes = [
+      { id: 'a', position: { x: 0, y: 0 } },
+      { id: 'b', position: { x: 0, y: 0 } },
+    ];
+    const edges = [{ source: 'a', target: 'b' }];
+    expect(applyLayout(nodes, edges)).toEqual(getLayoutedElements(nodes, edges, 'TB'));
+    expect(applyLayout(nodes, edges, 'dagre')).toEqual(getLayoutedElements(nodes, edges, 'TB'));
+  });
+});
 
 describe('positionNewNodes — incremental placement', () => {
   it('places a new connected node near its existing neighbour, not at the origin', () => {
