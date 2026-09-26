@@ -104,3 +104,15 @@ def test_pull_request_trigger_names_no_retired_branch():
     workflow = _workflow()
     triggers = workflow.get("on", workflow.get(True))
     assert "dev" not in triggers["pull_request"]["branches"]
+
+
+def test_teed_steps_run_under_the_default_shell_the_test_executes():
+    # The steps above are executed under `bash -e`, GitHub's default. An explicit
+    # `shell: bash` adds pipefail, under which `-e` kills the bandit step at the
+    # pipeline and its summary fence is never closed - so pin the default.
+    workflow = _workflow()
+    assert "shell" not in workflow.get("defaults", {}).get("run", {})
+    for job in workflow["jobs"].values():
+        assert "shell" not in job.get("defaults", {}).get("run", {})
+    for param in _teed_steps():
+        assert "shell" not in param.values[0]
