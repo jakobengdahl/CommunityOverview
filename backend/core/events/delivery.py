@@ -34,15 +34,23 @@ DEFAULT_BACKOFF_TIMES = [0.5, 2.0, 5.0]  # Seconds between retries
 DEFAULT_TIMEOUT = 10  # HTTP request timeout in seconds
 
 
-# RFC 6598 Carrier-Grade NAT range. Python's ipaddress module does not classify
-# 100.64.0.0/10 as private, but it is used for internal infrastructure in many
-# cloud and ISP environments and must be blocked.
-_RFC6598_CGNAT = ipaddress.ip_network("100.64.0.0/10")
+# Non-global ranges that Python's ipaddress module does not classify as private
+# or reserved, so the flag checks in _is_safe_ip let them through:
+# - 100.64.0.0/10: RFC 6598 Carrier-Grade NAT, used for internal infrastructure
+#   in many cloud and ISP environments.
+# - 192.88.99.0/24: the deprecated 6to4 relay anycast prefix (RFC 7526).
+# - fec0::/10: the deprecated IPv6 site-local prefix (RFC 3879), still routed
+#   internally by some networks.
+_UNFLAGGED_INTERNAL_NETWORKS = (
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("192.88.99.0/24"),
+    ipaddress.ip_network("fec0::/10"),
+)
 
 
 def _is_safe_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Return True if the IP is publicly routable (not private/internal)."""
-    if ip.version == 4 and ip in _RFC6598_CGNAT:
+    if any(ip in network for network in _UNFLAGGED_INTERNAL_NETWORKS):
         return False
     return not (
         ip.is_private

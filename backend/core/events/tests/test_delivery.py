@@ -607,16 +607,18 @@ def _addrinfo(*ips):
     return [(None, None, None, None, (ip, 0)) for ip in ips]
 
 
+@pytest.fixture
+def _public_dns(monkeypatch):
+    # Offline, an unresolvable host is rejected by the DNS step, which would
+    # let a scheme check that had stopped working pass unnoticed.
+    monkeypatch.setattr(
+        delivery.socket, "getaddrinfo", lambda *a, **k: _addrinfo("93.184.216.34")
+    )
+
+
+@pytest.mark.usefixtures("_public_dns")
 class TestIsSafeUrlClauses:
     """Each clause of is_safe_url pinned by an input only that clause decides."""
-
-    @pytest.fixture(autouse=True)
-    def _public_dns(self, monkeypatch):
-        # Offline, an unresolvable host is rejected by the DNS step, which would
-        # let a scheme check that had stopped working pass unnoticed.
-        monkeypatch.setattr(
-            delivery.socket, "getaddrinfo", lambda *a, **k: _addrinfo("93.184.216.34")
-        )
 
     def test_public_host_is_accepted_under_the_dns_stub(self):
         assert is_safe_url("http://example.com/x") is True
@@ -637,6 +639,26 @@ class TestIsSafeUrlClauses:
         # 4000::/3 is unassigned: is_reserved, but neither is_private nor any
         # other clause of _is_safe_ip, so only the is_reserved clause refuses it.
         assert is_safe_url("http://[4000::1]/x") is False
+
+    @pytest.mark.parametrize(
+        "ip",
+        ["100.64.0.1", "192.88.99.1", "fec0::1"],
+        ids=["cgnat", "6to4-relay-anycast", "ipv6-site-local"],
+    )
+    def test_internal_range_without_an_ipaddress_flag_is_rejected(
+        self, monkeypatch, ip
+    ):
+        # ipaddress classifies none of these as private or reserved, so only
+        # the explicit network list refuses them — as a literal and as a DNS
+        # answer alongside a public address.
+        literal = f"[{ip}]" if ":" in ip else ip
+        assert is_safe_url(f"http://{literal}/x") is False
+        monkeypatch.setattr(
+            delivery.socket,
+            "getaddrinfo",
+            lambda *a, **k: _addrinfo("93.184.216.34", ip),
+        )
+        assert is_safe_url("http://mixed.example.com/x") is False
 
     def test_dns_failure_is_rejected(self, monkeypatch):
         def fail(*args, **kwargs):
@@ -678,15 +700,10 @@ class _StubHttpxModule:
         return getattr(httpx, name)
 
 
+@pytest.mark.usefixtures("_public_dns")
 class TestWebhookRedirectHops:
     """Drive _post_with_redirect_ssrf_check through a mock transport and record
     every request that actually went out."""
-
-    @pytest.fixture(autouse=True)
-    def _public_dns(self, monkeypatch):
-        monkeypatch.setattr(
-            delivery.socket, "getaddrinfo", lambda *a, **k: _addrinfo("93.184.216.34")
-        )
 
     def _post(self, monkeypatch, handler, url="http://start.example.com/hook"):
         seen = []
@@ -757,10 +774,15 @@ class TestWebhookRedirectHops:
         assert len(seen) == MAX_REDIRECTS
         assert {method for method, _ in seen} == {"POST"}
 
-    def test_302_cap_counts_the_post_and_the_gets_together(self, monkeypatch):
+    @pytest.mark.parametrize("status", [301, 302, 303])
+    def test_method_switching_cap_counts_the_post_and_the_gets_together(
+        self, monkeypatch, status
+    ):
         seen, outcome = self._post(
             monkeypatch,
-            lambda request, index: httpx.Response(302, headers={"location": "/loop"}),
+            lambda request, index: httpx.Response(
+                status, headers={"location": "/loop"}
+            ),
         )
 
         methods = [method for method, _ in seen]
