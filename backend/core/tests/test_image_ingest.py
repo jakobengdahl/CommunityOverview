@@ -13,6 +13,7 @@ import pytest
 from PIL import Image
 
 from backend.core import image_ingest
+from backend.core.events import delivery
 
 
 def _png_bytes(size=(4, 4), color=(255, 0, 0), mode="RGB"):
@@ -305,6 +306,82 @@ class TestFetchImageBytesSSRF:
         _install_transport(monkeypatch, handler)
         with pytest.raises(image_ingest.ImageFetchError):
             image_ingest.fetch_image_bytes("https://example.invalid/pic.png")
+
+
+class TestFetchImageBytesRedirectHops:
+    """Every redirect hop is re-validated, and the shared cap bounds the walk."""
+
+    def _fetch(self, monkeypatch, handler, url="https://start.example.invalid/pic.png"):
+        seen = []
+
+        def recording(request):
+            seen.append(str(request.url))
+            return handler(request, len(seen) - 1)
+
+        _install_transport(monkeypatch, recording)
+        try:
+            return seen, image_ingest.fetch_image_bytes(url)
+        except Exception as exc:
+            return seen, exc
+
+    def test_multi_hop_redirect_is_followed_to_the_image(self, monkeypatch):
+        raw = _png_bytes()
+
+        def handler(request, index):
+            if index == 0:
+                return httpx.Response(
+                    302, headers={"location": "https://cdn.example.invalid/img/"}
+                )
+            if index == 1:
+                return httpx.Response(301, headers={"location": "pic.png"})
+            return httpx.Response(200, content=raw)
+
+        seen, outcome = self._fetch(monkeypatch, handler)
+
+        assert outcome == raw
+        assert seen == [
+            "https://start.example.invalid/pic.png",
+            "https://cdn.example.invalid/img/",
+            "https://cdn.example.invalid/img/pic.png",
+        ]
+
+    @pytest.mark.parametrize("internal_hop", [0, 1, 2, delivery.MAX_REDIRECTS - 2])
+    def test_every_hop_is_revalidated(self, monkeypatch, internal_hop):
+        def handler(request, index):
+            if index < internal_hop:
+                return httpx.Response(
+                    302,
+                    headers={"location": f"https://hop{index + 1}.example.invalid/p"},
+                )
+            if index == internal_hop:
+                return httpx.Response(
+                    302, headers={"location": "http://169.254.169.254/latest"}
+                )
+            raise AssertionError(f"unexpected request {request.url}")
+
+        seen, outcome = self._fetch(monkeypatch, handler)
+
+        assert isinstance(outcome, image_ingest.ImageFetchError)
+        assert "disallowed" in str(outcome)
+        assert len(seen) == internal_hop + 1
+        assert all("169.254.169.254" not in url for url in seen)
+
+    @pytest.mark.parametrize(
+        "location",
+        ["https://loop.example.invalid/pic.png", "/pic.png"],
+        ids=["absolute", "relative"],
+    )
+    def test_redirect_cap_is_the_shared_limit(self, monkeypatch, location):
+        seen, outcome = self._fetch(
+            monkeypatch,
+            lambda request, index: httpx.Response(302, headers={"location": location}),
+        )
+
+        assert isinstance(outcome, image_ingest.ImageFetchError)
+        assert "exceeded" in str(outcome)
+        # Counted against delivery.py's constant, the one all four redirect
+        # walkers import, so a local copy that drifted would fail here.
+        assert len(seen) == delivery.MAX_REDIRECTS
 
 
 class TestDataUrlByteLength:

@@ -395,13 +395,14 @@ class SqliteExecutionStore:
             ids = [r["id"] for r in rows]
             if not ids:
                 return []
+            # Only the "?" placeholder count is interpolated; the ids are bound.
             self._conn.execute(
                 f"""
                 UPDATE execution_jobs SET
                     state = ?, lease_owner = NULL, lease_expiry = NULL,
                     run_at = ?, updated_at = ?
                 WHERE id IN ({",".join("?" for _ in ids)})
-                """,
+                """,  # nosec B608
                 [ExecutionState.PENDING.value, now_ts, now_ts, *ids],
             )
             self._conn.commit()
@@ -436,7 +437,8 @@ class SqliteExecutionStore:
             clauses.append("kind = ?")
             params.append(kind.value)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        sql = f"SELECT * FROM execution_jobs {where} ORDER BY created_at DESC"
+        # WHERE holds only fixed column clauses and "?" placeholders; values are bound.
+        sql = f"SELECT * FROM execution_jobs {where} ORDER BY created_at DESC"  # nosec B608
         if limit is not None:
             sql += " LIMIT ?"
             params.append(limit)

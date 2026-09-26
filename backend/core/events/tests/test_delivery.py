@@ -2,8 +2,12 @@
 Tests for event delivery worker.
 """
 
+import socket
 import time
 from unittest.mock import patch, Mock
+
+import httpx2 as httpx
+import pytest
 
 from backend.core.events.models import (
     Event,
@@ -14,10 +18,12 @@ from backend.core.events.models import (
     DeliveryStatus,
     SubscriptionInfo,
 )
+from backend.core.events import delivery
 from backend.core.events.delivery import (
     MAX_REDIRECTS,
     DeliveryWorker,
     DeliveryItem,
+    _SSRFRedirectBlocked,
     is_safe_url,
 )
 
@@ -595,3 +601,168 @@ class TestDeliveryItem:
         item = DeliveryItem(event=event, webhook_url="https://example.com")
 
         assert item.attempt == 1
+
+
+def _addrinfo(*ips):
+    return [(None, None, None, None, (ip, 0)) for ip in ips]
+
+
+class TestIsSafeUrlClauses:
+    """Each clause of is_safe_url pinned by an input only that clause decides."""
+
+    @pytest.fixture(autouse=True)
+    def _public_dns(self, monkeypatch):
+        # Offline, an unresolvable host is rejected by the DNS step, which would
+        # let a scheme check that had stopped working pass unnoticed.
+        monkeypatch.setattr(
+            delivery.socket, "getaddrinfo", lambda *a, **k: _addrinfo("93.184.216.34")
+        )
+
+    def test_public_host_is_accepted_under_the_dns_stub(self):
+        assert is_safe_url("http://example.com/x") is True
+        assert is_safe_url("https://example.com/x") is True
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "ftp://example.com/x",
+            "file://example.com/etc/passwd",
+            "gopher://example.com/",
+        ],
+    )
+    def test_non_http_scheme_is_rejected_even_when_the_host_resolves(self, url):
+        assert is_safe_url(url) is False
+
+    def test_reserved_ipv6_literal_is_rejected(self):
+        # 4000::/3 is unassigned: is_reserved, but neither is_private nor any
+        # other clause of _is_safe_ip, so only the is_reserved clause refuses it.
+        assert is_safe_url("http://[4000::1]/x") is False
+
+    def test_dns_failure_is_rejected(self, monkeypatch):
+        def fail(*args, **kwargs):
+            raise socket.gaierror("name resolution failed")
+
+        monkeypatch.setattr(delivery.socket, "getaddrinfo", fail)
+        assert is_safe_url("http://unresolvable.example.com/x") is False
+
+    def test_empty_dns_answer_is_rejected(self, monkeypatch):
+        monkeypatch.setattr(delivery.socket, "getaddrinfo", lambda *a, **k: [])
+        assert is_safe_url("http://empty.example.com/x") is False
+
+    @pytest.mark.parametrize(
+        "answer",
+        [("not-an-ip", "10.0.0.1"), ("93.184.216.34", "not-an-ip")],
+        ids=["garbage-before-internal", "garbage-after-public"],
+    )
+    def test_unparseable_dns_answer_is_rejected(self, monkeypatch, answer):
+        monkeypatch.setattr(
+            delivery.socket, "getaddrinfo", lambda *a, **k: _addrinfo(*answer)
+        )
+        assert is_safe_url("http://odd.example.com/x") is False
+
+
+class _StubHttpxModule:
+    """Stands in for delivery.py's module-level ``httpx`` name.
+
+    Rebinding that name (rather than ``@patch``-ing ``Client`` on the shared
+    httpx2 module object) keeps the mock transport local to delivery.py.
+    """
+
+    def __init__(self, transport):
+        self._transport = transport
+
+    def Client(self, **kwargs):
+        return httpx.Client(transport=self._transport, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(httpx, name)
+
+
+class TestWebhookRedirectHops:
+    """Drive _post_with_redirect_ssrf_check through a mock transport and record
+    every request that actually went out."""
+
+    @pytest.fixture(autouse=True)
+    def _public_dns(self, monkeypatch):
+        monkeypatch.setattr(
+            delivery.socket, "getaddrinfo", lambda *a, **k: _addrinfo("93.184.216.34")
+        )
+
+    def _post(self, monkeypatch, handler, url="http://start.example.com/hook"):
+        seen = []
+
+        def recording(request):
+            seen.append((request.method, str(request.url)))
+            return handler(request, len(seen) - 1)
+
+        transport = httpx.MockTransport(recording)
+        monkeypatch.setattr(delivery, "httpx", _StubHttpxModule(transport))
+        worker = DeliveryWorker()
+        try:
+            response = worker._post_with_redirect_ssrf_check(
+                url, {"k": "v"}, {"Content-Type": "application/json"}
+            )
+        except Exception as exc:
+            return seen, exc
+        return seen, response
+
+    @pytest.mark.parametrize("internal_hop", [0, 1, 2, MAX_REDIRECTS - 2])
+    def test_every_hop_is_revalidated(self, monkeypatch, internal_hop):
+        def handler(request, index):
+            if index < internal_hop:
+                return httpx.Response(
+                    307, headers={"location": f"http://hop{index + 1}.example.com/h"}
+                )
+            if index == internal_hop:
+                return httpx.Response(307, headers={"location": "http://10.0.0.1/h"})
+            raise AssertionError(f"unexpected request {request.url}")
+
+        seen, outcome = self._post(monkeypatch, handler)
+
+        assert isinstance(outcome, _SSRFRedirectBlocked)
+        assert len(seen) == internal_hop + 1
+        assert all("10.0.0.1" not in url for _, url in seen)
+
+    def test_relative_location_resolves_against_the_current_hop(self, monkeypatch):
+        def handler(request, index):
+            if index == 0:
+                return httpx.Response(
+                    307, headers={"location": "https://second.example.com/dir/"}
+                )
+            if index == 1:
+                return httpx.Response(307, headers={"location": "next"})
+            return httpx.Response(200)
+
+        seen, outcome = self._post(monkeypatch, handler)
+
+        assert outcome.status_code == 200
+        assert [url for _, url in seen] == [
+            "http://start.example.com/hook",
+            "https://second.example.com/dir/",
+            "https://second.example.com/dir/next",
+        ]
+
+    @pytest.mark.parametrize(
+        "location",
+        ["https://loop.example.com/hook", "/loop"],
+        ids=["absolute", "relative"],
+    )
+    def test_307_cap_holds_for_both_location_flavours(self, monkeypatch, location):
+        seen, outcome = self._post(
+            monkeypatch,
+            lambda request, index: httpx.Response(307, headers={"location": location}),
+        )
+
+        assert isinstance(outcome, httpx.TooManyRedirects)
+        assert len(seen) == MAX_REDIRECTS
+        assert {method for method, _ in seen} == {"POST"}
+
+    def test_302_cap_counts_the_post_and_the_gets_together(self, monkeypatch):
+        seen, outcome = self._post(
+            monkeypatch,
+            lambda request, index: httpx.Response(302, headers={"location": "/loop"}),
+        )
+
+        methods = [method for method, _ in seen]
+        assert isinstance(outcome, httpx.TooManyRedirects)
+        assert methods == ["POST"] + ["GET"] * (MAX_REDIRECTS - 1)
