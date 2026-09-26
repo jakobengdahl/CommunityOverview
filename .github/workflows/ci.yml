@@ -381,7 +381,36 @@ jobs:
         run: pip install -r services/mcp_oauth_gateway/requirements-dev.txt
 
       - name: Run gateway tests
-        run: pytest test_oauth_flow.py -q
+        run: pytest test_oauth_flow.py test_upstream_auth.py test_lockfiles.py -q
+        working-directory: services/mcp_oauth_gateway
+
+      # The Docker image installs the runtime lock with --require-hashes, but
+      # images build only on deploy-branch pushes; install it the same way, on
+      # the image's Python version, so a bad hash or an unresolvable lock fails
+      # at PR time. pip hashes only the wheels it downloads, and several locked
+      # packages ship one wheel per CPython version, so the version must match.
+      - name: Read the image's Python version
+        id: image-python
+        run: |
+          version=$(sed -n 's/^FROM python:\([0-9][0-9.]*\).*/\1/p' Dockerfile | head -n 1)
+          if [ -z "$version" ]; then
+            echo "::error::Could not read the Python version from the FROM line in Dockerfile"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+        working-directory: services/mcp_oauth_gateway
+
+      - name: Set up the image's Python
+        id: runtime-python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ steps.image-python.outputs.version }}
+
+      - name: Verify the runtime lock installs with hashes
+        run: |
+          "${{ steps.runtime-python.outputs.python-path }}" -m venv "$RUNNER_TEMP/gw-runtime"
+          "$RUNNER_TEMP/gw-runtime/bin/pip" install --require-hashes -r requirements.txt
+          "$RUNNER_TEMP/gw-runtime/bin/pip" check
         working-directory: services/mcp_oauth_gateway
 
   # Gate carrying the required-check name "Gateway tests". Same semantics as the

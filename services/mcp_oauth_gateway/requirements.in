@@ -8,12 +8,14 @@
 # requirements.txt is GENERATED from this file with fully-pinned, hash-verified
 # dependencies. After editing this file, regenerate the lock:
 #
-#   uv pip compile --universal --generate-hashes \
-#     services/mcp_oauth_gateway/requirements.in \
-#     -o services/mcp_oauth_gateway/requirements.txt
+#   cd services/mcp_oauth_gateway
+#   uv pip compile --universal --generate-hashes --python-version 3.11 \
+#     requirements.in -o requirements.txt
+#
+# test_lockfiles.py checks the pins, hashes and the recorded command offline.
 fastapi==0.141.1
 uvicorn[standard]==0.32.1
 httpx2==2.13.1
 PyJWT[crypto]==2.15.0
 itsdangerous==2.2.0
-python-multipart
+python-multipart==0.0.32

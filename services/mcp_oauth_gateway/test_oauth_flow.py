@@ -899,6 +899,22 @@ class TestRegisterContentType(unittest.TestCase):
         resp = client.post("/register", content=json.dumps({"redirect_uris": ["https://a/cb"]}))
         assert resp.status_code == 422
 
+    def test_json_content_type_with_charset_registers(self):
+        resp = client.post(
+            "/register",
+            content=json.dumps({"redirect_uris": ["https://a/cb"]}),
+            headers={"Content-Type": "application/json; charset=utf-8"},
+        )
+        assert resp.status_code == 201
+
+    def test_non_json_content_type_is_rejected(self):
+        resp = client.post(
+            "/register",
+            content=json.dumps({"redirect_uris": ["https://a/cb"]}),
+            headers={"Content-Type": "text/plain"},
+        )
+        assert resp.status_code == 422
+
 
 class TestRegisterRateLimit(unittest.TestCase):
     """The unauthenticated /register endpoint is rate-limited per client IP."""
