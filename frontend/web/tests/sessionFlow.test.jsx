@@ -1631,7 +1631,8 @@ describe('Server-backed session lifecycle', () => {
   // Holds back App's resync guard timers so a test can fire them by hand
   // instead of waiting out the real delay. The sync client's ops POST timers
   // share the guard's length, so length alone cannot tell them apart; a guard
-  // timer is the one of that length scheduled from App.jsx, and anything else
+  // timer is the one of that length whose setTimeout call is made by App.jsx
+  // itself, and anything else
   // runs on the real clock. A cleared timer is dropped here too, so only the
   // guard timers still scheduled are ever fired.
   function holdRequestTimeouts() {
@@ -1639,7 +1640,20 @@ describe('Server-backed session lifecycle', () => {
     let nextId = 0;
     const realSetTimeout = globalThis.setTimeout;
     const realClearTimeout = globalThis.clearTimeout;
-    const scheduledFromApp = () => /[\\/]src[\\/]App\.jsx/.test(new Error().stack || '');
+    // Only the direct caller counts: App.jsx also reaches the ops POST timer
+    // through synchronous calls into the sync client, with App.jsx further
+    // down the same stack.
+    const scheduledFromApp = () => {
+      const limit = Error.stackTraceLimit;
+      Error.stackTraceLimit = 50;
+      const stack = new Error().stack || '';
+      Error.stackTraceLimit = limit;
+      const caller = stack
+        .split('\n')
+        .slice(1)
+        .find((frame) => !/node_modules|sessionFlow\.test\.jsx/.test(frame));
+      return /[\\/]src[\\/]App\.jsx/.test(caller || '');
+    };
     const setSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation((cb, ms, ...args) => {
       if (ms === DEFAULT_REQUEST_TIMEOUT_MS && scheduledFromApp()) {
         nextId -= 1;

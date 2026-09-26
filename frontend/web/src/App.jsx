@@ -277,11 +277,12 @@ function App() {
   // onto the canvas — silently undoing the very rejection the "change not
   // saved" notice just reported. The reentrancy guard suppresses onDropped's
   // *own* resync call while one is already in flight for the same sync
-  // client, so that in-flight call is the only thing that will ever act on
-  // this — it reads and clears this set for itself right before finalising
-  // which ops to fold/replay. A resync for a newer client is not suppressed:
-  // it supersedes the replaced client's call, which stops at its next
-  // checkpoint, so whichever call reads this set next is the newer one.
+  // client and its guard timer has not fired, so that in-flight call is the
+  // only thing that will ever act on this — it reads and clears this set for
+  // itself right before finalising which ops to fold/replay. A resync for a
+  // newer client, or one started after the guard timer fired, is not
+  // suppressed: it supersedes the older call by token, which stops at its
+  // next checkpoint, so whichever call reads this set next is the newer one.
   const recentlyDroppedOpsRef = useRef(new Set());
   // MCP tool-result push application (external AI agent commands → canvas) and
   // the legacy SSE push stream. The op-stream `command` events are wired below
