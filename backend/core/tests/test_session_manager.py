@@ -187,6 +187,36 @@ class TestApplyOps:
                 s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["c"]}]
             )
 
+    async def test_a_batch_costing_more_than_the_whole_bucket_is_too_large_and_charges_nothing(
+        self,
+    ):
+        mgr = _manager(bucket_capacity=2, bucket_refill_per_sec=0)
+        s = mgr.create_session()
+        three = [{"op": "nodes_added", "node_ids": [n]} for n in ("a", "b", "c")]
+
+        with pytest.raises(OpBatchTooLarge):
+            await mgr.apply_ops(s.id, "c1", 0, three)
+        await mgr.apply_ops(s.id, "c1", 0, three[:2])
+        with pytest.raises(RateLimited):
+            await mgr.apply_ops(s.id, "c1", 0, three[2:])
+        assert s.state["node_refs"] == ["a", "b"]
+
+    async def test_at_default_settings_a_batch_over_the_burst_is_too_large_not_rate_limited(
+        self,
+    ):
+        """The bucket holds 200 while the op-count cap is 500, so a 201-500 op
+        batch passes both caps but could never be admitted by backing off."""
+        mgr = _manager(bucket_refill_per_sec=0)
+        s = mgr.create_session()
+        assert mgr._bucket.capacity == 200 < mgr.max_ops_per_batch
+        ops = [{"op": "nodes_added", "node_ids": [f"n{i}"]} for i in range(201)]
+
+        with pytest.raises(OpBatchTooLarge):
+            await mgr.apply_ops(s.id, "c1", 0, ops)
+        res = await mgr.apply_ops(s.id, "c1", 0, ops[:200])
+
+        assert res["seq"] == 200
+
     async def test_lookup_rate_limit_throttles_per_key(self):
         """Session-id lookups are throttled per source and refill over time."""
         mgr = _manager(lookup_bucket_capacity=2, lookup_refill_per_sec=0)

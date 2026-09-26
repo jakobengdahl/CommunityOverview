@@ -291,6 +291,26 @@ class TestSessionOps:
         assert state["node_refs"] == ["node-1", "node-2"]
         assert state["positions"]["node-1"] == {"x": 5.0, "y": 6.0}
 
+    def test_a_batch_over_the_rate_burst_is_413_not_a_retryable_429(
+        self, test_app: TestClient
+    ):
+        """201-500 ops pass the op-count and byte caps but exceed the 200-token
+        bucket, so no backoff could admit them; the refusal draws nothing, so
+        a batch at the full burst still goes through afterwards."""
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        ops = [{"op": "nodes_added", "node_ids": [f"n{i}"]} for i in range(201)]
+
+        over = test_app.post(
+            f"/api/sessions/{sid}/ops", json={"client_id": "c1", "ops": ops}
+        )
+        at_burst = test_app.post(
+            f"/api/sessions/{sid}/ops", json={"client_id": "c1", "ops": ops[:200]}
+        )
+
+        assert over.status_code == 413
+        assert over.json()["detail"] == "op batch too large"
+        assert at_burst.status_code == 200
+
     def test_ops_unknown_session_404(self, test_app: TestClient):
         resp = test_app.post(
             "/api/sessions/9999-9999/ops",
