@@ -432,3 +432,18 @@ class TestVectorStoreReports:
         assert any(
             "background model preload failed" in m and "no model" in m for m in warnings
         ), warnings
+
+
+class TestStorageLogFixture:
+    def test_a_caplog_clear_does_not_hide_a_report(self, caplog, storage_log):
+        logging.getLogger("backend.core.storage").warning("before the clear")
+        caplog.clear()
+
+        assert storage_log()[logging.WARNING] == ["before the clear"]
+
+    def test_a_printed_report_fails_the_next_read(self, storage_log):
+        logging.getLogger("backend.core.storage").warning("printed too")
+        print("printed too")
+
+        with pytest.raises(AssertionError, match="went to stdout"):
+            storage_log()
