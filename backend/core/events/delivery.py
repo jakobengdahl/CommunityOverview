@@ -50,6 +50,15 @@ _UNFLAGGED_INTERNAL_NETWORKS = (
 
 def _is_safe_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Return True if the IP is publicly routable (not private/internal)."""
+    if isinstance(ip, ipaddress.IPv6Address):
+        # An IPv4-mapped address (::ffff:a.b.c.d) reaches the embedded IPv4
+        # host through a dual-stack socket, and the IPv6 flags on the wrapper
+        # differ between Python versions, so judge the embedded host alone.
+        if ip.ipv4_mapped is not None:
+            return _is_safe_ip(ip.ipv4_mapped)
+        # A 6to4 address (2002::/16) is relayed to its embedded IPv4 host.
+        if ip.sixtofour is not None and not _is_safe_ip(ip.sixtofour):
+            return False
     if any(ip in network for network in _UNFLAGGED_INTERNAL_NETWORKS):
         return False
     return not (
