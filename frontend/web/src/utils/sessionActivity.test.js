@@ -1251,6 +1251,16 @@ describe('describeActivity', () => {
       ).toBe('history.desc.annotation_updated_intensity');
     });
 
+    it('does not report the browser clamping a stored out-of-range intensity to 0 as an edit', () => {
+      const base = { id: 'h1', geometry: { x: 0, y: 0, w: 160, h: 160, rotation: 0 } };
+      const r = record({
+        op: 'annotation_updated',
+        before: { ...base, type: 'heatmap', intensity: -3 },
+        after: { ...base, type: 'heatmap', intensity: 0 },
+      });
+      expect(describeActivity(r).key).not.toBe('history.desc.annotation_updated_intensity');
+    });
+
     it('does not report the browser filling in a heat-map default intensity as an edit', () => {
       const base = { id: 'h1', geometry: { x: 0, y: 0, w: 160, h: 160, rotation: 0 } };
       const r = record({

@@ -338,6 +338,19 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     expect(heatmap.position).toEqual({ x: 100, y: 100 });
   });
 
+  it('sizes a drawn heat-map circle by the width when the sweep is wider than tall', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^heat map$/i }));
+
+    const pane = screen.getByTestId('pane');
+    fireEvent(pane, pointerEvent('pointerdown', { clientX: 100, clientY: 100 }));
+    fireEvent(pane, pointerEvent('pointermove', { clientX: 300, clientY: 160 }));
+    fireEvent(pane, pointerEvent('pointerup', { clientX: 300, clientY: 160 }));
+
+    expect(findCreatedNode('heatmap').style).toEqual({ width: 200, height: 200 });
+  });
+
   it('grows a drawn heat-map circle from the press point the way the drag went', () => {
     render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));

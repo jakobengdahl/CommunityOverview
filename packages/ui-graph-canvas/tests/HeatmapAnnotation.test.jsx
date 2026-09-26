@@ -113,6 +113,18 @@ describe('heat-map accessible name', () => {
     );
   });
 
+  it.each([
+    [7.6, 8],
+    [15, 10],
+    [-2, 0],
+    ['x', 5],
+    [undefined, 5],
+  ])('names a stored %s as the level it draws, %i', (stored, level) => {
+    expect(computeAnnotationAriaLabel('heatmap', { intensity: stored })).toBe(
+      `Heat-map circle, intensity ${level} of 10`
+    );
+  });
+
   it('fills a host-translated template', () => {
     expect(
       computeAnnotationAriaLabel(
@@ -143,6 +155,17 @@ describe('heat-map overlay round trip', () => {
     const back = flowNodeToOverlay(node);
     expect(back.intensity).toBe(0);
     expect(back.size).toEqual({ w: 220, h: 220 });
+  });
+
+  it('leaves the other sized kinds on their own 160x96 default', () => {
+    expect(overlayToFlowNode({ id: 's1', kind: 'shape', position: { x: 0, y: 0 } }).style).toEqual({
+      width: 160,
+      height: 96,
+    });
+    for (const type of ['shape', 'image', 'note']) {
+      const { geometry } = createAnnotation({ type, position: { x: 0, y: 0 } });
+      expect([geometry.w, geometry.h]).toEqual([160, 96]);
+    }
   });
 
   it('gives an unsized heat-map overlay a square default box', () => {

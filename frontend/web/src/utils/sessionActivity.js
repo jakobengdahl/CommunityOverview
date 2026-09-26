@@ -217,7 +217,16 @@ function browserWriteBack(annotation) {
  */
 function userChanged(before, after, normalised, path = [], annotationType) {
   if (sameValue(before, after, path, annotationType)) return false;
-  if (zeroIsValue(path, annotationType) && (before === 0 || after === 0)) {
+  // vote_dot's translators drop `value`, so its write-back holds nothing to
+  // compare a 0 against and the change has to be asserted here. A heat-map's
+  // write-back always holds a whole level (normalizeHeatmapIntensity), so the
+  // comparison below already tells a user's 0 from the browser clamping a
+  // stored -3 to 0 — which this shortcut would misreport as an edit.
+  if (
+    annotationType === 'vote_dot' &&
+    zeroIsValue(path, annotationType) &&
+    (before === 0 || after === 0)
+  ) {
     return true;
   }
   return !sameValue(after, normalised, path, annotationType);

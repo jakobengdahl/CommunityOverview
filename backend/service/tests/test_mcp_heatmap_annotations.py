@@ -37,6 +37,21 @@ def _listed(tools_map, session_id, annotation_id):
     return next(a for a in result["annotations"] if a["id"] == annotation_id)
 
 
+class TestHeatmapContractValues:
+    def test_defaults_are_the_documented_literals(self):
+        # Pinned as literals, not against the constants themselves, so a
+        # changed default cannot pass by moving the assertion with it. They
+        # mirror HEATMAP_* in packages/ui-graph-canvas/src/utils/annotationModel.js.
+        assert HEATMAP_DEFAULT_DIAMETER == 160
+        assert HEATMAP_DEFAULT_INTENSITY == 5
+
+    def test_other_generic_types_get_no_size_default(self):
+        annotation = build_annotation(type="shape", x=0, y=0)
+        assert annotation["geometry"]["w"] == 0
+        assert annotation["geometry"]["h"] == 0
+        assert "size" not in annotation
+
+
 class TestHeatmapBuilder:
     def test_default_size_is_a_circle_of_the_default_diameter(self):
         annotation = build_annotation(type="heatmap", x=0, y=0)
