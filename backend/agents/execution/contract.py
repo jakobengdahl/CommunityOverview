@@ -219,6 +219,19 @@ class ExecutionStoreContractTests:
         assert [r.id for r in recovered] == [j.id]
         assert store.get(j.id).state == ExecutionState.PENDING
 
+    def test_recover_stale_resets_every_expired_lease(self, store):
+        # More than one expired job, so the recovery must cover the whole set,
+        # not just the first id it finds.
+        jobs = [store.enqueue(_job(idempotency_key=f"k{i}")) for i in range(3)]
+        for _ in jobs:
+            store.claim_next("w1", now=T0, lease_seconds=60)
+        recovered = store.recover_stale(now=T0 + timedelta(seconds=90))
+        assert sorted(r.id for r in recovered) == sorted(j.id for j in jobs)
+        for j in jobs:
+            got = store.get(j.id)
+            assert got.state == ExecutionState.PENDING
+            assert got.lease_owner is None
+
     def test_claim_next_reclaims_expired_lease(self, store):
         store.enqueue(_job())
         first = store.claim_next("w1", now=T0, lease_seconds=60)
@@ -275,6 +288,16 @@ class ExecutionStoreContractTests:
         assert len(store.list_jobs(states=[ExecutionState.PENDING])) == 2
         assert len(store.list_jobs(states=[ExecutionState.SUCCEEDED])) == 0
         assert len(store.list_jobs(limit=1)) == 1
+
+    def test_list_jobs_matches_quote_bearing_agent_id_literally(self, store):
+        # A filter value carrying SQL syntax must be compared as a literal: it
+        # matches only the job whose agent_id is exactly that string.
+        hostile = "a1' OR '1'='1"
+        target = store.enqueue(_job(idempotency_key="h", agent_id=hostile))
+        store.enqueue(_job(idempotency_key="o", agent_id="a1"))
+        store.enqueue(_job(idempotency_key="p", agent_id="a2"))
+        assert [j.id for j in store.list_jobs(agent_id=hostile)] == [target.id]
+        assert store.list_jobs(agent_id="x' OR '1'='1") == []
 
     def test_list_jobs_newest_first(self, store):
         older = store.enqueue(
