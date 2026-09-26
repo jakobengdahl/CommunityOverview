@@ -123,9 +123,7 @@ class MCPBrowserHandler:
     transport, and returns a helpful info payload for plain browser GETs.
     """
 
-    def __init__(
-        self, sse_app, streamable_app=None, tools_map=None, streamable_ready=None
-    ):
+    def __init__(self, sse_app, streamable_app, tools_map=None, streamable_ready=None):
         self.sse_app = sse_app
         self.streamable_app = streamable_app
         self.tools_map = tools_map or {}
@@ -135,7 +133,7 @@ class MCPBrowserHandler:
         self._streamable_ready = streamable_ready or (lambda: True)
 
     def _streamable(self):
-        if self.streamable_app is not None and self._streamable_ready():
+        if self._streamable_ready():
             return self.streamable_app
         return None
 
@@ -199,16 +197,12 @@ class MCPBrowserHandler:
                     "protocol": "MCP supports SSE and Streamable HTTP transports.",
                     "transports": {
                         "sse_legacy": "/mcp/sse",
-                        "streamable_http": "/mcp"
-                        if self.streamable_app
-                        else "not available",
+                        "streamable_http": "/mcp",
                     },
                     "streamable_http_endpoints": {
                         "POST /mcp": "send JSON-RPC message; respond inline or as SSE stream",
                         "GET /mcp": "open SSE stream for server-initiated messages (Accept: text/event-stream)",
-                    }
-                    if self.streamable_app
-                    else {},
+                    },
                     "documentation": "https://modelcontextprotocol.io/",
                     "available_tools": list(self.tools_map.keys()),
                 }
@@ -228,29 +222,17 @@ def mount_mcp(app: FastAPI, mcp, tools_map) -> None:
     """
     mcp_sse_app = bind_request_authorization_to_asgi_app(mcp.sse_app())
 
-    # Try to create Streamable HTTP app (requires mcp ≥ 1.8).
-    # If the installed version doesn't support it, fall back to SSE-only.
-    try:
-        # FastMCP mounts its Streamable HTTP handler at settings.streamable_http_path
-        # ("/mcp" by default). This whole app is itself mounted at /mcp, so the
-        # handler sees the already-stripped path "/" and the default would never
-        # match — every POST /mcp answered 404. Serve it from the mount root.
-        try:
-            mcp.settings.streamable_http_path = "/"
-        except (AttributeError, ValueError):
-            logger.warning(
-                "Could not set streamable_http_path; Streamable HTTP may not respond "
-                "on /mcp with this mcp version."
-            )
-        mcp_streamable_app = bind_request_authorization_to_asgi_app(
-            mcp.streamable_http_app()
-        )
-    except (AttributeError, TypeError):
-        mcp_streamable_app = None
+    # FastMCP mounts its Streamable HTTP handler at settings.streamable_http_path
+    # ("/mcp" by default). This whole app is itself mounted at /mcp, so the
+    # handler sees the already-stripped path "/" and the default would never
+    # match — every POST /mcp answered 404. Serve it from the mount root.
+    mcp.settings.streamable_http_path = "/"
+    mcp_streamable_app = bind_request_authorization_to_asgi_app(
+        mcp.streamable_http_app()
+    )
 
     streamable_state = {"started": False}
-    if mcp_streamable_app is not None:
-        _attach_streamable_session_lifecycle(app, mcp, streamable_state)
+    _attach_streamable_session_lifecycle(app, mcp, streamable_state)
 
     app.mount(
         "/mcp",
