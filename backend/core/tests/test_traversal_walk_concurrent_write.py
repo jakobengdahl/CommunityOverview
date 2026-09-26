@@ -176,8 +176,9 @@ class TestAWriteMidWalk:
         changed size". A "swap" write removes an entry the copy has already
         passed and adds another, keeping the size, which it reports as
         "dictionary keys changed" instead, and only once the copy reaches
-        the end of the dict - so a swap forces one retry, where a grow forces
-        one per write or two.
+        the end of the dict. That failed copy hands its tuples back to the
+        free list, which then feeds the retry without a collection - so a
+        swap forces one retry, where a grow forces one per write or two.
         """
         budget_size = 1000
         base = range(1, 2) if level == "narrow_keys" else range(1, 50)
@@ -230,6 +231,7 @@ class TestAWriteMidWalk:
                     del written[f"pad{i}"]
                 assert len(written) >= budget_size
         size = sys.getsizeof(written)
+        unwritten = len(written)
         budget = []
         writes = []
         # 2-tuples come from a free list that bypasses the collector's
@@ -245,7 +247,9 @@ class TestAWriteMidWalk:
                 return super().get(key, default)
 
         def write_during_collection(phase, info):
-            if phase == "start" and budget:
+            # Not before the first copy of `written` starts, so that copy
+            # sees it as built - a single edge in the narrow case.
+            if phase == "start" and budget and copies:
                 budget.pop()
                 writes.append(phase)
                 if write == "swap":
@@ -263,6 +267,7 @@ class TestAWriteMidWalk:
             gc.callbacks.remove(write_during_collection)
 
         assert drained
+        assert copies[0] == unwritten
         # The walk copies this dict once; every copy after the first is a
         # retry, which only an interrupted copy starts. A grow forces enough
         # of them that a retry giving up after a few dozen attempts fails.
