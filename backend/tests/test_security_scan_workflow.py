@@ -74,6 +74,10 @@ FD_DUP = re.compile(r"^[0-9]*-?$")
 TEE_OPERANDS = re.compile(r"\btee\b([^|;&\n]*)")
 STEP_SUMMARY = '"$GITHUB_STEP_SUMMARY"'
 
+# Files the runner reads back after a step: they change later steps' env, PATH
+# (a no-op `pip-audit` shim) or outputs.
+RUNNER_COMMAND_FILES = ("GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE")
+
 
 def _write_targets(body):
     targets = [t for dup, t in REDIRECT.findall(body) if not (dup and FD_DUP.match(t))]
@@ -119,28 +123,47 @@ def _run_step(step, tmp_path, scanner_exit):
         stub.chmod(0o755)
     summary = tmp_path / "summary.md"
     summary.touch()
-    github_env = tmp_path / "github_env"
-    github_env.touch()
+    # The runner's own layout: its command files live under RUNNER_TEMP, so a
+    # step that finds them there rather than through GITHUB_ENV is caught too.
+    runner_temp = tmp_path / "runner_temp"
+    commands = runner_temp / "_runner_file_commands"
+    commands.mkdir(parents=True)
+    command_files = {}
+    for var in RUNNER_COMMAND_FILES:
+        command_files[var] = commands / f"{var.lower()}_stub"
+        command_files[var].touch()
+    workdir = tmp_path / "work"
+    workdir.mkdir()
     script = tmp_path / "step.sh"
     script.write_text(step["run"])
-    inherited = {k: v for k, v in os.environ.items() if k not in SHELL_STARTUP_VARS}
+    # Nothing of the job running this test may leak in: under CI its GITHUB_*
+    # and RUNNER_* variables name that job's real command files.
+    inherited = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in SHELL_STARTUP_VARS and not k.startswith(("GITHUB_", "RUNNER_"))
+    }
     env = dict(
         inherited,
         PATH=f"{stub_dir}{os.pathsep}{os.environ['PATH']}",
         GITHUB_STEP_SUMMARY=str(summary),
-        GITHUB_ENV=str(github_env),
+        RUNNER_TEMP=str(runner_temp),
+        **{var: str(path) for var, path in command_files.items()},
     )
     result = subprocess.run(
         ["bash", "-e", str(script)],
-        cwd=REPO_ROOT,
+        cwd=workdir,
         env=env,
         capture_output=True,
         text=True,
         timeout=30,
     )
-    assert github_env.read_text() == "", (
-        f"step {step['name']!r} wrote to GITHUB_ENV, which reaches every later step"
+    written = sorted(
+        str(f.relative_to(runner_temp))
+        for f in runner_temp.rglob("*")
+        if f.is_file() and f.stat().st_size
     )
+    assert not written, f"step {step['name']!r} wrote runner command files {written}"
     return result.returncode, summary.read_text()
 
 
@@ -285,10 +308,12 @@ def test_no_env_switches_on_pipefail_behind_the_default_shell():
 
 
 @pytest.mark.parametrize("step", _run_steps())
-def test_no_step_writes_to_github_env_when_executed(step, tmp_path):
-    # GITHUB_ENV reaches every later step; _run_step fails on any write to it,
-    # however the body names the file.
-    _run_step(step, tmp_path, scanner_exit=0)
+def test_no_step_writes_runner_command_files_when_executed(step, tmp_path):
+    # _run_step fails on any write under RUNNER_TEMP, however the body names
+    # the file. The step must also run to completion: one that aborts early -
+    # on a tool this harness lacks, say - never reaches a write placed after it.
+    returncode, _ = _run_step(step, tmp_path, scanner_exit=0)
+    assert returncode == 0, f"step {step['name']!r} did not run to completion"
 
 
 def test_only_known_actions_are_used():
