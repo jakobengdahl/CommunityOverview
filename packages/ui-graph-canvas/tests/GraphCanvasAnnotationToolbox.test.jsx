@@ -367,6 +367,22 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     expect(heatmap.position).toEqual({ x: -100, y: -100 });
   });
 
+  it('keeps the press point as the corner when the flipped axis moved less than the minimum', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^heat map$/i }));
+
+    const pane = screen.getByTestId('pane');
+    fireEvent(pane, pointerEvent('pointerdown', { clientX: 100, clientY: 100 }));
+    fireEvent(pane, pointerEvent('pointermove', { clientX: 80, clientY: 300 }));
+    fireEvent(pane, pointerEvent('pointerup', { clientX: 80, clientY: 300 }));
+
+    const heatmap = findCreatedNode('heatmap');
+    expect(heatmap.style).toEqual({ width: 200, height: 200 });
+    // Leftward by 20: the square's right edge is the press point, x 100.
+    expect(heatmap.position).toEqual({ x: -100, y: 100 });
+  });
+
   it('starts a heat-map circle behind graph nodes', () => {
     render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));

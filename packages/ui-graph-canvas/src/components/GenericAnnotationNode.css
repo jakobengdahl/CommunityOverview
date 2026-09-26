@@ -214,9 +214,10 @@
 }
 
 /* Forced-colours modes drop background images, which would erase every
-   circle; draw each one as an outline instead so it stays visible. */
+   circle; draw each visible one as an outline instead. Level 0 stays
+   invisible here too, keeping only its selected/hover rim above. */
 @media (forced-colors: active) {
-  .graph-heatmap-circle {
+  .graph-generic-annotation-node.kind-heatmap:not(.is-empty) .graph-heatmap-circle {
     border: 2px solid CanvasText;
   }
 }

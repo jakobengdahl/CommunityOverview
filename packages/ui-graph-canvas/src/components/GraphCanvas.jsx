@@ -2169,18 +2169,16 @@ function GraphCanvasInner({
       } else if (kind === 'heatmap') {
         // A circle, so the box is square: a drag-to-draw sweep sizes it by
         // its longer side, and a plain click gets the default diameter. The
-        // square keeps the PRESS point as its corner and grows the way the hand
-        // moved: `position` is the swept box's top-left, so a leftward or
-        // upward sweep (the flip flags) moves the square's origin back by the
-        // amount it outgrew the sweep on that axis — otherwise it would extend
-        // past the press point, away from where the user dragged.
+        // square keeps the PRESS point (`options.anchor`) as its corner and
+        // grows the way the hand moved: a leftward or upward sweep (the flip
+        // flags) puts the press point on the square's right or bottom edge.
         const side = options.box
           ? Math.max(MIN_ANNOTATION_SIZE, options.box.width, options.box.height)
           : HEATMAP_DEFAULT_DIAMETER;
-        const origin = options.box
+        const origin = options.anchor
           ? {
-              x: options.flipX ? position.x + options.box.width - side : position.x,
-              y: options.flipY ? position.y + options.box.height - side : position.y,
+              x: options.flipX ? options.anchor.x - side : options.anchor.x,
+              y: options.flipY ? options.anchor.y - side : options.anchor.y,
             }
           : position;
         newNode = {
@@ -3852,7 +3850,8 @@ function GraphCanvasInner({
       // uses the same thresholded direction test as the flip flags it gets.
       const circle = placement.tool.kind === 'heatmap';
       if (circle) {
-        const side = Math.max(width, height);
+        // Floored at the same minimum createAnnotation applies, in screen px.
+        const side = Math.max(width, height, MIN_DRAWN_SIZE * getViewportRef.current().zoom);
         left =
           event.clientX - placement.startX < -MIN_DRAG_PX
             ? placement.startX - side
@@ -3933,6 +3932,10 @@ function GraphCanvasInner({
         {
           ...tool.options,
           box,
+          // The press point in flow space. A heat-map circle is anchored on it
+          // directly: recovering it from `position` + the floored `box` is off
+          // by the floor whenever a flipped axis moved less than the minimum.
+          anchor: a,
           // Thresholded, not a raw sign test: a long downward drag with a
           // couple of pixels of leftward jitter would otherwise silently
           // mirror the shape and aim a process arrow the wrong way.
