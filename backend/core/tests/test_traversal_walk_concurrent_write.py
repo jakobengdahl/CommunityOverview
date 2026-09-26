@@ -150,9 +150,17 @@ class TestAWriteMidWalk:
         assert writes
         assert errors == []
 
-    @pytest.mark.parametrize("level", ["neighbours", "parallel_keys"])
+    @pytest.mark.parametrize(
+        "level, write, min_retries",
+        [
+            ("neighbours", "grow", 100),
+            ("parallel_keys", "grow", 100),
+            ("parallel_keys", "swap", 1),
+            ("narrow_keys", "grow", 100),
+        ],
+    )
     def test_a_write_from_a_collection_during_the_copy_does_not_break_the_walk(
-        self, level
+        self, level, write, min_retries
     ):
         """The copy runs in C, but each item it copies allocates a tuple, and
         on CPython 3.11 an allocation can run a garbage collection, and with it
@@ -160,25 +168,68 @@ class TestAWriteMidWalk:
         is that Python code here, standing in for the writer: with the
         collection threshold at 1, and armed by the adjacency lookup that
         precedes the copy, it lands writes from inside the copy itself - on
-        the hub's neighbour dict, or on the key dict of one wide pair.
+        the hub's neighbour dict, or on the key dict of one pair - a wide
+        one, or one holding a single edge, so the copy is not skipped for a
+        dict too small to be written mid-copy.
+
+        A "grow" write adds an entry, which the copy reports as "dictionary
+        changed size". A "swap" write removes an entry the copy has already
+        passed and adds another, keeping the size, which it reports as
+        "dictionary keys changed" instead, and only once the copy reaches
+        the end of the dict - so a swap forces one retry, where a grow forces
+        one per write or two.
         """
+        budget_size = 1000
+        base = range(1, 2) if level == "narrow_keys" else range(1, 50)
         nodes = {"hub": _node("hub"), "n0": _node("n0")}
         edges: dict = {}
         graph = nx.MultiDiGraph()
         for node in nodes.values():
             graph.add_node(node.id, data=node)
         if level == "neighbours":
-            for i in range(1, 50):
+            for i in base:
                 nodes[f"n{i}"] = _node(f"n{i}")
                 _add(graph, edges, _edge(f"e{i}", "hub", f"n{i}"))
-            written = graph._succ["hub"]
-            entries = [{} for _ in range(100)]
+            entries = [{} for _ in range(budget_size)]
         else:
-            for i in range(1, 50):
+            if write == "swap":
+                # Ahead of the edges the walk must return, in insertion order,
+                # so each swap removes one of these, never one of those.
+                for i in range(budget_size):
+                    old = _edge(f"old{i}", "hub", "n0")
+                    graph.add_edge("hub", "n0", key=old.id, data=old)
+            for i in base:
                 _add(graph, edges, _edge(f"e{i}", "hub", "n0"))
-            written = graph._succ["hub"]["n0"]
-            entries = [{"data": _edge(f"gc{i}", "hub", "n0")} for i in range(100)]
-        # Each failed copy spends a write or two; enough for several retries.
+            entries = [
+                {"data": _edge(f"gc{i}", "hub", "n0")} for i in range(budget_size)
+            ]
+
+        copies = []
+
+        class _CountsCopies(dict):
+            def items(self):
+                copies.append(len(self))
+                return super().items()
+
+        if level == "neighbours":
+            written = graph._succ["hub"] = _CountsCopies(graph._succ["hub"])
+        else:
+            written = _CountsCopies(graph._succ["hub"]["n0"])
+            graph._succ["hub"]["n0"] = graph._pred["n0"]["hub"] = written
+            if write == "swap":
+                # A same-size write that also resizes the dict can move the
+                # entries under the copy without either error firing. Grow
+                # it until it resizes, which leaves room for more inserts
+                # than it holds, so no swap below resizes it.
+                unresized = sys.getsizeof(written)
+                pad = 0
+                while sys.getsizeof(written) == unresized:
+                    written[f"pad{pad}"] = entries[0]
+                    pad += 1
+                for i in range(pad):
+                    del written[f"pad{i}"]
+                assert len(written) >= budget_size
+        size = sys.getsizeof(written)
         budget = []
         writes = []
         # 2-tuples come from a free list that bypasses the collector's
@@ -190,13 +241,15 @@ class TestAWriteMidWalk:
             def get(self, key, default=None):
                 if key == "hub":
                     drained[:] = [(i, i) for i in range(5000)]
-                    budget[:] = [None] * len(entries)
+                    budget[:] = [None] * budget_size
                 return super().get(key, default)
 
         def write_during_collection(phase, info):
             if phase == "start" and budget:
                 budget.pop()
                 writes.append(phase)
+                if write == "swap":
+                    del written[next(iter(written))]
                 written[f"gc{len(writes)}"] = entries[len(writes) - 1]
 
         graph._succ = graph._adj = _ArmsOnLookup(graph._succ)
@@ -210,8 +263,13 @@ class TestAWriteMidWalk:
             gc.callbacks.remove(write_during_collection)
 
         assert drained
-        assert writes
-        assert {f"e{i}" for i in range(1, 50)} <= {e.id for e in result["edges"]}
+        # The walk copies this dict once; every copy after the first is a
+        # retry, which only an interrupted copy starts. A grow forces enough
+        # of them that a retry giving up after a few dozen attempts fails.
+        assert len(copies) - 1 >= min_retries, copies
+        if write == "swap":
+            assert sys.getsizeof(written) == size
+        assert {f"e{i}" for i in base} <= {e.id for e in result["edges"]}
 
 
 class TestTheCopyKeepsTheWalksAnswer:
@@ -250,6 +308,22 @@ class TestTheCopyKeepsTheWalksAnswer:
 
         assert {e.id for e in result["edges"]} == {"ab2"}
         assert {n.id for n in result["nodes"]} == {"a", "b"}
+
+    def test_a_second_hop_follows_the_incoming_edges_of_the_first(self):
+        # c reaches b only through an incoming edge, so it is found only if
+        # the second hop reads b's incoming adjacency, not the anchor's.
+        nodes = {nid: _node(nid) for nid in ("a", "b", "c")}
+        edges: dict = {}
+        graph = nx.MultiDiGraph()
+        for node in nodes.values():
+            graph.add_node(node.id, data=node)
+        _add(graph, edges, _edge("ab", "a", "b"))
+        _add(graph, edges, _edge("cb", "c", "b"))
+
+        result = storage_search.get_related_nodes(nodes, edges, graph, "a", depth=2)
+
+        assert {n.id for n in result["nodes"]} == {"a", "b", "c"}
+        assert {e.id for e in result["edges"]} == {"ab", "cb"}
 
     def test_an_anchor_the_graph_does_not_hold_returns_only_itself(self):
         # networkx's out_edges("ab") on a graph without "ab" iterates the
