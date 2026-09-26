@@ -4,7 +4,8 @@
 # This workflow:
 #   1. Runs tests on pushes to main, preview and prod (and v* tags) and on
 #      pull requests targeting those branches
-#   2. Builds and publishes both application images to GHCR on branch pushes
+#   2. Builds and publishes both application images to GHCR on pushes to
+#      preview and prod and on v* tags only; a push to main runs no build
 #   3. Emits artifact metadata that the infra repo consumes for deployment
 #
 # Responsibilities of this repo:
