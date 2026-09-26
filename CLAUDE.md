@@ -234,7 +234,7 @@ format tooling note under Code Style. Reproduce what CI validates locally:
 ```bash
 pytest backend/ -q          # backend-tests job (base/ML-free install)
 npm run test:unit           # frontend-tests job (all workspaces)
-pytest services/mcp_oauth_gateway/test_oauth_flow.py -q   # gateway-tests job
+(cd services/mcp_oauth_gateway && pytest test_oauth_flow.py test_upstream_auth.py test_lockfiles.py -q)   # gateway-tests job
 ```
 
 `python-lint` and `frontend-lint` are branch-protection required checks (see

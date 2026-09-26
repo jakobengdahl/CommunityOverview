@@ -3,15 +3,21 @@
 # requirements-dev.txt is GENERATED from this file with fully-pinned,
 # hash-verified dependencies. After editing this file, regenerate the lock:
 #
-#   uv pip compile --universal --generate-hashes \
-#     services/mcp_oauth_gateway/requirements-dev.in \
-#     -o services/mcp_oauth_gateway/requirements-dev.txt
+#   cd services/mcp_oauth_gateway
+#   uv pip compile --universal --generate-hashes --python-version 3.11 \
+#     requirements-dev.in -o requirements-dev.txt
+#
+# test_lockfiles.py checks the pins, hashes and the recorded command offline.
 
 # Includes the pinned runtime requirements.
 -r requirements.in
 
 # Testing
 pytest>=7.0.0
+
+# test_lockfiles.py parses the locks with it; pin it directly rather than
+# relying on pytest to keep pulling it in.
+packaging>=24.0
 
 # The repo-wide `timeout = 300` in the root pyproject.toml applies here too
 # (pytest walks up to find it), but only takes effect with this plugin
