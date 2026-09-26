@@ -14,6 +14,7 @@ from typing import AsyncIterator
 import httpx2 as httpx
 from fastapi import Request
 from fastapi.responses import StreamingResponse, Response
+from starlette.datastructures import Headers
 
 import config
 import upstream_auth
@@ -38,7 +39,7 @@ async def proxy_sse(request: Request) -> StreamingResponse:
     upstream_url = config.UPSTREAM_MCP_BASE_URL + "/mcp/sse"
 
     # Forward all incoming query parameters (e.g. sessionId)
-    params = dict(request.query_params)
+    params = request.query_params.multi_items()
 
     # Forward a safe subset of request headers and ensure the upstream
     # MCPBrowserHandler sees the SSE accept type (otherwise it returns JSON).
@@ -93,7 +94,7 @@ async def proxy_post_mcp(request: Request) -> Response:
     path = request.url.path  # e.g. /mcp/messages or /mcp/sse/messages
     upstream_url = config.UPSTREAM_MCP_BASE_URL + path
 
-    params = dict(request.query_params)
+    params = request.query_params.multi_items()
     headers = await _upstream_headers(request)
     body = await request.body()
 
@@ -109,7 +110,7 @@ async def proxy_post_mcp(request: Request) -> Response:
     return Response(
         content=resp.content,
         status_code=resp.status_code,
-        headers=dict(resp.headers),
+        headers=_response_headers(resp.headers),
     )
 
 
@@ -117,7 +118,7 @@ async def proxy_post(request: Request) -> Response:
     """Forward a POST /messages request to the upstream and return the response."""
     upstream_url = config.UPSTREAM_MCP_BASE_URL + "/mcp/messages"
 
-    params = dict(request.query_params)
+    params = request.query_params.multi_items()
     headers = await _upstream_headers(request)
     body = await request.body()
 
@@ -133,7 +134,7 @@ async def proxy_post(request: Request) -> Response:
     return Response(
         content=resp.content,
         status_code=resp.status_code,
-        headers=dict(resp.headers),
+        headers=_response_headers(resp.headers),
     )
 
 
@@ -151,7 +152,7 @@ async def proxy_streamable_http(request: Request) -> Response:
     straight past the gateway, so the gateway asks for ``/mcp/`` up front.
     """
     upstream_url = config.UPSTREAM_MCP_BASE_URL + "/mcp/"
-    params = dict(request.query_params)
+    params = request.query_params.multi_items()
     headers = await _upstream_headers(request)
     body = await request.body()
 
@@ -239,8 +240,13 @@ async def _upstream_headers(request: Request) -> dict:
     return headers
 
 
-def _response_headers(headers) -> dict:
+def _response_headers(headers: httpx.Headers) -> Headers:
     """Copy upstream response headers, dropping the ones the ASGI server owns.
+
+    ``content-encoding`` goes with the body framing: httpx has already decoded
+    the body, so relaying the upstream's ``gzip`` would make the client decode
+    it a second time. Repeated headers such as ``set-cookie`` are kept one entry
+    each, which a plain dict would collapse to the last one.
 
     ``Mcp-Session-Id`` is deliberately kept: Streamable HTTP clients read it
     from the initialize response and send it back on every later request.
@@ -250,22 +256,24 @@ def _response_headers(headers) -> dict:
     to an origin it cannot authenticate against, and would disclose the internal
     service URL.
     """
-    dropped = {"content-length", "content-encoding", "transfer-encoding", "connection"}
-    result = {k: v for k, v in headers.items() if k.lower() not in dropped}
-
-    location = next((v for k, v in result.items() if k.lower() == "location"), None)
-    if location:
-        upstream_host = urllib.parse.urlparse(config.UPSTREAM_MCP_BASE_URL).hostname
-        parsed = urllib.parse.urlparse(location)
-        if parsed.hostname and parsed.hostname == upstream_host:
-            rewritten = config.PUBLIC_BASE_URL.rstrip("/") + parsed.path
-            if parsed.query:
-                rewritten += "?" + parsed.query
-            logger.info("Rewrote upstream redirect %s → %s", location, rewritten)
-            for key in list(result):
-                if key.lower() == "location":
-                    result[key] = rewritten
-    return result
+    dropped = {b"content-length", b"content-encoding", b"transfer-encoding", b"connection"}
+    upstream_host = urllib.parse.urlparse(config.UPSTREAM_MCP_BASE_URL).hostname
+    raw = []
+    for key, value in headers.raw:
+        key = key.lower()
+        if key in dropped:
+            continue
+        if key == b"location":
+            location = value.decode("latin-1")
+            parsed = urllib.parse.urlparse(location)
+            if parsed.hostname and parsed.hostname == upstream_host:
+                rewritten = config.PUBLIC_BASE_URL.rstrip("/") + parsed.path
+                if parsed.query:
+                    rewritten += "?" + parsed.query
+                logger.info("Rewrote upstream redirect %s → %s", location, rewritten)
+                value = rewritten.encode("latin-1")
+        raw.append((key, value))
+    return Headers(raw=raw)
 
 
 def _rewrite_endpoint_event(raw: bytes) -> bytes:

@@ -154,8 +154,11 @@ class TestStreamableHttpTransport(unittest.TestCase):
             captured["url"] = url
             return MagicMock()
 
+        import httpx2 as httpx
+        from starlette.datastructures import QueryParams
+
         upstream_resp = MagicMock()
-        upstream_resp.headers = {"content-type": "application/json"}
+        upstream_resp.headers = httpx.Headers({"content-type": "application/json"})
         upstream_resp.status_code = 200
         upstream_resp.aread = AsyncMock(return_value=b"{}")
         upstream_resp.aclose = AsyncMock()
@@ -165,7 +168,7 @@ class TestStreamableHttpTransport(unittest.TestCase):
                               new=AsyncMock(return_value=upstream_resp)):
                 request = MagicMock()
                 request.method = "POST"
-                request.query_params = {}
+                request.query_params = QueryParams("")
                 request.headers = {}
                 request.body = AsyncMock(return_value=b"{}")
                 asyncio.run(proxy_module.proxy_streamable_http(request))
@@ -337,6 +340,219 @@ class TestTokenEndpointRedirectUri(unittest.TestCase):
         )
         assert resp.status_code == 200
         assert "access_token" in resp.json()
+
+
+class TestTokenEndpointMalformedBody(unittest.TestCase):
+    """POST /token answers an unparseable body with invalid_request, not a 500."""
+
+    def _assert_invalid_request(self, resp):
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["error"] == "invalid_request"
+
+    def test_malformed_json_is_invalid_request(self):
+        resp = client.post(
+            "/token",
+            content=b'{"grant_type": "authorization_code",',
+            headers={"Content-Type": "application/json"},
+        )
+        self._assert_invalid_request(resp)
+
+    def test_non_utf8_json_body_is_invalid_request(self):
+        resp = client.post(
+            "/token",
+            content=b"\xff\xfe{",
+            headers={"Content-Type": "application/json"},
+        )
+        self._assert_invalid_request(resp)
+
+    def test_non_object_json_is_invalid_request(self):
+        for payload in (b"[1, 2]", b'"authorization_code"', b"42", b"null"):
+            resp = client.post(
+                "/token", content=payload, headers={"Content-Type": "application/json"},
+            )
+            self._assert_invalid_request(resp)
+
+    def test_non_string_field_is_invalid_request(self):
+        verifier, challenge = _make_pkce_pair()
+        redirect = "https://chatgpt.com/callback"
+        code = auth.issue_auth_code(
+            email="alice@example.com", code_challenge=challenge, redirect_uri=redirect,
+        )
+        body = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "code_verifier": verifier,
+            "redirect_uri": redirect,
+        }
+        for field, bad in (("code", [code]), ("code_verifier", {"v": 1}),
+                           ("redirect_uri", 7), ("grant_type", ["authorization_code"])):
+            resp = client.post("/token", json={**body, field: bad})
+            self._assert_invalid_request(resp)
+        # The code was never consumed by the rejected requests.
+        assert client.post("/token", json=body).status_code == 200
+
+
+class TestProxyResponsePassthrough(unittest.TestCase):
+    """Buffered POST proxies relay upstream headers and query params faithfully."""
+
+    def _upstream_response(self):
+        import gzip
+
+        import httpx2 as httpx
+
+        return httpx.Response(
+            200,
+            headers=[
+                ("content-type", "application/json"),
+                ("content-encoding", "gzip"),
+                ("set-cookie", "a=1; Path=/"),
+                ("set-cookie", "b=2; Path=/"),
+                ("mcp-session-id", "sess-1"),
+            ],
+            content=gzip.compress(b'{"ok": true}'),
+        )
+
+    def _post_through_gateway(self, path):
+        import proxy as proxy_module
+
+        upstream_post = AsyncMock(return_value=self._upstream_response())
+        with patch.object(proxy_module._client, "post", new=upstream_post):
+            resp = client.post(
+                path + "?session_id=s1&tag=x&tag=y",
+                headers={"Authorization": "Bearer static-test-api-key"},
+                content=b"{}",
+            )
+        return resp, upstream_post
+
+    def test_decoded_body_is_not_labelled_gzip_and_repeats_survive(self):
+        for path in ("/messages", "/mcp/messages/", "/mcp/sse/messages"):
+            resp, upstream_post = self._post_through_gateway(path)
+            assert resp.status_code == 200, path
+            assert "content-encoding" not in resp.headers, path
+            assert resp.json() == {"ok": True}, path
+            assert resp.headers.get_list("set-cookie") == ["a=1; Path=/", "b=2; Path=/"], path
+            assert resp.headers["mcp-session-id"] == "sess-1", path
+            params = list(upstream_post.await_args.kwargs["params"])
+            assert params == [("session_id", "s1"), ("tag", "x"), ("tag", "y")], path
+
+    def test_response_filter_keeps_every_repeated_header(self):
+        import httpx2 as httpx
+
+        import proxy as proxy_module
+
+        headers = httpx.Headers([
+            ("Set-Cookie", "a=1"), ("set-cookie", "b=2"), ("Content-Encoding", "br"),
+        ])
+        filtered = proxy_module._response_headers(headers)
+        assert filtered.getlist("set-cookie") == ["a=1", "b=2"]
+        assert "content-encoding" not in filtered
+
+    def test_streaming_proxies_forward_repeated_query_params(self):
+        import proxy as proxy_module
+
+        captured = []
+
+        def fake_build_request(method, url, **kwargs):
+            captured.append(list(kwargs["params"]))
+            return MagicMock()
+
+        import httpx2 as httpx
+
+        upstream_resp = MagicMock()
+        upstream_resp.headers = httpx.Headers({"content-type": "application/json"})
+        upstream_resp.status_code = 200
+        upstream_resp.aread = AsyncMock(return_value=b"{}")
+        upstream_resp.aclose = AsyncMock()
+        with patch.object(proxy_module._client, "build_request", side_effect=fake_build_request):
+            with patch.object(proxy_module._client, "send",
+                              new=AsyncMock(return_value=upstream_resp)):
+                resp = client.post(
+                    "/mcp?tag=x&tag=y",
+                    headers={"Authorization": "Bearer static-test-api-key"},
+                    json={},
+                )
+        assert resp.status_code == 200
+        assert captured == [[("tag", "x"), ("tag", "y")]]
+
+        seen = {}
+
+        class FakeStream:
+            status_code = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def aiter_bytes(self):
+                yield b"event: endpoint\ndata: /messages/?session_id=1\n\n"
+
+        def fake_stream(method, url, **kwargs):
+            seen["params"] = list(kwargs["params"])
+            return FakeStream()
+
+        with patch.object(proxy_module._client, "stream", side_effect=fake_stream):
+            resp = client.get(
+                "/sse?tag=x&tag=y",
+                headers={"Authorization": "Bearer static-test-api-key"},
+            )
+        assert resp.status_code == 200
+        assert seen["params"] == [("tag", "x"), ("tag", "y")]
+
+
+def _proxied_routes():
+    """Every (method, path) the app serves by handing the request to ``proxy``."""
+    from starlette.routing import Route
+
+    found = []
+    for route in app.routes:
+        if not isinstance(route, Route) or "proxy" not in route.endpoint.__code__.co_names:
+            continue
+        path = route.path.replace("{subpath:path}", "messages")
+        for method in sorted(route.methods - {"HEAD"}):
+            found.append((method, path))
+    return found
+
+
+class TestEveryProxiedRouteRequiresAuth(unittest.TestCase):
+    """No proxied route reaches the upstream without a valid gateway credential."""
+
+    def test_route_enumeration_is_not_vacuous(self):
+        routes = set(_proxied_routes())
+        expected = {
+            ("POST", "/mcp"), ("GET", "/mcp"), ("DELETE", "/mcp"),
+            ("GET", "/sse"), ("GET", "/mcp/sse"), ("POST", "/mcp/sse"),
+            ("GET", "/mcp/sse/messages"), ("POST", "/mcp/sse/messages"),
+            ("POST", "/messages"), ("POST", "/messages/"), ("POST", "/mcp/messages/"),
+        }
+        assert expected <= routes, expected - routes
+
+    def test_unauthenticated_requests_never_reach_the_proxy(self):
+        credentials = {
+            "no header": {},
+            "non-Bearer scheme with the static key": {"Authorization": "Basic static-test-api-key"},
+            "lower-case scheme with the static key": {"Authorization": "bearer static-test-api-key"},
+            "garbage bearer": {"Authorization": "Bearer not-a-token"},
+        }
+        proxies = ("proxy_sse", "proxy_post", "proxy_post_mcp", "proxy_streamable_http")
+        for method, path in _proxied_routes():
+            for label, headers in credentials.items():
+                mocks = {name: AsyncMock() for name in proxies}
+                with patch.multiple("proxy", **mocks):
+                    resp = client.request(method, path, headers=headers)
+                assert resp.status_code == 401, (method, path, label, resp.status_code)
+                for mock in mocks.values():
+                    mock.assert_not_awaited()
+
+    def test_extract_bearer_token_rejects_other_schemes(self):
+        import main
+
+        for header in ("Basic static-test-api-key", "Token static-test-api-key",
+                       "bearer static-test-api-key", "static-test-api-key"):
+            request = MagicMock()
+            request.headers = {"Authorization": header}
+            assert main._extract_bearer_token(request) is None, header
 
 
 class TestAuthModuleRedirectUri(unittest.TestCase):
