@@ -20,16 +20,13 @@ import { savedViewMetadataToCanvasMetadata } from './sessionAnnotations';
  * makes sense on content a clear removes checks that content instead: the nodes
  * it edits, expands or connects must still be on the canvas when the reply
  * lands. canvasBaselineEpoch is not used for that, because a reconnect resync
- * bumps it too while putting the same content straight back. The two older
- * handlers here (applyEdgeUpdate, confirmNodeDelete) predate this and keep
- * their own checks.
+ * bumps it too while putting the same content straight back. confirmNodeDelete
+ * predates this and keeps its own check.
  *
  * Not every awaiting path comes through here. Image ingest and remote op
  * hydration carry their own sync-client guards. The `?view=` URL load is left
  * as it is because it races the `?session=` bootstrap load, and which of the two
- * should win when both are in the URL is an open product decision. Awaits that
- * only open a dialog (handleEdit's agent branch) or that live inside a dialog
- * component (CreateNodeDialog) are not covered either.
+ * should win when both are in the URL is an open product decision.
  *
  * They live here rather than inline in App so the mid-await switch is covered by
  * a test — App itself is not rendered by the suite — following the same reasoning
@@ -37,22 +34,26 @@ import { savedViewMetadataToCanvasMetadata } from './sessionAnnotations';
  */
 
 /**
- * Persist an edge edit, then update this session's canvas and tell collaborators.
+ * Persist an edge edit, then patch the edge on this canvas and tell collaborators.
  *
  * The PUT is authoritative and stands regardless, so the user is told the edit
  * landed whatever happened to the session. Everything after it is scoped to the
- * session the edit was made in: `edges` is that session's canvas, syncRef points
- * at whichever session is active when the reply lands — so fanning out after a
- * switch would broadcast the edit into a session it does not belong to — and the
- * edge dialog, if one is open by then, is the new session's.
+ * session the edit was made in: syncRef points at whichever session is active
+ * when the reply lands — so fanning out after a switch would broadcast the edit
+ * into a session it does not belong to — and the edge dialog, if one is open by
+ * then, is the new session's.
+ *
+ * The edge is patched in place on the canvas as it is when the reply lands, not
+ * written back from a copy taken before the await, which would revert whatever
+ * else changed in between. A reconnect resync that put the edge straight back
+ * does not drop the edit; a clear that removed it leaves nothing to patch, and
+ * nothing is fanned out for an edge this canvas no longer shows.
  *
  * @param {Object} params
  * @param {Object} params.editingEdge  The edge being edited, as opened in the dialog.
  * @param {Object} params.updates  Field updates to persist.
  * @param {Function} params.updateEdge  API call: persist the edit.
- * @param {Array} params.nodes  Current canvas nodes.
- * @param {Array} params.edges  Current canvas edges.
- * @param {Function} params.updateVisualization  Store action: replace the canvas.
+ * @param {Function} params.updateEdgeData  Store action: patch one edge in place.
  * @param {Object} params.syncRef  Ref holding the active session's sync client.
  * @param {Function} params.setEditingEdge  Store action: set/close the edge dialog.
  * @param {Function} params.showNotification  Surface success/failure to the user.
@@ -62,35 +63,30 @@ export async function applyEdgeUpdate({
   editingEdge,
   updates,
   updateEdge,
-  nodes,
-  edges,
-  updateVisualization,
+  updateEdgeData,
   syncRef,
   setEditingEdge,
   showNotification,
 }) {
-  const { sessionEpoch: requestEpoch, canvasBaselineEpoch: requestBaselineEpoch } =
-    useGraphStore.getState();
+  const scope = captureCanvasScope();
   try {
     await updateEdge(editingEdge.id, updates);
     // Reported at the end of each branch rather than once above them: the
     // session-scoped work below is still inside this try, so announcing success
     // before it runs would let a throw there follow "Edge updated" with "Could
     // not update edge" for a PUT that did land.
-    if (
-      isStaleSessionEpoch(requestEpoch) ||
-      useGraphStore.getState().canvasBaselineEpoch !== requestBaselineEpoch
-    ) {
+    const onCanvas = useGraphStore.getState().edges.some((e) => e.id === editingEdge.id);
+    if (scope.sessionChanged() || !onCanvas) {
       showNotification('success', 'Edge updated');
       return false;
     }
-    const newEdges = edges.map((e) => (e.id === editingEdge.id ? { ...e, ...updates } : e));
-    updateVisualization(nodes, newEdges);
+    updateEdgeData(editingEdge.id, updates);
     // Fan the update out to collaborators: both endpoints already exist on
     // their canvases, so nothing else prompts them to re-render the changed
     // edge; without this they show the stale attributes until reload.
     syncRef.current?.sendEdgesUpdated([{ id: editingEdge.id, ...updates }]);
-    setEditingEdge(null);
+    // A replace closed this dialog already, so anything open now is newer.
+    if (!scope.canvasReplaced()) setEditingEdge(null);
     showNotification('success', 'Edge updated');
     return true;
   } catch (error) {
@@ -519,4 +515,129 @@ export async function loadSavedViewNode({
     showNotification('error', 'Could not load saved view');
     return false;
   }
+}
+
+/**
+ * Fetch an Agent's subscription, then open the agent editor for both.
+ *
+ * Nothing is persisted, so a stale result is simply dropped: after a switch the
+ * editor would open over the new session for a node picked in the previous one.
+ * A failed fetch is reported only while the session is still the one it was
+ * asked from.
+ *
+ * @param {Object} params
+ * @param {Object} params.agent  The Agent node being edited.
+ * @param {Function} params.getNodeDetails  API call: fetch one node.
+ * @param {Function} params.openEditor  Open the editor with `{ agent, subscription }`.
+ * @param {Function} params.showNotification  Surface a failure to the user.
+ * @returns {Promise<boolean>} Whether the editor was opened.
+ */
+export async function openAgentEditor({ agent, getNodeDetails, openEditor, showNotification }) {
+  const scope = captureCanvasScope();
+  try {
+    let subscription = null;
+    const subId = agent.metadata?.subscription_id;
+    if (subId) {
+      const result = await getNodeDetails(subId);
+      if (result.success) subscription = result.node;
+    }
+    if (scope.sessionChanged()) return false;
+    openEditor({ agent, subscription });
+    return true;
+  } catch (error) {
+    console.error('Error preparing agent editor:', error);
+    if (!scope.sessionChanged()) showNotification('error', 'Could not load agent details');
+    return false;
+  }
+}
+
+/**
+ * Create a node from CreateNodeDialog, then show it on this session's canvas.
+ *
+ * Follows persistNewNodes: the node exists in the graph either way, so its
+ * creation is reported, but after a switch it is not drawn into — or focused
+ * on — a session that never asked for it.
+ *
+ * Errors from the API propagate so the dialog can show them.
+ *
+ * @param {Object} params
+ * @param {Object} params.node  The node to create.
+ * @param {Function} params.addNodes  API call: create nodes and edges.
+ * @param {Function} params.addNodesToVisualization  Store action: add to the canvas.
+ * @param {Function} params.showNotification  Surface the outcome to the user.
+ * @param {Function} [params.onDrawn]  Called with the created node once it is drawn.
+ * @returns {Promise<boolean>} Whether the node was drawn.
+ */
+export async function createDialogNode({
+  node,
+  addNodes,
+  addNodesToVisualization,
+  showNotification,
+  onDrawn,
+}) {
+  const scope = captureCanvasScope();
+  const result = await addNodes([node], []);
+  const created = createdNodesToCanvas([node], result);
+  if (!created) return false;
+  const [createdNode] = created.nodes;
+  showNotification('success', `${createdNode.type} "${createdNode.name}" created`);
+  if (scope.sessionChanged()) return false;
+  addNodesToVisualization(created.nodes, []);
+  onDrawn?.(createdNode);
+  return true;
+}
+
+/**
+ * Map an addNodes result onto the nodes that were sent, giving each its new id.
+ *
+ * The `toCanvas` of the single-node create branches (subscription, skill,
+ * knowledge collection, CreateNodeDialog).
+ *
+ * @param {Array} nodes  The nodes as sent.
+ * @param {Object} result  The addNodes reply.
+ * @returns {{nodes: Array}|null} What to draw, or null when nothing was created.
+ */
+export function createdNodesToCanvas(nodes, result) {
+  const ids = result?.added_node_ids;
+  if (!(ids && ids.length > 0)) return null;
+  return { nodes: nodes.map((node, index) => ({ ...node, id: ids[index] || node.id })) };
+}
+
+/**
+ * Map an agent create's addNodes result onto the Agent, its subscription and the
+ * edge between them, so the canvas edge points at the ids the server assigned.
+ *
+ * @param {Array} agentNodes  The Agent and EventSubscription nodes as sent.
+ * @param {Array} agentEdges  The edges as sent.
+ * @param {Object} result  The addNodes reply.
+ * @returns {{nodes: Array, edges: Array}|null} What to draw, or null when nothing was created.
+ */
+export function agentCreateToCanvas(agentNodes, agentEdges, result) {
+  const created = createdNodesToCanvas(agentNodes, result);
+  if (!created) return null;
+  const ids = result.added_node_ids;
+  const agentId = ids[agentNodes.findIndex((n) => n.type === 'Agent')];
+  const subscriptionId = ids[agentNodes.findIndex((n) => n.type === 'EventSubscription')];
+  const edges = agentEdges.map((edge, index) => ({
+    ...edge,
+    id: result.added_edge_ids?.[index] || edge.id,
+    source: agentId || edge.source,
+    target: subscriptionId || edge.target,
+  }));
+  return { nodes: created.nodes, edges };
+}
+
+/**
+ * The node updates an agent edit persists: the Agent, then its subscription when
+ * the edit changed it.
+ *
+ * @param {Object} data  AgentDialog's update payload.
+ * @returns {Array<{id: string, updates: Object}>} Entries for persistNodeUpdates.
+ */
+export function agentUpdateEntries({ agentId, agentUpdates, subscriptionId, subscriptionUpdates }) {
+  const entries = [{ id: agentId, updates: agentUpdates }];
+  if (subscriptionId && subscriptionUpdates) {
+    entries.push({ id: subscriptionId, updates: subscriptionUpdates });
+  }
+  return entries;
 }
