@@ -395,9 +395,9 @@ describe('heat-map stylesheet', () => {
   // Every rule's selector list and body, with the @media block (if any) it
   // sits in. Enough of a parser for this stylesheet: comments stripped, one
   // level of nesting, no strings containing braces.
-  const rules = (() => {
+  const parseRules = (source) => {
     const out = [];
-    const text = css.replace(/\/\*[\s\S]*?\*\//g, '');
+    const text = source.replace(/\/\*[\s\S]*?\*\//g, '');
     let media = null;
     let i = 0;
     while (i < text.length) {
@@ -424,7 +424,8 @@ describe('heat-map stylesheet', () => {
       i = end + 1;
     }
     return out;
-  })();
+  };
+  const rules = parseRules(css);
   const inForcedColours = (r) => Boolean(r.media?.includes('forced-colors'));
   // Declarations that make an element visible. Every border property draws —
   // longhands and logical border-inline*/border-block* included — except the
@@ -443,11 +444,12 @@ describe('heat-map stylesheet', () => {
   // does not extend to longhands (`border-width: 0 2px` still draws a side) or
   // to box-shadow (`0 0 0 1px red` is a ring). `transparent` hides only a
   // background: forced-colours mode repaints border and outline colours.
-  // `initial` is never a no-op, since on border-color or border-width it means
-  // currentcolor or a medium width. A quoted string, or a parenthesised group
-  // such as rgba(...) or calc((...)) with any nesting, counts as one opaque
-  // token; a value whose parentheses do not balance counts as painting, and so
-  // does anything else not listed here.
+  // `initial` counts as painting: on border-color or border-width it means
+  // currentcolor or a medium width, though on some properties, such as
+  // border-style or box-shadow, it is a no-op. A quoted string, or a
+  // parenthesised group such as rgba(...) or calc((...)) with any nesting,
+  // counts as one opaque token; a value whose parentheses do not balance
+  // counts as painting, and so does anything else not listed here.
   const PAINTING_PROPERTY =
     /^(?:-webkit-)?(border(-[a-z-]+)?|outline(-(color|style|width))?|box-shadow|(backdrop-)?filter|background(-(color|image))?)$/;
   const BORDER_SHORTHAND =
@@ -487,6 +489,56 @@ describe('heat-map stylesheet', () => {
     });
   const onHeatmapCircle = (sel) => /\.(kind-heatmap|graph-heatmap-circle)(?![\w-])/.test(sel);
   const withoutNot = (sel) => sel.replace(/:not\([^)]*\)/g, '');
+  // The element a selector styles is its last compound; a class further left
+  // only scopes it. A selector is set aside only when its last compound is
+  // plain — at least one class, optionally a type, and argument-free
+  // pseudo-classes or pseudo-elements — and carries none of the classes the
+  // heat-map node or its circle can have, as
+  // `.kind-heatmap .graph-heatmap-level` does. Anything else, such as
+  // :has(...), :not(...), :is(...), [attr] or `*`, could still narrow to the
+  // node or the circle, so it is judged as before, by the whole selector. So
+  // is every selector of a rule whose selector list has a parenthesis,
+  // bracket, quote or escape anywhere in it: the rule parser splits lists on
+  // every comma, even one inside :is(a, b, c), so a fragment's plain-looking
+  // last piece may not be its selector's last compound.
+  //
+  // And nothing in a sheet is set aside unless the sheet is flat enough for
+  // the parser to read it as CSS does: no stripped comment holds a brace (the
+  // comments are stripped as text, so url(/*) ... url(*/) would swallow the
+  // rules between them); the rest holds no `&`, quote or backslash anywhere,
+  // since a `}` in a string or escape ends a body or skips a prelude early
+  // and `&` refers to an outer rule; and no parsed body holds `{` or an
+  // unbalanced parenthesis, the marks a nested block or a `}` inside
+  // url(...) leaves behind.
+  const NODE_OR_CIRCLE_CLASS =
+    /\.(graph-generic-annotation-node|kind-heatmap|is-empty|selected|graph-heatmap-circle)(?![\w-])/;
+  const isBalanced = (body) => {
+    let depth = 0;
+    for (const c of body) {
+      if (c === '(') depth++;
+      else if (c === ')' && --depth < 0) return false;
+    }
+    return depth === 0;
+  };
+  const isFlatSheet = (source) => {
+    const comments = source.match(/\/\*[\s\S]*?\*\//g) ?? [];
+    if (comments.some((c) => /[{}]/.test(c))) return false;
+    if (/[&"'\\]/.test(source.replace(/\/\*[\s\S]*?\*\//g, ''))) return false;
+    return parseRules(source).every((r) => !r.body.includes('{') && isBalanced(r.body));
+  };
+  const sheetIsFlat = isFlatSheet(css);
+  const stylesHeatmapCircle = (sel, list = sel, flat = true) => {
+    const last = sel
+      .trim()
+      .split(/\s*[\s>+~]\s*/)
+      .pop();
+    const plain =
+      flat &&
+      !/[()[\]"'\\]/.test(list) &&
+      /^[\w-]*(?:(?:\.|::?)[\w-]+)+$/.test(last) &&
+      last.includes('.');
+    return onHeatmapCircle(sel) && !(plain && !NODE_OR_CIRCLE_CLASS.test(last));
+  };
 
   it.each([
     ['border-top-color: red', true],
@@ -553,6 +605,65 @@ describe('heat-map stylesheet', () => {
     expect(onHeatmapCircle('.kind-heatmapx .graph-heatmap-circle_inner')).toBe(false);
   });
 
+  it.each([
+    ['.graph-generic-annotation-node.kind-heatmap.is-empty:hover .graph-heatmap-circle', true],
+    ['.graph-generic-annotation-node.kind-heatmap', true],
+    ['.kind-heatmap > .graph-heatmap-circle', true],
+    ['.kind-heatmap:not(.is-empty) .graph-heatmap-circle', true],
+    ['.kind-heatmap .selected', true],
+    ['.kind-heatmap.is-empty > *', true],
+    ['.kind-heatmap.is-empty div', true],
+    ['.kind-heatmap.is-empty:has(> .graph-heatmap-level)', true],
+    ['.graph-generic-annotation-node:has(> .graph-heatmap-circle)', true],
+    ['.graph-generic-annotation-node:not(.kind-heatmap:hover)', true],
+    ['.graph-generic-annotation-node:is(.kind-heatmap).is-empty', true],
+    ['.graph-generic-annotation-node.is-empty:nth-child(n of .kind-heatmap)', true],
+    ['.graph-generic-annotation-node.is-empty:nth-child(n OF .kind-heatmap)', true],
+    ['.graph-generic-annotation-node.is-empty:not(:not(.kind-heatmap))', true],
+    ['.kind-heatmap .graph-heatmap-circle:nth-child(2n + 1)', true],
+    ['.kind-heatmap .x:where(.graph-heatmap-circle)', true],
+    ['.graph-heatmap-circle[title="a] .b"]', true],
+    ['.graph-heatmap-circle[title=") .b"]', true],
+    ['.kind-heatmap.is-empty > :is(.a .b', true],
+    ['.kind-heatmap.is-empty .x:where(.a .b', true],
+    ['.kind-heatmap .graph-heatmap-level', false],
+    ['.kind-heatmap.is-empty > .graph-heatmap-level', false],
+    ['.kind-heatmap.is-empty:hover .graph-heatmap-level::before', false],
+    ['.kind-heatmap ~ .other', false],
+    ['.graph-heatmap-circle-label', false],
+  ])('judges `%s` as styling the heat-map node or circle: %s', (sel, expected) => {
+    expect(stylesHeatmapCircle(sel)).toBe(expected);
+  });
+
+  it.each([
+    ['.a { color: red; }\n@media (x) { .b { background: rgba(1, 2, 3, 0.5); } }', true],
+    ['/* a plain note */ .a { color: red; }', true],
+    ['.a { color: red; :is(&, .x) { border: 1px solid; } }', false],
+    ['.a { color: red; & .x { border: 1px solid; } }', false],
+    ['.a { .b { color: red } border: 1px solid; .c { outline: 1px solid } }', false],
+    ['@scope (.a) { .b { color: red } :scope, .c { border: 1px solid } }', false],
+    ['.a { background-image: url(}); }', false],
+    ['.a { grid-area: \\}; }', false],
+    ['.a { content: "}"; }', false],
+    ['.a, .z\\}, .b { border: 1px solid; }', false],
+    ['.a { --p: url(/*); }\n.b { --q: url(*/); border: 1px solid; }', false],
+    ['/* { */ .a { color: red; }', false],
+  ])('reads `%s` as a flat sheet: %s', (source, expected) => {
+    expect(isFlatSheet(source)).toBe(expected);
+  });
+
+  it('judges a list fragment by the whole selector list it came from', () => {
+    const list = ':is(.a, .kind-heatmap.is-empty .wrap, .b:hover) .graph-heatmap-circle';
+    expect(stylesHeatmapCircle('.kind-heatmap.is-empty .wrap', list)).toBe(true);
+    expect(stylesHeatmapCircle('.kind-heatmap .graph-heatmap-level', list)).toBe(true);
+    expect(
+      stylesHeatmapCircle(
+        '.kind-heatmap .graph-heatmap-level',
+        '.x, .kind-heatmap .graph-heatmap-level'
+      )
+    ).toBe(false);
+  });
+
   it('outlines only non-empty circles in every forced-colours heat-map rule', () => {
     const selectors = rules
       .filter(inForcedColours)
@@ -568,8 +679,9 @@ describe('heat-map stylesheet', () => {
   it('draws an empty circle only while it is selected or hovered', () => {
     const painting = rules
       .filter((r) => !inForcedColours(r) && paints(r.body))
-      .flatMap((r) => r.selectors)
-      .filter(onHeatmapCircle);
+      .flatMap((r) =>
+        r.selectors.filter((sel) => stylesHeatmapCircle(sel, r.selectors.join(','), sheetIsFlat))
+      );
     // The rim itself must exist, so the loop below checks something.
     expect(painting.some((sel) => withoutNot(sel).includes('.is-empty'))).toBe(true);
     for (const sel of painting) {
