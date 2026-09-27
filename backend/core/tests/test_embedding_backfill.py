@@ -223,10 +223,18 @@ class TestStartupBackfillPass:
 
         monkeypatch.setattr(threading.Thread, "start", _recording_start)
 
-        storage._maybe_backfill_missing_embeddings_async()
+        try:
+            storage._maybe_backfill_missing_embeddings_async()
+        finally:
+            monkeypatch.setattr(threading.Thread, "start", real_start)
+            release.set()
 
-        monkeypatch.setattr(threading.Thread, "start", real_start)
+        # The probe ran, so the mid-call thread exit above was exercised.
+        assert not unrelated.is_alive()
         assert started == []
+        # The recorder sees only the caller's own starts; a backfill thread
+        # started on its behalf from another thread must not exist either.
+        assert "embedding-backfill" not in {t.name for t in threading.enumerate()}
         assert any("have no" in m for m in storage_log()[logging.WARNING])
         assert not storage.vector_store.has_embedding("a")
         storage.flush()
