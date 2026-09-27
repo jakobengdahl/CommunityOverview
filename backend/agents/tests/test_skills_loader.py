@@ -537,14 +537,29 @@ def _public_dns():
 
 
 @contextlib.contextmanager
-def _mock_http(handler):
-    """Give the loader's AsyncClient a MockTransport, keeping its own kwargs."""
+def _mock_http(handler, returned=None):
+    """Give the loader's AsyncClient a MockTransport, keeping its own kwargs.
+
+    With `returned`, every response the client's get() hands the loader is
+    appended to it, so a test can judge what the loader saw rather than the
+    fixture it built.
+    """
     real_client = loader_module.httpx.AsyncClient
 
     def factory(**kwargs):
-        return real_client(
+        client = real_client(
             transport=loader_module.httpx.MockTransport(handler), **kwargs
         )
+        if returned is not None:
+            real_get = client.get
+
+            async def recording_get(*args, **get_kwargs):
+                response = await real_get(*args, **get_kwargs)
+                returned.append(response)
+                return response
+
+            client.get = recording_get
+        return client
 
     with patch.object(loader_module.httpx, "AsyncClient", factory):
         yield
@@ -1347,10 +1362,10 @@ class TestFetchTextRemainingGuards:
 
         assert loader._text_cache == {}
 
-    async def _fetch_one(self, response, max_bytes=10):
+    async def _fetch_one(self, response, max_bytes=10, returned=None):
         handler, _seen = _recording_handler([response])
         with (
-            _mock_http(handler),
+            _mock_http(handler, returned),
             patch.object(loader_module, "is_safe_url", lambda _url: True),
         ):
             return await self._loader(max_skill_content_bytes=max_bytes)._fetch_text(
@@ -1364,8 +1379,10 @@ class TestFetchTextRemainingGuards:
         response = loader_module.httpx.Response(200, text="# chunked")
         del response.headers["content-length"]
         assert "content-length" not in response.headers
+        returned = []
 
-        assert await self._fetch_one(response) == "# chunked"
+        assert await self._fetch_one(response, returned=returned) == "# chunked"
+        assert ["content-length" in r.headers for r in returned] == [False]
 
     @pytest.mark.asyncio
     async def test_a_zero_content_length_with_an_empty_body_is_accepted(self):
@@ -1388,8 +1405,10 @@ class TestFetchTextRemainingGuards:
         """With no header, the body guard alone decides the boundary."""
         response = loader_module.httpx.Response(200, text="x" * 10)
         del response.headers["content-length"]
+        returned = []
 
-        assert await self._fetch_one(response) == "x" * 10
+        assert await self._fetch_one(response, returned=returned) == "x" * 10
+        assert ["content-length" in r.headers for r in returned] == [False]
 
     @pytest.mark.asyncio
     async def test_a_leading_zero_content_length_is_read_as_decimal(self):
