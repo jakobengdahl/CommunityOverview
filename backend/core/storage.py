@@ -1102,8 +1102,20 @@ class GraphStorage:
         here. What happens next is the caller's: `add_nodes` generates over
         the whole batch afterwards, so generation wins there, while a refresh
         generates only where the store supplied nothing.
+
+        The vectors come off the nodes only once the index holds them: until
+        then the node is their only copy, so a raise in the export or load
+        must leave them where they were for the caller to retry or settle.
         """
-        self._adopt_vectors(self._take_inline_vectors(nodes))
+        nodes = list(nodes)
+        self._adopt_vectors(
+            {
+                node.id: node.embedding
+                for node in nodes
+                if node.embedding is not None and len(node.embedding) > 0
+            }
+        )
+        self._take_inline_vectors(nodes)
 
     def _adopt_vectors(
         self, supplied: Dict[str, Any], anchor: Optional[int] = None
