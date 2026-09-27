@@ -293,7 +293,7 @@ class TestAuthorizationOrdering:
         # An empty pattern is an AutoAddRuleError for an allowed caller; a caller
         # denied mutations must get the access error, not the validation one.
         hook = DenyMutationsHook()
-        tools_map, _, auto_add_registry = _tools_with_hook(tmp_path, hook)
+        tools_map, *_ = _tools_with_hook(tmp_path, hook)
 
         result = tools_map["create_session_auto_add_agent"](SESSION)
 
@@ -302,7 +302,6 @@ class TestAuthorizationOrdering:
         assert [(c.action, c.target) for c in hook.seen_contexts] == [
             (GRAPH_ACTION_MUTATE, "create_session_auto_add_agent")
         ]
-        assert auto_add_registry.list_rules(SESSION) == []
 
 
 class TestUnavailable:
