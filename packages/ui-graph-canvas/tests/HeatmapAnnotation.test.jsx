@@ -505,7 +505,10 @@ describe('heat-map stylesheet', () => {
   // `}`, even one inside a string, escape or url(...), and reads a nested rule
   // as part of the outer body and its siblings as top-level rules, where `&`,
   // :scope or a folded-in parent declaration changes what they select; any
-  // such sheet leaves one of those marks in some parsed body.
+  // such sheet leaves one of those marks in some parsed body. Nor unless no
+  // stripped comment holds a brace: the comments are stripped as text, so
+  // url(/*) ... url(*/), which CSS reads as two values, would swallow the
+  // rules between them and merge two bodies into one.
   const NODE_OR_CIRCLE_CLASS =
     /\.(graph-generic-annotation-node|kind-heatmap|is-empty|selected|graph-heatmap-circle)(?![\w-])/;
   const isCleanBody = (body) => {
@@ -517,7 +520,8 @@ describe('heat-map stylesheet', () => {
     }
     return depth === 0;
   };
-  const stylesHeatmapCircle = (sel, list = sel, bodies = []) => {
+  const comments = css.match(/\/\*[\s\S]*?\*\//g) ?? [];
+  const stylesHeatmapCircle = (sel, list = sel, bodies = [], strippedComments = []) => {
     const last = sel
       .trim()
       .split(/\s*[\s>+~]\s*/)
@@ -525,6 +529,7 @@ describe('heat-map stylesheet', () => {
     const plain =
       !/[()[\]"'\\]/.test(list) &&
       bodies.every(isCleanBody) &&
+      !strippedComments.some((c) => /[{}]/.test(c)) &&
       /^[\w-]*(?:(?:\.|::?)[\w-]+)+$/.test(last) &&
       last.includes('.');
     return onHeatmapCircle(sel) && !(plain && !NODE_OR_CIRCLE_CLASS.test(last));
@@ -639,6 +644,16 @@ describe('heat-map stylesheet', () => {
     expect(judged('width: calc(1px))')).toBe(true);
   });
 
+  it('sets nothing aside from a sheet whose stripped comments hold a brace', () => {
+    const sel = '.kind-heatmap .graph-heatmap-level';
+    const judged = (...comments) => stylesHeatmapCircle(sel, sel, ['color: red;'], comments);
+    expect(judged('/* a plain note */')).toBe(false);
+    expect(judged('/*);\n}\n.kind-heatmap.is-empty .graph-heatmap-circle {\n  --b: url(*/')).toBe(
+      true
+    );
+    expect(judged('/* { */')).toBe(true);
+  });
+
   it('judges a list fragment by the whole selector list it came from', () => {
     const list = ':is(.a, .kind-heatmap.is-empty .wrap, .b:hover) .graph-heatmap-circle';
     expect(stylesHeatmapCircle('.kind-heatmap.is-empty .wrap', list)).toBe(true);
@@ -671,7 +686,8 @@ describe('heat-map stylesheet', () => {
           stylesHeatmapCircle(
             sel,
             r.selectors.join(','),
-            rules.map((o) => o.body)
+            rules.map((o) => o.body),
+            comments
           )
         )
       );
