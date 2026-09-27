@@ -84,22 +84,32 @@ def mentions_playwright(text):
 # character in one, so a name is never split on anything but shell syntax.
 SHELL_BOUNDARY = r"""[\s;&|()<>"'`]"""
 # Scripts npm runs without anything naming them: `npm ci` and `npm install`
-# run the install lifecycle, `npm t`, `npm start` and their many aliases,
-# abbreviations and flag-first spellings run the rest. Rather than parse npm's
-# command grammar, any `npm` invocation counts as running all of them - that
-# can only over-detect, which fails loudly here.
-IMPLICIT_SCRIPTS = {
-    "preinstall",
+# run the install and dependencies lifecycles, `npm t`, `npm restart`, `npm
+# pack` and their many aliases, abbreviations and flag-first spellings run the
+# rest, and each event also runs its pre/post pair whether or not the event
+# itself has a script. Rather than parse npm's command grammar, any `npm`
+# invocation counts as running all of them - that can only over-detect, which
+# fails loudly here.
+NPM_LIFECYCLE_EVENTS = (
     "install",
-    "postinstall",
+    "dependencies",
     "prepublish",
-    "preprepare",
     "prepare",
-    "postprepare",
+    "prepublishOnly",
+    "pack",
+    "publish",
+    "version",
+    "shrinkwrap",
     "test",
     "start",
     "stop",
     "restart",
+    "uninstall",
+)
+IMPLICIT_SCRIPTS = {
+    f"{prefix}{event}"
+    for event in NPM_LIFECYCLE_EVENTS
+    for prefix in ("", "pre", "post")
 }
 NPM = re.compile(r"\bnpm\b")
 
@@ -209,7 +219,13 @@ def test_the_e2e_job_set_is_discovered_not_only_listed(workflow, npm_scripts):
         ({"postprepare": "playwright test"}, "npm install"),
         ({"postinstall": "playwright test"}, "npm --prefix frontend/web ci"),
         ({"postinstall": "playwright test"}, "npm -w @community-graph/web sit"),
-        ({"start": "playwright test"}, "npm start"),
+        ({"dependencies": "playwright test"}, "npm ci"),
+        ({"predependencies": "playwright test"}, "npm ci"),
+        ({"preinstall": "playwright test"}, "npm ci"),
+        ({"install": "playwright test"}, "npm ci"),
+        ({"prepack": "playwright test"}, "npm pack"),
+        ({"stop": "playwright test"}, "npm restart"),
+        ({"prestart": "playwright test"}, "npm restart"),
         ({}, "npm run test:e2e"),
     ],
 )
