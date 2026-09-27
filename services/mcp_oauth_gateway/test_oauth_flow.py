@@ -1062,7 +1062,8 @@ class TestShortSigningKeyWarning(unittest.TestCase):
         for i in range(len(key) - 3):
             assert key[i : i + 4] not in text, f"part of the key leaked: {key[i:i + 4]!r}"
         assert hashlib.sha256(key.encode("utf-8", "surrogateescape")).hexdigest()[:8] not in text
-        # %r and repr() escape lone surrogates and non-ASCII, so the raw key never appears.
+        # repr()/%r escape lone surrogates and ascii() also escapes non-ASCII, so a leak may
+        # appear only in escaped form.
         for escaped in {repr(key)[1:-1], ascii(key)[1:-1]} - {key}:
             assert escaped not in text, f"escaped key leaked: {escaped!r}"
             for i in range(len(escaped) - 3):
