@@ -434,12 +434,13 @@ describe('heat-map stylesheet', () => {
   //
   // A value draws nothing when every token is a no-op (`border: 0 none`,
   // `outline: 0em`). A border or outline shorthand carries one width and one
-  // style, so either being zero, none or hidden draws nothing either — except
-  // an `auto` outline, whose width a browser may ignore. That shorthand rule
+  // style, so either being zero, none or hidden draws nothing either — unless
+  // the style is `auto`, whose width a browser may ignore, or any part is a
+  // function such as var(...) that could resolve to it. That shorthand rule
   // does not extend to longhands (`border-width: 0 2px` still draws a side) or
-  // to box-shadow (`0 0 0 1px red` is a ring). `transparent`
-  // hides only a background: forced-colours mode repaints border and outline
-  // colours. `initial` is never a no-op, since on a border longhand it means
+  // to box-shadow (`0 0 0 1px red` is a ring). `transparent` hides only a
+  // background: forced-colours mode repaints border and outline colours.
+  // `initial` is never a no-op, since on a border longhand it means
   // currentcolor or a medium width. A quoted string, or a parenthesised group
   // such as rgba(...) or calc((...)) with any nesting, counts as one opaque
   // token; a value whose parentheses do not balance counts as painting, and so
@@ -477,9 +478,8 @@ describe('heat-map stylesheet', () => {
       const noOp = (t) =>
         isNoOpToken(t) || (t === 'transparent' && property.startsWith('background'));
       if (tokens.every(noOp)) return false;
-      if (BORDER_SHORTHAND.test(property) && !tokens.includes('auto') && tokens.some(isNoOpToken)) {
-        return false;
-      }
+      const mayBeAuto = tokens.some((t) => t === 'auto' || t === 'fn');
+      if (BORDER_SHORTHAND.test(property) && !mayBeAuto && tokens.some(isNoOpToken)) return false;
       return true;
     });
   const onHeatmapCircle = (sel) => /\.(kind-heatmap|graph-heatmap-circle)(?![\w-])/.test(sel);
@@ -517,6 +517,7 @@ describe('heat-map stylesheet', () => {
     ['outline: 0em', false],
     ['outline: 1px none red', false],
     ['outline: 0 auto', true],
+    ['outline: 0 var(--ring-style, auto)', true],
     ['border-color: initial', true],
     ['border-width: initial', true],
     ['border-style: hidden', false],
