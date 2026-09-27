@@ -9,9 +9,14 @@ pin that fell below a known security floor.
 """
 
 import itertools
+import os
 import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
+
+import yaml
 
 from packaging.markers import Marker, default_environment
 from packaging.requirements import Requirement
@@ -66,12 +71,25 @@ _ENVIRONMENTS = [
 ]
 
 
+# The final stage's base image, which the image runs on. ci.yml's image-python
+# step applies the same rule in shell; TestImagePythonStep holds them together.
+_PYTHON_BASE = re.compile(r"\s*(?i:FROM)\s+(?:--platform=\S+\s+)?(?:\S*/)?python:(\d+)\.(\d+)")
+
+
+def _image_python(dockerfile):
+    """(major, minor) of the Python on the Dockerfile's last FROM line."""
+    froms = [line for line in dockerfile.splitlines() if line.split()[:1] and line.split()[0].upper() == "FROM"]
+    if not froms:
+        raise AssertionError("Dockerfile: no FROM line to read the image's Python from")
+    match = _PYTHON_BASE.match(froms[-1])
+    if not match:
+        raise AssertionError(f"Dockerfile: the last FROM line is not a python:X.Y image: {froms[-1]!r}")
+    return match.groups()
+
+
 def _image_environment():
     """The marker environment of the gateway image, read from its final FROM line."""
-    froms = re.findall(r"^FROM python:(\d+)\.(\d+)\S*", (HERE / "Dockerfile").read_text(), re.MULTILINE)
-    if not froms:
-        raise AssertionError("Dockerfile: no 'FROM python:X.Y' line to read the image's Python from")
-    major, minor = froms[-1]
+    major, minor = _image_python((HERE / "Dockerfile").read_text())
     return {
         **default_environment(),
         "sys_platform": "linux",
@@ -191,7 +209,7 @@ class _CommandChecks:
         text = (HERE / source).read_text()
         self.assertEqual(text.count(_documented_block(lock, source)), 1, f"{source}: documented command drifted")
         self.assertEqual(text.count("uv pip compile"), 1, f"{source}: more than one compile command")
-        self.assertEqual(len(re.findall(r"^#\s*cd\b", text, re.MULTILINE)), 1, f"{source}: more than one cd line")
+        self.assertEqual(len(re.findall(r"^\s*#\s*cd\b", text, re.MULTILINE)), 1, f"{source}: more than one cd line")
 
 
 class TestRuntimeLock(_CommandChecks, unittest.TestCase):
@@ -273,6 +291,69 @@ class TestLockIntegrity(unittest.TestCase):
                         Version(floor),
                         f"{lock_name}: {name} {version} is below the security floor {floor}",
                     )
+
+
+class TestImagePythonStep(unittest.TestCase):
+    """ci.yml's image-python step must read the same Python as _image_python."""
+
+    CASES = [
+        ("FROM python:3.12-slim\n", "3.12"),
+        ("FROM python:3.12.4-slim AS app\n", "3.12.4"),
+        ("from python:3.13\n", "3.13"),
+        ("  FROM --platform=linux/amd64 python:3.11-slim\n", "3.11"),
+        ("FROM docker.io/library/python:3.12-slim\n", "3.12"),
+        ("FROM python:3.11 AS build\nRUN true\n# FROM python:3.10\nFROM python:3.12-slim\n", "3.12"),
+        ("FROM python:3.12\nRUN echo from python:3.10\n", "3.12"),
+    ]
+    REJECTED = [
+        "",
+        "# FROM python:3.12\n",
+        "FROM python:3.12 AS build\nFROM debian:bookworm-slim\n",
+        "FROM mypython:3.12\n",
+    ]
+
+    def _step_script(self):
+        workflow = yaml.safe_load((HERE.parents[1] / ".github" / "workflows" / "ci.yml").read_text())
+        steps = workflow["jobs"]["gateway-tests-run"]["steps"]
+        (step,) = [s for s in steps if s.get("id") == "image-python"]
+        self.assertEqual(step["working-directory"], "services/mcp_oauth_gateway")
+        return step["run"]
+
+    def _run_step(self, dockerfile):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "Dockerfile").write_text(dockerfile)
+            output = Path(tmp, "github_output")
+            output.write_text("")
+            result = subprocess.run(
+                ["bash", "-e", "-c", self._step_script()],
+                cwd=tmp,
+                env={**os.environ, "GITHUB_OUTPUT": str(output)},
+                capture_output=True,
+                text=True,
+            )
+            return result.returncode, output.read_text()
+
+    def test_step_and_parser_agree_on_the_final_stage(self):
+        for dockerfile, version in self.CASES:
+            with self.subTest(dockerfile=dockerfile):
+                self.assertEqual(self._run_step(dockerfile), (0, f"version={version}\n"))
+                self.assertEqual(".".join(_image_python(dockerfile)), ".".join(version.split(".")[:2]))
+
+    def test_step_and_parser_reject_a_final_stage_without_python(self):
+        for dockerfile in self.REJECTED:
+            with self.subTest(dockerfile=dockerfile):
+                code, output = self._run_step(dockerfile)
+                self.assertNotEqual(code, 0)
+                self.assertEqual(output, "")
+                with self.assertRaises(AssertionError):
+                    _image_python(dockerfile)
+
+    def test_step_reads_the_gateway_dockerfile(self):
+        dockerfile = (HERE / "Dockerfile").read_text()
+        code, output = self._run_step(dockerfile)
+        self.assertEqual(code, 0)
+        self.assertRegex(output, r"^version=(\d+\.\d+)(\.\d+)?\n$")
+        self.assertEqual(output.strip().split("=")[1].split(".")[:2], list(_image_python(dockerfile)))
 
 
 if __name__ == "__main__":

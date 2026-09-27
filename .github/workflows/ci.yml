@@ -400,9 +400,11 @@ jobs:
       - name: Read the image's Python version
         id: image-python
         run: |
-          version=$(sed -n 's/^FROM python:\([0-9][0-9.]*\).*/\1/p' Dockerfile | head -n 1)
+          # The final stage is the one the image runs, so read its (last) FROM line.
+          version=$(awk 'tolower($1) == "from" { line = $0 } END { print line }' Dockerfile \
+            | sed -En 's/^[[:space:]]*[Ff][Rr][Oo][Mm][[:space:]]+(--platform=[^[:space:]]+[[:space:]]+)?([^[:space:]]*\/)?python:([0-9]+\.[0-9]+(\.[0-9]+)?).*/\3/p')
           if [ -z "$version" ]; then
-            echo "::error::Could not read the Python version from the FROM line in Dockerfile"
+            echo "::error::Could not read the Python version from the last FROM line in Dockerfile"
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
