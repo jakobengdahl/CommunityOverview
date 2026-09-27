@@ -21,6 +21,17 @@ const switchSession = () => {
   useGraphStore.getState().resetSessionScopedState(t, 'en');
 };
 const clearCanvas = () => useGraphStore.getState().clearVisualization();
+// A switch whose store reset lands on its own, without the canvas reload that
+// normally precedes it — so a guard keyed on canvasBaselineEpoch alone fails.
+const bumpSessionOnly = () => useGraphStore.getState().resetSessionScopedState(t, 'en');
+// A reconnect resync reloads the same session wholesale: clearVisualization and
+// then the server's contents, which bumps canvasBaselineEpoch but puts the same
+// nodes straight back.
+const resync = () => {
+  const { nodes, edges } = useGraphStore.getState();
+  useGraphStore.getState().clearVisualization();
+  useGraphStore.getState().addNodesToVisualization(nodes, edges);
+};
 
 const node = (id, extra = {}) => ({ id, type: 'Actor', name: id, ...extra });
 const edge = (id, source = 'a', target = 'b') => ({ id, source, target, type: 'RELATES_TO' });
@@ -86,8 +97,6 @@ describe('persistNodeUpdates (handleNodeUpdate and the save* update branches)', 
     const inFlight = persistNodeUpdates({
       entries,
       updateNode,
-      nodes: s.nodes,
-      edges: s.edges,
       updateVisualization: s.updateVisualization,
       onApplied,
     });
@@ -122,28 +131,76 @@ describe('persistNodeUpdates (handleNodeUpdate and the save* update branches)', 
   // write-back would restore everything the user just cleared.
   it('does not restore a canvas the user cleared mid-await', async () => {
     const { inFlight, onApplied } = run(clearCanvas);
-    expect(await inFlight).toBe(false);
+    await inFlight;
     expect(store().nodes).toEqual([]);
     expect(store().edges).toEqual([]);
     expect(onApplied).not.toHaveBeenCalled();
   });
 
   it('persists every entry in order and patches each (agent + subscription)', async () => {
-    const calls = [];
-    const s = store();
-    const applied = await persistNodeUpdates({
+    const first = deferred({});
+    const second = deferred({});
+    const updateNode = vi.fn((id) => (id === 'a' ? first.promise : second.promise));
+    const inFlight = persistNodeUpdates({
       entries: [
         { id: 'a', updates: { name: 'agent2' } },
         { id: 'b', updates: { name: 'sub2' } },
       ],
-      updateNode: vi.fn(async (id) => calls.push(id)),
-      nodes: s.nodes,
-      edges: s.edges,
-      updateVisualization: s.updateVisualization,
+      updateNode,
+      updateVisualization: store().updateVisualization,
+    });
+    expect(updateNode).toHaveBeenCalledTimes(1);
+    first.release();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(updateNode).toHaveBeenCalledTimes(2);
+    expect(updateNode).toHaveBeenLastCalledWith('b', { name: 'sub2' });
+    second.release();
+    expect(await inFlight).toBe(true);
+    expect(store().nodes.map((n) => n.name)).toEqual(['agent2', 'sub2']);
+  });
+
+  it('drops the patch when only the session epoch moved mid-await', async () => {
+    const { inFlight, onApplied } = run(() => {
+      bumpSessionOnly();
+      store().addNodesToVisualization([node('x')], []);
+    });
+    expect(await inFlight).toBe(false);
+    expect(store().nodes.find((n) => n.id === 'a').name).toBe('a');
+    expect(onApplied).not.toHaveBeenCalled();
+  });
+
+  // Patching the canvas as it is when the reply lands, not a copy from before
+  // the await, is what keeps concurrent in-place changes and resync reloads.
+  it('keeps changes made to the canvas during the await', async () => {
+    const { inFlight } = run(() => {
+      store().addNodesToVisualization([node('c')], [edge('e2', 'a', 'c')]);
+    });
+    expect(await inFlight).toBe(true);
+    expect(nodeIds()).toEqual(['a', 'b', 'c']);
+    expect(store().edges.map((e) => e.id)).toEqual(['e1', 'e2']);
+    expect(store().nodes.find((n) => n.id === 'a').name).toBe('A2');
+  });
+
+  it('still patches the node after a resync reload, without closing a dialog', async () => {
+    const { inFlight, onApplied } = run(resync);
+    expect(await inFlight).toBe(true);
+    expect(store().nodes.find((n) => n.id === 'a').name).toBe('A2');
+    expect(onApplied).not.toHaveBeenCalled();
+  });
+
+  it('runs onApplied for a node that is not on the canvas', async () => {
+    const updateVisualization = vi.fn();
+    const onApplied = vi.fn();
+    const applied = await persistNodeUpdates({
+      entries: [{ id: 'elsewhere', updates: { name: 'Z' } }],
+      updateNode: vi.fn().mockResolvedValue({}),
+      updateVisualization,
+      onApplied,
     });
     expect(applied).toBe(true);
-    expect(calls).toEqual(['a', 'b']);
-    expect(store().nodes.map((n) => n.name)).toEqual(['agent2', 'sub2']);
+    expect(updateVisualization).not.toHaveBeenCalled();
+    expect(onApplied).toHaveBeenCalledTimes(1);
   });
 
   it('propagates an API failure without touching the canvas', async () => {
@@ -154,8 +211,6 @@ describe('persistNodeUpdates (handleNodeUpdate and the save* update branches)', 
       persistNodeUpdates({
         entries: [{ id: 'a', updates: { name: 'A2' } }],
         updateNode: vi.fn().mockRejectedValue(new Error('boom')),
-        nodes: s.nodes,
-        edges: s.edges,
         updateVisualization,
       })
     ).rejects.toThrow('boom');
@@ -199,6 +254,29 @@ describe('persistNewNodes (the save* create branches)', () => {
     expect(nodeIds()).toEqual(['new1']);
   });
 
+  it('creates and draws the edges it is given', async () => {
+    const addNodes = vi.fn().mockResolvedValue({ added_node_ids: ['n1'], added_edge_ids: ['k1'] });
+    const applied = await persistNewNodes({
+      nodes: [node('tmp')],
+      edges: [edge('tmp-e', 'tmp', 'a')],
+      addNodes,
+      addNodesToVisualization: store().addNodesToVisualization,
+      toCanvas: (result) => ({
+        nodes: [node(result.added_node_ids[0])],
+        edges: [edge(result.added_edge_ids[0], 'n1', 'a')],
+      }),
+    });
+    expect(applied).toBe(true);
+    expect(addNodes).toHaveBeenCalledWith([node('tmp')], [edge('tmp-e', 'tmp', 'a')]);
+    expect(store().edges.map((e) => e.id)).toContain('k1');
+  });
+
+  it('does not draw after only the session epoch moved', async () => {
+    const { inFlight } = run(bumpSessionOnly);
+    expect(await inFlight).toBe(false);
+    expect(nodeIds()).not.toContain('new1');
+  });
+
   it('draws nothing when the result carries no ids', async () => {
     const add = vi.fn();
     const applied = await persistNewNodes({
@@ -213,26 +291,66 @@ describe('persistNewNodes (the save* create branches)', () => {
 });
 
 describe('expandNode (handleExpand)', () => {
-  function run(interleave) {
-    const call = deferred({ nodes: [node('a'), node('c')], edges: [edge('e2', 'a', 'c')] });
+  function run(
+    interleave,
+    related = { nodes: [node('a'), node('c')], edges: [edge('e2', 'a', 'c')] }
+  ) {
+    const call = deferred(related);
     const showNotification = vi.fn();
+    const getRelatedNodes = vi.fn(() => call.promise);
     const inFlight = expandNode({
       nodeId: 'a',
-      nodes: store().nodes,
-      getRelatedNodes: vi.fn(() => call.promise),
+      getRelatedNodes,
       addNodesToVisualization: store().addNodesToVisualization,
       showNotification,
     });
     interleave?.();
     call.release();
-    return { inFlight, showNotification };
+    return { inFlight, showNotification, getRelatedNodes };
   }
 
   it('adds the neighbours when nothing changed', async () => {
-    const { inFlight, showNotification } = run();
+    const { inFlight, showNotification, getRelatedNodes } = run();
+    expect(await inFlight).toBe(true);
+    expect(getRelatedNodes).toHaveBeenCalledWith('a', { depth: 1 });
+    expect(nodeIds()).toContain('c');
+    expect(store().edges.map((e) => e.id)).toContain('e2');
+    expect(showNotification).toHaveBeenCalledWith('success', 'Added 1 new node');
+  });
+
+  it('reports when every neighbour is already in view', async () => {
+    const { inFlight, showNotification } = run(null, { nodes: [node('b')], edges: [] });
+    expect(await inFlight).toBe(true);
+    expect(showNotification).toHaveBeenCalledWith('info', 'All related nodes already in view');
+  });
+
+  it('reports when there are no neighbours', async () => {
+    const { inFlight, showNotification } = run(null, { nodes: [] });
+    expect(await inFlight).toBe(true);
+    expect(showNotification).toHaveBeenCalledWith('info', 'No related nodes found');
+  });
+
+  it('reports a failed fetch', async () => {
+    const showNotification = vi.fn();
+    await expandNode({
+      nodeId: 'a',
+      getRelatedNodes: vi.fn().mockRejectedValue(new Error('down')),
+      addNodesToVisualization: vi.fn(),
+      showNotification,
+    });
+    expect(showNotification).toHaveBeenCalledWith('error', 'Could not expand node');
+  });
+
+  it('drops the result when only the session epoch moved', async () => {
+    const { inFlight } = run(bumpSessionOnly);
+    expect(await inFlight).toBe(false);
+    expect(nodeIds()).not.toContain('c');
+  });
+
+  it('still expands after a resync reload that kept the anchor', async () => {
+    const { inFlight } = run(resync);
     expect(await inFlight).toBe(true);
     expect(nodeIds()).toContain('c');
-    expect(showNotification).toHaveBeenCalledWith('success', 'Added 1 new node');
   });
 
   it('drops the result when the session switches mid-await', async () => {
@@ -277,18 +395,50 @@ describe('connectNodes (handleConnect)', () => {
     expect(syncRef.current.sendEdgesAdded).toHaveBeenCalledWith([edge('e9')]);
   });
 
-  it('neither draws nor fans out when the session switches mid-await', async () => {
-    const { inFlight, syncRef } = run(switchSession);
+  it('neither draws nor fans out when the session switches mid-await, but reports the edge', async () => {
+    const { inFlight, syncRef, showNotification } = run(() => {
+      switchSession();
+      store().addNodesToVisualization([node('a'), node('b')], []);
+    });
     expect(await inFlight).toBe(false);
     expect(store().edges).toEqual([]);
+    expect(syncRef.current.sendEdgesAdded).not.toHaveBeenCalled();
+    expect(showNotification).toHaveBeenCalledWith('success', 'Connection created');
+  });
+
+  it('neither draws nor fans out when only the session epoch moved', async () => {
+    const { inFlight, syncRef } = run(bumpSessionOnly);
+    expect(await inFlight).toBe(false);
+    expect(store().edges.map((e) => e.id)).toEqual(['e1']);
     expect(syncRef.current.sendEdgesAdded).not.toHaveBeenCalled();
   });
 
-  it('neither draws nor fans out when the canvas is cleared mid-await', async () => {
-    const { inFlight, syncRef } = run(clearCanvas);
+  it('neither draws nor fans out when the canvas is cleared mid-await, but reports the edge', async () => {
+    const { inFlight, syncRef, showNotification } = run(clearCanvas);
     expect(await inFlight).toBe(false);
     expect(store().edges).toEqual([]);
     expect(syncRef.current.sendEdgesAdded).not.toHaveBeenCalled();
+    expect(showNotification).toHaveBeenCalledWith('success', 'Connection created');
+  });
+
+  it('still draws and fans out after a resync reload that kept both endpoints', async () => {
+    const { inFlight, syncRef } = run(resync);
+    expect(await inFlight).toBe(true);
+    expect(store().edges.map((e) => e.id)).toContain('e9');
+    expect(syncRef.current.sendEdgesAdded).toHaveBeenCalledWith([edge('e9')]);
+  });
+
+  it('reports a failed request', async () => {
+    const showNotification = vi.fn();
+    await connectNodes({
+      source: 'a',
+      target: 'b',
+      addEdge: vi.fn().mockRejectedValue(new Error('down')),
+      addNodesToVisualization: vi.fn(),
+      syncRef: { current: null },
+      showNotification,
+    });
+    expect(showNotification).toHaveBeenCalledWith('error', 'Could not create connection');
   });
 
   it('still reports a failed create after a switch', async () => {
@@ -334,6 +484,33 @@ describe('deleteEdgeEverywhere (handleDeleteEdge)', () => {
     expect(store().edges.map((e) => e.id)).toEqual(['e1']);
     expect(syncRef.current.sendEdgesRemoved).not.toHaveBeenCalled();
     expect(showNotification).toHaveBeenCalledWith('success', 'Edge deleted');
+  });
+
+  it('touches nothing when only the session epoch moved', async () => {
+    const { inFlight, syncRef, removeEdge } = run(bumpSessionOnly);
+    expect(await inFlight).toBe(false);
+    expect(removeEdge).not.toHaveBeenCalled();
+    expect(syncRef.current.sendEdgesRemoved).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a non-success reply', () => Promise.resolve({ success: false })],
+    ['a failed request', () => Promise.reject(new Error('down'))],
+  ])('treats %s as a failure', async (_label, reply) => {
+    const syncRef = { current: { sendEdgesRemoved: vi.fn() } };
+    const showNotification = vi.fn();
+    const removeEdge = vi.fn();
+    const applied = await deleteEdgeEverywhere({
+      edgeId: 'e1',
+      deleteEdge: vi.fn(reply),
+      removeEdge,
+      syncRef,
+      showNotification,
+    });
+    expect(applied).toBe(false);
+    expect(removeEdge).not.toHaveBeenCalled();
+    expect(syncRef.current.sendEdgesRemoved).not.toHaveBeenCalled();
+    expect(showNotification).toHaveBeenCalledWith('error', 'Could not delete edge');
   });
 
   // In-place and same session: a clear is not a reason to drop it.
@@ -395,6 +572,29 @@ describe('setEdgeType (handleSetEdgeType)', () => {
     expect(showNotification).toHaveBeenCalledWith('success', 'Connection type updated');
   });
 
+  it('touches nothing when only the session epoch moved', async () => {
+    const { inFlight, syncRef, updateEdgeData } = run(bumpSessionOnly);
+    expect(await inFlight).toBe(false);
+    expect(updateEdgeData).not.toHaveBeenCalled();
+    expect(syncRef.current.sendEdgesUpdated).not.toHaveBeenCalled();
+  });
+
+  it('reports a failed request without editing the canvas', async () => {
+    const updateEdgeData = vi.fn();
+    const showNotification = vi.fn();
+    const applied = await setEdgeType({
+      edgeId: 'e1',
+      type: 'OWNS',
+      updateEdge: vi.fn().mockRejectedValue(new Error('down')),
+      updateEdgeData,
+      syncRef: { current: { sendEdgesUpdated: vi.fn() } },
+      showNotification,
+    });
+    expect(applied).toBe(false);
+    expect(updateEdgeData).not.toHaveBeenCalled();
+    expect(showNotification).toHaveBeenCalledWith('error', 'Could not update connection');
+  });
+
   it('still fans out the edit after a clear in the same session', async () => {
     const { inFlight, syncRef } = run(clearCanvas);
     expect(await inFlight).toBe(true);
@@ -406,10 +606,20 @@ describe('loadSavedViewNode (saved-view double-click load)', () => {
   const view = {
     type: 'SavedView',
     name: 'My view',
-    metadata: { node_ids: ['v1', 'v2'], positions: { v1: { x: 1, y: 2 } } },
+    metadata: {
+      node_ids: ['v1', 'v2'],
+      positions: { v1: { x: 1, y: 2 } },
+      groups: [{ id: 'g1', label: 'Team', position: { x: 0, y: 0 } }],
+      parentIds: { v1: 'g1' },
+      annotations: [{ id: 'note-1', kind: 'note', position: { x: 1, y: 2 }, text: 'hi' }],
+    },
   };
 
-  function run(interleave) {
+  beforeEach(() => {
+    useGraphStore.setState({ pendingGroups: null, pendingAnnotations: null });
+  });
+
+  function run(interleave, nodeData = view) {
     const calls = {};
     const getNodeDetails = vi.fn((id) => {
       calls[id] = deferred({ success: true, node: node(id), edges: [edge('ve', 'v1', 'v2')] });
@@ -418,7 +628,7 @@ describe('loadSavedViewNode (saved-view double-click load)', () => {
     const showNotification = vi.fn();
     const s = store();
     const inFlight = loadSavedViewNode({
-      nodeData: view,
+      nodeData,
       getNodeDetails,
       clearVisualization: s.clearVisualization,
       addNodesToVisualization: s.addNodesToVisualization,
@@ -437,7 +647,36 @@ describe('loadSavedViewNode (saved-view double-click load)', () => {
     expect(nodeIds()).toEqual(['v1', 'v2']);
     expect(store().nodes[0]._savedPosition).toEqual({ x: 1, y: 2 });
     expect(store().edges.map((e) => e.id)).toEqual(['ve']);
+    expect(store().pendingGroups.groups.map((g) => g.id)).toEqual(['g1']);
+    expect(store().pendingAnnotations.map((a) => a.id)).toEqual(['note-1']);
     expect(showNotification).toHaveBeenCalledWith('info', 'Loaded saved view: My view');
+  });
+
+  it('prefers the edges saved with the view, filtered by edge_ids otherwise', async () => {
+    const saved = { ...view, metadata: { ...view.metadata, edges: [edge('kept', 'v1', 'v2')] } };
+    const first = run(null, saved);
+    expect(await first.inFlight).toBe(true);
+    expect(store().edges.map((e) => e.id)).toEqual(['kept']);
+
+    const filtered = { ...view, metadata: { ...view.metadata, edge_ids: ['other'] } };
+    const second = run(null, filtered);
+    expect(await second.inFlight).toBe(true);
+    expect(store().edges).toEqual([]);
+  });
+
+  it('reports a failed load', async () => {
+    const showNotification = vi.fn();
+    const applied = await loadSavedViewNode({
+      nodeData: { ...view, metadata: { ...view.metadata, annotations: 'not-an-array' } },
+      getNodeDetails: vi.fn(),
+      clearVisualization: vi.fn(),
+      addNodesToVisualization: vi.fn(),
+      setPendingGroups: vi.fn(),
+      setPendingAnnotations: vi.fn(),
+      showNotification,
+    });
+    expect(applied).toBe(false);
+    expect(showNotification).toHaveBeenCalledWith('error', 'Could not load saved view');
   });
 
   it('does not load into a session switched to mid-await', async () => {
@@ -447,7 +686,16 @@ describe('loadSavedViewNode (saved-view double-click load)', () => {
     });
     expect(await inFlight).toBe(false);
     expect(nodeIds()).toEqual(['x']);
+    expect(store().pendingGroups).toBeNull();
+    expect(store().pendingAnnotations).toBeNull();
     expect(showNotification).not.toHaveBeenCalled();
+  });
+
+  it('does not load after only the session epoch moved', async () => {
+    const { inFlight } = run(bumpSessionOnly);
+    expect(await inFlight).toBe(false);
+    expect(store().nodes).toEqual([]);
+    expect(store().pendingGroups).toBeNull();
   });
 
   // The load's own clear happens before the await, so it must not count as a
@@ -459,5 +707,7 @@ describe('loadSavedViewNode (saved-view double-click load)', () => {
     });
     expect(await inFlight).toBe(false);
     expect(nodeIds()).toEqual(['y']);
+    expect(store().pendingGroups).toBeNull();
+    expect(store().pendingAnnotations).toBeNull();
   });
 });

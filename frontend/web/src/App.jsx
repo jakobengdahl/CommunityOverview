@@ -1168,12 +1168,11 @@ function App() {
     (nodeId) =>
       expandNode({
         nodeId,
-        nodes,
         getRelatedNodes: api.getRelatedNodes,
         addNodesToVisualization,
         showNotification,
       }),
-    [nodes, addNodesToVisualization, showNotification]
+    [addNodesToVisualization, showNotification]
   );
 
   // Callback: Edit node
@@ -1789,8 +1788,6 @@ function App() {
           await persistNodeUpdates({
             entries: [{ id: data.id, updates: data.updates }],
             updateNode: api.updateNode,
-            nodes,
-            edges,
             updateVisualization,
             onApplied: () => setEditingSubscriptionData(null),
           });
@@ -1820,7 +1817,7 @@ function App() {
         );
       }
     },
-    [addNodesToVisualization, nodes, edges, updateVisualization, showNotification, t]
+    [addNodesToVisualization, updateVisualization, showNotification, t]
   );
 
   // Save agent nodes (create or update)
@@ -1838,8 +1835,6 @@ function App() {
           await persistNodeUpdates({
             entries,
             updateNode: api.updateNode,
-            nodes,
-            edges,
             updateVisualization,
           });
 
@@ -1881,7 +1876,7 @@ function App() {
         showNotification('error', 'Could not save agent');
       }
     },
-    [nodes, edges, addNodesToVisualization, updateVisualization, showNotification]
+    [addNodesToVisualization, updateVisualization, showNotification]
   );
 
   // Callback: Create node from toolbar
@@ -1928,8 +1923,6 @@ function App() {
           await persistNodeUpdates({
             entries: [{ id, updates }],
             updateNode: api.updateNode,
-            nodes,
-            edges,
             updateVisualization,
           });
           showNotification('success', 'Skill updated');
@@ -1950,7 +1943,7 @@ function App() {
         showNotification('error', 'Could not save skill');
       }
     },
-    [nodes, edges, updateVisualization, addNodesToVisualization, showNotification]
+    [updateVisualization, addNodesToVisualization, showNotification]
   );
 
   const handleCreateAKC = useCallback(() => {
@@ -1966,8 +1959,6 @@ function App() {
           await persistNodeUpdates({
             entries: [{ id, updates }],
             updateNode: api.updateNode,
-            nodes,
-            edges,
             updateVisualization,
           });
           showNotification('success', 'Knowledge collection updated');
@@ -1988,7 +1979,7 @@ function App() {
         showNotification('error', 'Could not save knowledge collection');
       }
     },
-    [nodes, edges, addNodesToVisualization, updateVisualization, showNotification]
+    [addNodesToVisualization, updateVisualization, showNotification]
   );
 
   // Callback: Context menu action triggered from schema-defined callback items
@@ -2379,8 +2370,6 @@ function App() {
         await persistNodeUpdates({
           entries: [{ id: nodeId, updates }],
           updateNode: api.updateNode,
-          nodes,
-          edges,
           updateVisualization,
           onApplied: closeEditingNode,
         });
@@ -2390,7 +2379,7 @@ function App() {
         showNotification('error', 'Could not update node');
       }
     },
-    [nodes, edges, updateVisualization, closeEditingNode, showNotification]
+    [updateVisualization, closeEditingNode, showNotification]
   );
 
   // Modal dialog open/close (and edit-target) state, bundled for AppDialogs

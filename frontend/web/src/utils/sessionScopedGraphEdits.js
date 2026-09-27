@@ -2,30 +2,32 @@ import useGraphStore, { isStaleSessionEpoch } from '../store/graphStore';
 import { savedViewMetadataToCanvasMetadata } from './sessionAnnotations';
 
 /**
- * Dialog-driven graph edits guard against stale post-await canvas writes.
+ * App's awaiting graph handlers, guarded against stale post-await canvas writes.
  *
- * These handlers were written as "check the dialog is open, await the call,
- * apply the result". Closing the dialogs on a session switch or canvas clear
- * does not save them: the dialog check has already passed by the time the
- * invalidating event lands mid-await. Each therefore captures the relevant
- * epoch before awaiting and drops effects that target stale canvas state.
+ * Each awaits a network call and then edits the canvas store or fans out
+ * through syncRef — both of which point at whichever session is active when
+ * the reply lands. Closing dialogs on a session switch or canvas clear does not
+ * save them: any dialog check has already passed by the time the invalidating
+ * event lands mid-await. Each therefore captures the session before awaiting
+ * and drops effects that no longer have a target.
  *
  * They follow the same rule about what survives a stale request: the persisted
  * mutation is global and permanent, so the user is told it happened either way,
  * but nothing session-scoped is touched — no canvas edit, no sync fan-out, and
  * no dialog state, since by then those belong to the session the user moved to.
  *
- * Two guards apply, and which one a handler needs depends on what its post-await
- * write depends on. A switch bumps sessionEpoch; a clear or any other wholesale
- * replace of the canvas bumps canvasBaselineEpoch but not sessionEpoch. An effect
- * that goes through an in-place store action (updateEdgeData, removeEdge,
- * addNodesToVisualization of something new) is only wrong after a switch. One
- * that writes back a canvas captured before the await, or builds on content that
- * a clear removes, is wrong after either — see captureCanvasScope.
+ * A switch bumps sessionEpoch. A clear does not, so a handler whose effect only
+ * makes sense on content a clear removes checks that content instead: the nodes
+ * it edits, expands or connects must still be on the canvas when the reply
+ * lands. canvasBaselineEpoch is not used for that, because a reconnect resync
+ * bumps it too while putting the same content straight back. The two older
+ * handlers here (applyEdgeUpdate, confirmNodeDelete) predate this and keep
+ * their own checks.
  *
- * The `?view=` URL load in App is the one awaiting handler not routed through
- * here: it races the `?session=` bootstrap load, and which of the two should
- * win when both are in the URL is an open product decision, not a guard.
+ * Not every awaiting handler in App comes through here. Image ingest and remote
+ * op hydration carry their own sync-client guards; the `?view=` URL load is left
+ * as it is because it races the `?session=` bootstrap load, and which of the two
+ * should win when both are in the URL is an open product decision.
  *
  * They live here rather than inline in App so the mid-await switch is covered by
  * a test — App itself is not rendered by the suite — following the same reasoning
@@ -149,8 +151,9 @@ export async function confirmNodeDelete({
  * Capture the session and canvas the caller is about to await on.
  *
  * `sessionChanged` is true once the user has switched session. `canvasReplaced`
- * is also true once this session's canvas was cleared or replaced wholesale —
- * the case sessionEpoch alone misses, since a clear does not bump it.
+ * is also true once this session's canvas was replaced wholesale — cleared,
+ * loaded from a saved view or reloaded by a resync — the case sessionEpoch alone
+ * misses, since none of those bumps it.
  *
  * @returns {{ sessionChanged: () => boolean, canvasReplaced: () => boolean }}
  */
@@ -167,43 +170,40 @@ export function captureCanvasScope() {
 /**
  * Persist field updates to one or more nodes, then patch them on this canvas.
  *
- * The write-back replaces the whole canvas with `nodes`/`edges` as they were
- * when the edit started, so it is dropped once that canvas is gone — after a
- * switch it would put the previous session's contents onto the new one, and
- * after a clear it would restore everything the user just cleared.
- * `onApplied` runs only with the write-back: whatever it closes or resets is,
- * by then, state the user opened after moving on.
+ * The patch is applied to the canvas as it is when the reply lands, not to a
+ * copy taken before the await. Writing back such a copy would put the previous
+ * session's contents onto the new one after a switch, restore everything the
+ * user cleared after a clear, and revert whatever else changed in between. A
+ * switch drops the patch; after a clear there is simply nothing left to patch.
+ *
+ * `onApplied` runs only while the canvas the edit started on is still there:
+ * a switch or a wholesale replace closes this session's dialogs, so whatever
+ * it would close or reset by then is state the user opened after moving on.
  *
  * Errors from the API propagate so each caller keeps its own message.
  *
  * @param {Object} params
  * @param {Array<{id: string, updates: Object}>} params.entries  Updates, persisted in order.
  * @param {Function} params.updateNode  API call: persist one node's updates.
- * @param {Array} params.nodes  Canvas nodes when the edit started.
- * @param {Array} params.edges  Canvas edges when the edit started.
  * @param {Function} params.updateVisualization  Store action: replace the canvas.
  * @param {Function} [params.onApplied]  Session-scoped follow-up, e.g. closing the dialog.
- * @returns {Promise<boolean>} Whether the canvas was updated.
+ * @returns {Promise<boolean>} Whether the session was still current, so the patch applied.
  */
-export async function persistNodeUpdates({
-  entries,
-  updateNode,
-  nodes,
-  edges,
-  updateVisualization,
-  onApplied,
-}) {
+export async function persistNodeUpdates({ entries, updateNode, updateVisualization, onApplied }) {
   const scope = captureCanvasScope();
   for (const { id, updates } of entries) {
     await updateNode(id, updates);
   }
-  if (scope.canvasReplaced()) return false;
+  if (scope.sessionChanged()) return false;
+  const { nodes, edges } = useGraphStore.getState();
   const byId = new Map(entries.map(({ id, updates }) => [id, updates]));
-  updateVisualization(
-    nodes.map((n) => (byId.has(n.id) ? { ...n, ...byId.get(n.id) } : n)),
-    edges
-  );
-  onApplied?.();
+  if (nodes.some((n) => byId.has(n.id))) {
+    updateVisualization(
+      nodes.map((n) => (byId.has(n.id) ? { ...n, ...byId.get(n.id) } : n)),
+      edges
+    );
+  }
+  if (!scope.canvasReplaced()) onApplied?.();
   return true;
 }
 
@@ -245,12 +245,11 @@ export async function persistNewNodes({
  * Add a node's neighbours to this canvas.
  *
  * Nothing is persisted, so a stale result is simply dropped. The expansion hangs
- * off a node on the canvas it was asked from; once that canvas is cleared or
- * switched away the anchor is gone and the neighbours would land unattached.
+ * off a node on the canvas it was asked from: after a switch that canvas is
+ * gone, and after a clear the anchor is, so the neighbours would land unattached.
  *
  * @param {Object} params
  * @param {string} params.nodeId  The node to expand.
- * @param {Array} params.nodes  Canvas nodes when the expansion started.
  * @param {Function} params.getRelatedNodes  API call: fetch the neighbourhood.
  * @param {Function} params.addNodesToVisualization  Store action: add to the canvas.
  * @param {Function} params.showNotification  Surface the outcome to the user.
@@ -258,7 +257,6 @@ export async function persistNewNodes({
  */
 export async function expandNode({
   nodeId,
-  nodes,
   getRelatedNodes,
   addNodesToVisualization,
   showNotification,
@@ -266,7 +264,9 @@ export async function expandNode({
   const scope = captureCanvasScope();
   try {
     const result = await getRelatedNodes(nodeId, { depth: 1 });
-    if (scope.canvasReplaced()) return false;
+    if (scope.sessionChanged()) return false;
+    const { nodes } = useGraphStore.getState();
+    if (!nodes.some((n) => n.id === nodeId)) return false;
     if (result.nodes && result.nodes.length > 0) {
       const existingIds = new Set(nodes.map((n) => n.id));
       const newCount = result.nodes.filter((n) => !existingIds.has(n.id)).length;
@@ -290,10 +290,11 @@ export async function expandNode({
 /**
  * Persist a drag-connect, then draw the edge and tell collaborators.
  *
- * The edge exists in the graph either way. Drawing it needs both endpoints on
- * the canvas the drag happened on, so it is dropped once that canvas is cleared
- * or switched away, and so is the fan-out: after a switch syncRef points at the
- * new session, and after a clear the endpoints are gone for collaborators too.
+ * Drawing needs both endpoints on this session's canvas when the reply lands.
+ * After a switch the canvas is another session's, and after a clear the
+ * endpoints are gone; either way nothing is drawn or fanned out. The edge exists
+ * in the graph regardless, and nothing on screen would show it, so the user is
+ * told it was created.
  *
  * @param {Object} params
  * @param {string} params.source  Source node id.
@@ -301,7 +302,7 @@ export async function expandNode({
  * @param {Function} params.addEdge  API call: create the edge.
  * @param {Function} params.addNodesToVisualization  Store action: add to the canvas.
  * @param {Object} params.syncRef  Ref holding the active session's sync client.
- * @param {Function} params.showNotification  Surface failure to the user.
+ * @param {Function} params.showNotification  Surface the outcome to the user.
  * @returns {Promise<boolean>} Whether the edge was drawn.
  */
 export async function connectNodes({
@@ -321,7 +322,11 @@ export async function connectNodes({
       showNotification('error', 'Could not create connection');
       return false;
     }
-    if (scope.canvasReplaced()) return false;
+    const onCanvas = new Set(useGraphStore.getState().nodes.map((n) => n.id));
+    if (scope.sessionChanged() || !onCanvas.has(source) || !onCanvas.has(target)) {
+      showNotification('success', 'Connection created');
+      return false;
+    }
     addNodesToVisualization([], [result.edge]);
     // Fan the new edge out to collaborators. Both endpoints already exist
     // on their canvases, so nothing else prompts them to re-hydrate it
@@ -431,8 +436,8 @@ export async function setEdgeType({
  *
  * The canvas is cleared before the node fetches, so the scope is captured after
  * that clear. A switch or a later wholesale replace — another saved view, a
- * session load, the clear action — supersedes this load, and its nodes must not
- * be added on top of whatever replaced them.
+ * session load or resync, the clear action — supersedes this load, and its nodes
+ * must not be added on top of whatever replaced them.
  *
  * @param {Object} params
  * @param {Object} params.nodeData  The SavedView node.
