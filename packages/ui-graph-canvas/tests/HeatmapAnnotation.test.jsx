@@ -447,8 +447,8 @@ describe('heat-map stylesheet', () => {
   // currentcolor or a medium width, though on some properties, such as
   // border-style or box-shadow, it is a no-op. A quoted string, or a
   // parenthesised group such as rgba(...) or calc((...)) with any nesting,
-  // counts as one opaque token; a value whose parentheses do not balance counts as painting, and so
-  // does anything else not listed here.
+  // counts as one opaque token; a value whose parentheses do not balance
+  // counts as painting, and so does anything else not listed here.
   const PAINTING_PROPERTY =
     /^(?:-webkit-)?(border(-[a-z-]+)?|outline(-(color|style|width))?|box-shadow|(backdrop-)?filter|background(-(color|image))?)$/;
   const BORDER_SHORTHAND =
@@ -491,9 +491,10 @@ describe('heat-map stylesheet', () => {
   // The element a selector styles is its last compound; a class further left
   // only scopes it, so `.kind-heatmap .graph-heatmap-level` styles the label.
   // Combinators inside :has(...), :nth-child(2n+1) or [attr~=x] do not split
-  // it, and a class inside a pseudo-class argument does not name it. A last
-  // compound with no class of its own (`*`, `div`) may be the circle, so it
-  // is judged by the whole selector.
+  // it, and a class inside :not(...) or :has(...) does not name it. A last
+  // compound with no class of its own (`*`, `div`), or one using :is(...) or
+  // :where(...), whose classes do name it, may be the circle, so it is judged
+  // by the whole selector.
   const lastCompound = (sel) => {
     let depth = 0;
     let start = 0;
@@ -513,7 +514,9 @@ describe('heat-map stylesheet', () => {
   };
   const stylesHeatmapCircle = (sel) => {
     const own = lastCompound(sel);
-    return own.includes('.') ? onHeatmapCircle(own) : onHeatmapCircle(withoutNot(sel));
+    const byWhole =
+      !own.includes('.') || /:(is|where|matches|-(webkit|moz)-any)(?![\w-])/.test(own);
+    return onHeatmapCircle(byWhole ? withoutNot(sel) : own);
   };
 
   it.each([
@@ -601,6 +604,11 @@ describe('heat-map stylesheet', () => {
     expect(stylesHeatmapCircle('.kind-heatmap .graph-heatmap-circle[data-x~="y"]')).toBe(true);
     expect(stylesHeatmapCircle('.kind-heatmap.is-empty > *')).toBe(true);
     expect(stylesHeatmapCircle('.kind-heatmap.is-empty div')).toBe(true);
+    expect(stylesHeatmapCircle('.graph-generic-annotation-node:is(.kind-heatmap).is-empty')).toBe(
+      true
+    );
+    expect(stylesHeatmapCircle('.kind-heatmap .x:where(.graph-heatmap-circle)')).toBe(true);
+    expect(stylesHeatmapCircle('.kind-heatmap .graph-heatmap-level:is(.a)')).toBe(true);
     expect(stylesHeatmapCircle('.kind-heatmap .label:has(.graph-heatmap-circle)')).toBe(false);
     expect(stylesHeatmapCircle('.kind-heatmap .graph-heatmap-level:nth-child(2n + 1)')).toBe(false);
   });
