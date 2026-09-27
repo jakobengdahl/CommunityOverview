@@ -537,8 +537,9 @@ describe('heat-map stylesheet', () => {
   // `is-empty` is set on the heat-map node itself, so a :not(.is-empty) keeps
   // level-0 circles out only on the compound that is the circle's own node:
   // the last one naming the node class outside any parenthesis, followed only
-  // by descendant or child combinators. A class inside :has(...) or :is(...)
-  // names another element, and after + or ~ the node is a sibling's.
+  // by descendant or child combinators. A class inside :has(...) names
+  // another element and one inside :is(...) or :where(...) is not trusted to
+  // name the node, so neither counts; after + or ~ the node is a sibling's.
   const excludesEmptyHeatmap = (sel) => {
     const parts = compoundsOf(sel);
     const namesNode = ({ compound }) => {
