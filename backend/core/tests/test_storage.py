@@ -17,6 +17,7 @@ from backend.core import (
     RelationshipType,
 )
 from backend.core import storage_search
+from backend.core.storage_backends import EntityOperation, ExternalChange
 
 
 @pytest.fixture
@@ -465,6 +466,80 @@ class TestGraphStorageCRUD:
 
         assert result.success is False
         assert "Max 10" in result.message
+
+
+class TestRejectedAddNodesLeavesNoInlineVector:
+    """A rejected add_nodes keeps whatever landed before the rejection, and a
+    node that landed must hold its supplied vector in the index, never on the
+    object: every later event builds its payload from that object, and the
+    event path has no by-name filter for `embedding`."""
+
+    @staticmethod
+    def _events(storage):
+        seen = []
+        storage.add_system_listener(seen.append)
+        return seen
+
+    @pytest.mark.parametrize("repeat_existing", [False, True])
+    def test_a_landed_node_carries_no_embedding_into_later_events(
+        self, temp_storage, repeat_existing
+    ):
+        if repeat_existing:
+            temp_storage.add_nodes(
+                [Node(id="old", type=NodeType.ACTOR, name="Old")], []
+            )
+        rejected_id = "old" if repeat_existing else "a"
+        result = temp_storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5]),
+                Node(id=rejected_id, type=NodeType.ACTOR, name="Again"),
+            ],
+            [],
+        )
+        assert result.success is False
+        assert temp_storage.get_node("a") is not None
+        seen = self._events(temp_storage)
+
+        temp_storage.update_node("a", {"description": "changed"})
+
+        [event] = [e for e in seen if e.entity.id == "a"]
+        assert (event.entity.before or {}).get("embedding") is None
+        assert (event.entity.after or {}).get("embedding") is None
+
+    def test_a_landed_node_keeps_its_supplied_vector(self, temp_storage):
+        temp_storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5]),
+                Node(id="a", type=NodeType.ACTOR, name="Again"),
+            ],
+            [],
+        )
+
+        assert temp_storage.get_node("a").embedding is None
+        assert temp_storage.vector_store.get_vector_list("a") == pytest.approx(
+            [0.25, 0.5]
+        )
+
+    def test_an_external_upsert_of_a_landed_node_emits_no_embedding(self, temp_storage):
+        temp_storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5]),
+                Node(id="a", type=NodeType.ACTOR, name="Again"),
+            ],
+            [],
+        )
+        temp_storage.flush()
+        seen = self._events(temp_storage)
+        payload = temp_storage.get_node("a").to_dict()
+        payload.update(name="Renamed", updated_at="2999-01-01T00:00:00+00:00")
+
+        temp_storage.apply_external_change(
+            ExternalChange.entities([EntityOperation.upsert_node(payload)])
+        )
+
+        [event] = [e for e in seen if e.entity.id == "a"]
+        assert event.entity.before is not None
+        assert event.entity.before.get("embedding") is None
 
 
 class TestGraphStorageSearch:

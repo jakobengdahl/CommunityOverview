@@ -83,6 +83,107 @@ describe('getLayoutedElements — dagre layout', () => {
     }
     expect(new Set(out.map((n) => `${n.position.x},${n.position.y}`)).size).toBe(3);
   });
+
+  const at = (nodes, edges) =>
+    Object.fromEntries(
+      getLayoutedElements(
+        nodes.map((id) => ({ id, position: { x: 0, y: 0 } })),
+        edges.map(([source, target]) => ({ source, target }))
+      ).map((n) => [n.id, [n.position.x, n.position.y]])
+    );
+
+  // arrangeNodes' tree mode hands this a component's sub-edges, which can be
+  // empty, so an edgeless input is a real call and still has to be laid out.
+  it('lays out an edgeless input as one rank of non-overlapping nodes', () => {
+    const pos = at(['a', 'b', 'c'], []);
+    const xs = Object.values(pos)
+      .map(([x]) => x)
+      .sort((m, n) => m - n);
+    for (const [, y] of Object.values(pos)) expect(y).toBeCloseTo(50, 5);
+    expect(xs[0]).toBeCloseTo(50, 5);
+    expect(xs[1] - xs[0]).toBeCloseTo(350, 5);
+    expect(xs[2] - xs[1]).toBeCloseTo(350, 5);
+  });
+
+  it('lays out a large tree with every child one rank below its parent', () => {
+    const ids = Array.from({ length: 127 }, (_, i) => `n${i}`);
+    const edges = ids.slice(1).map((id, i) => [`n${Math.floor(i / 2)}`, id]);
+    const pos = at(ids, edges);
+    for (const [source, target] of edges) {
+      expect(pos[target][1] - pos[source][1]).toBeCloseTo(300, 5);
+    }
+    expect(pos.n0[1]).toBeCloseTo(50, 5);
+    // 64 leaves on the bottom rank, each at least a node width plus nodesep apart.
+    const leafXs = ids
+      .slice(63)
+      .map((id) => pos[id][0])
+      .sort((m, n) => m - n);
+    for (let i = 1; i < leafXs.length; i += 1) {
+      expect(leafXs[i] - leafXs[i - 1]).toBeGreaterThanOrEqual(350 - 1e-6);
+    }
+  });
+
+  // Exact positions: each fixture below is laid out differently by dagre if one
+  // of the configured options changes, so the layout options are pinned by
+  // what they produce rather than by reading the config back.
+  it('breaks a cycle with the greedy acyclicer', () => {
+    const pos = at(
+      ['a', 'b', 'c', 'd'],
+      [
+        ['a', 'b'],
+        ['b', 'c'],
+        ['c', 'd'],
+        ['d', 'b'],
+        ['a', 'c'],
+      ]
+    );
+    expect(pos).toEqual({
+      a: [150, 50],
+      b: [50, 350],
+      c: [350, 650],
+      d: [500, 50],
+    });
+  });
+
+  it('separates edges routed side by side by the configured edgesep', () => {
+    const pos = at(
+      ['a', 'b', 'c'],
+      [
+        ['a', 'b'],
+        ['b', 'c'],
+        ['c', 'a'],
+      ]
+    );
+    expect(pos).toEqual({ a: [150, 50], b: [50, 350], c: [150, 650] });
+  });
+
+  it('ranks with the tight-tree ranker, keeping short branches near their root', () => {
+    // longest-path would push the leaf `e` down to the bottom rank with `d`.
+    expect(
+      at(
+        ['a', 'b', 'c', 'd', 'e'],
+        [
+          ['a', 'b'],
+          ['b', 'c'],
+          ['c', 'd'],
+          ['a', 'e'],
+        ]
+      ).e
+    ).toEqual([400, 350]);
+    // network-simplex would put the source `a` on the second rank.
+    const pos = at(
+      ['a', 'b', 'c', 'd', 'e', 'f'],
+      [
+        ['a', 'c'],
+        ['a', 'e'],
+        ['b', 'd'],
+        ['c', 'f'],
+        ['d', 'e'],
+      ]
+    );
+    expect(pos.a).toEqual([150, 50]);
+    expect(pos.b).toEqual([600, 50]);
+  });
 });
 
 describe('applyLayout', () => {

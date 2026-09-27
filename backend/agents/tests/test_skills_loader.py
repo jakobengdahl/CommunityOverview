@@ -1325,6 +1325,29 @@ class TestFetchTextRemainingGuards:
                 await self._loader()._fetch_text("https://api.github.com/start")
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("advertised", ["abc", "1.5", "-1"])
+    async def test_a_malformed_content_length_is_refused_by_name(self, advertised):
+        """int() on the raw header used to escape as a bare parse error, and a
+        negative value slipped under the cap; both are refused as malformed."""
+        handler, _seen = _recording_handler(
+            [
+                loader_module.httpx.Response(
+                    200, headers={"content-length": advertised}, text="# skill"
+                )
+            ]
+        )
+        loader = self._loader()
+
+        with (
+            _mock_http(handler),
+            patch.object(loader_module, "is_safe_url", lambda _url: True),
+        ):
+            with pytest.raises(ValueError, match="Malformed Content-Length"):
+                await loader._fetch_text("https://api.github.com/start")
+
+        assert loader._text_cache == {}
+
+    @pytest.mark.asyncio
     async def test_a_fetch_that_carries_headers_is_cached_too(self):
         """The GitHub API path always sends headers, and the cache is what
         lets Stage 2 re-parse without a second request."""

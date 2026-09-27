@@ -681,10 +681,17 @@ class SkillsLoader:
                 response.raise_for_status()
                 # Reject early if the server advertises a content length that is too big
                 cl = response.headers.get("content-length")
-                if cl and int(cl) > max_bytes:
-                    raise ValueError(
-                        f"Content from {url} exceeds max size ({max_bytes} bytes)"
-                    )
+                if cl:
+                    try:
+                        advertised = int(cl)
+                    except ValueError:
+                        advertised = -1
+                    if advertised < 0:
+                        raise ValueError(f"Malformed Content-Length from {url}: {cl!r}")
+                    if advertised > max_bytes:
+                        raise ValueError(
+                            f"Content from {url} exceeds max size ({max_bytes} bytes)"
+                        )
                 content = response.text
                 if len(content.encode()) > max_bytes:
                     raise ValueError(
