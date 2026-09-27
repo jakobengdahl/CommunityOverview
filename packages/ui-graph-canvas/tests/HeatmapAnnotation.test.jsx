@@ -499,10 +499,21 @@ describe('heat-map stylesheet', () => {
   // bracket, quote or escape anywhere in it: the rule parser splits lists on
   // every comma, even one inside :is(a, b, c), so a fragment's plain-looking
   // last piece may not be its selector's last compound. And so is every
-  // selector of a rule whose body holds `{` or `&`: the parser reads a nested
-  // rule as part of the outer body, so its own selector is never seen.
+  // selector of a rule whose body holds `{`, `&`, a quote, an escape or an
+  // unbalanced parenthesis: the parser reads a nested rule as part of the
+  // outer body, and ends a body at a `}` inside a string, escape or url(...),
+  // so what follows is never seen.
   const NODE_OR_CIRCLE_CLASS =
     /\.(graph-generic-annotation-node|kind-heatmap|is-empty|selected|graph-heatmap-circle)(?![\w-])/;
+  const isCleanBody = (body) => {
+    if (/[{&"'\\]/.test(body)) return false;
+    let depth = 0;
+    for (const c of body) {
+      if (c === '(') depth++;
+      else if (c === ')' && --depth < 0) return false;
+    }
+    return depth === 0;
+  };
   const stylesHeatmapCircle = (sel, list = sel, body = '') => {
     const last = sel
       .trim()
@@ -510,7 +521,7 @@ describe('heat-map stylesheet', () => {
       .pop();
     const plain =
       !/[()[\]"'\\]/.test(list) &&
-      !/[{&]/.test(body) &&
+      isCleanBody(body) &&
       /^[\w-]*(?:(?:\.|::?)[\w-]+)+$/.test(last) &&
       last.includes('.');
     return onHeatmapCircle(sel) && !(plain && !NODE_OR_CIRCLE_CLASS.test(last));
@@ -619,6 +630,10 @@ describe('heat-map stylesheet', () => {
     );
     expect(stylesHeatmapCircle(sel, sel, 'color: red; & .x { border: 1px solid; }')).toBe(true);
     expect(stylesHeatmapCircle(sel, sel, 'background: rgba(15, 23, 42, 0.85);')).toBe(false);
+    expect(stylesHeatmapCircle(sel, sel, 'background-image: url(')).toBe(true);
+    expect(stylesHeatmapCircle(sel, sel, 'background: red; grid-area: \\')).toBe(true);
+    expect(stylesHeatmapCircle(sel, sel, 'content: "')).toBe(true);
+    expect(stylesHeatmapCircle(sel, sel, 'width: calc(1px))')).toBe(true);
   });
 
   it('judges a list fragment by the whole selector list it came from', () => {
