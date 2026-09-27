@@ -392,9 +392,9 @@ describe('heat-map stylesheet', () => {
     'utf-8'
   );
 
-  // Every rule's selector list, with the @media block (if any) it sits in.
-  // Enough of a parser for this stylesheet: comments stripped, one level of
-  // nesting, no strings containing braces.
+  // Every rule's selector list and body, with the @media block (if any) it
+  // sits in. Enough of a parser for this stylesheet: comments stripped, one
+  // level of nesting, no strings containing braces.
   const rules = (() => {
     const out = [];
     const text = css.replace(/\/\*[\s\S]*?\*\//g, '');
@@ -416,19 +416,29 @@ describe('heat-map stylesheet', () => {
         continue;
       }
       const end = text.indexOf('}', open);
-      out.push({ media, selectors: prelude.split(',').map((sel) => sel.trim()) });
+      out.push({
+        media,
+        selectors: prelude.split(',').map((sel) => sel.trim()),
+        body: text.slice(open + 1, end),
+      });
       i = end + 1;
     }
     return out;
   })();
-  const heatmapSelectors = (inForcedColours) =>
-    rules
-      .filter((r) => Boolean(r.media?.includes('forced-colors')) === inForcedColours)
-      .flatMap((r) => r.selectors)
-      .filter((sel) => sel.includes('.kind-heatmap'));
+  const inForcedColours = (r) => Boolean(r.media?.includes('forced-colors'));
+  // Declarations that make an element visible; border-radius and box-sizing
+  // shape the circle without drawing anything.
+  const paints = (body) =>
+    /(^|[;{\s])(border(-(top|right|bottom|left|color|style|width))?|outline(-[a-z]+)?|box-shadow|background(-[a-z]+)?)\s*:/.test(
+      body
+    );
+  const withoutNot = (sel) => sel.replace(/:not\([^)]*\)/g, '');
 
   it('outlines only non-empty circles in every forced-colours heat-map rule', () => {
-    const selectors = heatmapSelectors(true);
+    const selectors = rules
+      .filter(inForcedColours)
+      .flatMap((r) => r.selectors)
+      .filter((sel) => sel.includes('heatmap'));
     expect(selectors.length).toBeGreaterThan(0);
     for (const sel of selectors) {
       expect(sel).toContain(':not(.is-empty)');
@@ -437,10 +447,16 @@ describe('heat-map stylesheet', () => {
   });
 
   it('draws an empty circle only while it is selected or hovered', () => {
-    const selectors = heatmapSelectors(false).filter((sel) => /\.is-empty(?!\))/.test(sel));
-    expect(selectors.length).toBeGreaterThan(0);
-    for (const sel of selectors) {
-      expect(sel.includes('.selected') || sel.includes(':hover')).toBe(true);
+    const painting = rules
+      .filter((r) => !inForcedColours(r) && paints(r.body))
+      .flatMap((r) => r.selectors)
+      .filter((sel) => sel.includes('.graph-heatmap-circle'));
+    // The rim itself must exist, so the loop below checks something.
+    expect(painting.some((sel) => withoutNot(sel).includes('.is-empty'))).toBe(true);
+    for (const sel of painting) {
+      if (sel.includes(':not(.is-empty)')) continue;
+      const bare = withoutNot(sel);
+      expect(bare.includes('.selected') || bare.includes(':hover')).toBe(true);
     }
   });
 

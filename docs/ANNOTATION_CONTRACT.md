@@ -372,7 +372,7 @@ entry point closes for the three kinds that had no equivalent at creation
 time. A new annotation created this way is never locked, matching every
 other creation path. The menu is offered as an *anchor* from every eligible
 object's own context menu — a graph node, and every annotation kind except
-`group`/`arrow` (`note`, `label`, `shape`, `icon`, `vote_dot`,
+`group`/`arrow` (`note`, `label`, `text`, `shape`, `icon`, `vote_dot`,
 `image`, `freehand`, `heatmap`) — matching `findSnapTarget`'s full target candidacy
 (the same exclusion set `computeDroppedAttachment` and `findSnapTarget`'s own
 arrow-to-arrow guard apply), not only the three attachable kinds — a
