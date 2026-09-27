@@ -177,7 +177,7 @@ MCP. The required entry points are:
   exists, as distinct from the three surfaces above, which all create one.
   Selecting a single annotation shows a small **✎ Edit** button on it (`note`,
   `label`, `arrow`, `freehand`, and every `GenericAnnotationNode` kind —
-  `text`/`shape`/`icon`/`vote_dot`/`image`; `group` is out of scope, see
+  `text`/`shape`/`icon`/`vote_dot`/`image`/`heatmap`; `group` is out of scope, see
   below); activating it — click, tap, or Tab then Enter/Space — opens the
   same property editor `onContextMenu` (right-click, or a long-press that
   synthesizes it) already opens, which keeps working unchanged alongside it.
@@ -373,7 +373,7 @@ time. A new annotation created this way is never locked, matching every
 other creation path. The menu is offered as an *anchor* from every eligible
 object's own context menu — a graph node, and every annotation kind except
 `group`/`arrow` (`note`, `label`, `shape`, `icon`, `vote_dot`,
-`image`, `freehand`) — matching `findSnapTarget`'s full target candidacy
+`image`, `freehand`, `heatmap`) — matching `findSnapTarget`'s full target candidacy
 (the same exclusion set `computeDroppedAttachment` and `findSnapTarget`'s own
 arrow-to-arrow guard apply), not only the three attachable kinds — a
 `vote_dot` may still be the *target* an unrelated label/icon/text attaches
@@ -2245,7 +2245,7 @@ a write to a locked annotation — but which *tool* performs that write differs
 by type:
 
 - For the generic types (`text`/`label`/`line`/`shape`/`icon`/
-  `vote_dot`/`image`), `reorder_annotation`, `set_annotation_lock` and
+  `vote_dot`/`image`/`freehand`/`heatmap`), `reorder_annotation`, `set_annotation_lock` and
   `update_annotation` all still apply regardless of the annotation's current
   `locked` value.
 - For `note`, those three refuse the id outright — they resolve every id
