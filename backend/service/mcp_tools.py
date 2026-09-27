@@ -1060,6 +1060,11 @@ def register_mcp_tools(
                 "success": False,
                 "error": _INVALID_SESSION_ID_ERROR,
             }
+        # Gated before any session lookup so a denied caller learns nothing
+        # about whether the session exists or has a live canvas.
+        denied = _authorize_session(GRAPH_ACTION_MUTATE, "clear_visualization")
+        if denied:
+            return denied
         stored, clients, push_target = _session_facts(visualization_session_id)
         if not push_target and clients <= 0:
             # Keep the contract's not-found error for an id that names no
@@ -1154,6 +1159,11 @@ def register_mcp_tools(
                 "success": False,
                 "error": _INVALID_SESSION_ID_ERROR,
             }
+        denied = _authorize_session(
+            GRAPH_ACTION_MUTATE, "create_session_auto_add_agent"
+        )
+        if denied:
+            return denied
         try:
             rule = auto_add_registry.add_rule(
                 visualization_session_id,
@@ -1188,6 +1198,9 @@ def register_mcp_tools(
                 "success": False,
                 "error": _INVALID_SESSION_ID_ERROR,
             }
+        denied = _authorize_session(GRAPH_ACTION_READ, "list_session_auto_add_agents")
+        if denied:
+            return denied
         agents = [
             r.to_dict() for r in auto_add_registry.list_rules(visualization_session_id)
         ]
@@ -1215,6 +1228,11 @@ def register_mcp_tools(
                 "success": False,
                 "error": _INVALID_SESSION_ID_ERROR,
             }
+        denied = _authorize_session(
+            GRAPH_ACTION_MUTATE, "remove_session_auto_add_agent"
+        )
+        if denied:
+            return denied
         removed = auto_add_registry.remove_rule(visualization_session_id, agent_id)
         if not removed:
             return {
@@ -1272,10 +1290,7 @@ def register_mcp_tools(
             }
         # Same read gate as get_visualization_session_state: this tool reports a
         # session's existence and node count, so a hook that narrows reads must
-        # be asked here too. (Not every tool in this family is gated yet:
-        # clear_visualization and the three session auto-add agent tools still
-        # are not. This closes the one that discloses stored session state
-        # without asking.)
+        # be asked here too.
         denied = _authorize_session(
             GRAPH_ACTION_READ, "connect_to_visualization_session"
         )
