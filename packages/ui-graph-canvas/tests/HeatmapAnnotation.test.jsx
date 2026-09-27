@@ -515,30 +515,47 @@ describe('heat-map stylesheet', () => {
     return { bare, nots };
   };
   const withoutNot = (sel) => scanNots(sel).bare;
+  // Splits a selector into its compounds, each with the combinator in front
+  // of it (' ' for descendant); parenthesised and bracketed parts stay whole.
   const compoundsOf = (sel) => {
-    const parts = [''];
+    const parts = [{ combinator: '', compound: '' }];
+    let pending = '';
     let depth = 0;
     for (const c of sel.trim()) {
       if (c === '(' || c === '[') depth++;
       else if ((c === ')' || c === ']') && depth > 0) depth--;
       if (depth === 0 && /[\s>+~]/.test(c)) {
-        if (parts.at(-1)) parts.push('');
-      } else {
-        parts[parts.length - 1] += c;
+        if (c !== ' ' || !pending) pending = c.trim() || pending || ' ';
+        continue;
       }
+      if (pending && parts.at(-1).compound) parts.push({ combinator: pending, compound: '' });
+      pending = '';
+      parts.at(-1).compound += c;
     }
-    return parts.filter(Boolean);
+    return parts;
   };
-  // `is-empty` is set on the heat-map node itself, so only a :not(.is-empty)
-  // on the node's own compound keeps a level-0 circle out of a rule.
-  const excludesEmptyHeatmap = (sel) =>
-    compoundsOf(sel).some((compound) => {
-      const { bare, nots } = scanNots(compound);
-      return (
-        /\.(graph-generic-annotation-node|kind-heatmap)(?![\w-])/.test(bare) &&
-        nots.some((n) => n.top && n.arg.trim() === '.is-empty')
-      );
-    });
+  // `is-empty` is set on the heat-map node itself, so a :not(.is-empty) keeps
+  // level-0 circles out only on the compound that is the circle's own node:
+  // the last one naming the node class outside any parenthesis, followed only
+  // by descendant or child combinators. A class inside :has(...) or :is(...)
+  // names another element, and after + or ~ the node is a sibling's.
+  const excludesEmptyHeatmap = (sel) => {
+    const parts = compoundsOf(sel);
+    const namesNode = ({ compound }) => {
+      let flat = compound;
+      for (let prev; prev !== flat;) {
+        prev = flat;
+        flat = flat.replace(/\([^()]*\)/g, '');
+      }
+      return /\.(graph-generic-annotation-node|kind-heatmap)(?![\w-])/.test(flat);
+    };
+    const at = parts.findLastIndex(namesNode);
+    if (at < 0) return false;
+    if (parts.slice(at + 1).some((p) => p.combinator === '+' || p.combinator === '~')) {
+      return false;
+    }
+    return scanNots(parts[at].compound).nots.some((n) => n.top && n.arg.trim() === '.is-empty');
+  };
   // The element a selector styles is its last compound; a class further left
   // only scopes it. A selector is set aside only when its last compound is
   // plain — at least one class, optionally a type, and argument-free
@@ -741,6 +758,13 @@ describe('heat-map stylesheet', () => {
     ['.kind-heatmap:not(.is-empty-x) .graph-heatmap-circle', false],
     ['.kind-heatmap-legend:not(.is-empty) .graph-heatmap-circle', false],
     ['.kind-heatmap .graph-heatmap-circle', false],
+    ['.kind-heatmap:not(.is-empty) ~ .kind-heatmap.is-empty .graph-heatmap-circle', false],
+    ['.kind-heatmap:not(.is-empty) + .kind-heatmap.is-empty .graph-heatmap-circle', false],
+    ['.kind-heatmap:not(.is-empty) ~ .graph-heatmap-circle', false],
+    ['.react-flow__node:has(.kind-heatmap):not(.is-empty) .graph-heatmap-circle', false],
+    ['.react-flow__node:is(.kind-heatmap):not(.is-empty) .graph-heatmap-circle', false],
+    ['.a ~ .kind-heatmap:not(.is-empty) > .graph-heatmap-circle', true],
+    ['.kind-heatmap:not(.is-empty)', true],
   ])('reads `%s` as keeping level-0 circles out: %s', (sel, expected) => {
     expect(excludesEmptyHeatmap(sel)).toBe(expected);
   });
