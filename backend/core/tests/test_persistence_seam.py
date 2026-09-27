@@ -4297,3 +4297,203 @@ class TestExternalChangeSettlesEachReportOnItsOwn:
             )
         finally:
             storage.shutdown_events()
+
+
+class _HeldReloads:
+    """Once armed, every store read blocks until released, and is logged in
+    the backend's lifecycle when it goes through - so a refresh can be parked
+    inside _lock and its completion ordered against the teardown."""
+
+    def __init__(self, backend):
+        self.armed = False
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.reads = 0
+        load = backend.load_graph_data
+
+        def held():
+            if self.armed:
+                self.reads += 1
+                self.entered.set()
+                self.release.wait(5)
+                backend.lifecycle.append("reload")
+            return load()
+
+        backend.load_graph_data = held
+
+
+def _signal_on_stop(backend):
+    stopped = threading.Event()
+    stop = backend.stop_change_notification
+
+    def signalling_stop():
+        stop()
+        stopped.set()
+
+    backend.stop_change_notification = signalling_stop
+    return stopped
+
+
+class _ContendedLock:
+    """Delegates to the storage's lock, and says when the named thread has
+    reached it - which, for a report, is before it has read the flag only if
+    the flag is read under the lock."""
+
+    def __init__(self, lock, thread_name):
+        self._lock = lock
+        self._thread_name = thread_name
+        self.reached = threading.Event()
+
+    def __enter__(self):
+        if threading.current_thread().name == self._thread_name:
+            self.reached.set()
+        return self._lock.__enter__()
+
+    def __exit__(self, *exc):
+        return self._lock.__exit__(*exc)
+
+
+def _join(threads):
+    for thread in threads:
+        thread.join(5)
+    assert not any(thread.is_alive() for thread in threads)
+
+
+class TestTheShutdownFlagIsGuardedByTheLock:
+    """_shut_down is set and read under _lock. A refresh already past the
+    check finishes before teardown proceeds; none starts after it. The flag
+    alone, set or read outside the lock, keeps neither half: teardown would
+    stop the backend under a refresh still running, and a report that read
+    the flag before queueing on the lock would refresh a torn-down model.
+
+    Every thread is joined with a timeout, so a regression fails rather than
+    hangs."""
+
+    def test_a_shutdown_waits_for_a_refresh_already_under_way(self):
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        storage.add_nodes([_node("a", "Alpha")], [])
+        storage.flush()
+        listener = backend.listener
+        reloads = _HeldReloads(backend)
+        stopped = _signal_on_stop(backend)
+        backend.lifecycle.clear()
+        reloads.armed = True
+
+        started = []
+        try:
+            refresh = threading.Thread(
+                target=listener, args=(ExternalChange.unknown(),), daemon=True
+            )
+            refresh.start()
+            started.append(refresh)
+            assert reloads.entered.wait(5)
+
+            teardown = threading.Thread(target=storage.shutdown_events, daemon=True)
+            teardown.start()
+            started.append(teardown)
+            assert not stopped.wait(0.5), (
+                "shutdown stopped the notification under a refresh that was "
+                "still running"
+            )
+        finally:
+            reloads.release.set()
+            _join(started)
+
+        assert backend.lifecycle == [
+            "reload",
+            "stop_change_notification",
+            "checkpoint",
+        ]
+
+    def test_a_report_queued_on_the_lock_refreshes_nothing_after_shutdown(self):
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        storage.add_nodes([_node("a", "Alpha")], [])
+        storage.flush()
+        listener = backend.listener
+        reloads = _HeldReloads(backend)
+        reloads.release.set()
+        lock = _ContendedLock(storage._lock, "late-report")
+        storage._lock = lock
+        report = threading.Thread(
+            target=listener,
+            args=(ExternalChange.unknown(),),
+            name="late-report",
+            daemon=True,
+        )
+
+        started = []
+        try:
+            with storage._lock:
+                report.start()
+                started.append(report)
+                assert lock.reached.wait(5)
+                storage.shutdown_events()
+                # After the teardown's own writes, so a refresh that got
+                # through would have something to bring in.
+                backend.nodes = {"z": _node_payload("z", "Zulu")}
+                reloads.armed = True
+        finally:
+            _join(started)
+
+        assert reloads.reads == 0, "a report queued before shutdown refreshed after it"
+        assert set(storage.nodes) == {"a"}
+
+    def test_a_failed_construction_waits_for_a_refresh_already_under_way(
+        self, monkeypatch
+    ):
+        backend = _NotifyingBackend()
+        backend.save_graph_data(
+            {
+                "nodes": [_node_payload("a", "Alpha")],
+                "edges": [],
+                "metadata": {"version": "1.0", "graph_name": "g"},
+            }
+        )
+        reloads = _HeldReloads(backend)
+        stopped = _signal_on_stop(backend)
+        listeners = []
+        start = backend.start_change_notification
+        backend.start_change_notification = lambda listener: (
+            listeners.append(listener),
+            start(listener),
+        )
+        started = []
+
+        def refresh_then_fail(self):
+            # The gate is open by now, so this report goes straight through
+            # to a refresh, and parks inside _lock.
+            reloads.armed = True
+            refresh = threading.Thread(
+                target=listeners[0], args=(ExternalChange.unknown(),), daemon=True
+            )
+            refresh.start()
+            started.append(refresh)
+            reloads.entered.wait(5)
+            raise RuntimeError("model preload failed")
+
+        monkeypatch.setattr(VectorStore, "preload_model", refresh_then_fail)
+        failures = []
+
+        def construct():
+            try:
+                GraphStorage(persistence_backend=backend)
+            except RuntimeError as exc:
+                failures.append(exc)
+
+        construction = threading.Thread(target=construct, daemon=True)
+        try:
+            construction.start()
+            started.append(construction)
+            assert reloads.entered.wait(5)
+            assert not stopped.wait(0.5), (
+                "a failed construction stopped the notification under a "
+                "refresh that was still running"
+            )
+        finally:
+            reloads.release.set()
+            _join(started)
+
+        assert [str(exc) for exc in failures] == ["model preload failed"]
+        assert backend.lifecycle == ["reload", "stop_change_notification"]
