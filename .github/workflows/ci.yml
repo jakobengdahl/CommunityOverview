@@ -399,6 +399,10 @@ jobs:
       # packages ship one wheel per CPython version, so the version must match.
       - name: Read the image's Python version
         id: image-python
+        # [[:space:]] follows the locale: the runner's C.UTF-8 counts U+2003 as
+        # space. C keeps it to ASCII, as test_lockfiles.py's parser does.
+        env:
+          LC_ALL: C
         run: |
           # The final stage is the one the image runs, so read its (last) FROM line.
           version=$(awk 'tolower($1) == "from" { line = $0 } END { print line }' Dockerfile \
