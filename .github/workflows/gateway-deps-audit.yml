@@ -1,0 +1,158 @@
+# =============================================================================
+# Gateway dependency audit – advisories and lock freshness for the MCP gateway
+# =============================================================================
+# Two checks on services/mcp_oauth_gateway's hash-locked dependency files:
+#
+#   - pip-audit over BOTH locks (requirements.txt and requirements-dev.txt),
+#     blocking: a known-vulnerable pin fails the job.
+#   - lock freshness: re-runs the compile command each lock records in its own
+#     header, then fails if either lock changed.
+#
+# Both need the live package index and advisory data, so they are deliberately
+# kept out of ci.yml's required "Gateway tests" check, where an index outage or
+# an advisory published overnight would turn unrelated PRs red. This workflow
+# is not a branch-protection required check; nightly failures on main surface
+# through the workflow-run history instead.
+#
+# test_lockfiles.py covers the same locks offline (pins, hashes, recorded
+# command, security floors) inside the required check, and runs this
+# workflow's marker-stripping and re-compile scripts against fixtures.
+# =============================================================================
+
+name: Gateway Dependency Audit
+
+on:
+  pull_request:
+    paths:
+      - 'services/mcp_oauth_gateway/requirements*.in'
+      - 'services/mcp_oauth_gateway/requirements*.txt'
+      - 'services/mcp_oauth_gateway/Dockerfile'
+      - '.github/workflows/gateway-deps-audit.yml'
+  schedule:
+    # Nightly against the default branch (main): catches advisories published
+    # against unchanged pins.
+    - cron: '23 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pip-audit:
+    name: Gateway pip-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      # pip-audit evaluates each entry's environment marker against the runner
+      # and silently skips the ones that do not apply (win32, darwin, PyPy, ...).
+      # The locks are universal, so audit every entry: copy each lock with its
+      # markers dropped. Hashes and versions are kept as they are.
+      - name: Drop environment markers from the locks
+        id: strip-markers
+        env:
+          LC_ALL: C
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/gateway-audit"
+          mkdir -p "$out"
+          for lock in requirements.txt requirements-dev.txt; do
+            sed -E 's/^([A-Za-z0-9][A-Za-z0-9._-]*==[^ ;]+) ; .* \\$/\1 \\/' "$lock" > "$out/$lock"
+            entries=$(grep -cE '^[A-Za-z0-9]' "$lock" || true)
+            plain=$(grep -cE '^[A-Za-z0-9][A-Za-z0-9._-]*==[^ ;]+ \\$' "$out/$lock" || true)
+            if [ "$entries" -eq 0 ] || [ "$plain" -ne "$entries" ]; then
+              echo "::error::$lock: $plain of $entries entries are plain 'name==version \\' lines after dropping markers"
+              exit 1
+            fi
+          done
+          echo "dir=$out" >> "$GITHUB_OUTPUT"
+        working-directory: services/mcp_oauth_gateway
+
+      - name: Audit gateway runtime lock
+        run: |
+          echo "## pip-audit — services/mcp_oauth_gateway/requirements.txt (all markers)" >> "$GITHUB_STEP_SUMMARY"
+          pip-audit --require-hashes --disable-pip -r "${{ steps.strip-markers.outputs.dir }}/requirements.txt" -f markdown 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
+
+      - name: Audit gateway dev lock
+        if: ${{ !cancelled() && steps.strip-markers.outcome == 'success' }}
+        run: |
+          echo "## pip-audit — services/mcp_oauth_gateway/requirements-dev.txt (all markers)" >> "$GITHUB_STEP_SUMMARY"
+          pip-audit --require-hashes --disable-pip -r "${{ steps.strip-markers.outputs.dir }}/requirements-dev.txt" -f markdown 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
+
+  lock-freshness:
+    name: Gateway lock freshness
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+
+      # Pinned so a uv release that changes the lock's output format cannot turn
+      # this check red on its own. Bump it deliberately, together with any
+      # re-generated locks it produces.
+      - name: Install uv
+        run: pip install uv==0.8.17
+
+      # Runs exactly the command each lock's header records (the one its .in
+      # documents; test_lockfiles.py pins the two together). The header is
+      # checked against a strict shape and split into words without a shell
+      # evaluating it, so no header text can run anything but `uv pip compile`
+      # writing back to that same lock.
+      - name: Re-compile both locks from their recorded commands
+        id: recompile
+        env:
+          LC_ALL: C
+        run: |
+          set -euo pipefail
+          banner='# This file was autogenerated by uv via the following command:'
+          for lock in requirements.txt requirements-dev.txt; do
+            if [ "$(sed -n '1p' "$lock")" != "$banner" ]; then
+              echo "::error::$lock: first line is not uv's autogenerated banner"
+              exit 1
+            fi
+            cmd=$(sed -n '2s/^#    //p' "$lock")
+            if ! [[ "$cmd" =~ ^uv\ pip\ compile(\ [A-Za-z0-9._=-]+)+$ ]]; then
+              echo "::error::$lock: line 2 is not a plain 'uv pip compile' command"
+              exit 1
+            fi
+            read -ra argv <<< "$cmd"
+            n=${#argv[@]}
+            if [ "${argv[n-2]}" != "-o" ] || [ "${argv[n-1]}" != "$lock" ]; then
+              echo "::error::$lock: recorded command must end with '-o $lock'"
+              exit 1
+            fi
+            echo "Running: $cmd"
+            "${argv[@]}"
+          done
+        working-directory: services/mcp_oauth_gateway
+
+      - name: Fail if a lock changed
+        id: unchanged
+        run: |
+          set -euo pipefail
+          if [ -n "$(git status --porcelain -- .)" ]; then
+            git status --short -- .
+            git diff -- .
+            echo "::error::Re-compiling produced a different lock. Run the command in the lock's header (see its .in) and commit the result."
+            exit 1
+          fi
+        working-directory: services/mcp_oauth_gateway
