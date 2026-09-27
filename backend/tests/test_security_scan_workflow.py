@@ -54,8 +54,12 @@ REPORTING_ONLY_STEPS = {("bandit", "Run bandit (medium+ severity, non-blocking)"
 AUDIT_INVOCATION = re.compile(r"^\s*(?:pip-audit|npm\s+audit)\b.*$", re.M)
 
 # Any line that could run an audit, however spelled: `python -m pip_audit`,
-# `npx audit-ci`, `npm --prefix . audit`, `FOO=1 npm audit`.
-AUDIT_MENTION = re.compile(r"\baudit\b|pip[-_]audit", re.I)
+# `npx audit-ci`, `npm --prefix . audit`, `FOO=1 npm audit`. Every npm and npx
+# line counts too: `npm config set omit=peer` narrows a later audit, and npm
+# accepts abbreviations such as `npm aud`. So does `pip config`.
+AUDIT_MENTION = re.compile(
+    r"\baudit\b|pip[-_]audit|\bnpm\b|\bnpx\b|\bpip3?\s+config\b", re.I
+)
 AUDIT_INSTALL = "pip install pip-audit"
 # A literal summary heading: no expansion or substitution inside the quotes.
 SUMMARY_HEADING = re.compile(r'^echo "## [^"$`\\]*" >> "\$GITHUB_STEP_SUMMARY"$')
@@ -96,6 +100,26 @@ ALLOWED_ACTIONS = {
     "actions/setup-node",
     "gitleaks/gitleaks-action",
 }
+
+# The setup actions' inputs in the audit jobs, exactly. setup-node's
+# `registry-url` writes an .npmrc and exports NPM_CONFIG_USERCONFIG through
+# GITHUB_ENV, where no `run:` body shows it.
+AUDIT_JOB_ACTION_INPUTS = {
+    "pip-audit": [
+        ("actions/checkout", {}),
+        ("actions/setup-python", {"python-version": "3.11", "cache": "pip"}),
+    ],
+    "npm-audit": [
+        ("actions/checkout", {}),
+        ("actions/setup-node", {"node-version": "20"}),
+    ],
+}
+
+# Job control (`set -m`, `set -mE`, `set -o monitor`) puts each background job
+# in its own process group, out of reach of the group drain in _run_step.
+JOB_CONTROL = re.compile(r"\bset\b[^;&|\n]*\s(?:-[a-zA-Z]*m|-o\s+monitor\b)")
+# `command -p` searches bash's default PATH, reaching real tools past the stubs.
+COMMAND_P = re.compile(r"\bcommand\b[^;&|\n]*\s-[a-zA-Z]*p")
 
 # The only file a `run:` body may write to. Only `N>&M` / `>&-` is an fd dup;
 # `N>file`, `&>file` and `>&file` all write to a file.
@@ -159,12 +183,19 @@ def _wait_for_process_group(pgid, timeout):
     return False
 
 
-def _run_step(step, tmp_path, scanner_exit):
+def _run_step(step, tmp_path, scanner_exit, timeout=30):
     stub_dir = tmp_path / "bin"
     stub_dir.mkdir()
+    # Each stub records the environment it was started with: configuration a
+    # static check cannot see - a quote-split name, `declare -x` - reaches here.
+    env_capture = tmp_path / "env"
+    env_capture.mkdir()
     for name in STUBBED:
         stub = stub_dir / name
-        stub.write_text(f"#!/bin/sh\necho 'stub {name} report'\nexit {scanner_exit}\n")
+        stub.write_text(
+            f"#!/bin/sh\nexport -p > '{env_capture}/{name}.'$$\n"
+            f"echo 'stub {name} report'\nexit {scanner_exit}\n"
+        )
         stub.chmod(0o755)
     for name in REAL_TOOLS:
         (stub_dir / name).symlink_to(shutil.which(name))
@@ -187,11 +218,14 @@ def _run_step(step, tmp_path, scanner_exit):
     script = tmp_path / "step.sh"
     script.write_text(step["run"])
     # Nothing of the job running this test may leak in: under CI its GITHUB_*
-    # and RUNNER_* variables name that job's real command files.
+    # and RUNNER_* variables name that job's real command files, and its own
+    # audit configuration would read as the step's.
     inherited = {
         k: v
         for k, v in os.environ.items()
-        if k not in SHELL_STARTUP_VARS and not k.startswith(("GITHUB_", "RUNNER_"))
+        if k not in SHELL_STARTUP_VARS
+        and not k.startswith(("GITHUB_", "RUNNER_"))
+        and not AUDIT_CONFIG_VAR.match(k)
     }
     env = dict(
         inherited,
@@ -214,10 +248,28 @@ def _run_step(step, tmp_path, scanner_exit):
         start_new_session=True,
     )
     try:
-        proc.communicate(timeout=30)
+        proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # The whole group, not just the leader: a background child still holds
+        # stdout, and the reaping communicate() would wait on it.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.communicate()
+        raise
     finally:
         drained = _wait_for_process_group(proc.pid, timeout=30)
     assert drained, f"step {step['name']!r} left processes running"
+    for record in env_capture.iterdir():
+        if record.name.split(".")[0] not in ("npm", "pip-audit"):
+            continue
+        for line in record.read_text().splitlines():
+            name = re.match(r"export\s+([^=\s]+)", line)
+            assert not (name and AUDIT_CONFIG_VAR.match(name.group(1))), (
+                f"step {step['name']!r} hands {record.name.split('.')[0]} "
+                f"{name.group(1)}"
+            )
     written = sorted(
         str(f.relative_to(runner_temp))
         for f in runner_temp.rglob("*")
@@ -328,7 +380,7 @@ def test_dependency_audit_scope_is_not_narrowed_by_configuration(job_id):
 
 
 def _npmrc_keys(text):
-    for line in text.splitlines():
+    for line in text.removeprefix("\ufeff").splitlines():
         line = line.strip()
         if not line or line.startswith(("#", ";")):
             continue
@@ -345,6 +397,8 @@ def test_npmrc_does_not_narrow_the_npm_audit():
 def test_npmrc_key_parsing_sees_every_spelling_npm_accepts():
     text = 'omit[]=peer\n"audit-level"=critical\n@x:registry=https://x/\nglobal\n# c\n'
     assert set(_npmrc_keys(text)) == {"omit", "audit-level", "@x:registry", "global"}
+    # A byte-order mark saved by an editor is not part of the first key.
+    assert set(_npmrc_keys("\ufefffund=false\n")) == {"fund"}
 
 
 def test_audits_run_nowhere_but_their_own_jobs():
@@ -466,3 +520,85 @@ def test_teed_steps_run_under_the_default_shell_the_test_executes():
         assert "shell" not in job.get("defaults", {}).get("run", {})
     for param in _teed_steps():
         assert "shell" not in param.values[0]
+
+
+@pytest.mark.parametrize("job_id", sorted(AUDIT_JOB_ACTION_INPUTS))
+def test_audit_job_setup_action_inputs_are_pinned(job_id):
+    used = [
+        (step["uses"].split("@")[0], step.get("with") or {})
+        for step in _workflow()["jobs"][job_id]["steps"]
+        if "uses" in step
+    ]
+    assert used == AUDIT_JOB_ACTION_INPUTS[job_id]
+
+
+def _run_bodies():
+    for job_id, job in _workflow()["jobs"].items():
+        for step in job.get("steps", []):
+            if "run" in step:
+                yield f"{job_id}:{step.get('name')}", step["run"].replace("\\\n", "")
+
+
+def test_no_step_turns_on_job_control_or_reaches_past_the_stubs():
+    for where, body in _run_bodies():
+        assert not JOB_CONTROL.search(body), f"{where} turns on job control"
+        assert not COMMAND_P.search(body), f"{where} runs `command -p`"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "set -m",
+        "set -mE",
+        "set -Em",
+        "set -e -m",
+        "set -o monitor",
+        "  set  -o   monitor",
+    ],
+)
+def test_job_control_check_sees_every_spelling(body):
+    assert JOB_CONTROL.search(body)
+
+
+@pytest.mark.parametrize("body", ["set -e", "set -o pipefail", "set +x", "echo -m"])
+def test_job_control_check_passes_other_options(body):
+    assert not JOB_CONTROL.search(body)
+
+
+@pytest.mark.parametrize(
+    "body", ["command -p git", "command -pv git", "command -v -p git"]
+)
+def test_command_p_check_sees_every_spelling(body):
+    assert COMMAND_P.search(body)
+
+
+def test_audit_mention_sees_npm_configuration_and_abbreviations():
+    for line in ("npm config set omit=peer --location=project", "npm aud", "npx x"):
+        assert AUDIT_MENTION.search(line), line
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "npm_config_omit=dev npm audit",
+        'declare -x "npm""_config_omit=dev"; npm audit',
+        "export PIP_NO_DEPS=1; pip-audit",
+    ],
+)
+def test_stubs_catch_audit_configuration_in_their_environment(body, tmp_path):
+    step = {"name": "self-test", "run": body}
+    with pytest.raises(AssertionError, match="hands"):
+        _run_step(step, tmp_path, scanner_exit=0)
+
+
+@pytest.mark.timeout(60)
+def test_a_timed_out_step_is_killed_with_its_background_children(tmp_path):
+    # With only the leader killed, the child still holds stdout and the
+    # reaping communicate() never returns; the marker turns that hang into a
+    # failure.
+    step = {
+        "name": "self-test",
+        "run": "(while :; do :; done) &\nwhile :; do :; done\n",
+    }
+    with pytest.raises(subprocess.TimeoutExpired):
+        _run_step(step, tmp_path, scanner_exit=0, timeout=1)
