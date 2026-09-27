@@ -1106,6 +1106,7 @@ class TestShortSigningKeyWarning(unittest.TestCase):
         result = self._start_gateway("abc\udcff")
         assert result.returncode == 0, result.stderr
         assert result.stderr.count("GW_JWT_SIGNING_KEY") == 1, result.stderr
+        self._assert_key_absent(result.stdout + result.stderr, "abc\udcff")
 
     def test_gateway_startup_warns_on_short_key_and_still_starts(self):
         result = self._start_gateway(self.SHORT_KEY)
