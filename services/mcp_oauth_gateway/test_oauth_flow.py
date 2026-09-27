@@ -49,8 +49,8 @@ _UNRESERVED = (
 
 # Non-ASCII characters a Unicode-aware pattern (re.I case folding, \d, \w)
 # would accept as unreserved: KELVIN SIGN, LONG S, I WITH DOT ABOVE,
-# ARABIC-INDIC DIGIT ONE, FULLWIDTH A.
-_UNICODE_LOOKALIKES = ("\u212a", "\u017f", "\u0130", "\u0661", "\uff21")
+# DOTLESS I, ARABIC-INDIC DIGIT ONE, FULLWIDTH A.
+_UNICODE_LOOKALIKES = ("\u212a", "\u017f", "\u0130", "\u0131", "\u0661", "\uff21")
 
 
 # RSA keypair used to sign fake Google ID tokens in tests. The gateway verifies
@@ -470,14 +470,15 @@ class TestTokenEndpointMalformedBody(unittest.TestCase):
     def test_verifier_with_every_unreserved_char_is_accepted(self):
         verifier = _UNRESERVED
         assert len(verifier) == 66
-        code = auth.issue_auth_code(
-            "alice@example.com", auth.compute_s256_challenge(verifier), "https://app/cb",
-        )
-        resp = client.post("/token", data={
-            "grant_type": "authorization_code", "code": code,
-            "code_verifier": verifier, "redirect_uri": "https://app/cb",
-        })
-        assert resp.status_code == 200, resp.text
+        for encoding in ("data", "json"):
+            code = auth.issue_auth_code(
+                "alice@example.com", auth.compute_s256_challenge(verifier), "https://app/cb",
+            )
+            resp = client.post("/token", **{encoding: {
+                "grant_type": "authorization_code", "code": code,
+                "code_verifier": verifier, "redirect_uri": "https://app/cb",
+            }})
+            assert resp.status_code == 200, (encoding, resp.text)
 
     def test_code_verifier_length_bounds_are_inclusive(self):
         for length in (43, 128):
