@@ -1102,17 +1102,31 @@ class GraphStorage:
         here. What happens next is the caller's: `add_nodes` generates over
         the whole batch afterwards, so generation wins there, while a refresh
         generates only where the store supplied nothing.
+
+        The vectors come off the nodes only after the index export and load
+        have returned: until then the node is their only copy, so a raise
+        there must leave them where they were for the caller to retry or
+        settle. A vector the index refuses for its width is still cleared.
         """
-        self._adopt_vectors(self._take_inline_vectors(nodes))
+        nodes = list(nodes)
+        self._adopt_vectors(
+            {
+                node.id: node.embedding
+                for node in nodes
+                if node.embedding is not None and len(node.embedding) > 0
+            }
+        )
+        self._take_inline_vectors(nodes)
 
     def _adopt_vectors(
         self, supplied: Dict[str, Any], anchor: Optional[int] = None
     ) -> None:
-        """Move vectors already taken off their nodes into the index.
+        """Move supplied vectors, keyed by node id, into the index.
 
-        Separate from _adopt_supplied_vectors because the refresh takes a
+        Works on a dict rather than on nodes because the refresh takes a
         vector off its node when the operation is applied - so the event it
         emits does not carry it - and adopts it only when the batch ends.
+        _adopt_supplied_vectors passes vectors still on their nodes.
 
         `anchor` is the width to judge the supplied vectors against, for a
         caller that has already emptied the index of what would otherwise
