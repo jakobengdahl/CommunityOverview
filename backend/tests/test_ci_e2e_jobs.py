@@ -86,11 +86,12 @@ SHELL_BOUNDARY = r"""[\s;&|()<>"'`]"""
 # Scripts npm runs without anything naming them: `npm ci` and `npm install`
 # run the install and dependencies lifecycles, `npm t`, `npm restart`, `npm
 # pack` and their many aliases, abbreviations and flag-first spellings run the
-# rest. Some events (install, pack, version among them) also run their pre/post
-# pair when the event itself has no script, while `npm test` and the start/stop
-# family stop at "Missing script"; the set assumes all of them do. Rather than
-# parse npm's command grammar, any `npm` invocation counts as running every one
-# of these - that can only over-detect, which fails loudly here.
+# rest. Some events (install, pack, version and restart among them) also run
+# their pre/post pair when the event itself has no script, while `npm test` and
+# `npm stop` stop at "Missing script" and `npm start` does unless a server.js
+# exists; the set assumes all of them do. Rather than parse npm's command
+# grammar, any `npm` invocation counts as running every one of these - that can
+# only over-detect, which fails loudly here.
 NPM_LIFECYCLE_EVENTS = (
     "install",
     "dependencies",
@@ -237,9 +238,9 @@ def test_discovery_follows_npm_scripts_under_any_name(npm_scripts, extra, run):
 
 
 # The lifecycle events npm's scripts documentation lists, current and legacy
-# (prepublish, shrinkwrap, uninstall), each with its pre/post pair. Written out
-# independently of NPM_LIFECYCLE_EVENTS, so dropping an event or a prefix there
-# fails below.
+# (prepublish, shrinkwrap, uninstall), each with both prefixes as the
+# over-approximation above assumes. Written out independently of
+# NPM_LIFECYCLE_EVENTS, so dropping an event or a prefix there fails below.
 DOCUMENTED_LIFECYCLE_SCRIPTS = sorted(
     f"{prefix}{event}"
     for event in (
