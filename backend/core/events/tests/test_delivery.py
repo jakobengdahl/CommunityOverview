@@ -794,7 +794,13 @@ class TestWebhookRedirectHops:
     """Drive _post_with_redirect_ssrf_check through a mock transport and record
     every request that actually went out."""
 
-    def _post(self, monkeypatch, handler, url="http://start.example.com/hook"):
+    def _post(
+        self,
+        monkeypatch,
+        handler,
+        url="http://start.example.com/hook",
+        headers=None,
+    ):
         seen = []
 
         def recording(request):
@@ -806,7 +812,7 @@ class TestWebhookRedirectHops:
         worker = DeliveryWorker()
         try:
             response = worker._post_with_redirect_ssrf_check(
-                url, {"k": "v"}, {"Content-Type": "application/json"}
+                url, {"k": "v"}, headers or {"Content-Type": "application/json"}
             )
         except Exception as exc:
             return seen, exc
@@ -896,12 +902,17 @@ class TestWebhookRedirectHops:
                 return httpx.Response(status, headers={"location": "/second"})
             return httpx.Response(200)
 
-        seen, outcome = self._post(monkeypatch, handler)
+        seen, outcome = self._post(
+            monkeypatch,
+            handler,
+            headers={"Content-Type": "application/json", "X-Signature": "sig-1"},
+        )
 
         assert outcome.status_code == 200
         assert [method for method, _ in seen] == ["POST", "GET"]
         assert sent_headers[0]["content-type"] == "application/json"
         assert "content-type" not in sent_headers[1]
+        assert sent_headers[1]["x-signature"] == "sig-1"
 
     def test_method_keeping_hop_after_a_switch_stays_get(self, monkeypatch):
         def handler(request, index):
