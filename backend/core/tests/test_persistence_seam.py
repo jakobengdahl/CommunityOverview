@@ -544,6 +544,20 @@ class TestChangeNotificationWiring:
             listeners.append(listener),
             start(listener),
         )
+        # One report on the way down too, while the write queue is still
+        # there to drain: refused from the start of the failure path, not
+        # from when the stop returns.
+        stop = backend.stop_change_notification
+
+        def reporting_stop():
+            listeners[0](
+                ExternalChange.entities(
+                    [EntityOperation.upsert_node(_node_payload("c", "Cedar"))]
+                )
+            )
+            stop()
+
+        backend.stop_change_notification = reporting_stop
 
         with pytest.raises(RuntimeError, match="model preload failed"):
             GraphStorage(persistence_backend=backend)
