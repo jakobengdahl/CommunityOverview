@@ -10,6 +10,8 @@ import base64
 import importlib
 import json
 import os
+import re
+import subprocess
 import sys
 import time
 import unittest
@@ -990,6 +992,110 @@ class TestGatewayJwt(unittest.TestCase):
                 )
         assert good == "alice@example.com"
         assert bad is None
+
+
+class TestShortSigningKeyWarning(unittest.TestCase):
+    """GW_JWT_SIGNING_KEY below 32 bytes is warned about at startup, never refused."""
+
+    # Distinctive so any leak of the value (or a slice of it) is easy to spot.
+    SHORT_KEY = "plumvox-quiltbex-zyg"
+
+    def _warnings_for(self, key):
+        import main
+
+        with self.assertLogs("main", level="DEBUG") as cm:
+            main.logger.debug("sentinel")
+            main._warn_if_short_signing_key(key)
+        return [r for r in cm.records if r.levelname == "WARNING"]
+
+    # Starts the gateway, then exits 3 if startup replaced the configured key.
+    _STARTUP_SCRIPT = (
+        "import os, sys, config, main\n"
+        "sys.exit(0 if config.GW_JWT_SIGNING_KEY == os.environ['GW_JWT_SIGNING_KEY'] else 3)\n"
+    )
+
+    def _start_gateway(self, key):
+        env = dict(os.environ, GW_JWT_SIGNING_KEY=key)
+        return subprocess.run(
+            [sys.executable, "-c", self._STARTUP_SCRIPT],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+    def _assert_key_absent(self, text, key):
+        assert key not in text
+        for i in range(len(key) - 3):
+            assert key[i : i + 4] not in text, f"part of the key leaked: {key[i:i + 4]!r}"
+        assert hashlib.sha256(key.encode()).hexdigest()[:8] not in text
+
+    def test_short_key_logs_warning_without_the_value(self):
+        records = self._warnings_for(self.SHORT_KEY)
+        assert len(records) == 1
+        message = records[0].getMessage()
+        assert "GW_JWT_SIGNING_KEY" in message
+        assert "32 bytes" in message
+        self._assert_key_absent(message, self.SHORT_KEY)
+        # The only numbers allowed are the recommended minimum (32 bytes / 256 bits).
+        assert set(re.findall(r"\d+", message)) <= {"32", "256"}, message
+        assert records[0].args == (32,)
+
+    def test_boundary_is_32_bytes(self):
+        assert len(self._warnings_for("k" * 31)) == 1
+        assert self._warnings_for("k" * 32) == []
+        assert self._warnings_for("k" * 64) == []
+
+    def test_length_is_measured_in_utf8_bytes(self):
+        # 16 characters but 32 bytes: long enough.
+        assert self._warnings_for("\u00e9" * 16) == []
+        # 16 characters, 31 bytes: too short.
+        assert len(self._warnings_for("\u00e9" * 15 + "a")) == 1
+
+    def test_non_utf8_key_warns_instead_of_raising(self):
+        # A non-UTF-8 env value arrives as lone surrogates (surrogateescape).
+        assert len(self._warnings_for("abc\udcff")) == 1
+        assert self._warnings_for("k" * 31 + "\udcff") == []
+
+    def test_gateway_starts_with_a_non_utf8_key(self):
+        result = self._start_gateway("abc\udcff")
+        assert result.returncode == 0, result.stderr
+        assert result.stderr.count("GW_JWT_SIGNING_KEY") == 1, result.stderr
+
+    def test_gateway_startup_warns_on_short_key_and_still_starts(self):
+        result = self._start_gateway(self.SHORT_KEY)
+        assert result.returncode == 0, result.stderr
+        output = result.stdout + result.stderr
+        warning_lines = [
+            line for line in output.splitlines()
+            if "WARNING" in line and "GW_JWT_SIGNING_KEY" in line
+        ]
+        assert len(warning_lines) == 1, output
+        self._assert_key_absent(output, self.SHORT_KEY)
+
+    def test_gateway_startup_is_quiet_with_a_32_byte_key(self):
+        result = self._start_gateway("test-jwt-key-at-least-32-chars!!")
+        assert result.returncode == 0, result.stderr
+        output = result.stdout + result.stderr
+        assert "GW_JWT_SIGNING_KEY" not in output
+        assert "WARNING" not in output, output
+
+    def test_short_key_still_signs_and_verifies_tokens(self):
+        with patch.object(config, "GW_JWT_SIGNING_KEY", self.SHORT_KEY):
+            verifier, challenge = _make_pkce_pair()
+            code = auth.issue_auth_code("alice@example.com", challenge, "https://app/cb")
+            token = auth.exchange_code_for_token(code, verifier, "https://app/cb")
+            assert token is not None
+            claims = auth.validate_token(token)
+            assert claims is not None
+            assert claims["sub"] == "alice@example.com"
+        # The short key itself signed it: it verifies under that key and no other.
+        decoded = jwt.decode(
+            token, self.SHORT_KEY, algorithms=["HS256"], audience=config.PUBLIC_BASE_URL
+        )
+        assert decoded["sub"] == "alice@example.com"
+        assert auth.validate_token(token) is None
 
 
 class TestCorsConfiguration(unittest.TestCase):
