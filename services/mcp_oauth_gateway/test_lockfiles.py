@@ -73,12 +73,14 @@ _ENVIRONMENTS = [
 
 # The final stage's base image, which the image runs on. ci.yml's image-python
 # step applies the same rule in shell; TestImagePythonStep holds them together.
-_PYTHON_BASE = re.compile(r"\s*(?i:FROM)\s+(?:--platform=\S+\s+)?(?:\S*/)?python:(\d+)\.(\d+)")
+_PYTHON_BASE = re.compile(r"\s*(?i:FROM)\s+(?:--platform=\S+\s+)?(?:\S*/)?python:(\d+)\.(\d+)", re.ASCII)
 
 
 def _image_python(dockerfile):
     """(major, minor) of the Python on the Dockerfile's last FROM line."""
-    froms = [line for line in dockerfile.splitlines() if line.split()[:1] and line.split()[0].upper() == "FROM"]
+    # awk's records and default fields: lines on \n only, fields on space and tab only.
+    lines = dockerfile.split("\n")
+    froms = [line for line in lines if re.split(r"[ \t]+", line.strip(" \t"))[0].upper() == "FROM"]
     if not froms:
         raise AssertionError("Dockerfile: no FROM line to read the image's Python from")
     match = _PYTHON_BASE.match(froms[-1])
@@ -304,12 +306,22 @@ class TestImagePythonStep(unittest.TestCase):
         ("FROM docker.io/library/python:3.12-slim\n", "3.12"),
         ("FROM python:3.11 AS build\nRUN true\n# FROM python:3.10\nFROM python:3.12-slim\n", "3.12"),
         ("FROM python:3.12\nRUN echo from python:3.10\n", "3.12"),
+        ("From python:3.12\n", "3.12"),
+        ("FROM python:3.12.10-slim\n", "3.12.10"),
+        ("FROM python:10.1\n", "10.1"),
+        ("FROM\tpython:3.11\n", "3.11"),
+        ("FROM python:3.12-slim\r\n", "3.12"),
     ]
     REJECTED = [
         "",
         "# FROM python:3.12\n",
         "FROM python:3.12 AS build\nFROM debian:bookworm-slim\n",
         "FROM mypython:3.12\n",
+        "FROM python:3-slim\n",
+        "FROM python:3.x\n",
+        "FROM busybox from python:3.12\n",
+        "FROM\u00a0python:3.12\n",
+        "FROM python:\u0663.\u0661\u0662\n",
     ]
 
     def _step_script(self):
