@@ -1236,7 +1236,10 @@ describe('Server-backed session lifecycle', () => {
   // Materialise a session with a live stream, start a resync whose reload is
   // held on `gate`, and return the stream so a test can deliver ops while the
   // reload is in flight.
-  async function startResyncHeldOnGate(gate, loadsById) {
+  // Renders the app and waits for its sync stream, without delivering any
+  // stream event: the client stays un-ready, so only a bypassReady flush (a
+  // session switch) can POST its queue.
+  async function startSyncedSession() {
     const { container } = renderApp();
     act(() => {
       useGraphStore.getState().updateVisualization([NODE_A], []);
@@ -1244,13 +1247,17 @@ describe('Server-backed session lifecycle', () => {
     const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
     fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
     await waitFor(() => screen.getByText('Save View'));
-    const source = await waitFor(() => {
+    return waitFor(() => {
       const found = FakeEventSource.instances.find(
         (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')
       );
       expect(found).toBeTruthy();
       return found;
     });
+  }
+
+  async function startResyncHeldOnGate(gate, loadsById) {
+    const source = await startSyncedSession();
     const sessionId = source.url.split('/api/sessions/')[1].split('/')[0];
     gate.active = true;
     act(() => {
@@ -1698,15 +1705,21 @@ describe('Server-backed session lifecycle', () => {
       });
     const op = { op: 'nodes_hidden', node_ids: ['held-probe'] };
     let timeouts = null;
+    let probeStack = null;
     // Kept in flight: a settled POST clears its own timer, which would empty
     // pending() whether or not the harness had wrongly held it.
     const originalFetch = global.fetch.getMockImplementation();
-    global.fetch.mockImplementation((url, opts) =>
-      opts?.body?.includes('held-probe') ? new Promise(() => {}) : originalFetch(url, opts)
-    );
+    global.fetch.mockImplementation((url, opts) => {
+      if (!opts?.body?.includes('held-probe')) return originalFetch(url, opts);
+      const limit = Error.stackTraceLimit;
+      Error.stackTraceLimit = 50;
+      probeStack = new Error().stack || '';
+      Error.stackTraceLimit = limit;
+      return new Promise(() => {});
+    });
 
     try {
-      const source = await startResyncHeldOnGate({ active: false }, () => 1);
+      const source = await startSyncedSession();
       const client = clients.find((c) => source.url.includes(`/api/sessions/${c.sessionId}/`));
       timeouts = holdRequestTimeouts();
       act(() => client.sendOps([op]));
@@ -1714,6 +1727,10 @@ describe('Server-backed session lifecycle', () => {
       fireEvent.click(screen.getByText('5555-6666'));
 
       await waitFor(() => expect(opsFrom(global.fetch)).toContainEqual(op));
+      // The POST, and the timer _postOps arms in the same synchronous call,
+      // must come from the switch: from the debounced flush instead, App.jsx
+      // would be off the stack and this test would prove nothing.
+      expect(probeStack).toMatch(/[\\/]src[\\/]App\.jsx/);
       expect(timeouts.pending()).toEqual([]);
     } finally {
       timeouts?.restore();
