@@ -18,10 +18,54 @@ from backend.core.session_auto_add import (
     build_node_create_listener,
 )
 from backend.core.session_registry import SessionRegistry
-from backend.runtime.authorization import AUTHORIZATION_MODE_ENV
+from backend.runtime.authorization import (
+    AUTHORIZATION_MODE_ENV,
+    GRAPH_ACTION_MUTATE,
+    GRAPH_ACTION_READ,
+    GraphAuthorizationDecision,
+)
 from backend.service import GraphService, register_mcp_tools
+from backend.service.mcp_tools import _INVALID_SESSION_ID_ERROR
+from backend.service.tests.test_authorization import DenyMutationsHook
 
 SESSION = "1000-2000"
+
+
+class DenyAllRecordingHook:
+    """Denies every action and records the ``(action, target)`` it was asked."""
+
+    def __init__(self):
+        self.seen = []
+
+    def evaluate(self, context):
+        self.seen.append((context.action, context.target))
+        return GraphAuthorizationDecision(
+            allowed=False, reason="denied", mode="custom", source="test"
+        )
+
+
+def _tools_with_hook(tmp_path, hook, *, session_registry=True, auto_add=True):
+    storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+    service = GraphService(storage, authorization_hook=hook)
+    registry = SessionRegistry() if session_registry else None
+    auto_add_registry = SessionAutoAddRegistry() if auto_add else None
+    mock_mcp = Mock()
+    mock_mcp.tool = MagicMock(return_value=lambda f: f)
+    tools_map = register_mcp_tools(
+        mock_mcp,
+        service,
+        session_registry=registry,
+        auto_add_registry=auto_add_registry,
+    )
+    return tools_map, registry, auto_add_registry
+
+
+# (tool, action it must be authorized as, extra kwargs a well-formed call needs)
+AUTO_ADD_TOOLS = [
+    ("create_session_auto_add_agent", GRAPH_ACTION_MUTATE, {"node_types": ["Actor"]}),
+    ("list_session_auto_add_agents", GRAPH_ACTION_READ, {}),
+    ("remove_session_auto_add_agent", GRAPH_ACTION_MUTATE, {"agent_id": "a-1"}),
+]
 
 
 @pytest.fixture
@@ -187,6 +231,78 @@ class TestAuthorization:
         assert listed["success"] is True
         assert len(listed["agents"]) == 1
         assert removed["success"] is True
+
+
+class TestAuthorizationOrdering:
+    """Pins where the gate sits relative to the tools' own validation.
+
+    Input validation and the availability check run before the hook is asked,
+    so a denied caller still gets the specific error for a malformed id or an
+    unwired registry, and the hook is never consulted for a call that could
+    not have proceeded anyway. The gate itself names the tool as its target.
+    """
+
+    @pytest.mark.parametrize("tool,action,kwargs", AUTO_ADD_TOOLS)
+    def test_malformed_session_id_is_rejected_before_the_gate(
+        self, tmp_path, tool, action, kwargs
+    ):
+        hook = DenyAllRecordingHook()
+        tools_map, *_ = _tools_with_hook(tmp_path, hook)
+
+        result = tools_map[tool]("bad", **kwargs)
+
+        assert result == {"success": False, "error": _INVALID_SESSION_ID_ERROR}
+        assert hook.seen == []
+
+    @pytest.mark.parametrize("tool,action,kwargs", AUTO_ADD_TOOLS)
+    @pytest.mark.parametrize(
+        "wiring",
+        [{"auto_add": False}, {"session_registry": False}],
+        ids=["no-auto-add-registry", "no-session-registry"],
+    )
+    def test_unavailable_registry_is_reported_before_the_gate(
+        self, tmp_path, tool, action, kwargs, wiring
+    ):
+        hook = DenyAllRecordingHook()
+        tools_map, *_ = _tools_with_hook(tmp_path, hook, **wiring)
+
+        result = tools_map[tool](SESSION, **kwargs)
+
+        assert result == {
+            "success": False,
+            "error": "Auto-add agents are not available",
+        }
+        assert hook.seen == []
+
+    @pytest.mark.parametrize("tool,action,kwargs", AUTO_ADD_TOOLS)
+    def test_gate_is_asked_once_with_the_tool_as_target(
+        self, tmp_path, tool, action, kwargs
+    ):
+        hook = DenyAllRecordingHook()
+        tools_map, *_ = _tools_with_hook(tmp_path, hook)
+
+        result = tools_map[tool](SESSION, **kwargs)
+
+        assert result["success"] is False
+        assert result["error_code"] == "access_denied"
+        assert result["authorization"]["action"] == action
+        assert result["authorization"]["target"] == tool
+        assert hook.seen == [(action, tool)]
+
+    def test_denied_create_is_refused_before_pattern_validation(self, tmp_path):
+        # An empty pattern is an AutoAddRuleError for an allowed caller; a caller
+        # denied mutations must get the access error, not the validation one.
+        hook = DenyMutationsHook()
+        tools_map, _, auto_add_registry = _tools_with_hook(tmp_path, hook)
+
+        result = tools_map["create_session_auto_add_agent"](SESSION)
+
+        assert result["error_code"] == "access_denied"
+        assert "at least one" not in result["error"]
+        assert [(c.action, c.target) for c in hook.seen_contexts] == [
+            (GRAPH_ACTION_MUTATE, "create_session_auto_add_agent")
+        ]
+        assert auto_add_registry.list_rules(SESSION) == []
 
 
 class TestUnavailable:

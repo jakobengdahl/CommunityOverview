@@ -21,12 +21,14 @@ from backend.core.session_store import (
     InMemorySessionPersistenceBackend,
     SessionStore,
 )
-from backend.runtime.authorization import AUTHORIZATION_MODE_ENV
+from backend.runtime.authorization import AUTHORIZATION_MODE_ENV, GRAPH_ACTION_MUTATE
 from backend.service import GraphService, register_mcp_tools
+from backend.service.mcp_tools import _INVALID_SESSION_ID_ERROR
 from backend.service.tests.test_authorization import (
     ActionScopedNarrowingHook,
     FixedNarrowingHook,
 )
+from backend.service.tests.test_mcp_auto_add_tools import DenyAllRecordingHook
 
 
 @pytest.fixture
@@ -654,3 +656,76 @@ class TestVisualizationToolsAuthorization:
         assert "error_code" not in layout
         assert moved["success"] is True
         assert moved["moved"] == 1
+
+
+class TestClearVisualizationGateOrdering:
+    """Pins where ``clear_visualization``'s gate sits.
+
+    Availability and id validation come first, so the hook is never asked for
+    a call that could not proceed. The gate then runs before any session
+    lookup: a denied caller must not cause the tool to probe stored state,
+    presence or the push queue, since the answers differ between a live
+    session and an unknown id even when the refusal does not.
+    """
+
+    @staticmethod
+    def _tools(tmp_path, hook, *, wired=True):
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        service = GraphService(storage, authorization_hook=hook)
+        manager = (
+            SessionManager(SessionStore(InMemorySessionPersistenceBackend()))
+            if wired
+            else None
+        )
+        registry = SessionRegistry() if wired else None
+        mock_mcp = Mock()
+        mock_mcp.tool = MagicMock(return_value=lambda f: f)
+        tools_map = register_mcp_tools(
+            mock_mcp, service, session_registry=registry, session_manager=manager
+        )
+        return tools_map, manager, registry
+
+    def test_malformed_session_id_is_rejected_before_the_gate(self, tmp_path):
+        hook = DenyAllRecordingHook()
+        tools_map, *_ = self._tools(tmp_path, hook)
+
+        result = tools_map["clear_visualization"](visualization_session_id="bad")
+
+        assert result == {"success": False, "error": _INVALID_SESSION_ID_ERROR}
+        assert hook.seen == []
+
+    def test_unavailable_sessions_are_reported_before_the_gate(self, tmp_path):
+        hook = DenyAllRecordingHook()
+        tools_map, *_ = self._tools(tmp_path, hook, wired=False)
+
+        result = tools_map["clear_visualization"](visualization_session_id="1000-2000")
+
+        assert result == {
+            "success": False,
+            "error": "Visualization sessions are not available",
+        }
+        assert hook.seen == []
+
+    def test_denied_clear_looks_nothing_up(self, tmp_path, monkeypatch):
+        hook = DenyAllRecordingHook()
+        tools_map, manager, registry = self._tools(tmp_path, hook)
+        session = _session_with_nodes(manager, ["a"])
+        manager.connect(session.id, "client-1", None)
+        registry.get_or_create(session.id)
+        lookups = {
+            "get_session": Mock(wraps=manager.get_session),
+            "connected_count": Mock(wraps=manager.connected_count),
+        }
+        for name, spy in lookups.items():
+            monkeypatch.setattr(manager, name, spy)
+        has_consumer = Mock(wraps=registry.has_consumer)
+        monkeypatch.setattr(registry, "has_consumer", has_consumer)
+
+        result = tools_map["clear_visualization"](visualization_session_id=session.id)
+
+        assert result["error_code"] == "access_denied"
+        assert result["authorization"]["target"] == "clear_visualization"
+        assert hook.seen == [(GRAPH_ACTION_MUTATE, "clear_visualization")]
+        assert not lookups["get_session"].called
+        assert not lookups["connected_count"].called
+        assert not has_consumer.called
