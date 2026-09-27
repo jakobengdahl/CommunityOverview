@@ -121,6 +121,11 @@ async function renderApp() {
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
+  // The barrier above keys on the first run's stats. A second startup run
+  // (a dependency change, or the error path refetching stats) could land after
+  // the seed and replace it, so require that startup settled on exactly one.
+  expect(api.getGraphStats).toHaveBeenCalledTimes(1);
+  expect(store().stats).toBe(startupStats);
   await act(async () => {
     store().updateVisualization([NODE_A, NODE_B], [EDGE_1]);
   });
