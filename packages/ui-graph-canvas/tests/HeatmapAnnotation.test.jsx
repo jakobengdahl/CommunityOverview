@@ -681,6 +681,7 @@ describe('heat-map stylesheet', () => {
     ['.kind-heatmap .selected', true],
     ['.kind-heatmap.is-empty > *', true],
     ['.kind-heatmap.is-empty div', true],
+    ['.kind-heatmap.is-empty div:first-child', true],
     ['.kind-heatmap.is-empty:has(> .graph-heatmap-level)', true],
     ['.graph-generic-annotation-node:has(> .graph-heatmap-circle)', true],
     ['.graph-generic-annotation-node:not(.kind-heatmap:hover)', true],
@@ -713,6 +714,8 @@ describe('heat-map stylesheet', () => {
     ['.a { background-image: url(}); }', false],
     ['.a { grid-area: \\}; }', false],
     ['.a { content: "}"; }', false],
+    [".a { content: '}'; }", false],
+    ['& .x { border: 1px solid; }', false],
     ['.a, .z\\}, .b { border: 1px solid; }', false],
     ['.a { --p: url(/*); }\n.b { --q: url(*/); border: 1px solid; }', false],
     ['/* { */ .a { color: red; }', false],
@@ -730,6 +733,16 @@ describe('heat-map stylesheet', () => {
         '.x, .kind-heatmap .graph-heatmap-level'
       )
     ).toBe(false);
+    expect(
+      stylesHeatmapCircle(
+        '.kind-heatmap .graph-heatmap-level',
+        '[a] .x, .kind-heatmap .graph-heatmap-level'
+      )
+    ).toBe(true);
+  });
+
+  it('keeps a plain-looking selector in a sheet that is not flat', () => {
+    expect(stylesHeatmapCircle('.kind-heatmap .graph-heatmap-level', undefined, false)).toBe(true);
   });
 
   it.each([
@@ -777,8 +790,7 @@ describe('heat-map stylesheet', () => {
       .filter(onHeatmapCircle);
     expect(selectors.length).toBeGreaterThan(0);
     for (const sel of selectors) {
-      expect(sel).toContain(':not(.is-empty)');
-      expect(sel.replace(':not(.is-empty)', '')).not.toContain('.is-empty');
+      expect(excludesEmptyHeatmap(sel)).toBe(true);
     }
   });
 
