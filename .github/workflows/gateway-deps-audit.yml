@@ -9,10 +9,11 @@
 #     header, then fails if either lock changed.
 #
 # Both need the live package index and advisory data, so they are deliberately
-# kept out of ci.yml's required "Gateway tests" check, where an index outage or
-# an advisory published overnight would turn unrelated PRs red. This workflow
-# is not a branch-protection required check; nightly failures on main surface
-# through the workflow-run history instead.
+# kept out of ci.yml's required "Gateway tests" check, where an index outage,
+# an advisory published overnight, or a new wheel uploaded to an already-pinned
+# release (which changes the lock's hashes) would turn unrelated PRs red. This
+# workflow is not a branch-protection required check; nightly failures on main
+# surface through the workflow-run history instead.
 #
 # test_lockfiles.py covers the same locks offline (pins, hashes, recorded
 # command, security floors) inside the required check, and runs this
@@ -113,10 +114,11 @@ jobs:
         run: pip install uv==0.8.17
 
       # Runs exactly the command each lock's header records (the one its .in
-      # documents; test_lockfiles.py pins the two together). The header is
-      # checked against a strict shape and split into words without a shell
-      # evaluating it, so no header text can run anything but `uv pip compile`
-      # writing back to that same lock.
+      # documents; test_lockfiles.py pins the two together). The header must
+      # match that command's fixed shape, in which only the --python-version
+      # number may vary, and is split into words without a shell evaluating it,
+      # so no header text can add an option or run anything but that compile
+      # from the lock's own .in back into the lock.
       - name: Re-compile both locks from their recorded commands
         id: recompile
         env:
@@ -130,16 +132,13 @@ jobs:
               exit 1
             fi
             cmd=$(sed -n '2s/^#    //p' "$lock")
-            if ! [[ "$cmd" =~ ^uv\ pip\ compile(\ [A-Za-z0-9._=-]+)+$ ]]; then
-              echo "::error::$lock: line 2 is not a plain 'uv pip compile' command"
+            source="${lock%.txt}.in"
+            shape="^uv pip compile --universal --generate-hashes --python-version [0-9]+\.[0-9]+ ${source//./\\.} -o ${lock//./\\.}\$"
+            if ! [[ "$cmd" =~ $shape ]]; then
+              echo "::error::$lock: line 2 is not 'uv pip compile --universal --generate-hashes --python-version X.Y $source -o $lock'"
               exit 1
             fi
             read -ra argv <<< "$cmd"
-            n=${#argv[@]}
-            if [ "${argv[n-2]}" != "-o" ] || [ "${argv[n-1]}" != "$lock" ]; then
-              echo "::error::$lock: recorded command must end with '-o $lock'"
-              exit 1
-            fi
             echo "Running: $cmd"
             "${argv[@]}"
           done
@@ -149,8 +148,9 @@ jobs:
         id: unchanged
         run: |
           set -euo pipefail
-          if [ -n "$(git status --porcelain -- .)" ]; then
-            git status --short -- .
+          # --ignored: a write into a gitignored path must fail the job too.
+          if [ -n "$(git status --porcelain --ignored -- .)" ]; then
+            git status --short --ignored -- .
             git diff -- .
             echo "::error::Re-compiling produced a different lock. Run the command in the lock's header (see its .in) and commit the result."
             exit 1
