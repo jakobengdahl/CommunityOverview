@@ -1002,10 +1002,10 @@ class TestShortSigningKeyWarning(unittest.TestCase):
     SHORT_KEY = "plumvox-quiltbex-zyg"
 
     # Attributes logging sets on every record; anything else came from extra=.
+    # taskName is only standard from 3.12 on, where makeLogRecord already sets it.
     _STANDARD_RECORD_ATTRS = frozenset(vars(logging.makeLogRecord({}))) | {
         "message",
         "asctime",
-        "taskName",
     }
 
     def _warnings_for(self, key):
@@ -1062,6 +1062,14 @@ class TestShortSigningKeyWarning(unittest.TestCase):
         for i in range(len(key) - 3):
             assert key[i : i + 4] not in text, f"part of the key leaked: {key[i:i + 4]!r}"
         assert hashlib.sha256(key.encode("utf-8", "surrogateescape")).hexdigest()[:8] not in text
+        # repr()/%r escape lone surrogates and ascii() also escapes non-ASCII, so a leak may
+        # appear only in escaped form.
+        for escaped in {repr(key)[1:-1], ascii(key)[1:-1]} - {key}:
+            assert escaped not in text, f"escaped key leaked: {escaped!r}"
+            for i in range(len(escaped) - 3):
+                assert escaped[i : i + 4] not in text, (
+                    f"part of the escaped key leaked: {escaped[i:i + 4]!r}"
+                )
 
     def test_short_key_logs_warning_without_the_value(self):
         records = self._warnings_for(self.SHORT_KEY)
