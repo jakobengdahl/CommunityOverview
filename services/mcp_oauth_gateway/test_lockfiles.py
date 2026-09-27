@@ -456,6 +456,85 @@ class TestAuditMarkerStripStep(unittest.TestCase):
                 self.assertEqual(output, "")
 
 
+class TestAuditSteps(unittest.TestCase):
+    """Each lock's pip-audit reads the marker-free copy with hashes enforced, and its failure fails the job."""
+
+    _DIR_EXPR = "${{ steps.strip-markers.outputs.dir }}"
+
+    def setUp(self):
+        workflow = yaml.safe_load((HERE.parents[1] / ".github" / "workflows" / "gateway-deps-audit.yml").read_text())
+        # Unset shell means GitHub runs `bash -e {0}`, without pipefail: what _run below reproduces.
+        self.assertNotIn("defaults", workflow)
+        job = workflow["jobs"]["pip-audit"]
+        self.assertNotIn("defaults", job)
+        steps = job["steps"]
+        ids = [s.get("id") for s in steps]
+        start = ids.index("strip-markers")
+        self.strip = steps[start]
+        self.audits = steps[start + 1 :]
+        self.assertEqual(len(self.audits), 2)
+        for step in [self.strip, *self.audits]:
+            self.assertNotIn("shell", step)
+
+        code, output, tmp = _run_audit_step(self.strip, {lock: (HERE / lock).read_text() for lock in _LOCKS})
+        self.addCleanup(subprocess.run, ["rm", "-rf", str(tmp)])
+        self.assertEqual(code, 0)
+        self.assertTrue(output.startswith("dir="))
+        self.dir = output.strip().removeprefix("dir=")
+
+    def _run(self, step, audit_exit):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(subprocess.run, ["rm", "-rf", str(tmp)])
+        (tmp / "bin").mkdir()
+        (tmp / "work").mkdir()
+        stub = tmp / "bin" / "pip-audit"
+        stub.write_text(
+            f'#!/bin/sh\nfor a in "$@"; do printf "%s\\n" "$a"; done > "{tmp}/argv"\n'
+            f'echo "stub report"\nexit {audit_exit}\n'
+        )
+        stub.chmod(0o755)
+        summary = tmp / "summary"
+        summary.write_text("")
+        self.assertEqual(step["run"].count("${{"), step["run"].count(self._DIR_EXPR))
+        script = step["run"].replace(self._DIR_EXPR, self.dir)
+        env = {**os.environ, "PATH": f"{tmp / 'bin'}:{os.environ['PATH']}", "GITHUB_STEP_SUMMARY": str(summary)}
+        result = subprocess.run(["bash", "-e", "-c", script], cwd=tmp / "work", env=env, capture_output=True, text=True)
+        argv = (tmp / "argv").read_text().splitlines() if (tmp / "argv").exists() else None
+        return result.returncode, argv, summary.read_text()
+
+    def test_each_lock_is_audited_from_the_marker_free_copy_with_hashes_required(self):
+        for step, lock in zip(self.audits, _LOCKS):
+            with self.subTest(lock=lock):
+                code, argv, summary = self._run(step, 0)
+                self.assertEqual(code, 0)
+                self.assertIsNotNone(argv)
+                self.assertEqual(argv.count("-r"), 1)
+                path = argv[argv.index("-r") + 1]
+                self.assertEqual(path, f"{self.dir}/{lock}")
+                self.assertNotIn(" ; ", Path(path).read_text())
+                self.assertIn("--require-hashes", argv)
+                self.assertIn("--disable-pip", argv)
+                self.assertIn("stub report", summary)
+
+    def test_a_failing_audit_fails_its_step_with_pip_audits_exit_code(self):
+        for step, lock in zip(self.audits, _LOCKS):
+            with self.subTest(lock=lock):
+                code, argv, _ = self._run(step, 3)
+                self.assertIsNotNone(argv)
+                self.assertEqual(code, 3)
+
+    def test_audit_steps_cannot_be_skipped_or_ignored(self):
+        runtime, dev = self.audits
+        for step in [self.strip, *self.audits]:
+            with self.subTest(step=step.get("name")):
+                self.assertNotIn("continue-on-error", step)
+        self.assertNotIn("if", self.strip)
+        self.assertNotIn("if", runtime)
+        # The dev lock is audited even when the runtime audit failed, but not
+        # when there is no marker-free copy to audit.
+        self.assertEqual(dev["if"], "${{ !cancelled() && steps.strip-markers.outcome == 'success' }}")
+
+
 class TestRecompileStep(unittest.TestCase):
     """The freshness job runs exactly each lock's recorded command, and nothing else."""
 

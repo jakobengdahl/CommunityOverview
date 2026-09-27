@@ -9,6 +9,7 @@ import hashlib
 import base64
 import importlib
 import json
+import logging
 import os
 import re
 import subprocess
@@ -1000,13 +1001,44 @@ class TestShortSigningKeyWarning(unittest.TestCase):
     # Distinctive so any leak of the value (or a slice of it) is easy to spot.
     SHORT_KEY = "plumvox-quiltbex-zyg"
 
+    # Attributes logging sets on every record; anything else came from extra=.
+    _STANDARD_RECORD_ATTRS = frozenset(vars(logging.makeLogRecord({}))) | {
+        "message",
+        "asctime",
+        "taskName",
+    }
+
     def _warnings_for(self, key):
+        """Return the WARNING records, after leak-checking every record at every level."""
         import main
 
         with self.assertLogs("main", level="DEBUG") as cm:
             main.logger.debug("sentinel")
             main._warn_if_short_signing_key(key)
-        return [r for r in cm.records if r.levelname == "WARNING"]
+        records = cm.records[1:]
+        for record in records:
+            self._assert_record_does_not_leak(record, key)
+        return [r for r in records if r.levelname == "WARNING"]
+
+    def _assert_record_does_not_leak(self, record, key):
+        # Where the code under test chooses the content: the message and any extras.
+        chosen = [record.getMessage(), str(record.msg), repr(record.args)]
+        chosen += [
+            repr(value)
+            for name, value in vars(record).items()
+            if name not in self._STANDARD_RECORD_ATTRS
+        ]
+        # Logging-owned string fields (path, thread name, ...) may hold digits but never the key.
+        owned = [
+            value
+            for name, value in vars(record).items()
+            if name in self._STANDARD_RECORD_ATTRS and isinstance(value, str)
+        ]
+        for text in chosen + owned:
+            self._assert_key_absent(text, key)
+        # The only numbers allowed are the recommended minimum (32 bytes / 256 bits).
+        for text in chosen:
+            assert set(re.findall(r"\d+", text)) <= {"32", "256"}, text
 
     # Starts the gateway, then exits 3 if startup replaced the configured key.
     _STARTUP_SCRIPT = (
@@ -1029,7 +1061,7 @@ class TestShortSigningKeyWarning(unittest.TestCase):
         assert key not in text
         for i in range(len(key) - 3):
             assert key[i : i + 4] not in text, f"part of the key leaked: {key[i:i + 4]!r}"
-        assert hashlib.sha256(key.encode()).hexdigest()[:8] not in text
+        assert hashlib.sha256(key.encode("utf-8", "surrogateescape")).hexdigest()[:8] not in text
 
     def test_short_key_logs_warning_without_the_value(self):
         records = self._warnings_for(self.SHORT_KEY)
@@ -1046,6 +1078,10 @@ class TestShortSigningKeyWarning(unittest.TestCase):
         assert len(self._warnings_for("k" * 31)) == 1
         assert self._warnings_for("k" * 32) == []
         assert self._warnings_for("k" * 64) == []
+
+    def test_surrounding_whitespace_counts_toward_the_length(self):
+        # The key is used verbatim, so padding is part of its length.
+        assert self._warnings_for(" " + "k" * 30 + " ") == []
 
     def test_length_is_measured_in_utf8_bytes(self):
         # 16 characters but 32 bytes: long enough.
