@@ -51,7 +51,8 @@ def _warn_if_short_signing_key(key: str) -> None:
     Warning only: a short key is still used as-is. The message never includes
     the key, any part of it, or its exact length.
     """
-    if len(key.encode("utf-8")) < MIN_JWT_SIGNING_KEY_BYTES:
+    # surrogateescape: a non-UTF-8 env value must not crash startup here.
+    if len(key.encode("utf-8", "surrogateescape")) < MIN_JWT_SIGNING_KEY_BYTES:
         logger.warning(
             "GW_JWT_SIGNING_KEY is shorter than the recommended minimum of %d bytes "
             "(256 bits) for HS256. Rotate it to a longer random secret.",
