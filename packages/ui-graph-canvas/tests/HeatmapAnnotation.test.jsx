@@ -428,9 +428,10 @@ describe('heat-map stylesheet', () => {
   const inForcedColours = (r) => Boolean(r.media?.includes('forced-colors'));
   // Declarations that make an element visible. Every border property draws —
   // longhands and logical border-inline*/border-block* included — except the
-  // radii, which only shape the circle. `filter` and `backdrop-filter` draw
-  // too: a drop-shadow or a blurred backdrop shows an otherwise empty box.
-  // outline-offset and background-size
+  // radii, which only shape the circle. backdrop-filter paints the box's area
+  // even when the box itself is transparent; `filter` counts conservatively,
+  // since a url(...) filter can flood the box and a drop-shadow copies
+  // whatever the box or its children draw. outline-offset and background-size
   // and the like only adjust what something else draws, and border-collapse
   // and border-spacing are table layout. A -webkit- prefix draws the same.
   //
