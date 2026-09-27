@@ -488,7 +488,75 @@ describe('heat-map stylesheet', () => {
       return true;
     });
   const onHeatmapCircle = (sel) => /\.(kind-heatmap|graph-heatmap-circle)(?![\w-])/.test(sel);
-  const withoutNot = (sel) => sel.replace(/:not\([^)]*\)/g, '');
+  // Each :not(...) is cut out whole, nested parentheses included; one never
+  // closed takes the rest of the selector with it. `top` marks a :not that
+  // sits directly on its compound rather than inside another pseudo-class.
+  const scanNots = (sel) => {
+    let bare = '';
+    const nots = [];
+    let depth = 0;
+    let i = 0;
+    while (i < sel.length) {
+      if (/^:not\(/i.test(sel.slice(i, i + 5))) {
+        let inner = 1;
+        let j = i + 5;
+        for (; j < sel.length && inner > 0; j++) {
+          if (sel[j] === '(') inner++;
+          else if (sel[j] === ')') inner--;
+        }
+        nots.push({ arg: sel.slice(i + 5, inner === 0 ? j - 1 : j), top: depth === 0 });
+        i = j;
+        continue;
+      }
+      if (sel[i] === '(') depth++;
+      else if (sel[i] === ')' && depth > 0) depth--;
+      bare += sel[i++];
+    }
+    return { bare, nots };
+  };
+  const withoutNot = (sel) => scanNots(sel).bare;
+  // Splits a selector into its compounds, each with the combinator in front
+  // of it (' ' for descendant); parenthesised and bracketed parts stay whole.
+  const compoundsOf = (sel) => {
+    const parts = [{ combinator: '', compound: '' }];
+    let pending = '';
+    let depth = 0;
+    for (const c of sel.trim()) {
+      if (c === '(' || c === '[') depth++;
+      else if ((c === ')' || c === ']') && depth > 0) depth--;
+      if (depth === 0 && /[\s>+~]/.test(c)) {
+        if (c !== ' ' || !pending) pending = c.trim() || pending || ' ';
+        continue;
+      }
+      if (pending && parts.at(-1).compound) parts.push({ combinator: pending, compound: '' });
+      pending = '';
+      parts.at(-1).compound += c;
+    }
+    return parts;
+  };
+  // `is-empty` is set on the heat-map node itself, so a :not(.is-empty) keeps
+  // level-0 circles out only on the compound that is the circle's own node:
+  // the last one naming the node class outside any parenthesis, followed only
+  // by descendant or child combinators. A class inside :has(...) names
+  // another element and one inside :is(...) or :where(...) is not trusted to
+  // name the node, so neither counts; after + or ~ the node is a sibling's.
+  const excludesEmptyHeatmap = (sel) => {
+    const parts = compoundsOf(sel);
+    const namesNode = ({ compound }) => {
+      let flat = compound;
+      for (let prev; prev !== flat;) {
+        prev = flat;
+        flat = flat.replace(/\([^()]*\)/g, '');
+      }
+      return /\.(graph-generic-annotation-node|kind-heatmap)(?![\w-])/.test(flat);
+    };
+    const at = parts.findLastIndex(namesNode);
+    if (at < 0) return false;
+    if (parts.slice(at + 1).some((p) => p.combinator === '+' || p.combinator === '~')) {
+      return false;
+    }
+    return scanNots(parts[at].compound).nots.some((n) => n.top && n.arg.trim() === '.is-empty');
+  };
   // The element a selector styles is its last compound; a class further left
   // only scopes it. A selector is set aside only when its last compound is
   // plain — at least one class, optionally a type, and argument-free
@@ -664,6 +732,44 @@ describe('heat-map stylesheet', () => {
     ).toBe(false);
   });
 
+  it.each([
+    ['.kind-heatmap:not(.is-empty) .graph-heatmap-circle', '.kind-heatmap .graph-heatmap-circle'],
+    ['.a:not(:is(.b, .c)).is-empty:hover', '.a.is-empty:hover'],
+    ['.a:not(:not(.b)):hover', '.a:hover'],
+    ['.a:NOT(.b).c', '.a.c'],
+    [':is(.a:not(.b)) .c', ':is(.a) .c'],
+    ['.a:not(:is(.b) .c', '.a'],
+    [
+      '.kind-heatmap.is-empty.selected .graph-heatmap-circle',
+      '.kind-heatmap.is-empty.selected .graph-heatmap-circle',
+    ],
+  ])('strips every :not from `%s`', (sel, expected) => {
+    expect(withoutNot(sel)).toBe(expected);
+  });
+
+  it.each([
+    ['.graph-generic-annotation-node.kind-heatmap:not(.is-empty) .graph-heatmap-circle', true],
+    ['.kind-heatmap:not( .is-empty ):hover > .graph-heatmap-circle', true],
+    ['.graph-generic-annotation-node:not(.is-empty).kind-heatmap .graph-heatmap-circle', true],
+    ['.canvas:not(.is-empty) .kind-heatmap.is-empty .graph-heatmap-circle', false],
+    ['.kind-heatmap.is-empty .graph-heatmap-circle:not(.is-empty)', false],
+    ['.kind-heatmap .x:not(.is-empty) .graph-heatmap-circle', false],
+    ['.kind-heatmap:not(:not(.is-empty)) .graph-heatmap-circle', false],
+    ['.kind-heatmap:is(:not(.is-empty)) .graph-heatmap-circle', false],
+    ['.kind-heatmap:not(.is-empty-x) .graph-heatmap-circle', false],
+    ['.kind-heatmap-legend:not(.is-empty) .graph-heatmap-circle', false],
+    ['.kind-heatmap .graph-heatmap-circle', false],
+    ['.kind-heatmap:not(.is-empty) ~ .kind-heatmap.is-empty .graph-heatmap-circle', false],
+    ['.kind-heatmap:not(.is-empty) + .kind-heatmap.is-empty .graph-heatmap-circle', false],
+    ['.kind-heatmap:not(.is-empty) ~ .graph-heatmap-circle', false],
+    ['.react-flow__node:has(.kind-heatmap):not(.is-empty) .graph-heatmap-circle', false],
+    ['.react-flow__node:is(.kind-heatmap):not(.is-empty) .graph-heatmap-circle', false],
+    ['.a ~ .kind-heatmap:not(.is-empty) > .graph-heatmap-circle', true],
+    ['.kind-heatmap:not(.is-empty)', true],
+  ])('reads `%s` as keeping level-0 circles out: %s', (sel, expected) => {
+    expect(excludesEmptyHeatmap(sel)).toBe(expected);
+  });
+
   it('outlines only non-empty circles in every forced-colours heat-map rule', () => {
     const selectors = rules
       .filter(inForcedColours)
@@ -685,7 +791,7 @@ describe('heat-map stylesheet', () => {
     // The rim itself must exist, so the loop below checks something.
     expect(painting.some((sel) => withoutNot(sel).includes('.is-empty'))).toBe(true);
     for (const sel of painting) {
-      if (sel.includes(':not(.is-empty)')) continue;
+      if (excludesEmptyHeatmap(sel)) continue;
       const bare = withoutNot(sel);
       expect(bare.includes('.selected') || bare.includes(':hover')).toBe(true);
     }
