@@ -494,9 +494,10 @@ describe('heat-map stylesheet', () => {
   // of the classes the heat-map node or its circle can have, as
   // `.kind-heatmap .graph-heatmap-level` does. Anything else, such as
   // :has(...), :not(...), :is(...), [attr] or `*`, could still narrow to the
-  // node or the circle, so it is judged as before, by the whole selector. A
-  // split inside a group leaves a parenthesis, bracket or quote in the piece,
-  // so that piece is never plain.
+  // node or the circle, so it is judged as before, by the whole selector. So
+  // is any selector with a parenthesis, bracket, quote or escape anywhere in
+  // it: the rule parser splits lists on every comma, even one inside
+  // :is(a, b), so a fragment's plain-looking last piece may not be its last.
   const NODE_OR_CIRCLE_CLASS =
     /\.(graph-generic-annotation-node|kind-heatmap|is-empty|selected|graph-heatmap-circle)(?![\w-])/;
   const stylesHeatmapCircle = (sel) => {
@@ -504,7 +505,8 @@ describe('heat-map stylesheet', () => {
       .trim()
       .split(/\s*[\s>+~]\s*/)
       .pop();
-    const plain = /^[\w-]*(?:(?:\.|::?)[\w-]+)+$/.test(last) && last.includes('.');
+    const plain =
+      !/[()[\]"'\\]/.test(sel) && /^[\w-]*(?:(?:\.|::?)[\w-]+)+$/.test(last) && last.includes('.');
     return onHeatmapCircle(sel) && !(plain && !NODE_OR_CIRCLE_CLASS.test(last));
   };
 
@@ -592,6 +594,8 @@ describe('heat-map stylesheet', () => {
     ['.kind-heatmap .x:where(.graph-heatmap-circle)', true],
     ['.graph-heatmap-circle[title="a] .b"]', true],
     ['.graph-heatmap-circle[title=") .b"]', true],
+    ['.kind-heatmap.is-empty > :is(.a .b', true],
+    ['.kind-heatmap.is-empty .x:where(.a .b', true],
     ['.kind-heatmap .graph-heatmap-level', false],
     ['.kind-heatmap.is-empty > .graph-heatmap-level', false],
     ['.kind-heatmap.is-empty:hover .graph-heatmap-level::before', false],
