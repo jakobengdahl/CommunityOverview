@@ -1120,11 +1120,12 @@ class GraphStorage:
     def _adopt_vectors(
         self, supplied: Dict[str, Any], anchor: Optional[int] = None
     ) -> None:
-        """Move vectors already taken off their nodes into the index.
+        """Move supplied vectors, keyed by node id, into the index.
 
-        Separate from _adopt_supplied_vectors because the refresh takes a
+        Works on a dict rather than on nodes because the refresh takes a
         vector off its node when the operation is applied - so the event it
         emits does not carry it - and adopts it only when the batch ends.
+        _adopt_supplied_vectors passes vectors still on their nodes.
 
         `anchor` is the width to judge the supplied vectors against, for a
         caller that has already emptied the index of what would otherwise
