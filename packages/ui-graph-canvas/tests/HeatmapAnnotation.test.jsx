@@ -433,19 +433,20 @@ describe('heat-map stylesheet', () => {
   // and border-spacing are table layout. A -webkit- prefix draws the same.
   //
   // A value draws nothing when every token is a no-op (`border: 0 none`,
-  // `border-color: initial`). A border or outline shorthand carries one width,
-  // one style and one colour, so any one of them being zero, none, hidden or
-  // transparent (`border: 1px solid transparent`) draws nothing either. That
+  // `outline: 0em`). A border or outline shorthand carries one width and one
+  // style, so either being zero, none or hidden draws nothing either. That
   // shorthand rule does not extend to longhands (`border-width: 0 2px` still
-  // draws a side) or to box-shadow (`0 0 0 1px red` is a ring). Functions such
-  // as rgba(...) count as one opaque token. Anything else counts as painting.
+  // draws a side) or to box-shadow (`0 0 0 1px red` is a ring). `transparent`
+  // hides only a background: forced-colours mode repaints border and outline
+  // colours. `initial` is never a no-op, since on a border longhand it means
+  // currentcolor or a medium width. Functions such as rgba(...) count as one
+  // opaque token. Anything else counts as painting.
   const PAINTING_PROPERTY =
     /^(?:-webkit-)?(border(-[a-z-]+)?|outline(-(color|style|width))?|box-shadow|background(-(color|image))?)$/;
   const BORDER_SHORTHAND =
     /^(?:-webkit-)?(border(-(top|right|bottom|left|inline|block)(-(start|end))?)?|outline)$/;
   const ZERO_LENGTH = /^0+(\.0+)?([a-z]+|%)?$/;
-  const isNoOpToken = (token) =>
-    ['none', 'hidden', 'transparent', 'initial'].includes(token) || ZERO_LENGTH.test(token);
+  const isNoOpToken = (token) => ['none', 'hidden'].includes(token) || ZERO_LENGTH.test(token);
   const paints = (body) =>
     body.split(';').some((decl) => {
       const colon = decl.indexOf(':');
@@ -464,13 +465,10 @@ describe('heat-map stylesheet', () => {
         return false;
       }
       const tokens = value.replace(/[a-z-]+\([^)]*\)/g, 'fn()').split(/\s+/);
-      if (tokens.every(isNoOpToken)) return false;
-      if (
-        BORDER_SHORTHAND.test(property) &&
-        tokens.some((t) => isNoOpToken(t) && t !== 'initial')
-      ) {
-        return false;
-      }
+      const noOp = (t) =>
+        isNoOpToken(t) || (t === 'transparent' && property.startsWith('background'));
+      if (tokens.every(noOp)) return false;
+      if (BORDER_SHORTHAND.test(property) && tokens.some(isNoOpToken)) return false;
       return true;
     });
   const onHeatmapCircle = (sel) => /\.(kind-heatmap|graph-heatmap-circle)(?![\w-])/.test(sel);
@@ -500,11 +498,15 @@ describe('heat-map stylesheet', () => {
     ['border-spacing: 2px', false],
     ['border: 0 none', false],
     ['border: 0em solid red', false],
-    ['border: 1px solid transparent', false],
+    ['border: 1px solid transparent', true],
+    ['outline: 2px solid transparent', true],
+    ['border-color: transparent', true],
+    ['background: transparent none', false],
     ['border-top: 2px hidden red', false],
     ['outline: 0em', false],
     ['outline: 1px none red', false],
-    ['border-color: initial', false],
+    ['border-color: initial', true],
+    ['border-width: initial', true],
     ['border-style: hidden', false],
     ['border-width: 0 2px', true],
     ['border-color: transparent red', true],
