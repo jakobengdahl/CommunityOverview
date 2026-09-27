@@ -83,13 +83,25 @@ def mentions_playwright(text):
 # A script name is matched as a whole shell word: npm allows almost any
 # character in one, so a name is never split on anything but shell syntax.
 SHELL_BOUNDARY = r"""[\s;&|()<>"'`]"""
-# npm runs these without anything naming them: `npm ci` and `npm install` run
-# the install hooks, `npm t` is `npm test`, and pre<X>/post<X> wrap `npm run X`.
-INSTALL_HOOKS = {"preinstall", "install", "postinstall", "prepare"}
-NPM_INSTALL = re.compile(
-    r"\bnpm\s+(?:ci|clean-install|i|install|it|cit|install-test|install-ci-test)\b"
-)
-NPM_TEST = re.compile(r"\bnpm\s+(?:t|tst|it|cit|install-test|install-ci-test)\b")
+# Scripts npm runs without anything naming them: `npm ci` and `npm install`
+# run the install lifecycle, `npm t`, `npm start` and their many aliases,
+# abbreviations and flag-first spellings run the rest. Rather than parse npm's
+# command grammar, any `npm` invocation counts as running all of them - that
+# can only over-detect, which fails loudly here.
+IMPLICIT_SCRIPTS = {
+    "preinstall",
+    "install",
+    "postinstall",
+    "prepublish",
+    "preprepare",
+    "prepare",
+    "postprepare",
+    "test",
+    "start",
+    "stop",
+    "restart",
+}
+NPM = re.compile(r"\bnpm\b")
 
 
 def invoked_scripts(text, scripts):
@@ -100,10 +112,8 @@ def invoked_scripts(text, scripts):
             rf"(?:^|{SHELL_BOUNDARY}){re.escape(name)}(?=$|{SHELL_BOUNDARY})", text
         )
     }
-    if NPM_INSTALL.search(text):
-        names |= INSTALL_HOOKS
-    if NPM_TEST.search(text):
-        names.add("test")
+    if NPM.search(text):
+        names |= IMPLICIT_SCRIPTS
     return names
 
 
@@ -193,6 +203,13 @@ def test_the_e2e_job_set_is_discovered_not_only_listed(workflow, npm_scripts):
         ({"postinstall": "playwright test"}, "npm ci --no-audit --no-fund"),
         ({"prepare": "playwright test"}, "npm install"),
         ({"test": "playwright test"}, "npm t"),
+        ({"test": "playwright test"}, "npm --silent tes"),
+        ({"prepublish": "playwright test"}, "npm ci"),
+        ({"preprepare": "playwright test"}, "npm ic"),
+        ({"postprepare": "playwright test"}, "npm install"),
+        ({"postinstall": "playwright test"}, "npm --prefix frontend/web ci"),
+        ({"postinstall": "playwright test"}, "npm -w @community-graph/web sit"),
+        ({"start": "playwright test"}, "npm start"),
         ({}, "npm run test:e2e"),
     ],
 )
