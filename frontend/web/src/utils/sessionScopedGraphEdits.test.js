@@ -365,11 +365,13 @@ describe('openAgentEditor (handleEdit, Agent branch)', () => {
     expect(openEditor).toHaveBeenCalledWith({ agent: bare, subscription: null });
   });
 
+  // The failed reply still carries a node, so the editor has to go by the
+  // success flag rather than by whether a node came back.
   it('opens the editor without a subscription the fetch could not find', async () => {
     const openEditor = vi.fn();
     await openAgentEditor({
       agent,
-      getNodeDetails: vi.fn().mockResolvedValue({ success: false }),
+      getNodeDetails: vi.fn().mockResolvedValue({ success: false, node: subscription }),
       openEditor,
       showNotification: vi.fn(),
     });
