@@ -30,6 +30,7 @@ from backend.core.storage_backends import (
     IncrementalGraphPersistenceBackend,
     capabilities_of,
 )
+from backend.core.vector_store import VectorStore
 
 
 def _node_payload(node_id: str, name: str):
@@ -463,26 +464,115 @@ class TestChangeNotificationWiring:
         with pytest.raises(RuntimeError):
             storage._io_executor.submit(lambda: None)
 
-    def test_a_report_after_shutdown_raises_nothing_into_the_backend(self):
-        """A backend that reports after stop has broken its contract, but the
-        thread the refresh would raise into is the backend's own. The drain
-        finds the executor shut down; with nothing left to wait for, the
-        refresh goes ahead."""
+    def test_a_report_after_shutdown_changes_nothing_and_raises_nothing(self):
+        """A backend that reports after stop has broken its contract. The
+        model is being torn down, so the report refreshes nothing; and the
+        thread it arrived on is the backend's own, so nothing is raised into
+        it either."""
         backend = _NotifyingBackend()
         storage = GraphStorage(persistence_backend=backend)
+        storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
         listener = backend.listener
         storage.shutdown_events()
+        backend.calls.clear()
 
         listener(
             ExternalChange.entities(
                 [EntityOperation.upsert_node(_node_payload("b", "Beacon"))]
             )
         )
-        assert storage.get_node("b").name == "Beacon"
+        assert storage.get_node("b") is None
 
         backend.nodes = {"z": _node_payload("z", "Zulu")}
         listener(ExternalChange.unknown())
-        assert {n.id for n in storage.get_all_nodes()} == {"z"}
+        assert {n.id for n in storage.get_all_nodes()} == {"a"}
+        assert backend.calls == []
+
+    def test_a_report_made_while_stopping_changes_nothing(self):
+        """Refused from the top of shutdown, not from when stop returns: a
+        backend that reports on its way down is reporting into a teardown
+        that has already begun, while the write queue is still there to
+        drain and would let the refresh through."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+        listener = backend.listener
+        stop = backend.stop_change_notification
+
+        def reporting_stop():
+            listener(
+                ExternalChange.entities(
+                    [EntityOperation.upsert_node(_node_payload("b", "Beacon"))]
+                )
+            )
+            stop()
+
+        backend.stop_change_notification = reporting_stop
+        storage.shutdown_events()
+
+        assert storage.get_node("b") is None
+        assert {n.id for n in storage.get_all_nodes()} == {"a"}
+
+    def test_a_report_after_a_failed_construction_changes_nothing(self, monkeypatch):
+        """Construction that fails after the gate opened leaves a backend
+        thread holding a listener into an object nobody owns. A report it
+        makes anyway must not refresh that object."""
+        built = []
+        load = GraphStorage.load
+
+        def recording_load(self, *args, **kwargs):
+            built.append(self)
+            return load(self, *args, **kwargs)
+
+        def boom(self):
+            raise RuntimeError("model preload failed")
+
+        monkeypatch.setattr(GraphStorage, "load", recording_load)
+        monkeypatch.setattr(VectorStore, "preload_model", boom)
+        backend = _NotifyingBackend()
+        backend.save_graph_data(
+            {
+                "nodes": [_node_payload("a", "Alpha")],
+                "edges": [],
+                "metadata": {"version": "1.0", "graph_name": "g"},
+            }
+        )
+
+        listeners = []
+        start = backend.start_change_notification
+        backend.start_change_notification = lambda listener: (
+            listeners.append(listener),
+            start(listener),
+        )
+        # One report on the way down too, while the write queue is still
+        # there to drain: refused from the start of the failure path, not
+        # from when the stop returns.
+        stop = backend.stop_change_notification
+
+        def reporting_stop():
+            listeners[0](
+                ExternalChange.entities(
+                    [EntityOperation.upsert_node(_node_payload("c", "Cedar"))]
+                )
+            )
+            stop()
+
+        backend.stop_change_notification = reporting_stop
+
+        with pytest.raises(RuntimeError, match="model preload failed"):
+            GraphStorage(persistence_backend=backend)
+        (storage,) = built
+
+        listeners[0](
+            ExternalChange.entities(
+                [EntityOperation.upsert_node(_node_payload("b", "Beacon"))]
+            )
+        )
+        backend.nodes = {"z": _node_payload("z", "Zulu")}
+        listeners[0](ExternalChange.unknown())
+
+        assert set(storage.nodes) == {"a"}
+        assert len(built) == 1, "a late report reloaded the abandoned model"
 
     def test_a_refresh_is_never_written_back(self):
         """The change is already in the store. Persisting it would hand the
