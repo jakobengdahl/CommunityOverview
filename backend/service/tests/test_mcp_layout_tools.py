@@ -598,6 +598,50 @@ class TestVisualizationToolsAuthorization:
         assert connect["connected"] is True
         assert "error_code" not in connect
 
+    def test_read_only_blocks_clear_and_pushes_nothing(self, authz_tools, monkeypatch):
+        """``clear_visualization`` wipes what every viewer of the session sees.
+
+        It skipped the seam entirely, so an actor denied every other session
+        tool could still clear a live canvas.
+        """
+        tools_map, manager, _ = authz_tools
+        session = _session_with_nodes(manager, ["a"])
+        sub, _ = manager.connect(session.id, "client-1", None)
+        while not sub.queue.empty():
+            sub.queue.get_nowait()
+        monkeypatch.setenv(AUTHORIZATION_MODE_ENV, "read-only")
+
+        result = tools_map["clear_visualization"](visualization_session_id=session.id)
+
+        assert result["success"] is False
+        assert result.get("error_code") == "access_denied"
+        assert sub.queue.empty()
+
+    def test_deny_all_clear_does_not_disclose_the_session(
+        self, authz_tools, monkeypatch
+    ):
+        # Denied before the existence check: an unknown id and a live session
+        # must refuse identically.
+        tools_map, manager, _ = authz_tools
+        session = _session_with_nodes(manager, ["a"])
+        manager.connect(session.id, "client-1", None)
+        monkeypatch.setenv(AUTHORIZATION_MODE_ENV, "deny-all")
+
+        live = tools_map["clear_visualization"](visualization_session_id=session.id)
+        unknown = tools_map["clear_visualization"](visualization_session_id="9999-9999")
+
+        assert live.get("error_code") == "access_denied"
+        assert unknown == live
+
+    def test_permissive_default_allows_clear(self, authz_tools):
+        tools_map, manager, _ = authz_tools
+        session = _session_with_nodes(manager, ["a"])
+        manager.connect(session.id, "client-1", None)
+
+        result = tools_map["clear_visualization"](visualization_session_id=session.id)
+
+        assert result["success"] is True
+
     def test_permissive_default_allows_read_and_mutation(self, authz_tools):
         tools_map, manager, _ = authz_tools
         session = _session_with_nodes(manager, ["a"])
