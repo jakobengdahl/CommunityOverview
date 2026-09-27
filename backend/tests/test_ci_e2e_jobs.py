@@ -13,6 +13,8 @@ that a failure stays red and leaves a report, and that it stays out of every
 dependency chain and out of branch protection.
 """
 
+import json
+import re
 from pathlib import Path
 
 import pytest
@@ -23,6 +25,7 @@ from backend.tests.test_ci_gate_semantics import BRANCH_PROTECTION_CHECKS
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
+PACKAGE_JSONS = (REPO_ROOT / "package.json", REPO_ROOT / "frontend/web/package.json")
 
 # job id -> (check name, the exact Playwright command it runs). The command is
 # compared whole, so a dropped or swapped --project, an added --list, --shard,
@@ -49,6 +52,18 @@ E2E_IF = (
 
 MAX_TIMEOUT_MINUTES = 20
 
+# Workflow-level env reaches every step. playwright.config.js reads CI for
+# forbidOnly, retries and reuseExistingServer, so an added `CI: ''` changes how
+# the specs run while every step still matches.
+WORKFLOW_ENV_KEYS = {"REGISTRY", "CORE_IMAGE", "GATEWAY_IMAGE"}
+
+# Any other job key can change where or whether the specs run: a `container`
+# swaps the image, a `strategy` fans the job out, `defaults` re-shells steps.
+E2E_JOB_KEYS = {"if", "name", "needs", "runs-on", "steps", "timeout-minutes"}
+UPLOAD_STEP_KEYS = {"name", "if", "uses", "with"}
+# `if-no-files-found: ignore` would let a failure leave no report and no error.
+UPLOAD_WITH_KEYS = {"name", "path", "retention-days"}
+
 
 @pytest.fixture(scope="module")
 def workflow():
@@ -61,16 +76,50 @@ def as_list(needs):
     return [needs] if isinstance(needs, str) else list(needs)
 
 
-def runs_playwright_tests(step):
+def mentions_playwright(text):
+    return "playwright" in text.replace("playwright install", "")
+
+
+def words(text):
+    return set(re.findall(r"[\w:.@/-]+", text))
+
+
+def playwright_scripts(scripts):
+    """Names of the npm scripts that reach Playwright, directly or through
+    another script, so a wrapper added under any name is followed too."""
+    reaching = {name for name, body in scripts.items() if mentions_playwright(body)}
+    while True:
+        more = {
+            name
+            for name, body in scripts.items()
+            if name not in reaching and words(body) & reaching
+        }
+        if not more:
+            return reaching
+        reaching |= more
+
+
+@pytest.fixture(scope="module")
+def npm_scripts():
+    scripts = {}
+    for path in PACKAGE_JSONS:
+        for name, body in json.loads(path.read_text()).get("scripts", {}).items():
+            scripts[name] = f"{scripts.get(name, '')} {body}"
+    return scripts
+
+
+def runs_playwright_tests(step, scripts):
     """Any step that reaches Playwright other than to install a browser - a
-    direct `playwright test` and the web workspace's `test:e2e` script alike,
+    direct `playwright test` or an npm script that runs it, under any name,
     so a job spelled some other way is still discovered."""
     run = str(step.get("run", ""))
-    return "test:e2e" in run or "playwright" in run.replace("playwright install", "")
+    return mentions_playwright(run) or bool(words(run) & playwright_scripts(scripts))
 
 
-def playwright_test_steps(job):
-    return [step for step in job.get("steps", []) if runs_playwright_tests(step)]
+def playwright_test_steps(job, scripts):
+    return [
+        step for step in job.get("steps", []) if runs_playwright_tests(step, scripts)
+    ]
 
 
 def upload_steps(job):
@@ -81,17 +130,43 @@ def upload_steps(job):
     ]
 
 
-def test_the_e2e_job_set_is_discovered_not_only_listed(workflow):
+def test_the_e2e_job_set_is_discovered_not_only_listed(workflow, npm_scripts):
     """Every parametrised test below runs over E2E_JOBS, so a new Playwright
     job, or a renamed one, must fail here rather than go unchecked."""
     discovered = {
-        job_id for job_id, job in workflow["jobs"].items() if playwright_test_steps(job)
+        job_id
+        for job_id, job in workflow["jobs"].items()
+        if playwright_test_steps(job, npm_scripts)
     }
     assert discovered == set(E2E_JOBS) == {"desktop-e2e", "mobile-e2e"}
 
 
+def test_discovery_follows_npm_scripts_under_any_name(npm_scripts):
+    """The real package.json files hold no such wrapper today, so pin that
+    discovery would see one rather than wait for it to slip past."""
+    scripts = {
+        **npm_scripts,
+        "test:mobile": "playwright test --project=mobile-iphone",
+        "ci:browser": "npm run test:mobile",
+    }
+    for run in ("npm run test:mobile", "npm run ci:browser -w web", "npm run test:e2e"):
+        assert runs_playwright_tests({"run": run}, scripts), run
+    for run in ("npx playwright install chromium", "npm run test:unit", "npm ci"):
+        assert not runs_playwright_tests({"run": run}, scripts), run
+
+
+def test_nothing_workflow_level_reaches_the_e2e_steps(workflow):
+    """A workflow-level `defaults: run: shell:` re-shells every run step, so
+    `bash -c 'exit 0' {0}` would turn both Playwright steps into no-ops."""
+    assert "defaults" not in workflow
+    assert set(workflow.get("env", {})) == WORKFLOW_ENV_KEYS
+
+
 @pytest.mark.parametrize("job_id", sorted(E2E_JOBS))
 class TestE2EJobShape:
+    def test_carries_only_the_pinned_job_keys(self, workflow, job_id):
+        assert set(workflow["jobs"][job_id]) == E2E_JOB_KEYS
+
     def test_runs_only_on_changed_service_code_and_never_on_a_draft(
         self, workflow, job_id
     ):
@@ -99,8 +174,10 @@ class TestE2EJobShape:
         assert " ".join(str(job["if"]).split()) == E2E_IF
         assert as_list(job["needs"]) == ["detect-changes"]
 
-    def test_runs_the_intended_specs_from_the_web_workspace(self, workflow, job_id):
-        steps = playwright_test_steps(workflow["jobs"][job_id])
+    def test_runs_the_intended_specs_from_the_web_workspace(
+        self, workflow, npm_scripts, job_id
+    ):
+        steps = playwright_test_steps(workflow["jobs"][job_id], npm_scripts)
         assert len(steps) == 1, f"{job_id}: expected one playwright test step"
         step = steps[0]
         assert step["run"].strip() == E2E_JOBS[job_id][1]
@@ -140,6 +217,8 @@ class TestE2EJobShape:
         assert str(step.get("if", "")).strip() == "failure()"
         assert step["with"]["path"] == "frontend/web/playwright-report/"
         assert step["with"]["name"] == f"{job_id}-report"
+        assert set(step) == UPLOAD_STEP_KEYS
+        assert set(step["with"]) == UPLOAD_WITH_KEYS
 
     def test_the_check_name_is_marked_and_not_required(self, workflow, job_id):
         name = workflow["jobs"][job_id]["name"]
