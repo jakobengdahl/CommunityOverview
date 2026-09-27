@@ -490,13 +490,31 @@ describe('heat-map stylesheet', () => {
   const withoutNot = (sel) => sel.replace(/:not\([^)]*\)/g, '');
   // The element a selector styles is its last compound; a class further left
   // only scopes it, so `.kind-heatmap .graph-heatmap-level` styles the label.
-  const stylesHeatmapCircle = (sel) =>
-    onHeatmapCircle(
-      withoutNot(sel)
-        .trim()
-        .split(/\s*[\s>+~]\s*/)
-        .pop()
-    );
+  // Combinators inside :has(...), :nth-child(2n+1) or [attr~=x] do not split
+  // it, and a class inside a pseudo-class argument does not name it. A last
+  // compound with no class of its own (`*`, `div`) may be the circle, so it
+  // is judged by the whole selector.
+  const lastCompound = (sel) => {
+    let depth = 0;
+    let start = 0;
+    const text = sel.trim();
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (c === '(' || c === '[') depth++;
+      else if (c === ')' || c === ']') depth--;
+      else if (depth === 0 && /[\s>+~]/.test(c)) start = i + 1;
+    }
+    let own = text.slice(start);
+    for (let prev; prev !== own;) {
+      prev = own;
+      own = own.replace(/\([^()]*\)|\[[^\]]*\]/g, '');
+    }
+    return own;
+  };
+  const stylesHeatmapCircle = (sel) => {
+    const own = lastCompound(sel);
+    return own.includes('.') ? onHeatmapCircle(own) : onHeatmapCircle(withoutNot(sel));
+  };
 
   it.each([
     ['border-top-color: red', true],
@@ -577,6 +595,14 @@ describe('heat-map stylesheet', () => {
     expect(stylesHeatmapCircle('.kind-heatmap ~ .other')).toBe(false);
     expect(stylesHeatmapCircle('.graph-heatmap-level:not(.kind-heatmap)')).toBe(false);
     expect(stylesHeatmapCircle('.graph-heatmap-circle-label')).toBe(false);
+    expect(stylesHeatmapCircle('.kind-heatmap.is-empty:has(> .graph-heatmap-level)')).toBe(true);
+    expect(stylesHeatmapCircle('.kind-heatmap .graph-heatmap-circle:nth-child(2n + 1)')).toBe(true);
+    expect(stylesHeatmapCircle('.kind-heatmap .graph-heatmap-circle:not(.a .b)')).toBe(true);
+    expect(stylesHeatmapCircle('.kind-heatmap .graph-heatmap-circle[data-x~="y"]')).toBe(true);
+    expect(stylesHeatmapCircle('.kind-heatmap.is-empty > *')).toBe(true);
+    expect(stylesHeatmapCircle('.kind-heatmap.is-empty div')).toBe(true);
+    expect(stylesHeatmapCircle('.kind-heatmap .label:has(.graph-heatmap-circle)')).toBe(false);
+    expect(stylesHeatmapCircle('.kind-heatmap .graph-heatmap-level:nth-child(2n + 1)')).toBe(false);
   });
 
   it('outlines only non-empty circles in every forced-colours heat-map rule', () => {
