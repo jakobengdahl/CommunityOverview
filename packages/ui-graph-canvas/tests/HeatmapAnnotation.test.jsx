@@ -491,18 +491,21 @@ describe('heat-map stylesheet', () => {
   // The element a selector styles is its last compound; a class further left
   // only scopes it. A selector is set aside only when its last compound is
   // plain — at least one class, optionally a type, and argument-free
-  // pseudo-classes or pseudo-elements — and carries none of the classes the heat-map node or its circle can have, as
+  // pseudo-classes or pseudo-elements — and carries none of the classes the
+  // heat-map node or its circle can have, as
   // `.kind-heatmap .graph-heatmap-level` does. Anything else, such as
   // :has(...), :not(...), :is(...), [attr] or `*`, could still narrow to the
   // node or the circle, so it is judged as before, by the whole selector. So
   // is every selector of a rule whose selector list has a parenthesis,
   // bracket, quote or escape anywhere in it: the rule parser splits lists on
   // every comma, even one inside :is(a, b, c), so a fragment's plain-looking
-  // last piece may not be its selector's last compound. And so is every
-  // selector of a rule whose body holds `{`, `&`, a quote, an escape or an
-  // unbalanced parenthesis: the parser reads a nested rule as part of the
-  // outer body, and ends a body at a `}` inside a string, escape or url(...),
-  // so what follows is never seen.
+  // last piece may not be its selector's last compound. And nothing is set
+  // aside unless every rule body in the sheet holds no `{`, `&`, quote,
+  // escape or unbalanced parenthesis. The parser ends a body at the first
+  // `}`, even one inside a string, escape or url(...), and reads a nested rule
+  // as part of the outer body and its siblings as top-level rules, where `&`,
+  // :scope or a folded-in parent declaration changes what they select; any
+  // such sheet leaves one of those marks in some parsed body.
   const NODE_OR_CIRCLE_CLASS =
     /\.(graph-generic-annotation-node|kind-heatmap|is-empty|selected|graph-heatmap-circle)(?![\w-])/;
   const isCleanBody = (body) => {
@@ -514,14 +517,14 @@ describe('heat-map stylesheet', () => {
     }
     return depth === 0;
   };
-  const stylesHeatmapCircle = (sel, list = sel, body = '') => {
+  const stylesHeatmapCircle = (sel, list = sel, bodies = []) => {
     const last = sel
       .trim()
       .split(/\s*[\s>+~]\s*/)
       .pop();
     const plain =
       !/[()[\]"'\\]/.test(list) &&
-      isCleanBody(body) &&
+      bodies.every(isCleanBody) &&
       /^[\w-]*(?:(?:\.|::?)[\w-]+)+$/.test(last) &&
       last.includes('.');
     return onHeatmapCircle(sel) && !(plain && !NODE_OR_CIRCLE_CLASS.test(last));
@@ -622,18 +625,18 @@ describe('heat-map stylesheet', () => {
     expect(stylesHeatmapCircle(sel)).toBe(expected);
   });
 
-  it('judges every selector of a rule with a nested rule in its body', () => {
+  it('sets nothing aside from a sheet whose parsed bodies may hide nesting', () => {
     const sel = '.kind-heatmap .graph-heatmap-level';
-    expect(stylesHeatmapCircle(sel, sel, 'color: red;')).toBe(false);
-    expect(stylesHeatmapCircle(sel, sel, 'color: red; :is(&, .x) { border: 1px solid; }')).toBe(
-      true
-    );
-    expect(stylesHeatmapCircle(sel, sel, 'color: red; & .x { border: 1px solid; }')).toBe(true);
-    expect(stylesHeatmapCircle(sel, sel, 'background: rgba(15, 23, 42, 0.85);')).toBe(false);
-    expect(stylesHeatmapCircle(sel, sel, 'background-image: url(')).toBe(true);
-    expect(stylesHeatmapCircle(sel, sel, 'background: red; grid-area: \\')).toBe(true);
-    expect(stylesHeatmapCircle(sel, sel, 'content: "')).toBe(true);
-    expect(stylesHeatmapCircle(sel, sel, 'width: calc(1px))')).toBe(true);
+    const judged = (...bodies) => stylesHeatmapCircle(sel, sel, bodies);
+    expect(judged('color: red;', 'background: rgba(15, 23, 42, 0.85);')).toBe(false);
+    expect(judged('color: red; :is(&, .x) { border: 1px solid; ')).toBe(true);
+    expect(judged('color: red; & .x { border: 1px solid; ')).toBe(true);
+    expect(judged('border: 1px solid;', '.a { color: red ')).toBe(true);
+    expect(judged('color: red;', '.a { color: red ')).toBe(true);
+    expect(judged('background-image: url(')).toBe(true);
+    expect(judged('background: red; grid-area: \\')).toBe(true);
+    expect(judged('content: "')).toBe(true);
+    expect(judged('width: calc(1px))')).toBe(true);
   });
 
   it('judges a list fragment by the whole selector list it came from', () => {
@@ -664,7 +667,13 @@ describe('heat-map stylesheet', () => {
     const painting = rules
       .filter((r) => !inForcedColours(r) && paints(r.body))
       .flatMap((r) =>
-        r.selectors.filter((sel) => stylesHeatmapCircle(sel, r.selectors.join(','), r.body))
+        r.selectors.filter((sel) =>
+          stylesHeatmapCircle(
+            sel,
+            r.selectors.join(','),
+            rules.map((o) => o.body)
+          )
+        )
       );
     // The rim itself must exist, so the loop below checks something.
     expect(painting.some((sel) => withoutNot(sel).includes('.is-empty'))).toBe(true);
