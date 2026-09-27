@@ -86,10 +86,12 @@ SHELL_BOUNDARY = r"""[\s;&|()<>"'`]"""
 # Scripts npm runs without anything naming them: `npm ci` and `npm install`
 # run the install and dependencies lifecycles, `npm t`, `npm restart`, `npm
 # pack` and their many aliases, abbreviations and flag-first spellings run the
-# rest, and each event also runs its pre/post pair whether or not the event
-# itself has a script. Rather than parse npm's command grammar, any `npm`
-# invocation counts as running all of them - that can only over-detect, which
-# fails loudly here.
+# rest. Some events (install, pack, version and restart among them) also run
+# their pre/post pair when the event itself has no script, while `npm test` and
+# `npm stop` stop at "Missing script" and `npm start` does unless a server.js
+# exists; the set assumes all of them do. Rather than parse npm's command
+# grammar, any `npm` invocation counts as running every one of these - that can
+# only over-detect, which fails loudly here.
 NPM_LIFECYCLE_EVENTS = (
     "install",
     "dependencies",
@@ -233,6 +235,39 @@ def test_discovery_follows_npm_scripts_under_any_name(npm_scripts, extra, run):
     """The real package.json files hold none of these wrappers today, so pin
     that discovery would see each one rather than wait for it to slip past."""
     assert runs_playwright_tests({"run": run}, {**npm_scripts, **extra})
+
+
+# The lifecycle events npm's scripts documentation lists, current and legacy
+# (prepublish, shrinkwrap, uninstall), each with both prefixes as the
+# over-approximation above assumes. Written out independently of
+# NPM_LIFECYCLE_EVENTS, so dropping an event or a prefix there fails below.
+DOCUMENTED_LIFECYCLE_SCRIPTS = sorted(
+    f"{prefix}{event}"
+    for event in (
+        "dependencies",
+        "install",
+        "pack",
+        "prepare",
+        "prepublish",
+        "prepublishOnly",
+        "publish",
+        "restart",
+        "shrinkwrap",
+        "start",
+        "stop",
+        "test",
+        "uninstall",
+        "version",
+    )
+    for prefix in ("", "pre", "post")
+)
+
+
+@pytest.mark.parametrize("name", DOCUMENTED_LIFECYCLE_SCRIPTS)
+def test_any_npm_invocation_counts_as_running_every_lifecycle_script(npm_scripts, name):
+    assert runs_playwright_tests(
+        {"run": "npm ci"}, {**npm_scripts, name: "playwright test"}
+    )
 
 
 @pytest.mark.parametrize(
