@@ -118,8 +118,9 @@ AUDIT_JOB_ACTION_INPUTS = {
 # Job control (`set -m`, `set -mE`, `set -o monitor`) puts each background job
 # in its own process group, out of reach of the group drain in _run_step.
 JOB_CONTROL = re.compile(r"\bset\b[^;&|\n]*\s(?:-[a-zA-Z]*m|-o\s+monitor\b)")
-# `command -p` searches bash's default PATH, reaching real tools past the stubs.
-COMMAND_P = re.compile(r"\bcommand\b[^;&|\n]*\s-[a-zA-Z]*p")
+# `command -p` searches bash's default PATH and `hash -p` binds a name to any
+# file, both reaching real tools past the stubs.
+COMMAND_P = re.compile(r"\b(?:command|hash)\b[^;&|\n]*\s-[a-zA-Z]*p")
 
 # The only file a `run:` body may write to. Only `N>&M` / `>&-` is an fd dup;
 # `N>file`, `&>file` and `>&file` all write to a file.
@@ -188,12 +189,14 @@ def _run_step(step, tmp_path, scanner_exit, timeout=30):
     stub_dir.mkdir()
     # Each stub records the environment it was started with: configuration a
     # static check cannot see - a quote-split name, `declare -x` - reaches here.
+    # Raw, not `export -p`, which omits names that are not shell identifiers
+    # such as `npm_config_audit-level`.
     env_capture = tmp_path / "env"
     env_capture.mkdir()
     for name in STUBBED:
         stub = stub_dir / name
         stub.write_text(
-            f"#!/bin/sh\nexport -p > '{env_capture}/{name}.'$$\n"
+            f"#!/bin/sh\n/bin/cat /proc/$$/environ > '{env_capture}/{name}.'$$\n"
             f"echo 'stub {name} report'\nexit {scanner_exit}\n"
         )
         stub.chmod(0o755)
@@ -261,21 +264,21 @@ def _run_step(step, tmp_path, scanner_exit, timeout=30):
     finally:
         drained = _wait_for_process_group(proc.pid, timeout=30)
     assert drained, f"step {step['name']!r} left processes running"
-    for record in env_capture.iterdir():
-        if record.name.split(".")[0] not in ("npm", "pip-audit"):
-            continue
-        for line in record.read_text().splitlines():
-            name = re.match(r"export\s+([^=\s]+)", line)
-            assert not (name and AUDIT_CONFIG_VAR.match(name.group(1))), (
-                f"step {step['name']!r} hands {record.name.split('.')[0]} "
-                f"{name.group(1)}"
-            )
     written = sorted(
         str(f.relative_to(runner_temp))
         for f in runner_temp.rglob("*")
         if f.is_file() and f.stat().st_size
     )
     assert not written, f"step {step['name']!r} wrote runner command files {written}"
+    for record in env_capture.iterdir():
+        scanner = record.name.split(".")[0]
+        if scanner not in ("npm", "pip-audit"):
+            continue
+        for entry in record.read_bytes().split(b"\0"):
+            name = entry.split(b"=", 1)[0].decode(errors="replace")
+            assert not AUDIT_CONFIG_VAR.match(name), (
+                f"step {step['name']!r} hands {scanner} {name}"
+            )
     return proc.returncode, summary.read_text()
 
 
@@ -566,14 +569,20 @@ def test_job_control_check_passes_other_options(body):
 
 
 @pytest.mark.parametrize(
-    "body", ["command -p git", "command -pv git", "command -v -p git"]
+    "body",
+    ["command -p git", "command -pv git", "command -v -p git", "hash -p /x/git git"],
 )
 def test_command_p_check_sees_every_spelling(body):
     assert COMMAND_P.search(body)
 
 
 def test_audit_mention_sees_npm_configuration_and_abbreviations():
-    for line in ("npm config set omit=peer --location=project", "npm aud", "npx x"):
+    for line in (
+        "npm config set omit=peer --location=project",
+        "npm aud",
+        "npx x",
+        "pip config set global.no-deps true",
+    ):
         assert AUDIT_MENTION.search(line), line
 
 
@@ -583,6 +592,7 @@ def test_audit_mention_sees_npm_configuration_and_abbreviations():
         "npm_config_omit=dev npm audit",
         'declare -x "npm""_config_omit=dev"; npm audit',
         "export PIP_NO_DEPS=1; pip-audit",
+        "/usr/bin/env npm_config_audit-level=critical npm audit",
     ],
 )
 def test_stubs_catch_audit_configuration_in_their_environment(body, tmp_path):
@@ -600,5 +610,8 @@ def test_a_timed_out_step_is_killed_with_its_background_children(tmp_path):
         "name": "self-test",
         "run": "(while :; do :; done) &\nwhile :; do :; done\n",
     }
+    started = time.monotonic()
     with pytest.raises(subprocess.TimeoutExpired):
         _run_step(step, tmp_path, scanner_exit=0, timeout=1)
+    # Well inside the 30 s group drain: the timeout path killed the group itself.
+    assert time.monotonic() - started < 10
