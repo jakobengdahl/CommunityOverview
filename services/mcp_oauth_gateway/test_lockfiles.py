@@ -322,24 +322,32 @@ class TestImagePythonStep(unittest.TestCase):
         "FROM busybox from python:3.12\n",
         "FROM\u00a0python:3.12\n",
         "FROM python:\u0663.\u0661\u0662\n",
+        "FROM\u2003python:3.12\n",
+        "FROM --platform=x\u2003python:3.12\n",
     ]
 
-    def _step_script(self):
+    def _step(self):
         workflow = yaml.safe_load((HERE.parents[1] / ".github" / "workflows" / "ci.yml").read_text())
         steps = workflow["jobs"]["gateway-tests-run"]["steps"]
         (step,) = [s for s in steps if s.get("id") == "image-python"]
         self.assertEqual(step["working-directory"], "services/mcp_oauth_gateway")
-        return step["run"]
+        return step
 
     def _run_step(self, dockerfile):
+        step = self._step()
+        # Start from the runner's C.UTF-8, whatever the caller's locale, and let
+        # the step's own env override it as it does on the runner.
+        env = {k: v for k, v in os.environ.items() if not k.startswith("LC_") and k not in ("LANG", "LANGUAGE")}
+        env.update({"LANG": "C.UTF-8", **step.get("env", {})})
         with tempfile.TemporaryDirectory() as tmp:
             Path(tmp, "Dockerfile").write_text(dockerfile)
             output = Path(tmp, "github_output")
             output.write_text("")
+            env["GITHUB_OUTPUT"] = str(output)
             result = subprocess.run(
-                ["bash", "-e", "-c", self._step_script()],
+                ["bash", "-e", "-c", step["run"]],
                 cwd=tmp,
-                env={**os.environ, "GITHUB_OUTPUT": str(output)},
+                env=env,
                 capture_output=True,
                 text=True,
             )
