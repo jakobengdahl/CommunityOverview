@@ -428,7 +428,10 @@ describe('heat-map stylesheet', () => {
   const inForcedColours = (r) => Boolean(r.media?.includes('forced-colors'));
   // Declarations that make an element visible. Every border property draws —
   // longhands and logical border-inline*/border-block* included — except the
-  // radii, which only shape the circle; outline-offset and background-size
+  // radii, which only shape the circle. backdrop-filter paints the box's area
+  // even when the box itself is transparent; `filter` counts conservatively,
+  // since a url(...) filter can flood the box and a drop-shadow copies
+  // whatever the box or its children draw. outline-offset and background-size
   // and the like only adjust what something else draws, and border-collapse
   // and border-spacing are table layout. A -webkit- prefix draws the same.
   //
@@ -440,13 +443,13 @@ describe('heat-map stylesheet', () => {
   // does not extend to longhands (`border-width: 0 2px` still draws a side) or
   // to box-shadow (`0 0 0 1px red` is a ring). `transparent` hides only a
   // background: forced-colours mode repaints border and outline colours.
-  // `initial` is never a no-op, since on a border longhand it means
+  // `initial` is never a no-op, since on border-color or border-width it means
   // currentcolor or a medium width. A quoted string, or a parenthesised group
   // such as rgba(...) or calc((...)) with any nesting, counts as one opaque
   // token; a value whose parentheses do not balance counts as painting, and so
   // does anything else not listed here.
   const PAINTING_PROPERTY =
-    /^(?:-webkit-)?(border(-[a-z-]+)?|outline(-(color|style|width))?|box-shadow|background(-(color|image))?)$/;
+    /^(?:-webkit-)?(border(-[a-z-]+)?|outline(-(color|style|width))?|box-shadow|(backdrop-)?filter|background(-(color|image))?)$/;
   const BORDER_SHORTHAND =
     /^(?:-webkit-)?(border(-(top|right|bottom|left|inline|block)(-(start|end))?)?|outline)$/;
   const ZERO_LENGTH = /^0+(\.0+)?([a-z]+|%)?$/;
@@ -528,6 +531,12 @@ describe('heat-map stylesheet', () => {
     ['border: 2px solid rgb(calc((0)) 0 0)', true],
     ['border: 2px solid rgb(0 0 0', true],
     ['box-shadow: 0 0 0 1px transparent, 0 0 0 2px red', true],
+    ['filter: drop-shadow(0 0 2px red)', true],
+    ['-webkit-filter: drop-shadow(0 0 2px red)', true],
+    ['backdrop-filter: blur(2px)', true],
+    ['-webkit-backdrop-filter: blur(2px)', true],
+    ['filter: none', false],
+    ['backdrop-filter: none', false],
   ])('treats `%s` as painting: %s', (decl, expected) => {
     expect(paints(`\n  width: 10px;\n  ${decl};\n`)).toBe(expected);
   });
@@ -560,7 +569,7 @@ describe('heat-map stylesheet', () => {
     const painting = rules
       .filter((r) => !inForcedColours(r) && paints(r.body))
       .flatMap((r) => r.selectors)
-      .filter((sel) => sel.includes('.graph-heatmap-circle'));
+      .filter(onHeatmapCircle);
     // The rim itself must exist, so the loop below checks something.
     expect(painting.some((sel) => withoutNot(sel).includes('.is-empty'))).toBe(true);
     for (const sel of painting) {
