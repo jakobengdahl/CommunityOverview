@@ -662,10 +662,10 @@ class TestRejectedAddNodesLeavesNoInlineVector:
             )
 
 
-class TestAdoptionKeepsVectorsUntilTheIndexHoldsThem:
-    """A supplied vector's only copy is the node object until the index holds
-    it, so a raise while exporting or loading the index must not take it off
-    the node first."""
+class TestAdoptionKeepsVectorsIfTheIndexRaises:
+    """A supplied vector's only copy is the node object until the index export
+    and load have returned, so a raise there must not take it off the node
+    first - not even one the index would have refused for its width."""
 
     @pytest.mark.parametrize("failing", ["export_vectors", "load_vectors"])
     def test_a_raise_in_the_index_leaves_the_vector_on_the_node(
@@ -696,13 +696,121 @@ class TestAdoptionKeepsVectorsUntilTheIndexHoldsThem:
 
         monkeypatch.setattr(temp_storage.vector_store, "load_vectors", fail_once)
 
-        temp_storage.add_nodes(
+        result = temp_storage.add_nodes(
             [Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5])],
             [],
         )
 
+        assert result.success is False
+        assert "load failed" in result.message
+        assert temp_storage.get_node("a") is not None
         assert len(calls) == 2
         assert temp_storage.get_node("a").embedding is None
+        assert temp_storage.vector_store.get_vector_list("a") == pytest.approx(
+            [0.25, 0.5]
+        )
+
+    @pytest.mark.parametrize("failing", ["export_vectors", "load_vectors"])
+    def test_a_raise_in_an_anchored_index_leaves_every_vector_on_its_node(
+        self, temp_storage, monkeypatch, failing
+    ):
+        temp_storage.vector_store.load_vectors({"anchor": [1.0, 0.0]})
+
+        def fail(*args, **kwargs):
+            raise RuntimeError(f"{failing} failed")
+
+        monkeypatch.setattr(temp_storage.vector_store, failing, fail)
+        fits = Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5])
+        too_wide = Node(
+            id="b", type=NodeType.ACTOR, name="Beta", embedding=[0.1, 0.2, 0.3]
+        )
+
+        with pytest.raises(RuntimeError):
+            temp_storage._adopt_supplied_vectors([fits, too_wide])
+
+        assert fits.embedding == pytest.approx([0.25, 0.5])
+        assert too_wide.embedding == pytest.approx([0.1, 0.2, 0.3])
+
+
+class TestAdoptionSettlesSuppliedVectors:
+    """On success every supplied vector leaves its node: the index holds the
+    ones it accepts, and the ones it cannot use are cleared rather than left
+    for later events to carry."""
+
+    @staticmethod
+    def _without_generation(monkeypatch, storage):
+        def no_generation(nodes):
+            raise RuntimeError("no embedding model")
+
+        monkeypatch.setattr(
+            storage.vector_store, "update_nodes_embeddings", no_generation
+        )
+
+    @pytest.mark.parametrize("unusable", [[0.1, 0.2, 0.3], []])
+    def test_an_unusable_vector_is_cleared_from_the_node(
+        self, temp_storage, monkeypatch, unusable
+    ):
+        self._without_generation(monkeypatch, temp_storage)
+        temp_storage.vector_store.load_vectors({"anchor": [1.0, 0.0]})
+
+        result = temp_storage.add_nodes(
+            [Node(id="b", type=NodeType.ACTOR, name="Beta", embedding=unusable)],
+            [],
+        )
+
+        assert result.success is True
+        assert temp_storage.get_node("b").embedding is None
+        assert temp_storage.vector_store.get_vector_list("b") is None
+        assert temp_storage.vector_store.get_vector_list("anchor") == pytest.approx(
+            [1.0, 0.0]
+        )
+
+    def test_a_zero_length_vector_does_not_block_the_rest_of_the_batch(
+        self, temp_storage, monkeypatch
+    ):
+        self._without_generation(monkeypatch, temp_storage)
+
+        result = temp_storage.add_nodes(
+            [
+                Node(id="z", type=NodeType.ACTOR, name="Zero", embedding=[]),
+                Node(id="b", type=NodeType.ACTOR, name="Beta", embedding=[0.1, 0.2]),
+            ],
+            [],
+        )
+
+        assert result.success is True
+        assert temp_storage.vector_store.get_vector_list("z") is None
+        assert temp_storage.vector_store.get_vector_list("b") == pytest.approx(
+            [0.1, 0.2]
+        )
+        assert temp_storage.get_node("z").embedding is None
+        assert temp_storage.get_node("b").embedding is None
+
+    def test_a_supplied_vector_replaces_an_orphan_index_vector_for_a_new_id(
+        self, temp_storage
+    ):
+        temp_storage.vector_store.load_vectors({"a": [0.75, 1.0]})
+
+        result = temp_storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5]),
+                Node(id="a", type=NodeType.ACTOR, name="Again"),
+            ],
+            [],
+        )
+
+        assert result.success is False
+        assert temp_storage.get_node("a").embedding is None
+        assert temp_storage.vector_store.get_vector_list("a") == pytest.approx(
+            [0.25, 0.5]
+        )
+
+    def test_nodes_passed_as_an_iterator_are_adopted_and_cleared(self, temp_storage):
+        node = Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5])
+
+        temp_storage._adopt_supplied_vectors(iter([node]))
+
+        assert node.embedding is None
         assert temp_storage.vector_store.get_vector_list("a") == pytest.approx(
             [0.25, 0.5]
         )
