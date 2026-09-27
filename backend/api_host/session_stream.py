@@ -18,7 +18,11 @@ from pydantic import BaseModel, Field
 from starlette.requests import Request
 
 from backend.core.session_registry import SessionRegistry
-from backend.runtime.authorization import GRAPH_ACTION_MUTATE, use_request_authorization
+from backend.runtime.authorization import (
+    GRAPH_ACTION_MUTATE,
+    GRAPH_ACTION_READ,
+    use_request_authorization,
+)
 from backend.service.access import authorize_graph_access
 from backend.service.rest_api import _lookup_rate_key
 
@@ -292,19 +296,22 @@ def register_session_stream(
     # trigger-token endpoint, so the hosted layer can bind it to a real actor;
     # the open-core default is permissive. It never mutates the graph.
 
-    def _auto_add_authorize_mutate(request: Request):
-        """Return a denial JSONResponse if a mutating auto-add call is refused."""
+    def _auto_add_authorize(request: Request, action: str):
+        """Return a denial JSONResponse if the auto-add call is refused."""
         if graph_service is None:
             return None
         with use_request_authorization(headers=request.headers):
             denied = authorize_graph_access(
                 graph_service.authorization_hook,
-                action=GRAPH_ACTION_MUTATE,
+                action=action,
                 target="session_auto_add_agent",
             )
         if denied:
             return JSONResponse(denied, status_code=403)
         return None
+
+    def _auto_add_authorize_mutate(request: Request):
+        return _auto_add_authorize(request, GRAPH_ACTION_MUTATE)
 
     @app.post("/sessions/{session_id}/auto-add-agents")
     async def create_auto_add_agent(
@@ -373,6 +380,9 @@ def register_session_stream(
             )
         if not session_registry.is_valid_session_id(session_id):
             return JSONResponse({"error": "invalid session_id format"}, status_code=400)
+        denied = _auto_add_authorize(request, GRAPH_ACTION_READ)
+        if denied is not None:
+            return denied
         if _rate_limited(request):
             return JSONResponse({"error": "rate limit exceeded"}, status_code=429)
         agents = [r.to_dict() for r in auto_add_registry.list_rules(session_id)]
