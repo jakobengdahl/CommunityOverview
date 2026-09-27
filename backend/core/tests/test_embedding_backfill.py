@@ -193,15 +193,40 @@ class TestStartupBackfillPass:
         )
         storage_log()
 
+        # Starts are recorded rather than threads counted before and after:
+        # every GraphStorage, this one included, runs a short-lived
+        # embedding-preload thread that can exit mid-call, and a census of
+        # the process's threads then differs although nothing was started.
+        # `unrelated` ends inside the call so that case is always exercised.
+        release = threading.Event()
+        unrelated = threading.Thread(target=release.wait, daemon=True)
+        unrelated.start()
+
+        def _absent_and_unrelated_thread_exits(name):
+            release.set()
+            unrelated.join()
+            return None
+
         monkeypatch.setattr(
-            storage_module.importlib.util, "find_spec", lambda name: None
+            storage_module.importlib.util,
+            "find_spec",
+            _absent_and_unrelated_thread_exits,
         )
-        before = {t.ident for t in threading.enumerate()}
+        caller = threading.current_thread()
+        started = []
+        real_start = threading.Thread.start
+
+        def _recording_start(thread):
+            if threading.current_thread() is caller:
+                started.append(thread.name)
+            return real_start(thread)
+
+        monkeypatch.setattr(threading.Thread, "start", _recording_start)
 
         storage._maybe_backfill_missing_embeddings_async()
 
-        after = {t.ident for t in threading.enumerate()}
-        assert after == before
+        monkeypatch.setattr(threading.Thread, "start", real_start)
+        assert started == []
         assert any("have no" in m for m in storage_log()[logging.WARNING])
         assert not storage.vector_store.has_embedding("a")
         storage.flush()
