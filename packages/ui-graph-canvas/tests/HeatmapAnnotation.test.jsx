@@ -439,8 +439,8 @@ describe('heat-map stylesheet', () => {
   // draws a side) or to box-shadow (`0 0 0 1px red` is a ring). `transparent`
   // hides only a background: forced-colours mode repaints border and outline
   // colours. `initial` is never a no-op, since on a border longhand it means
-  // currentcolor or a medium width. Functions such as rgba(...) count as one
-  // opaque token. Anything else counts as painting.
+  // currentcolor or a medium width. A function call such as rgba(...), nested
+  // ones included, counts as one opaque token. Anything else counts as painting.
   const PAINTING_PROPERTY =
     /^(?:-webkit-)?(border(-[a-z-]+)?|outline(-(color|style|width))?|box-shadow|background(-(color|image))?)$/;
   const BORDER_SHORTHAND =
@@ -464,7 +464,12 @@ describe('heat-map stylesheet', () => {
       ) {
         return false;
       }
-      const tokens = value.replace(/[a-z-]+\([^)]*\)/g, 'fn()').split(/\s+/);
+      let flat = value;
+      for (let prev; prev !== flat;) {
+        prev = flat;
+        flat = flat.replace(/[a-z-]+\([^()]*\)/g, 'fn');
+      }
+      const tokens = flat.split(/\s+/);
       const noOp = (t) =>
         isNoOpToken(t) || (t === 'transparent' && property.startsWith('background'));
       if (tokens.every(noOp)) return false;
@@ -511,6 +516,7 @@ describe('heat-map stylesheet', () => {
     ['border-width: 0 2px', true],
     ['border-color: transparent red', true],
     ['border: 1px solid rgba(0 0 0 / 0.5)', true],
+    ['border: 2px solid hsl(var(--h) 0% 40%)', true],
     ['box-shadow: 0 0 0 1px transparent, 0 0 0 2px red', true],
   ])('treats `%s` as painting: %s', (decl, expected) => {
     expect(paints(`\n  width: 10px;\n  ${decl};\n`)).toBe(expected);
