@@ -171,6 +171,11 @@ describe('heat-map overlay round trip', () => {
     }
   });
 
+  it('keeps an unsized image on the generic 160x96 box, not the heat-map square', () => {
+    const node = overlayToFlowNode({ id: 'i1', kind: 'image', position: { x: 0, y: 0 } });
+    expect(node.style).toEqual({ width: 160, height: 96 });
+  });
+
   it('gives an unsized heat-map overlay a square default box', () => {
     const node = overlayToFlowNode({ id: 'h2', kind: 'heatmap', position: { x: 0, y: 0 } });
     expect(node.style).toEqual({
@@ -216,6 +221,43 @@ describe('GenericAnnotationNode — heatmap', () => {
     expect(screen.queryByRole('button', { name: /^Intensity \d+$/ })).toBeNull();
     expect(hoisted.setNodes).not.toHaveBeenCalled();
     expect(notifyChange).not.toHaveBeenCalled();
+  });
+
+  // A stored intensity is read through normalizeHeatmapIntensity everywhere it
+  // is used, so a raw value that is out of range, fractional or absent must
+  // behave exactly like the whole level it normalises to.
+  it.each([-2, 0.3])('treats a stored %s as level 0 and marks it empty', (stored) => {
+    const { circle } = renderHeatmap({ intensity: stored });
+    expect(circle.getAttribute('data-intensity')).toBe('0');
+    expect(circle.classList.contains('is-empty')).toBe(true);
+  });
+
+  it.each([
+    [undefined, 5],
+    [7.6, 8],
+  ])('marks level %s as %i and publishes nothing when that level is chosen', (stored, level) => {
+    const data = stored === undefined ? {} : { intensity: stored };
+    const { circle, notifyChange } = renderHeatmap(data);
+    fireEvent.contextMenu(circle);
+    fireEvent.click(screen.getByRole('button', { name: 'Intensity' }));
+    const pressed = screen
+      .getAllByRole('button', { name: /^Intensity \d+$/ })
+      .filter((b) => b.getAttribute('aria-pressed') === 'true');
+    expect(pressed.map((b) => b.textContent)).toEqual([String(level)]);
+    fireEvent.click(screen.getByRole('button', { name: `Intensity ${level}` }));
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+    expect(notifyChange).not.toHaveBeenCalled();
+  });
+
+  it('leaves an image free to change its aspect ratio while resizing', () => {
+    render(
+      <AnnotationContext.Provider value={{ notifyChange: vi.fn(), labels: {} }}>
+        <GenericAnnotationNode id="i1" type="image" data={{ image: { url: 'x.png' } }} selected />
+      </AnnotationContext.Provider>
+    );
+    const props = hoisted.resizerProps.at(-1);
+    expect(props.isVisible).toBe(true);
+    expect(props.keepAspectRatio).toBe(false);
   });
 
   it('draws the circle as its own element inside the box', () => {
@@ -349,6 +391,58 @@ describe('heat-map stylesheet', () => {
     ),
     'utf-8'
   );
+
+  // Every rule's selector list, with the @media block (if any) it sits in.
+  // Enough of a parser for this stylesheet: comments stripped, one level of
+  // nesting, no strings containing braces.
+  const rules = (() => {
+    const out = [];
+    const text = css.replace(/\/\*[\s\S]*?\*\//g, '');
+    let media = null;
+    let i = 0;
+    while (i < text.length) {
+      const open = text.indexOf('{', i);
+      const close = text.indexOf('}', i);
+      if (close !== -1 && (open === -1 || close < open)) {
+        media = null;
+        i = close + 1;
+        continue;
+      }
+      if (open === -1) break;
+      const prelude = text.slice(i, open).trim();
+      if (prelude.startsWith('@media')) {
+        media = prelude;
+        i = open + 1;
+        continue;
+      }
+      const end = text.indexOf('}', open);
+      out.push({ media, selectors: prelude.split(',').map((sel) => sel.trim()) });
+      i = end + 1;
+    }
+    return out;
+  })();
+  const heatmapSelectors = (inForcedColours) =>
+    rules
+      .filter((r) => Boolean(r.media?.includes('forced-colors')) === inForcedColours)
+      .flatMap((r) => r.selectors)
+      .filter((sel) => sel.includes('.kind-heatmap'));
+
+  it('outlines only non-empty circles in every forced-colours heat-map rule', () => {
+    const selectors = heatmapSelectors(true);
+    expect(selectors.length).toBeGreaterThan(0);
+    for (const sel of selectors) {
+      expect(sel).toContain(':not(.is-empty)');
+      expect(sel.replace(':not(.is-empty)', '')).not.toContain('.is-empty');
+    }
+  });
+
+  it('draws an empty circle only while it is selected or hovered', () => {
+    const selectors = heatmapSelectors(false).filter((sel) => /\.is-empty(?!\))/.test(sel));
+    expect(selectors.length).toBeGreaterThan(0);
+    for (const sel of selectors) {
+      expect(sel.includes('.selected') || sel.includes(':hover')).toBe(true);
+    }
+  });
 
   it('keeps level-0 circles out of the forced-colours outline', () => {
     const block = css.slice(css.indexOf('@media (forced-colors: active)'));
