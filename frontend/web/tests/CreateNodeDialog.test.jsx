@@ -33,6 +33,7 @@ describe('CreateNodeDialog', () => {
     submitName('  Acme  ');
 
     await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(onSave).toHaveBeenCalledTimes(1);
     expect(onSave).toHaveBeenCalledWith(
       expect.objectContaining({ name: 'Acme', type: 'Actor', tags: [], aliases: [] })
     );

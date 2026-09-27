@@ -396,6 +396,28 @@ describe('openAgentEditor (handleEdit, Agent branch)', () => {
     expect(showNotification).not.toHaveBeenCalled();
   });
 
+  // Only a switch makes the editor wrong: a clear or resync in the same session
+  // leaves the agent the user asked to edit.
+  it('still opens the editor after a clear in the same session', async () => {
+    const call = deferred();
+    const getNodeDetails = vi.fn(() =>
+      call.promise.then(() => ({ success: true, node: subscription }))
+    );
+    const openEditor = vi.fn();
+
+    const inFlight = openAgentEditor({
+      agent,
+      getNodeDetails,
+      openEditor,
+      showNotification: vi.fn(),
+    });
+    useGraphStore.getState().clearVisualization();
+    call.release();
+
+    expect(await inFlight).toBe(true);
+    expect(openEditor).toHaveBeenCalledWith({ agent, subscription });
+  });
+
   it('reports a failed fetch without opening the editor', async () => {
     const openEditor = vi.fn();
     const showNotification = vi.fn();
@@ -446,6 +468,7 @@ describe('createDialogNode (CreateNodeDialog via handleNodeCreated)', () => {
     const drawn = await createDialogNode(h);
 
     expect(drawn).toBe(true);
+    expect(h.addNodes).toHaveBeenCalledTimes(1);
     expect(h.addNodes).toHaveBeenCalledWith([draft], []);
     expect(h.addNodesToVisualization).toHaveBeenCalledWith([{ ...draft, id: 'n1' }], []);
     expect(useGraphStore.getState().nodes.map((n) => n.id)).toContain('n1');
@@ -541,6 +564,18 @@ describe('agentCreateToCanvas (handleSaveAgent create branch)', () => {
       added_node_ids: ['sub-1', 'agent-1'],
     });
     expect(drawn.edges[0].id).toBe('tmp-edge');
+  });
+
+  it('keeps the sent ids for anything the server returned no id for', () => {
+    const drawn = agentCreateToCanvas(agentNodes, agentEdges, { added_node_ids: ['sub-1'] });
+
+    expect(drawn.nodes.map((n) => n.id)).toEqual(['sub-1', 'tmp-agent']);
+    expect(drawn.edges[0]).toMatchObject({ source: 'tmp-agent', target: 'sub-1' });
+
+    const noSub = agentCreateToCanvas(agentNodes, agentEdges, {
+      added_node_ids: [null, 'agent-1'],
+    });
+    expect(noSub.edges[0]).toMatchObject({ source: 'agent-1', target: 'tmp-sub' });
   });
 
   it('returns null when nothing was created', () => {
