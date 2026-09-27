@@ -199,6 +199,10 @@ describe('applyEdgeUpdate', () => {
     expect(applied).toBe(false);
     expect(useGraphStore.getState().edges).toEqual([]);
     expect(h.syncRef.current.sendEdgesUpdated).not.toHaveBeenCalled();
+    // removeEdge leaves the dialog open and the dialog does not close itself,
+    // so the save must still close it.
+    expect(h.setEditingEdge).toHaveBeenCalledWith(null);
+    expect(useGraphStore.getState().editingEdge).toBeNull();
     expect(h.showNotification).toHaveBeenCalledWith('success', 'Edge updated');
   });
 

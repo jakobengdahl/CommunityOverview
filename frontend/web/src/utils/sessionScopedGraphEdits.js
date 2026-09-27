@@ -4,9 +4,9 @@ import { savedViewMetadataToCanvasMetadata } from './sessionAnnotations';
 /**
  * App's awaiting graph handlers, guarded against stale post-await canvas writes.
  *
- * Each awaits a network call and then edits the canvas store or fans out
- * through syncRef — both of which point at whichever session is active when
- * the reply lands. Closing dialogs on a session switch or canvas clear does not
+ * Each awaits a network call and then edits the canvas store, fans out through
+ * syncRef or opens a dialog — all of which point at whichever session is active
+ * when the reply lands. Closing dialogs on a session switch or canvas clear does not
  * save them: any dialog check has already passed by the time the invalidating
  * event lands mid-await. Each therefore captures the session before awaiting
  * and drops effects that no longer have a target.
@@ -30,7 +30,9 @@ import { savedViewMetadataToCanvasMetadata } from './sessionAnnotations';
  *
  * They live here rather than inline in App so the mid-await switch is covered by
  * a test — App itself is not rendered by the suite — following the same reasoning
- * as sessionLifecycle.js.
+ * as sessionLifecycle.js. The pure mappers at the end (the `toCanvas` and entry
+ * builders App hands these helpers) await nothing; they live here for the same
+ * reason, so what App passes in is tested too.
  */
 
 /**
@@ -76,19 +78,20 @@ export async function applyEdgeUpdate({
     // before it runs would let a throw there follow "Edge updated" with "Could
     // not update edge" for a PUT that did land.
     const onCanvas = useGraphStore.getState().edges.some((e) => e.id === editingEdge.id);
-    if (scope.sessionChanged() || !onCanvas) {
-      showNotification('success', 'Edge updated');
-      return false;
+    const applied = !scope.sessionChanged() && onCanvas;
+    if (applied) {
+      updateEdgeData(editingEdge.id, updates);
+      // Fan the update out to collaborators: both endpoints already exist on
+      // their canvases, so nothing else prompts them to re-render the changed
+      // edge; without this they show the stale attributes until reload.
+      syncRef.current?.sendEdgesUpdated([{ id: editingEdge.id, ...updates }]);
     }
-    updateEdgeData(editingEdge.id, updates);
-    // Fan the update out to collaborators: both endpoints already exist on
-    // their canvases, so nothing else prompts them to re-render the changed
-    // edge; without this they show the stale attributes until reload.
-    syncRef.current?.sendEdgesUpdated([{ id: editingEdge.id, ...updates }]);
-    // A replace closed this dialog already, so anything open now is newer.
+    // A switch or replace closed this dialog already, so anything open now is
+    // newer. An edge removed in place (a collaborator's delete) leaves the
+    // dialog open, and nothing but this closes it.
     if (!scope.canvasReplaced()) setEditingEdge(null);
     showNotification('success', 'Edge updated');
-    return true;
+    return applied;
   } catch (error) {
     console.error('Error updating edge:', error);
     showNotification('error', 'Could not update edge');
