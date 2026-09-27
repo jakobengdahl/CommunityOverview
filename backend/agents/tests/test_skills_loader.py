@@ -1325,7 +1325,7 @@ class TestFetchTextRemainingGuards:
                 await self._loader()._fetch_text("https://api.github.com/start")
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("advertised", ["abc", "1.5", "-1"])
+    @pytest.mark.parametrize("advertised", ["abc", "1.5", "-1", "0x10", "5, 5"])
     async def test_a_malformed_content_length_is_refused_by_name(self, advertised):
         """int() on the raw header used to escape as a bare parse error, and a
         negative value slipped under the cap; both are refused as malformed."""
@@ -1346,6 +1346,60 @@ class TestFetchTextRemainingGuards:
                 await loader._fetch_text("https://api.github.com/start")
 
         assert loader._text_cache == {}
+
+    async def _fetch_one(self, response, max_bytes=10):
+        handler, _seen = _recording_handler([response])
+        with (
+            _mock_http(handler),
+            patch.object(loader_module, "is_safe_url", lambda _url: True),
+        ):
+            return await self._loader(max_skill_content_bytes=max_bytes)._fetch_text(
+                "https://api.github.com/start"
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_response_without_content_length_is_returned(self):
+        """Chunked responses carry no Content-Length; only the body guard
+        applies to them, so they must not be refused for the missing header."""
+        response = loader_module.httpx.Response(200, text="# chunked")
+        del response.headers["content-length"]
+        assert "content-length" not in response.headers
+
+        assert await self._fetch_one(response) == "# chunked"
+
+    @pytest.mark.asyncio
+    async def test_a_zero_content_length_with_an_empty_body_is_accepted(self):
+        response = loader_module.httpx.Response(
+            200, headers={"content-length": "0"}, content=b""
+        )
+
+        assert await self._fetch_one(response) == ""
+
+    @pytest.mark.asyncio
+    async def test_an_advertised_length_of_exactly_the_cap_is_accepted(self):
+        response = loader_module.httpx.Response(
+            200, headers={"content-length": "10"}, text="x" * 10
+        )
+
+        assert await self._fetch_one(response) == "x" * 10
+
+    @pytest.mark.asyncio
+    async def test_an_unlengthed_body_of_exactly_the_cap_is_accepted(self):
+        """With no header, the body guard alone decides the boundary."""
+        response = loader_module.httpx.Response(200, text="x" * 10)
+        del response.headers["content-length"]
+
+        assert await self._fetch_one(response) == "x" * 10
+
+    @pytest.mark.asyncio
+    async def test_a_leading_zero_content_length_is_read_as_decimal(self):
+        """'010' is ten, not a malformed value: base-prefix parsing
+        (int(cl, 0)) would refuse it."""
+        response = loader_module.httpx.Response(
+            200, headers={"content-length": "010"}, text="x" * 10
+        )
+
+        assert await self._fetch_one(response) == "x" * 10
 
     @pytest.mark.asyncio
     async def test_a_fetch_that_carries_headers_is_cached_too(self):
