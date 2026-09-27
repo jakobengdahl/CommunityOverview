@@ -490,24 +490,29 @@ describe('heat-map stylesheet', () => {
   const withoutNot = (sel) => sel.replace(/:not\([^)]*\)/g, '');
   // The element a selector styles is its last compound; a class further left
   // only scopes it. A selector is set aside only when its last compound is
-  // plain — classes, a type, argument-free pseudo-classes — and carries none
-  // of the classes the heat-map node or its circle can have, as
+  // plain — at least one class, optionally a type, and argument-free
+  // pseudo-classes or pseudo-elements — and carries none of the classes the heat-map node or its circle can have, as
   // `.kind-heatmap .graph-heatmap-level` does. Anything else, such as
   // :has(...), :not(...), :is(...), [attr] or `*`, could still narrow to the
   // node or the circle, so it is judged as before, by the whole selector. So
   // is every selector of a rule whose selector list has a parenthesis,
   // bracket, quote or escape anywhere in it: the rule parser splits lists on
   // every comma, even one inside :is(a, b, c), so a fragment's plain-looking
-  // last piece may not be its selector's last compound.
+  // last piece may not be its selector's last compound. And so is every
+  // selector of a rule whose body holds `{` or `&`: the parser reads a nested
+  // rule as part of the outer body, so its own selector is never seen.
   const NODE_OR_CIRCLE_CLASS =
     /\.(graph-generic-annotation-node|kind-heatmap|is-empty|selected|graph-heatmap-circle)(?![\w-])/;
-  const stylesHeatmapCircle = (sel, list = sel) => {
+  const stylesHeatmapCircle = (sel, list = sel, body = '') => {
     const last = sel
       .trim()
       .split(/\s*[\s>+~]\s*/)
       .pop();
     const plain =
-      !/[()[\]"'\\]/.test(list) && /^[\w-]*(?:(?:\.|::?)[\w-]+)+$/.test(last) && last.includes('.');
+      !/[()[\]"'\\]/.test(list) &&
+      !/[{&]/.test(body) &&
+      /^[\w-]*(?:(?:\.|::?)[\w-]+)+$/.test(last) &&
+      last.includes('.');
     return onHeatmapCircle(sel) && !(plain && !NODE_OR_CIRCLE_CLASS.test(last));
   };
 
@@ -606,6 +611,16 @@ describe('heat-map stylesheet', () => {
     expect(stylesHeatmapCircle(sel)).toBe(expected);
   });
 
+  it('judges every selector of a rule with a nested rule in its body', () => {
+    const sel = '.kind-heatmap .graph-heatmap-level';
+    expect(stylesHeatmapCircle(sel, sel, 'color: red;')).toBe(false);
+    expect(stylesHeatmapCircle(sel, sel, 'color: red; :is(&, .x) { border: 1px solid; }')).toBe(
+      true
+    );
+    expect(stylesHeatmapCircle(sel, sel, 'color: red; & .x { border: 1px solid; }')).toBe(true);
+    expect(stylesHeatmapCircle(sel, sel, 'background: rgba(15, 23, 42, 0.85);')).toBe(false);
+  });
+
   it('judges a list fragment by the whole selector list it came from', () => {
     const list = ':is(.a, .kind-heatmap.is-empty .wrap, .b:hover) .graph-heatmap-circle';
     expect(stylesHeatmapCircle('.kind-heatmap.is-empty .wrap', list)).toBe(true);
@@ -633,7 +648,9 @@ describe('heat-map stylesheet', () => {
   it('draws an empty circle only while it is selected or hovered', () => {
     const painting = rules
       .filter((r) => !inForcedColours(r) && paints(r.body))
-      .flatMap((r) => r.selectors.filter((sel) => stylesHeatmapCircle(sel, r.selectors.join(','))));
+      .flatMap((r) =>
+        r.selectors.filter((sel) => stylesHeatmapCircle(sel, r.selectors.join(','), r.body))
+      );
     // The rim itself must exist, so the loop below checks something.
     expect(painting.some((sel) => withoutNot(sel).includes('.is-empty'))).toBe(true);
     for (const sel of painting) {
