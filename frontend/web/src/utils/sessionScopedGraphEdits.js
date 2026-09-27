@@ -73,10 +73,10 @@ export async function applyEdgeUpdate({
   const scope = captureCanvasScope();
   try {
     await updateEdge(editingEdge.id, updates);
-    // Reported at the end of each branch rather than once above them: the
-    // session-scoped work below is still inside this try, so announcing success
-    // before it runs would let a throw there follow "Edge updated" with "Could
-    // not update edge" for a PUT that did land.
+    // Reported after the session-scoped work rather than straight after the
+    // PUT: that work is still inside this try, so announcing success before it
+    // runs would let a throw there follow "Edge updated" with "Could not update
+    // edge" for a PUT that did land.
     const onCanvas = useGraphStore.getState().edges.some((e) => e.id === editingEdge.id);
     const applied = !scope.sessionChanged() && onCanvas;
     if (applied) {
