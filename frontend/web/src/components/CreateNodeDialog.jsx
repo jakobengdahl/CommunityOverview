@@ -96,12 +96,9 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
         }
       }
 
-      const result = await api.addNodes([node], []);
-
-      if (result.added_node_ids && result.added_node_ids.length > 0) {
-        const createdNode = { ...node, id: result.added_node_ids[0] };
-        onSave?.(createdNode);
-      }
+      // The owner persists the node: only it knows whether the session the
+      // dialog was opened in is still the one to draw it into.
+      await onSave(node);
 
       onClose();
     } catch (err) {

@@ -30,12 +30,17 @@ import FullscreenExitButton from './components/FullscreenExitButton';
 import { decideClearAction } from './utils/clearBoard';
 import { dropIntoFreshSession, receiveRemoteSessionDeleted } from './utils/sessionLifecycle';
 import {
+  agentCreateToCanvas,
+  agentUpdateEntries,
   applyEdgeUpdate,
   confirmNodeDelete,
   connectNodes,
+  createDialogNode,
+  createdNodesToCanvas,
   deleteEdgeEverywhere,
   expandNode,
   loadSavedViewNode,
+  openAgentEditor,
   persistNewNodes,
   persistNodeUpdates,
   setEdgeType,
@@ -1179,23 +1184,15 @@ function App() {
   const handleEdit = useCallback(
     async (nodeId, nodeData) => {
       if (nodeData.type === 'Agent') {
-        try {
-          let subscriptionNode = null;
-          const subId = nodeData.metadata?.subscription_id;
-
-          if (subId) {
-            const result = await api.getNodeDetails(subId);
-            if (result.success) {
-              subscriptionNode = result.node;
-            }
-          }
-
-          setEditingAgentData({ agent: nodeData, subscription: subscriptionNode });
-          setShowAgentDialog(true);
-        } catch (error) {
-          console.error('Error preparing agent editor:', error);
-          showNotification('error', 'Could not load agent details');
-        }
+        await openAgentEditor({
+          agent: nodeData,
+          getNodeDetails: api.getNodeDetails,
+          openEditor: (data) => {
+            setEditingAgentData(data);
+            setShowAgentDialog(true);
+          },
+          showNotification,
+        });
       } else if (nodeData.type === 'EventSubscription') {
         setEditingSubscriptionData(nodeData);
         setShowSubscriptionDialog(true);
@@ -1307,15 +1304,13 @@ function App() {
         editingEdge,
         updates,
         updateEdge: api.updateEdge,
-        nodes,
-        edges,
-        updateVisualization,
+        updateEdgeData,
         syncRef,
         setEditingEdge,
         showNotification,
       });
     },
-    [editingEdge, setEditingEdge, nodes, edges, updateVisualization, showNotification, syncRef]
+    [editingEdge, setEditingEdge, updateEdgeData, showNotification, syncRef]
   );
 
   // Callback: Change an edge's relationship type from the context menu.
@@ -1800,10 +1795,7 @@ function App() {
             nodes: [data],
             addNodes: api.addNodes,
             addNodesToVisualization,
-            toCanvas: (result) =>
-              result.added_node_ids?.length > 0
-                ? { nodes: [{ ...data, id: result.added_node_ids[0] }] }
-                : null,
+            toCanvas: (result) => createdNodesToCanvas([data], result),
           });
           showNotification('success', t('notifications.subscription_created', { name: data.name }));
         }
@@ -1826,14 +1818,8 @@ function App() {
       try {
         if (data.agentId) {
           // UPDATE
-          const { agentId, agentUpdates, subscriptionId, subscriptionUpdates } = data;
-
-          const entries = [{ id: agentId, updates: agentUpdates }];
-          if (subscriptionId && subscriptionUpdates) {
-            entries.push({ id: subscriptionId, updates: subscriptionUpdates });
-          }
           await persistNodeUpdates({
-            entries,
+            entries: agentUpdateEntries(data),
             updateNode: api.updateNode,
             updateVisualization,
           });
@@ -1847,25 +1833,7 @@ function App() {
             edges: agentEdges,
             addNodes: api.addNodes,
             addNodesToVisualization,
-            toCanvas: (result) => {
-              if (!(result.added_node_ids && result.added_node_ids.length > 0)) return null;
-              const nodesWithIds = agentNodes.map((node, index) => ({
-                ...node,
-                id: result.added_node_ids[index] || node.id,
-              }));
-              const edgesWithIds = agentEdges.map((edge, index) => ({
-                ...edge,
-                id: result.added_edge_ids?.[index] || edge.id,
-                source:
-                  result.added_node_ids[agentNodes.findIndex((n) => n.type === 'Agent')] ||
-                  edge.source,
-                target:
-                  result.added_node_ids[
-                    agentNodes.findIndex((n) => n.type === 'EventSubscription')
-                  ] || edge.target,
-              }));
-              return { nodes: nodesWithIds, edges: edgesWithIds };
-            },
+            toCanvas: (result) => agentCreateToCanvas(agentNodes, agentEdges, result),
           });
 
           const agentNode = agentNodes.find((n) => n.type === 'Agent');
@@ -1892,26 +1860,37 @@ function App() {
     [schema]
   );
 
-  // Handle created node from CreateNodeDialog
-  const handleNodeCreated = useCallback(
+  // Touch has no drag-to-canvas step to choose a position, so a node
+  // created via a toolbar tap is centered in the viewport directly
+  // (reusing the existing focus/center-camera primitive) instead of
+  // landing wherever the layout defaults new nodes to. Desktop's
+  // click-to-create and drag-to-canvas paths are unchanged.
+  //
+  // Deferred like FloatingSearch's identical newly-added-node case
+  // (FloatingSearch.jsx): the canvas's own node state only picks up
+  // addNodesToVisualization's update on a later render, so focusing
+  // synchronously would target a node the canvas doesn't know about yet.
+  const focusCreatedNode = useCallback(
     (createdNode) => {
-      addNodesToVisualization([createdNode], []);
-      showNotification('success', `${createdNode.type} "${createdNode.name}" created`);
-      // Touch has no drag-to-canvas step to choose a position, so a node
-      // created via a toolbar tap is centered in the viewport directly
-      // (reusing the existing focus/center-camera primitive) instead of
-      // landing wherever the layout defaults new nodes to. Desktop's
-      // click-to-create and drag-to-canvas paths are unchanged.
-      //
-      // Deferred like FloatingSearch's identical newly-added-node case
-      // (FloatingSearch.jsx): the canvas's own node state only picks up
-      // addNodesToVisualization's update on a later render, so focusing
-      // synchronously would target a node the canvas doesn't know about yet.
       if (isCoarsePointer) {
         setTimeout(() => setFocusNodeId(createdNode.id), 100);
       }
     },
-    [addNodesToVisualization, showNotification, isCoarsePointer, setFocusNodeId]
+    [isCoarsePointer, setFocusNodeId]
+  );
+
+  // Create a node from CreateNodeDialog. API errors propagate so the dialog
+  // can show them.
+  const handleNodeCreated = useCallback(
+    (node) =>
+      createDialogNode({
+        node,
+        addNodes: api.addNodes,
+        addNodesToVisualization,
+        showNotification,
+        onDrawn: focusCreatedNode,
+      }),
+    [addNodesToVisualization, showNotification, focusCreatedNode]
   );
 
   // Callback: Save a skill node (create or update)
@@ -1931,10 +1910,7 @@ function App() {
             nodes: [skillData],
             addNodes: api.addNodes,
             addNodesToVisualization,
-            toCanvas: (result) =>
-              result.added_node_ids?.length > 0
-                ? { nodes: [{ ...skillData, id: result.added_node_ids[0] }] }
-                : null,
+            toCanvas: (result) => createdNodesToCanvas([skillData], result),
           });
           showNotification('success', `${skillData.type} "${skillData.name}" created`);
         }
@@ -1967,10 +1943,7 @@ function App() {
             nodes: [nodeData],
             addNodes: api.addNodes,
             addNodesToVisualization,
-            toCanvas: (result) =>
-              result.added_node_ids && result.added_node_ids.length > 0
-                ? { nodes: [{ ...nodeData, id: result.added_node_ids[0] }] }
-                : null,
+            toCanvas: (result) => createdNodesToCanvas([nodeData], result),
           });
           showNotification('success', `Collection "${nodeData.name}" created`);
         }
