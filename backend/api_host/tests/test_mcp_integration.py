@@ -357,18 +357,53 @@ class TestStreamableHttpTransport:
         assert response.status_code == 200
         assert response.headers.get("mcp-session-id")
 
+    @pytest.mark.parametrize(
+        "error", [TypeError, AttributeError, ImportError, RuntimeError, ValueError]
+    )
     def test_a_broken_streamable_transport_fails_startup(
-        self, app_config, mock_llm_provider
+        self, app_config, mock_llm_provider, error
     ):
-        """No silent downgrade to an SSE-only /mcp when the SDK cannot build it."""
+        """No silent downgrade to an SSE-only /mcp when the SDK cannot build it.
+
+        Parametrized so a fallback narrowed to one exception type (an old SDK
+        missing the attribute, an import failure) cannot slip back in.
+        """
         from unittest.mock import patch
 
         with patch(
             "backend.api_host.server.FastMCP.streamable_http_app",
-            side_effect=TypeError("broken transport"),
+            side_effect=error("broken transport"),
         ):
-            with pytest.raises(TypeError, match="broken transport"):
+            with pytest.raises(error, match="broken transport"):
                 self._client(app_config, mock_llm_provider)
+
+    def test_a_failed_session_manager_start_routes_post_to_sse(
+        self, app_config, mock_llm_provider
+    ):
+        """Until the session manager runs, POST /mcp/ must not reach Streamable HTTP.
+
+        Reaching it would answer "Task group is not initialized"; the legacy
+        transport is the fallback.
+        """
+        from unittest.mock import patch
+
+        from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+
+        sse = _RecordingApp("sse")
+        with (
+            patch.object(
+                StreamableHTTPSessionManager,
+                "run",
+                side_effect=RuntimeError("session manager failed to start"),
+            ),
+            patch("backend.api_host.server.FastMCP.sse_app", return_value=sse),
+        ):
+            with self._client(app_config, mock_llm_provider) as client:
+                response = self._initialize(client, "/mcp/")
+
+        assert response.status_code == 299
+        assert response.text == "sse"
+        assert [c["method"] for c in sse.calls] == ["POST"]
 
     def test_browser_get_still_returns_the_info_payload(
         self, app_config, mock_llm_provider
@@ -378,6 +413,144 @@ class TestStreamableHttpTransport:
 
         assert response.status_code == 200
         assert response.json()["transports"]["streamable_http"] == "/mcp"
+
+
+class _RecordingApp:
+    """ASGI app that records each scope it receives and answers 299 *name*."""
+
+    def __init__(self, name):
+        self.name = name
+        self.calls = []
+
+    async def __call__(self, scope, receive, send):
+        self.calls.append(scope)
+        if scope["type"] != "http":
+            return
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 299,
+                "headers": [(b"content-type", b"text/plain")],
+            }
+        )
+        await send({"type": "http.response.body", "body": self.name.encode()})
+
+
+class TestMCPBrowserHandlerRouting:
+    """Which transport MCPBrowserHandler hands each request to."""
+
+    def _dispatch(self, scope, *, ready):
+        from backend.api_host.mcp_mount import MCPBrowserHandler
+
+        sse = _RecordingApp("sse")
+        streamable = _RecordingApp("streamable")
+        handler = MCPBrowserHandler(
+            sse, streamable, {"tool_a": None}, streamable_ready=lambda: ready
+        )
+        sent = []
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            sent.append(message)
+
+        anyio.run(handler, scope, receive, send)
+        return sse, streamable, sent
+
+    @staticmethod
+    def _http(method, path="/mcp", accept=None):
+        headers = [(b"host", b"testserver")]
+        if accept is not None:
+            headers.append((b"accept", accept.encode()))
+        return {
+            "type": "http",
+            "method": method,
+            "path": path,
+            "root_path": "/mcp",
+            "headers": headers,
+            "query_string": b"",
+        }
+
+    @pytest.mark.parametrize(
+        "method,path,accept",
+        [
+            ("POST", "/mcp", "application/json, text/event-stream"),
+            ("POST", "/mcp/", "application/json, text/event-stream"),
+            ("DELETE", "/mcp", None),
+            ("GET", "/mcp", "text/event-stream"),
+        ],
+    )
+    def test_streamable_requests_reach_streamable_when_ready(
+        self, method, path, accept
+    ):
+        sse, streamable, _ = self._dispatch(
+            self._http(method, path, accept), ready=True
+        )
+
+        assert [c["method"] for c in streamable.calls] == [method]
+        assert sse.calls == []
+
+    @pytest.mark.parametrize(
+        "method,path,accept",
+        [
+            ("POST", "/mcp", "application/json, text/event-stream"),
+            ("POST", "/mcp/", "application/json, text/event-stream"),
+            ("DELETE", "/mcp", None),
+            ("GET", "/mcp", "text/event-stream"),
+        ],
+    )
+    def test_streamable_requests_fall_back_to_sse_until_ready(
+        self, method, path, accept
+    ):
+        sse, streamable, _ = self._dispatch(
+            self._http(method, path, accept), ready=False
+        )
+
+        assert streamable.calls == []
+        assert [c["method"] for c in sse.calls] == [method]
+
+    @pytest.mark.parametrize(
+        "method,path,accept",
+        [
+            ("GET", "/mcp/sse", "text/event-stream"),
+            ("POST", "/mcp/messages/", "application/json"),
+        ],
+    )
+    def test_legacy_subpaths_reach_sse_even_when_streamable_is_ready(
+        self, method, path, accept
+    ):
+        sse, streamable, _ = self._dispatch(
+            self._http(method, path, accept), ready=True
+        )
+
+        assert streamable.calls == []
+        assert [c["path"] for c in sse.calls] == [path]
+
+    @pytest.mark.parametrize("scope_type", ["websocket", "lifespan"])
+    def test_non_http_scopes_go_to_sse_never_streamable(self, scope_type):
+        scope = {"type": scope_type, "path": "/mcp", "root_path": "/mcp"}
+        sse, streamable, _ = self._dispatch(scope, ready=True)
+
+        assert streamable.calls == []
+        assert [c["type"] for c in sse.calls] == [scope_type]
+
+    def test_browser_get_documents_the_streamable_endpoints(self):
+        import json
+
+        sse, streamable, sent = self._dispatch(
+            self._http("GET", "/mcp", "application/json"), ready=True
+        )
+
+        assert sse.calls == [] and streamable.calls == []
+        assert sent[0]["status"] == 200
+        payload = json.loads(b"".join(m.get("body", b"") for m in sent[1:]))
+        assert payload["transports"] == {
+            "sse_legacy": "/mcp/sse",
+            "streamable_http": "/mcp",
+        }
+        assert set(payload["streamable_http_endpoints"]) == {"POST /mcp", "GET /mcp"}
+        assert payload["available_tools"] == ["tool_a"]
 
 
 class TestMountRelativePath:
@@ -527,9 +700,9 @@ class TestMcpTransportBodySizeLimit:
 
         assert status == 413
         assert body == b"Request body too large"
-        # Refused as soon as the running total passes the cap, not after
-        # buffering the whole upload.
-        assert unread > 0
+        # Refused at the fifth 1 MiB chunk, the first to push the running
+        # total past the 4 MiB cap: three chunks plus the terminator unread.
+        assert unread == 4
 
     def test_sse_messages_rejects_oversized_content_length(
         self, app_config, mock_llm_provider
@@ -558,7 +731,7 @@ class TestMcpTransportBodySizeLimit:
 
         assert status == 413
         assert body == b"Request body too large"
-        assert unread > 0
+        assert unread == 4
 
     def test_streamable_http_rejects_on_declared_length_alone(
         self, app_config, mock_llm_provider
