@@ -443,10 +443,11 @@ describe('heat-map stylesheet', () => {
   // does not extend to longhands (`border-width: 0 2px` still draws a side) or
   // to box-shadow (`0 0 0 1px red` is a ring). `transparent` hides only a
   // background: forced-colours mode repaints border and outline colours.
-  // `initial` is never a no-op, since on border-color or border-width it means
-  // currentcolor or a medium width. A quoted string, or a parenthesised group
-  // such as rgba(...) or calc((...)) with any nesting, counts as one opaque
-  // token; a value whose parentheses do not balance counts as painting, and so
+  // `initial` counts as painting: on border-color or border-width it means
+  // currentcolor or a medium width, though on some properties, such as
+  // border-style or box-shadow, it is a no-op. A quoted string, or a
+  // parenthesised group such as rgba(...) or calc((...)) with any nesting,
+  // counts as one opaque token; a value whose parentheses do not balance counts as painting, and so
   // does anything else not listed here.
   const PAINTING_PROPERTY =
     /^(?:-webkit-)?(border(-[a-z-]+)?|outline(-(color|style|width))?|box-shadow|(backdrop-)?filter|background(-(color|image))?)$/;
@@ -487,6 +488,15 @@ describe('heat-map stylesheet', () => {
     });
   const onHeatmapCircle = (sel) => /\.(kind-heatmap|graph-heatmap-circle)(?![\w-])/.test(sel);
   const withoutNot = (sel) => sel.replace(/:not\([^)]*\)/g, '');
+  // The element a selector styles is its last compound; a class further left
+  // only scopes it, so `.kind-heatmap .graph-heatmap-level` styles the label.
+  const stylesHeatmapCircle = (sel) =>
+    onHeatmapCircle(
+      withoutNot(sel)
+        .trim()
+        .split(/\s*[\s>+~]\s*/)
+        .pop()
+    );
 
   it.each([
     ['border-top-color: red', true],
@@ -553,6 +563,22 @@ describe('heat-map stylesheet', () => {
     expect(onHeatmapCircle('.kind-heatmapx .graph-heatmap-circle_inner')).toBe(false);
   });
 
+  it('judges the rim rules by the element they style, not by their scope', () => {
+    expect(
+      stylesHeatmapCircle(
+        '.graph-generic-annotation-node.kind-heatmap.is-empty:hover .graph-heatmap-circle'
+      )
+    ).toBe(true);
+    expect(stylesHeatmapCircle('.graph-generic-annotation-node.kind-heatmap')).toBe(true);
+    expect(stylesHeatmapCircle('.kind-heatmap > .graph-heatmap-circle')).toBe(true);
+    expect(stylesHeatmapCircle('.kind-heatmap:not(.is-empty) .graph-heatmap-circle')).toBe(true);
+    expect(stylesHeatmapCircle('.kind-heatmap .graph-heatmap-level')).toBe(false);
+    expect(stylesHeatmapCircle('.kind-heatmap.is-empty > .graph-heatmap-level')).toBe(false);
+    expect(stylesHeatmapCircle('.kind-heatmap ~ .other')).toBe(false);
+    expect(stylesHeatmapCircle('.graph-heatmap-level:not(.kind-heatmap)')).toBe(false);
+    expect(stylesHeatmapCircle('.graph-heatmap-circle-label')).toBe(false);
+  });
+
   it('outlines only non-empty circles in every forced-colours heat-map rule', () => {
     const selectors = rules
       .filter(inForcedColours)
@@ -569,7 +595,7 @@ describe('heat-map stylesheet', () => {
     const painting = rules
       .filter((r) => !inForcedColours(r) && paints(r.body))
       .flatMap((r) => r.selectors)
-      .filter(onHeatmapCircle);
+      .filter(stylesHeatmapCircle);
     // The rim itself must exist, so the loop below checks something.
     expect(painting.some((sel) => withoutNot(sel).includes('.is-empty'))).toBe(true);
     for (const sel of painting) {
