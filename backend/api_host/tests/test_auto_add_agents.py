@@ -343,9 +343,11 @@ class TestGateSeesTheRequestActor:
         return hook
 
     def test_create_is_allowed_for_the_header_actor(self, test_app, hook):
-        _create_agent(test_app, headers={ACTOR_ID_HEADER: _ACTOR})
+        agent_id = _create_agent(test_app, headers={ACTOR_ID_HEADER: _ACTOR})
 
         assert [a["actor_id"] for a in hook.actors] == [_ACTOR]
+        rules = test_app.app.state.auto_add_registry.list_rules(SESSION)
+        assert [r.agent_id for r in rules] == [agent_id]
 
     def test_list_is_allowed_for_the_header_actor(self, test_app, hook):
         resp = test_app.get(
@@ -367,9 +369,11 @@ class TestGateSeesTheRequestActor:
         assert [a["actor_id"] for a in hook.actors] == [_ACTOR, _ACTOR]
         assert test_app.app.state.auto_add_registry.list_rules(SESSION) == []
 
-    @pytest.mark.parametrize(
+    _OTHER_ACTORS = pytest.mark.parametrize(
         "headers", [{}, {ACTOR_ID_HEADER: "someone-else"}], ids=["none", "other"]
     )
+
+    @_OTHER_ACTORS
     def test_create_is_denied_for_any_other_actor(self, test_app, hook, headers):
         resp = test_app.post(
             f"/sessions/{SESSION}/auto-add-agents",
@@ -380,3 +384,25 @@ class TestGateSeesTheRequestActor:
         assert resp.status_code == 403
         assert resp.json() == _actor_denied_body(GRAPH_ACTION_MUTATE)
         assert test_app.app.state.auto_add_registry.list_rules(SESSION) == []
+
+    @_OTHER_ACTORS
+    def test_list_is_denied_for_any_other_actor(self, test_app, hook, headers):
+        resp = test_app.get(f"/sessions/{SESSION}/auto-add-agents", headers=headers)
+
+        assert resp.status_code == 403
+        assert resp.json() == _actor_denied_body(GRAPH_ACTION_READ)
+
+    @_OTHER_ACTORS
+    def test_delete_is_denied_for_any_other_actor_and_keeps_the_agent(
+        self, test_app, hook, headers
+    ):
+        agent_id = _create_agent(test_app, headers={ACTOR_ID_HEADER: _ACTOR})
+
+        resp = test_app.delete(
+            f"/sessions/{SESSION}/auto-add-agents/{agent_id}", headers=headers
+        )
+
+        assert resp.status_code == 403
+        assert resp.json() == _actor_denied_body(GRAPH_ACTION_MUTATE)
+        rules = test_app.app.state.auto_add_registry.list_rules(SESSION)
+        assert [r.agent_id for r in rules] == [agent_id]
