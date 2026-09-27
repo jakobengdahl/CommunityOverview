@@ -111,9 +111,13 @@ async function renderApp() {
     </I18nProvider>
   );
   // Let the startup work settle before seeding the canvas, so nothing it
-  // does afterwards replaces the seed.
-  await waitFor(() => expect(api.getSchema).toHaveBeenCalled());
-  await waitFor(() => expect(typeof canvas()?.canvasBaselineEpoch).toBe('number'));
+  // does afterwards replaces the seed. The config load applies schema, stats
+  // and capabilities in one synchronous block, and the mock returns a fresh
+  // object per call, so seeing this render's stats object in the store proves
+  // that block ran rather than that App mounted.
+  await waitFor(() => expect(api.getGraphStats).toHaveBeenCalled());
+  const startupStats = await api.getGraphStats.mock.results[0].value;
+  await waitFor(() => expect(store().stats).toBe(startupStats));
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
@@ -141,8 +145,8 @@ describe('App handler wiring', () => {
 
   it('handleEdit opens the agent editor with the subscription fetched from the API', async () => {
     const subscription = { id: 'sub', type: 'EventSubscription', name: 'Sub' };
-    api.getNodeDetails.mockResolvedValueOnce({ success: true, node: subscription });
     await renderApp();
+    api.getNodeDetails.mockResolvedValueOnce({ success: true, node: subscription });
     const agent = { id: 'ag', type: 'Agent', name: 'Ag', metadata: { subscription_id: 'sub' } };
 
     await act(async () => {
@@ -209,8 +213,8 @@ describe('App handler wiring', () => {
     ['onSaveSubscription', { type: 'EventSubscription', name: 'New sub' }],
     ['onSaveAKC', { type: 'ActiveKnowledgeCollection', name: 'New collection' }],
   ])('%s draws the created node under the id the server assigned', async (handler, data) => {
-    api.addNodes.mockResolvedValueOnce({ success: true, added_node_ids: ['created-1'] });
     await renderApp();
+    api.addNodes.mockResolvedValueOnce({ success: true, added_node_ids: ['created-1'] });
 
     await act(async () => {
       await dialogs()[handler](data);
@@ -237,12 +241,12 @@ describe('App handler wiring', () => {
   });
 
   it('handleExpand fetches the neighbours of the given node and draws them', async () => {
+    await renderApp();
     const neighbour = { id: 'n1', type: 'Actor', name: 'N1' };
     api.getRelatedNodes.mockResolvedValueOnce({
       nodes: [neighbour],
       edges: [{ id: 'en', source: 'b', target: 'n1', type: 'RELATES_TO' }],
     });
-    await renderApp();
 
     await act(async () => {
       await canvas().onExpand('b');
@@ -254,11 +258,11 @@ describe('App handler wiring', () => {
   });
 
   it('handleConnect creates the edge between the dragged endpoints and draws it', async () => {
+    await renderApp();
     api.addEdge.mockResolvedValueOnce({
       success: true,
       edge: { id: 'e2', source: 'b', target: 'a', type: 'RELATES_TO' },
     });
-    await renderApp();
 
     await act(async () => {
       await canvas().onConnect({ source: 'b', target: 'a' });
@@ -291,12 +295,15 @@ describe('App handler wiring', () => {
   });
 
   it('double-clicking a saved view loads its nodes from the API into the canvas', async () => {
-    api.getNodeDetails.mockImplementation(async (id) => ({
+    await renderApp();
+    // Once-only, so the stub cannot outlive this test whatever the runner's
+    // mock-restore semantics or test order.
+    const savedViewNode = async (id) => ({
       success: true,
       node: { id, type: 'Actor', name: id.toUpperCase() },
       edges: [],
-    }));
-    await renderApp();
+    });
+    api.getNodeDetails.mockImplementationOnce(savedViewNode).mockImplementationOnce(savedViewNode);
     const view = { type: 'SavedView', name: 'View', metadata: { node_ids: ['v1', 'v2'] } };
 
     await act(async () => {
