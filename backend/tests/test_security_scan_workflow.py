@@ -15,7 +15,10 @@ masking unnoticed.
 
 import os
 import re
+import shutil
+import signal
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -27,6 +30,10 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "security-scan.yml"
 SCANNERS = ("pip-audit", "npm", "bandit")
 # Stubbed too, so every `run:` step - the installs included - can be executed.
 STUBBED = SCANNERS + ("pip",)
+# The only real tools on a step's PATH. Anything else - git, curl, rm - is not
+# found, so a step that starts using one fails here until it is stubbed or
+# listed, instead of running for real inside the test process.
+REAL_TOOLS = ("tee",)
 
 # `|tee`, `| tee` and `|& tee` alike; a spelling the discovery missed would
 # escape every exit-status check below.
@@ -45,6 +52,29 @@ REPORTING_ONLY_STEPS = {("bandit", "Run bandit (medium+ severity, non-blocking)"
 # A step invokes an audit when a line of its body starts with the scanner, so
 # `pip install pip-audit` is not one and a step that stops teeing still is.
 AUDIT_INVOCATION = re.compile(r"^\s*(?:pip-audit|npm\s+audit)\b.*$", re.M)
+
+# Any line that could run an audit, however spelled: `python -m pip_audit`,
+# `npx audit-ci`, `npm --prefix . audit`, `FOO=1 npm audit`.
+AUDIT_MENTION = re.compile(r"\baudit\b|pip[-_]audit", re.I)
+AUDIT_INSTALL = "pip install pip-audit"
+# A literal summary heading: no expansion or substitution inside the quotes.
+SUMMARY_HEADING = re.compile(r'^echo "## [^"$`\\]*" >> "\$GITHUB_STEP_SUMMARY"$')
+
+# Configuration that narrows an audit without touching its command line: npm
+# reads `npm_config_*` from the environment and the project `.npmrc`, pip-audit
+# reads `PIP_AUDIT_*` and pip's own `PIP_*`.
+AUDIT_CONFIG_VAR = re.compile(r"npm_config_|\bPIP_", re.I)
+NPMRC = REPO_ROOT / ".npmrc"
+# An allowlist: npm's ini parser takes `omit[]=peer`, `"audit-level"=critical`,
+# scoped registries and bare keys, too many spellings for a denylist to cover.
+NPMRC_HARMLESS_KEYS = {
+    "engine-strict",
+    "fund",
+    "loglevel",
+    "save-exact",
+    "save-prefix",
+    "update-notifier",
+}
 
 # The exact audit command lines, per job. Scope is what makes an audit blocking
 # mean anything: a swapped `-r` file, `--no-deps`, `--audit-level=critical` or a
@@ -114,6 +144,21 @@ def test_every_scanner_report_step_is_discovered():
     assert len(_teed_steps()) == 5
 
 
+def _wait_for_process_group(pgid, timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        return True
+    return False
+
+
 def _run_step(step, tmp_path, scanner_exit):
     stub_dir = tmp_path / "bin"
     stub_dir.mkdir()
@@ -121,19 +166,24 @@ def _run_step(step, tmp_path, scanner_exit):
         stub = stub_dir / name
         stub.write_text(f"#!/bin/sh\necho 'stub {name} report'\nexit {scanner_exit}\n")
         stub.chmod(0o755)
+    for name in REAL_TOOLS:
+        (stub_dir / name).symlink_to(shutil.which(name))
     summary = tmp_path / "summary.md"
     summary.touch()
-    # The runner's own layout: its command files live under RUNNER_TEMP, so a
-    # step that finds them there rather than through GITHUB_ENV is caught too.
-    runner_temp = tmp_path / "runner_temp"
+    # The runner's own layout: HOME/work/_temp is RUNNER_TEMP, holding the
+    # command files, and the checkout sits beside it. A step that reaches them
+    # through RUNNER_TEMP, HOME or a relative path rather than GITHUB_ENV writes
+    # where the check below looks.
+    home = tmp_path / "home"
+    runner_temp = home / "work" / "_temp"
     commands = runner_temp / "_runner_file_commands"
     commands.mkdir(parents=True)
     command_files = {}
     for var in RUNNER_COMMAND_FILES:
         command_files[var] = commands / f"{var.lower()}_stub"
         command_files[var].touch()
-    workdir = tmp_path / "work"
-    workdir.mkdir()
+    workdir = home / "work" / "repo" / "repo"
+    workdir.mkdir(parents=True)
     script = tmp_path / "step.sh"
     script.write_text(step["run"])
     # Nothing of the job running this test may leak in: under CI its GITHUB_*
@@ -145,26 +195,36 @@ def _run_step(step, tmp_path, scanner_exit):
     }
     env = dict(
         inherited,
-        PATH=f"{stub_dir}{os.pathsep}{os.environ['PATH']}",
+        PATH=str(stub_dir),
+        HOME=str(home),
         GITHUB_STEP_SUMMARY=str(summary),
+        GITHUB_WORKSPACE=str(workdir),
         RUNNER_TEMP=str(runner_temp),
         **{var: str(path) for var, path in command_files.items()},
     )
-    result = subprocess.run(
-        ["bash", "-e", str(script)],
+    # Its own process group, waited on until empty: a background writer that
+    # closed its fds would otherwise land after the check below.
+    proc = subprocess.Popen(
+        [shutil.which("bash"), "-e", str(script)],
         cwd=workdir,
         env=env,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
-        timeout=30,
+        start_new_session=True,
     )
+    try:
+        proc.communicate(timeout=30)
+    finally:
+        drained = _wait_for_process_group(proc.pid, timeout=30)
+    assert drained, f"step {step['name']!r} left processes running"
     written = sorted(
         str(f.relative_to(runner_temp))
         for f in runner_temp.rglob("*")
         if f.is_file() and f.stat().st_size
     )
     assert not written, f"step {step['name']!r} wrote runner command files {written}"
-    return result.returncode, summary.read_text()
+    return proc.returncode, summary.read_text()
 
 
 @pytest.mark.parametrize("step", _teed_steps())
@@ -231,6 +291,60 @@ def test_dependency_audit_scope_is_pinned(job_id):
         for m in AUDIT_INVOCATION.finditer(step["run"])
     ]
     assert sorted(commands) == sorted(AUDIT_COMMANDS[job_id])
+
+
+def test_every_line_that_could_run_an_audit_is_a_pinned_command():
+    # AUDIT_INVOCATION only finds audits spelled the way the pinned ones are.
+    for job_id, job in _workflow()["jobs"].items():
+        pinned = AUDIT_COMMANDS.get(job_id, [])
+        for step in job.get("steps", []):
+            body = step.get("run", "").replace("\\\n", "")
+            for line in body.splitlines():
+                line = line.strip()
+                if not AUDIT_MENTION.search(line) or SUMMARY_HEADING.match(line):
+                    continue
+                if job_id == "pip-audit" and line == AUDIT_INSTALL:
+                    continue
+                assert line in pinned, f"{job_id}:{step['name']} runs {line!r}"
+
+
+@pytest.mark.parametrize("job_id", sorted(AUDIT_COMMANDS))
+def test_dependency_audit_scope_is_not_narrowed_by_configuration(job_id):
+    workflow = _workflow()
+    job = workflow["jobs"][job_id]
+    assert not job.get("env"), f"job {job_id!r} sets env"
+    assert not job.get("defaults"), f"job {job_id!r} sets defaults"
+    for step in job["steps"]:
+        where = f"{job_id}:{step.get('name')}"
+        assert not step.get("env"), f"{where} sets env"
+        # npm run from a workspace directory audits only that workspace.
+        assert "working-directory" not in step, f"{where} sets working-directory"
+        body = step.get("run", "")
+        assert not AUDIT_CONFIG_VAR.search(body), f"{job_id}:{step['name']}"
+    for var in workflow.get("env") or {}:
+        assert not AUDIT_CONFIG_VAR.match(var), f"workflow env sets {var}"
+    run_defaults = (workflow.get("defaults") or {}).get("run") or {}
+    assert "working-directory" not in run_defaults, "workflow sets working-directory"
+
+
+def _npmrc_keys(text):
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        key = line.split("=", 1)[0].strip().strip("\"'")
+        yield key.removesuffix("[]").strip().lower()
+
+
+def test_npmrc_does_not_narrow_the_npm_audit():
+    if NPMRC.exists():
+        keys = set(_npmrc_keys(NPMRC.read_text()))
+        assert keys <= NPMRC_HARMLESS_KEYS, f".npmrc sets {keys - NPMRC_HARMLESS_KEYS}"
+
+
+def test_npmrc_key_parsing_sees_every_spelling_npm_accepts():
+    text = 'omit[]=peer\n"audit-level"=critical\n@x:registry=https://x/\nglobal\n# c\n'
+    assert set(_npmrc_keys(text)) == {"omit", "audit-level", "@x:registry", "global"}
 
 
 def test_audits_run_nowhere_but_their_own_jobs():
@@ -304,16 +418,24 @@ def test_no_env_switches_on_pipefail_behind_the_default_shell():
             for target in _write_targets(body):
                 assert target == STEP_SUMMARY, f"{where} writes to {target}"
             assert "GITHUB_ENV" not in body and "github.env" not in body, where
+            # The runner's command files by their on-disk location.
+            assert "_runner_file_commands" not in body, where
+            assert "/home/runner" not in body, where
             assert not re.search(r"\bGITHUB_STEP_SUMMARY\s*=", body), where
 
 
 @pytest.mark.parametrize("step", _run_steps())
-def test_no_step_writes_runner_command_files_when_executed(step, tmp_path):
+@pytest.mark.parametrize("scanner_exit", [0, 1])
+def test_no_step_writes_runner_command_files_when_executed(
+    step, tmp_path, scanner_exit
+):
     # _run_step fails on any write under RUNNER_TEMP, however the body names
-    # the file. The step must also run to completion: one that aborts early -
-    # on a tool this harness lacks, say - never reaches a write placed after it.
-    returncode, _ = _run_step(step, tmp_path, scanner_exit=0)
-    assert returncode == 0, f"step {step['name']!r} did not run to completion"
+    # the file. On success the step must also run to completion: one that aborts
+    # early - on a tool this harness lacks, say - never reaches a write placed
+    # after it. The failing run reaches a write behind `||`.
+    returncode, _ = _run_step(step, tmp_path, scanner_exit)
+    if scanner_exit == 0:
+        assert returncode == 0, f"step {step['name']!r} did not run to completion"
 
 
 def test_only_known_actions_are_used():
