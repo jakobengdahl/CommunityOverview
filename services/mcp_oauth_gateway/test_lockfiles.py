@@ -333,7 +333,8 @@ class TestImagePythonStep(unittest.TestCase):
         job = workflow["jobs"]["gateway-tests-run"]
         (step,) = [s for s in job["steps"] if s.get("id") == "image-python"]
         self.assertEqual(step["working-directory"], "services/mcp_oauth_gateway")
-        return step, {**workflow.get("env", {}), **job.get("env", {}), **step.get("env", {})}
+        merged = {**workflow.get("env", {}), **job.get("env", {}), **step.get("env", {})}
+        return step, {k: str(v) for k, v in merged.items()}
 
     def _run_step(self, dockerfile):
         step, step_env = self._step()
@@ -468,7 +469,7 @@ class TestRecompileStep(unittest.TestCase):
         log = bindir / "calls"
         # uv logs its arguments; the other stubs log their name too, so a header
         # naming another binary is caught when it runs, not only when it is missing.
-        for name, prefix in [("uv", ""), ("uvx", "uvx "), ("sh", "sh ")]:
+        for name, prefix in [("uv", ""), ("uvx", "uvx "), ("sh", "sh "), ("xuv", "xuv ")]:
             stub = bindir / name
             stub.write_text(f'#!/bin/sh\nprintf "%s\\n" "{prefix}$*" >> "{log}"\nexit {uv_exit}\n')
             stub.chmod(0o755)
@@ -575,8 +576,8 @@ class TestAuditWorkflowShape(unittest.TestCase):
         self.ci = yaml.safe_load((workflows / "ci.yml").read_text())
 
     def test_triggers_cover_every_lock_input(self):
-        # PyYAML reads the bare key `on` as True.
-        triggers = self.workflow[True]
+        # PyYAML reads the bare key `on` as True; a quoted "on" stays a string.
+        triggers = self.workflow.get("on", self.workflow.get(True))
         self.assertEqual(set(triggers), {"pull_request", "schedule", "workflow_dispatch"})
         self.assertEqual(
             triggers["pull_request"],
