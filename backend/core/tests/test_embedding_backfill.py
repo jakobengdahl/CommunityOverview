@@ -219,17 +219,25 @@ class TestStartupBackfillPass:
         }
         caller = threading.current_thread()
         started = []
+        backfills_started = []
         real_start = threading.Thread.start
 
         def _recording_start(thread):
             if threading.current_thread() is caller:
                 started.append(thread.name)
+            if thread.name == "embedding-backfill":
+                backfills_started.append(thread)
             return real_start(thread)
 
         monkeypatch.setattr(threading.Thread, "start", _recording_start)
 
+        # The recorder stays in place until the io executor has drained, so
+        # a backfill started on the caller's behalf from another thread is
+        # recorded however quickly it finishes; a census of live threads
+        # would miss one that has already exited.
         try:
             storage._maybe_backfill_missing_embeddings_async()
+            storage.flush()
         finally:
             monkeypatch.setattr(threading.Thread, "start", real_start)
             release.set()
@@ -240,12 +248,9 @@ class TestStartupBackfillPass:
         assert probed == ["sentence_transformers"]
         assert not unrelated.is_alive()
         assert started == []
-        # The recorder sees only the caller's own starts; a backfill thread
-        # started on its behalf from another thread must not exist either.
-        # Drained first, so one the io executor would start has started;
-        # compared with the threads before the call, so a lingering real
+        assert backfills_started == []
+        # Compared with the threads before the call, so a lingering real
         # backfill from an earlier test is not blamed on this one.
-        storage.flush()
         backfills_after = {
             t for t in threading.enumerate() if t.name == "embedding-backfill"
         }
