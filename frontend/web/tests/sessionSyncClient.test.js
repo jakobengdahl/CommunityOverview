@@ -1646,6 +1646,104 @@ describe('SessionSyncClient', () => {
     }
   });
 
+  // A 429 between chunks requeues that chunk at the front, so the backlog
+  // behind it still drains in order once the backoff has passed. 600 ops,
+  // not 400: with a chunk still queued behind the rejected one, requeueing it
+  // at the back instead would reorder delivery.
+  it('drains a chunked queue in order across a 429 on a middle chunk (R9)', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = makeFetch([
+        { ok: true, status: 200, json: async () => ({ seq: 200 }) },
+        { ok: false, status: 429 },
+        { ok: true, status: 200, json: async () => ({ seq: 400 }) },
+        { ok: true, status: 200, json: async () => ({ seq: 600 }) },
+      ]);
+      const { client } = makeClient({ fetchImpl });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      const ops = Array.from({ length: 600 }, (_, i) => ({
+        op: 'nodes_added',
+        node_ids: [`n${i}`],
+      }));
+      client.sendOps(ops);
+
+      await vi.advanceTimersByTimeAsync(600); // past the 500ms retry backoff
+
+      expect(fetchImpl.calls.map((c) => c.body.ops.length)).toEqual([200, 200, 200, 200]);
+      expect(fetchImpl.calls[2].body.ops).toEqual(fetchImpl.calls[1].body.ops);
+      const delivered = [0, 2, 3].flatMap((i) => fetchImpl.calls[i].body.ops);
+      expect(delivered).toEqual(ops);
+      expect(client.getPendingOps()).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The client's byte cap (MAX_BATCH_BYTES, 240 KiB of JSON.stringify output,
+  // below the server's 256 KiB) is not exported, so it is restated here.
+  const CLIENT_BATCH_BYTES = 240 * 1024;
+  const opOfBytes = (bytes) => {
+    const shell = JSON.stringify({ op: 'nodes_hidden', node_ids: [''] }).length;
+    return { op: 'nodes_hidden', node_ids: ['x'.repeat(bytes - shell)] };
+  };
+  const opsBytes = (ops) => ops.reduce((sum, op) => sum + JSON.stringify(op).length, 0);
+
+  it('splits a queue by the byte cap, keeping every POST under it', async () => {
+    const fetchImpl = makeFetch();
+    const { client } = makeClient({ fetchImpl });
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    const ops = [0, 1, 2].map(() => opOfBytes(100 * 1024));
+    client.sendOps(ops);
+
+    await client.flush();
+    await client.flush();
+
+    expect(fetchImpl.calls.map((c) => c.body.ops.length)).toEqual([2, 1]);
+    expect(fetchImpl.calls.flatMap((c) => c.body.ops)).toEqual(ops);
+    for (const call of fetchImpl.calls) {
+      expect(opsBytes(call.body.ops)).toBeLessThanOrEqual(CLIENT_BATCH_BYTES);
+    }
+  });
+
+  it('sends a batch that exactly fills the byte cap as one POST', async () => {
+    const fetchImpl = makeFetch();
+    const { client } = makeClient({ fetchImpl });
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    const ops = [opOfBytes(CLIENT_BATCH_BYTES / 2), opOfBytes(CLIENT_BATCH_BYTES / 2)];
+    expect(opsBytes(ops)).toBe(CLIENT_BATCH_BYTES);
+    client.sendOps(ops);
+
+    await client.flush();
+
+    expect(fetchImpl.calls).toHaveLength(1);
+    expect(fetchImpl.calls[0].body.ops).toEqual(ops);
+  });
+
+  // An op over the byte cap on its own can never fit a batch; it is still
+  // sent alone, so the server's 413 drops it through onDropped and the ops
+  // behind it are not stalled.
+  it('sends an op over the byte cap alone and drains past it on its 413', async () => {
+    const fetchImpl = makeFetch([{ ok: false, status: 413, json: async () => ({}) }]);
+    const onDropped = vi.fn();
+    const { client } = makeClient({ fetchImpl, handlers: { onDropped } });
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    const oversized = opOfBytes(CLIENT_BATCH_BYTES + 1024);
+    const small = { op: 'nodes_added', node_ids: ['after'] };
+    client.sendOps([oversized, small]);
+
+    await client.flush();
+    await client.flush();
+
+    expect(fetchImpl.calls.map((c) => c.body.ops)).toEqual([[oversized], [small]]);
+    expect(onDropped).toHaveBeenCalledTimes(1);
+    expect(onDropped).toHaveBeenCalledWith([oversized], 413, {});
+    expect(client.getPendingOps()).toEqual([]);
+  });
+
   it('ignores a duplicate or stale sequenced op event (R15)', () => {
     const onRemoteOps = vi.fn();
     const { client } = makeClient({ handlers: { onRemoteOps } });

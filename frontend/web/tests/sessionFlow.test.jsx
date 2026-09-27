@@ -1632,9 +1632,8 @@ describe('Server-backed session lifecycle', () => {
   // instead of waiting out the real delay. The sync client's ops POST timers
   // share the guard's length, so length alone cannot tell them apart; a guard
   // timer is the one of that length whose setTimeout call is made by App.jsx
-  // itself, and anything else
-  // runs on the real clock. A cleared timer is dropped here too, so only the
-  // guard timers still scheduled are ever fired.
+  // itself, and anything else runs on the real clock. A cleared timer is
+  // dropped here too, so only the guard timers still scheduled are ever fired.
   function holdRequestTimeouts() {
     const held = new Map();
     let nextId = 0;
@@ -1682,6 +1681,46 @@ describe('Server-backed session lifecycle', () => {
       },
     };
   }
+
+  // A session switch flushes the old client's queue through a call chain
+  // that starts in App.jsx, so its ops POST timer has App.jsx on the stack
+  // below the sync client. The harness must still leave that timer on the
+  // real clock: firing it by hand would abort the POST, not the guard.
+  it('holdRequestTimeouts leaves an ops POST timer scheduled under App.jsx unheld', async () => {
+    sessionStore.touchSession('5555-6666');
+    const clients = [];
+    const originalConnect = SessionSyncClient.prototype.connect;
+    const connectSpy = vi
+      .spyOn(SessionSyncClient.prototype, 'connect')
+      .mockImplementation(function connect(...args) {
+        clients.push(this);
+        return originalConnect.apply(this, args);
+      });
+    const op = { op: 'nodes_hidden', node_ids: ['held-probe'] };
+    let timeouts = null;
+    // Kept in flight: a settled POST clears its own timer, which would empty
+    // pending() whether or not the harness had wrongly held it.
+    const originalFetch = global.fetch.getMockImplementation();
+    global.fetch.mockImplementation((url, opts) =>
+      opts?.body?.includes('held-probe') ? new Promise(() => {}) : originalFetch(url, opts)
+    );
+
+    try {
+      const source = await startResyncHeldOnGate({ active: false }, () => 1);
+      const client = clients.find((c) => source.url.includes(`/api/sessions/${c.sessionId}/`));
+      timeouts = holdRequestTimeouts();
+      act(() => client.sendOps([op]));
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getByText('5555-6666'));
+
+      await waitFor(() => expect(opsFrom(global.fetch)).toContainEqual(op));
+      expect(timeouts.pending()).toEqual([]);
+    } finally {
+      timeouts?.restore();
+      connectSpy.mockRestore();
+      global.fetch.mockImplementation(originalFetch);
+    }
+  });
 
   const catchUpMessage = () => ({
     data: JSON.stringify({
