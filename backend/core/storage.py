@@ -1103,9 +1103,10 @@ class GraphStorage:
         the whole batch afterwards, so generation wins there, while a refresh
         generates only where the store supplied nothing.
 
-        The vectors come off the nodes only once the index holds them: until
-        then the node is their only copy, so a raise in the export or load
-        must leave them where they were for the caller to retry or settle.
+        The vectors come off the nodes only after the index export and load
+        have returned: until then the node is their only copy, so a raise
+        there must leave them where they were for the caller to retry or
+        settle. A vector the index refuses for its width is still cleared.
         """
         nodes = list(nodes)
         self._adopt_vectors(
