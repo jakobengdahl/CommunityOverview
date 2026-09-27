@@ -541,6 +541,172 @@ class TestRejectedAddNodesLeavesNoInlineVector:
         assert event.entity.before is not None
         assert event.entity.before.get("embedding") is None
 
+    @staticmethod
+    def _raise_on_second_node(monkeypatch, storage):
+        build = storage._build_match_fields
+
+        def build_or_raise(node):
+            if node.id == "boom":
+                raise RuntimeError("index build failed")
+            return build(node)
+
+        monkeypatch.setattr(storage, "_build_match_fields", build_or_raise)
+
+    def test_a_raise_mid_batch_settles_the_landed_vector(
+        self, temp_storage, monkeypatch
+    ):
+        self._raise_on_second_node(monkeypatch, temp_storage)
+
+        result = temp_storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5]),
+                Node(id="boom", type=NodeType.ACTOR, name="Boom"),
+            ],
+            [],
+        )
+
+        assert result.success is False
+        assert temp_storage.get_node("a").embedding is None
+        assert temp_storage.vector_store.get_vector_list("a") == pytest.approx(
+            [0.25, 0.5]
+        )
+
+    def test_a_failed_adoption_still_strips_the_landed_node(
+        self, temp_storage, monkeypatch
+    ):
+        def refuse(nodes):
+            raise RuntimeError("index unavailable")
+
+        monkeypatch.setattr(temp_storage, "_adopt_supplied_vectors", refuse)
+
+        result = temp_storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5]),
+                Node(id="a", type=NodeType.ACTOR, name="Again"),
+            ],
+            [],
+        )
+        assert result.success is False
+        assert temp_storage.get_node("a").embedding is None
+        seen = self._events(temp_storage)
+
+        temp_storage.update_node("a", {"description": "changed"})
+
+        [event] = [e for e in seen if e.entity.id == "a"]
+        assert (event.entity.before or {}).get("embedding") is None
+        assert (event.entity.after or {}).get("embedding") is None
+
+    @pytest.mark.parametrize("failure", ["duplicate_id", "raise"])
+    def test_the_settled_vector_survives_a_reload(
+        self, temp_storage, monkeypatch, failure
+    ):
+        if failure == "raise":
+            self._raise_on_second_node(monkeypatch, temp_storage)
+        second_id = "a" if failure == "duplicate_id" else "boom"
+
+        result = temp_storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5]),
+                Node(id=second_id, type=NodeType.ACTOR, name="Second"),
+            ],
+            [],
+        )
+        assert result.success is False
+        temp_storage.flush()
+
+        reloaded = GraphStorage(
+            json_path=str(temp_storage.json_path),
+            embeddings_path=str(temp_storage._embedding_sidecar.path),
+        )
+
+        assert reloaded.get_node("a") is not None
+        assert reloaded.vector_store.get_vector_list("a") == pytest.approx([0.25, 0.5])
+
+    def test_settling_after_a_successful_adoption_keeps_the_vector(
+        self, temp_storage, monkeypatch
+    ):
+        def no_generation(nodes):
+            raise RuntimeError("no embedding model")
+
+        monkeypatch.setattr(
+            temp_storage.vector_store, "update_nodes_embeddings", no_generation
+        )
+
+        result = temp_storage.add_nodes(
+            [Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5])],
+            [Edge(source="a", target="missing", type=RelationshipType.RELATES_TO)],
+        )
+
+        assert result.success is False
+        assert "does not exist" in result.message
+        assert temp_storage.get_node("a").embedding is None
+        assert temp_storage.vector_store.get_vector_list("a") == pytest.approx(
+            [0.25, 0.5]
+        )
+
+    def test_every_landed_vector_in_a_batch_is_settled(self, temp_storage):
+        result = temp_storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5]),
+                Node(id="b", type=NodeType.ACTOR, name="Beta", embedding=[0.75, 1.0]),
+                Node(id="a", type=NodeType.ACTOR, name="Again"),
+            ],
+            [],
+        )
+
+        assert result.success is False
+        for node_id, vector in (("a", [0.25, 0.5]), ("b", [0.75, 1.0])):
+            assert temp_storage.get_node(node_id).embedding is None
+            assert temp_storage.vector_store.get_vector_list(node_id) == pytest.approx(
+                vector
+            )
+
+
+class TestAdoptionKeepsVectorsUntilTheIndexHoldsThem:
+    """A supplied vector's only copy is the node object until the index holds
+    it, so a raise while exporting or loading the index must not take it off
+    the node first."""
+
+    @pytest.mark.parametrize("failing", ["export_vectors", "load_vectors"])
+    def test_a_raise_in_the_index_leaves_the_vector_on_the_node(
+        self, temp_storage, monkeypatch, failing
+    ):
+        def fail(*args, **kwargs):
+            raise RuntimeError(f"{failing} failed")
+
+        monkeypatch.setattr(temp_storage.vector_store, failing, fail)
+        node = Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5])
+
+        with pytest.raises(RuntimeError):
+            temp_storage._adopt_supplied_vectors([node])
+
+        assert node.embedding == pytest.approx([0.25, 0.5])
+
+    def test_a_transient_load_failure_in_add_nodes_does_not_lose_the_vector(
+        self, temp_storage, monkeypatch
+    ):
+        load = temp_storage.vector_store.load_vectors
+        calls = []
+
+        def fail_once(vectors):
+            calls.append(vectors)
+            if len(calls) == 1:
+                raise RuntimeError("load failed")
+            load(vectors)
+
+        monkeypatch.setattr(temp_storage.vector_store, "load_vectors", fail_once)
+
+        temp_storage.add_nodes(
+            [Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5])],
+            [],
+        )
+
+        assert len(calls) == 2
+        assert temp_storage.get_node("a").embedding is None
+        assert temp_storage.vector_store.get_vector_list("a") == pytest.approx(
+            [0.25, 0.5]
+        )
+
 
 class TestGraphStorageSearch:
     """Tests for search functionality"""
