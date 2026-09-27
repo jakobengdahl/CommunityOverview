@@ -41,6 +41,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# RFC 7518 §3.2: an HS256 key should be at least as long as the hash output.
+MIN_JWT_SIGNING_KEY_BYTES = 32
+
+
+def _warn_if_short_signing_key(key: str) -> None:
+    """Log a warning when the JWT signing key is below the HS256 recommendation.
+
+    Warning only: a short key is still used as-is. The message never includes
+    the key, any part of it, or its exact length.
+    """
+    if len(key.encode("utf-8")) < MIN_JWT_SIGNING_KEY_BYTES:
+        logger.warning(
+            "GW_JWT_SIGNING_KEY is shorter than the recommended minimum of %d bytes "
+            "(256 bits) for HS256. Rotate it to a longer random secret.",
+            MIN_JWT_SIGNING_KEY_BYTES,
+        )
+
+
+_warn_if_short_signing_key(config.GW_JWT_SIGNING_KEY)
+
 app = FastAPI(title="MCP OAuth Gateway", version="1.0.0")
 
 # CORS – required for browser-based MCP clients (MCPJam, ChatGPT plugin preview, etc.)
