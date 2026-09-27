@@ -347,6 +347,12 @@ describe('expandNode (handleExpand)', () => {
     expect(nodeIds()).not.toContain('c');
   });
 
+  it('drops the result when the anchor is removed in place mid-await', async () => {
+    const { inFlight } = run(() => store().removeNode('a'));
+    expect(await inFlight).toBe(false);
+    expect(nodeIds()).toEqual(['b']);
+  });
+
   it('still expands after a resync reload that kept the anchor', async () => {
     const { inFlight } = run(resync);
     expect(await inFlight).toBe(true);
@@ -420,6 +426,17 @@ describe('connectNodes (handleConnect)', () => {
     expect(syncRef.current.sendEdgesAdded).not.toHaveBeenCalled();
     expect(showNotification).toHaveBeenCalledWith('success', 'Connection created');
   });
+
+  it.each(['a', 'b'])(
+    'neither draws nor fans out when endpoint %s is removed in place mid-await',
+    async (id) => {
+      const { inFlight, syncRef, showNotification } = run(() => store().removeNode(id));
+      expect(await inFlight).toBe(false);
+      expect(store().edges.map((e) => e.id)).not.toContain('e9');
+      expect(syncRef.current.sendEdgesAdded).not.toHaveBeenCalled();
+      expect(showNotification).toHaveBeenCalledWith('success', 'Connection created');
+    }
+  );
 
   it('still draws and fans out after a resync reload that kept both endpoints', async () => {
     const { inFlight, syncRef } = run(resync);
