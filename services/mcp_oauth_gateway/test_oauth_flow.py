@@ -923,7 +923,6 @@ class TestGatewayJwt(unittest.TestCase):
     def test_validate_token_rejects_garbage(self):
         assert auth.validate_token("not-a-jwt") is None
 
-
     def test_exchange_google_code_verifies_signature_and_reads_email(self):
         """A validly-signed Google ID token yields the email."""
         id_token = _make_google_id_token()
@@ -999,7 +998,7 @@ class TestShortSigningKeyWarning(unittest.TestCase):
     """GW_JWT_SIGNING_KEY below 32 bytes is warned about at startup, never refused."""
 
     # Distinctive so any leak of the value (or a slice of it) is easy to spot.
-    SHORT_KEY = "Qz7hTk-Kx9vRp-Wv3mZq"
+    SHORT_KEY = "plumvox-quiltbex-zyg"
 
     def _warnings_for(self, key):
         import main

@@ -41,7 +41,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# RFC 7518 §3.2: an HS256 key should be at least as long as the hash output.
+# RFC 7518 §3.2: an HS256 key must be at least as long as the 256-bit hash output.
 MIN_JWT_SIGNING_KEY_BYTES = 32
 
 
