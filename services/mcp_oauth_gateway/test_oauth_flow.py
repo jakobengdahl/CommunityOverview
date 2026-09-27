@@ -1048,13 +1048,22 @@ class TestShortSigningKeyWarning(unittest.TestCase):
 
     def _start_gateway(self, key):
         env = dict(os.environ, GW_JWT_SIGNING_KEY=key)
-        return subprocess.run(
+        result = subprocess.run(
             [sys.executable, "-c", self._STARTUP_SCRIPT],
             cwd=os.path.dirname(os.path.abspath(__file__)),
             env=env,
             capture_output=True,
-            text=True,
             timeout=60,
+        )
+        # Strict locale decoding would turn a raw-byte leak of a non-UTF-8 key into a
+        # UnicodeDecodeError (or, under latin-1, into other characters that pass). UTF-8 with
+        # surrogateescape maps an undecodable byte back to its lone surrogate under any
+        # locale, so a raw-byte leak reappears as the key.
+        return subprocess.CompletedProcess(
+            result.args,
+            result.returncode,
+            result.stdout.decode("utf-8", "surrogateescape"),
+            result.stderr.decode("utf-8", "surrogateescape"),
         )
 
     def _assert_key_absent(self, text, key):
