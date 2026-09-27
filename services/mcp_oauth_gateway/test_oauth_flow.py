@@ -1056,8 +1056,9 @@ class TestShortSigningKeyWarning(unittest.TestCase):
             timeout=60,
         )
         # Strict locale decoding would turn a raw-byte leak of a non-UTF-8 key into a
-        # UnicodeDecodeError (or, under latin-1, into other characters that pass); decode
-        # the way the key itself was encoded so a leak reappears as the key.
+        # UnicodeDecodeError (or, under latin-1, into other characters that pass). UTF-8 with
+        # surrogateescape maps an undecodable byte back to its lone surrogate under any
+        # locale, so a raw-byte leak reappears as the key.
         return subprocess.CompletedProcess(
             result.args,
             result.returncode,
