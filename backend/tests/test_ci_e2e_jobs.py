@@ -25,7 +25,7 @@ from backend.tests.test_ci_gate_semantics import BRANCH_PROTECTION_CHECKS
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
-PACKAGE_JSONS = (REPO_ROOT / "package.json", REPO_ROOT / "frontend/web/package.json")
+ROOT_PACKAGE_JSON = REPO_ROOT / "package.json"
 
 # job id -> (check name, the exact Playwright command it runs). The command is
 # compared whole, so a dropped or swapped --project, an added --list, --shard,
@@ -80,19 +80,47 @@ def mentions_playwright(text):
     return "playwright" in text.replace("playwright install", "")
 
 
-def words(text):
-    return set(re.findall(r"[\w:.@/-]+", text))
+# A script name is matched as a whole shell word: npm allows almost any
+# character in one, so a name is never split on anything but shell syntax.
+SHELL_BOUNDARY = r"""[\s;&|()<>"'`]"""
+# npm runs these without anything naming them: `npm ci` and `npm install` run
+# the install hooks, `npm t` is `npm test`, and pre<X>/post<X> wrap `npm run X`.
+INSTALL_HOOKS = {"preinstall", "install", "postinstall", "prepare"}
+NPM_INSTALL = re.compile(
+    r"\bnpm\s+(?:ci|clean-install|i|install|it|cit|install-test|install-ci-test)\b"
+)
+NPM_TEST = re.compile(r"\bnpm\s+(?:t|tst|it|cit|install-test|install-ci-test)\b")
+
+
+def invoked_scripts(text, scripts):
+    names = {
+        name
+        for name in scripts
+        if re.search(
+            rf"(?:^|{SHELL_BOUNDARY}){re.escape(name)}(?=$|{SHELL_BOUNDARY})", text
+        )
+    }
+    if NPM_INSTALL.search(text):
+        names |= INSTALL_HOOKS
+    if NPM_TEST.search(text):
+        names.add("test")
+    return names
 
 
 def playwright_scripts(scripts):
-    """Names of the npm scripts that reach Playwright, directly or through
-    another script, so a wrapper added under any name is followed too."""
+    """Names of the npm scripts that reach Playwright, directly, through
+    another script or through a pre/post hook npm runs with it, so a wrapper
+    added under any name is followed too."""
     reaching = {name for name, body in scripts.items() if mentions_playwright(body)}
     while True:
         more = {
             name
             for name, body in scripts.items()
-            if name not in reaching and words(body) & reaching
+            if name not in reaching
+            and (
+                invoked_scripts(body, scripts) & reaching
+                or {f"pre{name}", f"post{name}"} & reaching
+            )
         }
         if not more:
             return reaching
@@ -101,10 +129,18 @@ def playwright_scripts(scripts):
 
 @pytest.fixture(scope="module")
 def npm_scripts():
+    """Scripts of the root and every workspace, merged by name: `npm run X -w`
+    may pick any workspace, so a name reaches Playwright if any body does."""
+    root = json.loads(ROOT_PACKAGE_JSON.read_text())
+    paths = [ROOT_PACKAGE_JSON] + sorted(
+        path
+        for pattern in root["workspaces"]
+        for path in REPO_ROOT.glob(f"{pattern}/package.json")
+    )
     scripts = {}
-    for path in PACKAGE_JSONS:
+    for path in paths:
         for name, body in json.loads(path.read_text()).get("scripts", {}).items():
-            scripts[name] = f"{scripts.get(name, '')} {body}"
+            scripts[name] = f"{scripts.get(name, '')}\n{body}"
     return scripts
 
 
@@ -113,7 +149,9 @@ def runs_playwright_tests(step, scripts):
     direct `playwright test` or an npm script that runs it, under any name,
     so a job spelled some other way is still discovered."""
     run = str(step.get("run", ""))
-    return mentions_playwright(run) or bool(words(run) & playwright_scripts(scripts))
+    return mentions_playwright(run) or bool(
+        invoked_scripts(run, scripts) & playwright_scripts(scripts)
+    )
 
 
 def playwright_test_steps(job, scripts):
@@ -141,18 +179,34 @@ def test_the_e2e_job_set_is_discovered_not_only_listed(workflow, npm_scripts):
     assert discovered == set(E2E_JOBS) == {"desktop-e2e", "mobile-e2e"}
 
 
-def test_discovery_follows_npm_scripts_under_any_name(npm_scripts):
-    """The real package.json files hold no such wrapper today, so pin that
-    discovery would see one rather than wait for it to slip past."""
-    scripts = {
-        **npm_scripts,
-        "test:mobile": "playwright test --project=mobile-iphone",
-        "ci:browser": "npm run test:mobile",
-    }
-    for run in ("npm run test:mobile", "npm run ci:browser -w web", "npm run test:e2e"):
-        assert runs_playwright_tests({"run": run}, scripts), run
-    for run in ("npx playwright install chromium", "npm run test:unit", "npm ci"):
-        assert not runs_playwright_tests({"run": run}, scripts), run
+@pytest.mark.parametrize(
+    "extra, run",
+    [
+        ({"test:mobile": "playwright test"}, "npm run test:mobile"),
+        ({"smoke+ci": "playwright test"}, "npm run smoke+ci -w @community-graph/web"),
+        (
+            {"test:mobile": "playwright test", "ci:browser": "npm run test:mobile"},
+            "npm run ci:browser && echo done",
+        ),
+        ({"posttest": "playwright test"}, "npm run test:unit"),
+        ({"prelint": "playwright test"}, "npm run lint"),
+        ({"postinstall": "playwright test"}, "npm ci --no-audit --no-fund"),
+        ({"prepare": "playwright test"}, "npm install"),
+        ({"test": "playwright test"}, "npm t"),
+        ({}, "npm run test:e2e"),
+    ],
+)
+def test_discovery_follows_npm_scripts_under_any_name(npm_scripts, extra, run):
+    """The real package.json files hold none of these wrappers today, so pin
+    that discovery would see each one rather than wait for it to slip past."""
+    assert runs_playwright_tests({"run": run}, {**npm_scripts, **extra})
+
+
+@pytest.mark.parametrize(
+    "run", ["npx playwright install chromium", "npm run test:unit", "npm ci", "npm t"]
+)
+def test_discovery_leaves_non_playwright_steps_alone(npm_scripts, run):
+    assert not runs_playwright_tests({"run": run}, npm_scripts)
 
 
 def test_nothing_workflow_level_reaches_the_e2e_steps(workflow):
