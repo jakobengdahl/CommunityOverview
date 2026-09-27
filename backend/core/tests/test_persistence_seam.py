@@ -4389,10 +4389,18 @@ class TestTheShutdownFlagIsGuardedByTheLock:
             started.append(refresh)
             assert reloads.entered.wait(5)
 
-            teardown = threading.Thread(target=storage.shutdown_events, daemon=True)
+            # Swapped only now: the refresh already holds the real lock, and
+            # the teardown saying it has reached the wrapper is what makes
+            # the check below a fact rather than a race against the clock.
+            lock = _ContendedLock(storage._lock, "teardown")
+            storage._lock = lock
+            teardown = threading.Thread(
+                target=storage.shutdown_events, name="teardown", daemon=True
+            )
             teardown.start()
             started.append(teardown)
-            assert not stopped.wait(0.5), (
+            assert lock.reached.wait(5), "shutdown never took _lock"
+            assert not stopped.is_set(), (
                 "shutdown stopped the notification under a refresh that was "
                 "still running"
             )
@@ -4453,24 +4461,29 @@ class TestTheShutdownFlagIsGuardedByTheLock:
         )
         reloads = _HeldReloads(backend)
         stopped = _signal_on_stop(backend)
-        listeners = []
-        start = backend.start_change_notification
-        backend.start_change_notification = lambda listener: (
-            listeners.append(listener),
-            start(listener),
-        )
         started = []
+        # Made here, so the main thread can wait on it before the wrapper
+        # that sets it exists.
+        took_lock = threading.Event()
 
         def refresh_then_fail(self):
             # The gate is open by now, so this report goes straight through
             # to a refresh, and parks inside _lock.
             reloads.armed = True
             refresh = threading.Thread(
-                target=listeners[0], args=(ExternalChange.unknown(),), daemon=True
+                target=backend.listener,
+                args=(ExternalChange.unknown(),),
+                daemon=True,
             )
             refresh.start()
             started.append(refresh)
             reloads.entered.wait(5)
+            # The instance under construction, reached through the gate it
+            # registered: its failure path must now say when it takes _lock.
+            storage = backend.listener._listener.__self__
+            lock = _ContendedLock(storage._lock, "construction")
+            lock.reached = took_lock
+            storage._lock = lock
             raise RuntimeError("model preload failed")
 
         monkeypatch.setattr(VectorStore, "preload_model", refresh_then_fail)
@@ -4482,12 +4495,15 @@ class TestTheShutdownFlagIsGuardedByTheLock:
             except RuntimeError as exc:
                 failures.append(exc)
 
-        construction = threading.Thread(target=construct, daemon=True)
+        construction = threading.Thread(
+            target=construct, name="construction", daemon=True
+        )
         try:
             construction.start()
             started.append(construction)
             assert reloads.entered.wait(5)
-            assert not stopped.wait(0.5), (
+            assert took_lock.wait(5), "a failed construction never took _lock"
+            assert not stopped.is_set(), (
                 "a failed construction stopped the notification under a "
                 "refresh that was still running"
             )
