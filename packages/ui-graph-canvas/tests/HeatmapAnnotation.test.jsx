@@ -426,19 +426,69 @@ describe('heat-map stylesheet', () => {
     return out;
   })();
   const inForcedColours = (r) => Boolean(r.media?.includes('forced-colors'));
-  // Declarations that make an element visible; border-radius and box-sizing
-  // shape the circle without drawing anything.
+  // Declarations that make an element visible. Every border property draws —
+  // longhands and logical border-inline*/border-block* included — except the
+  // radii, which only shape the circle; outline-offset and background-size
+  // and the like only adjust what something else draws. A value that draws
+  // nothing (`background-color: transparent`, `border: none`) paints nothing.
+  const PAINTING_PROPERTY =
+    /^(border(-[a-z-]+)?|outline(-(color|style|width))?|box-shadow|background(-(color|image))?)$/;
+  const NON_PAINTING_VALUE = /^(none|transparent|0(px)?)$/;
   const paints = (body) =>
-    /(^|[;{\s])(border(-(top|right|bottom|left|color|style|width))?|outline(-[a-z]+)?|box-shadow|background(-[a-z]+)?)\s*:/.test(
-      body
-    );
+    body.split(';').some((decl) => {
+      const colon = decl.indexOf(':');
+      if (colon === -1) return false;
+      const property = decl.slice(0, colon).trim().toLowerCase();
+      const value = decl
+        .slice(colon + 1)
+        .replace(/!important/i, '')
+        .trim()
+        .toLowerCase();
+      return (
+        PAINTING_PROPERTY.test(property) &&
+        !property.endsWith('-radius') &&
+        !NON_PAINTING_VALUE.test(value)
+      );
+    });
+  const onHeatmapCircle = (sel) => /\.(kind-heatmap|graph-heatmap-circle)(?![\w-])/.test(sel);
   const withoutNot = (sel) => sel.replace(/:not\([^)]*\)/g, '');
+
+  it.each([
+    ['border-top-color: red', true],
+    ['border-inline-start: 1px solid red', true],
+    ['border-block-width: 2px', true],
+    ['border: 1px dashed rgba(220, 38, 38, 0.6)', true],
+    ['outline: 2px solid CanvasText', true],
+    ['box-shadow: 0 0 0 1px red', true],
+    ['background: rgba(220, 38, 38, 0.2)', true],
+    ['border-radius: 50%', false],
+    ['border-top-left-radius: 4px', false],
+    ['border-start-end-radius: 4px', false],
+    ['box-sizing: border-box', false],
+    ['outline-offset: 2px', false],
+    ['background-color: transparent', false],
+    ['background-size: cover', false],
+    ['border: none', false],
+    ['box-shadow: none !important', false],
+    ['--border: 1px solid red', false],
+  ])('treats `%s` as painting: %s', (decl, expected) => {
+    expect(paints(`\n  width: 10px;\n  ${decl};\n`)).toBe(expected);
+  });
+
+  it('checks forced-colours rules on the circle, not on the intensity menu', () => {
+    expect(
+      onHeatmapCircle('.graph-generic-annotation-node.kind-heatmap .graph-heatmap-circle')
+    ).toBe(true);
+    expect(onHeatmapCircle('.graph-heatmap-circle')).toBe(true);
+    expect(onHeatmapCircle('.heatmap-level-button.active')).toBe(false);
+    expect(onHeatmapCircle('.context-menu-heatmap-intensity')).toBe(false);
+  });
 
   it('outlines only non-empty circles in every forced-colours heat-map rule', () => {
     const selectors = rules
       .filter(inForcedColours)
       .flatMap((r) => r.selectors)
-      .filter((sel) => sel.includes('heatmap'));
+      .filter(onHeatmapCircle);
     expect(selectors.length).toBeGreaterThan(0);
     for (const sel of selectors) {
       expect(sel).toContain(':not(.is-empty)');
