@@ -680,4 +680,15 @@ describe('heat-map annotations survive the server <-> overlay round trip', () =>
     ]);
     expect(overlay.intensity).toBe(10);
   });
+
+  // Written by a client or agent that stored the level as a string; it is
+  // still a readable level, so it must not fall back to the default.
+  it('reads a stored string intensity as its whole level', () => {
+    const [overlay] = annotationsToOverlays([
+      { id: 'heat-3', type: 'heatmap', position: { x: 0, y: 0 }, intensity: '7' },
+    ]);
+    expect(overlay.intensity).toBe(7);
+    const [back] = overlaysToAnnotations([overlay]);
+    expect(back.intensity).toBe(7);
+  });
 });

@@ -420,8 +420,9 @@ images all also have an **Opacity** row in their menu, offering four levels (30%
 hiding it entirely. Freehand strokes have had this since drawing shipped; every other
 kind gets it from the same row now too.
 
-Notes, labels, arrows, freehand strokes, text, shapes, icons, voting dots and
-images all have a **Layer** row in their right-click menu, just above Delete. **Bring to
+Notes, labels, arrows, freehand strokes, text, shapes, icons, voting dots,
+heat-map circles and images all have a **Layer** row in their right-click menu, just
+above Delete. **Bring to
 front** puts the annotation on top of the other annotations and **Send to back** puts it
 underneath, so you can pull a sticky note out from under a transparent-fill shape or tuck
 a shape behind a label. The buttons do nothing once an annotation is already alone at the
@@ -1066,8 +1067,8 @@ bottom navigation bar replaces the toolbar and the hamburger menu:
 | **Search** | Opens the graph search in a sheet that slides up from the bottom |
 | **Create** | Opens the node-type picker in the same bottom sheet, for adding a
 graph node (an Actor, Initiative, and so on) |
-| **Annotate** | Opens the annotation toolbox — notes, text, labels, frames,
-shapes, icons, vote dots, images and freehand drawing — in its own bottom
+| **Annotate** | Opens the annotation toolbox — notes, text, labels, shapes,
+icons, vote dots, heat maps, images and freehand drawing — in its own bottom
 sheet. Kept as a separate slot from **Create** on purpose: an annotation is a
 mark on the canvas, not a graph node, and the two creation flows stay visually
 and behaviorally distinct even though both live behind the same style of
