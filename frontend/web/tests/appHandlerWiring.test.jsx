@@ -104,6 +104,8 @@ const findEdge = (id) => store().edges.find((e) => e.id === id);
 const canvas = () => captured.canvas;
 const dialogs = () => captured.dialogs;
 
+let startupStats = null;
+
 async function renderApp() {
   render(
     <I18nProvider>
@@ -116,7 +118,7 @@ async function renderApp() {
   // object per call, so seeing this render's stats object in the store proves
   // that block ran rather than that App mounted.
   await waitFor(() => expect(api.getGraphStats).toHaveBeenCalled());
-  const startupStats = await api.getGraphStats.mock.results[0].value;
+  startupStats = await api.getGraphStats.mock.results[0].value;
   await waitFor(() => expect(store().stats).toBe(startupStats));
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -140,12 +142,27 @@ describe('App handler wiring', () => {
     store().setEditingEdge(null);
     captured.canvas = null;
     captured.dialogs = null;
+    startupStats = null;
     vi.clearAllMocks();
     vi.spyOn(console, 'error').mockImplementation(() => {});
   });
 
-  afterEach(() => {
-    vi.restoreAllMocks();
+  afterEach(async () => {
+    // renderApp's check runs once, right after startup settles; a second
+    // startup run that begins later would land mid-test and replace the seed.
+    // Only App's config load fetches stats, so give any such late run time to
+    // start, then require that the test ended on the one startup run.
+    try {
+      if (startupStats) {
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        });
+        expect(api.getGraphStats).toHaveBeenCalledTimes(1);
+        expect(store().stats).toBe(startupStats);
+      }
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   it('handleEdit opens the agent editor with the subscription fetched from the API', async () => {
