@@ -2393,11 +2393,28 @@ class GraphStorage:
                     # (executor shut down); the caller still gets its result.
                     logger.warning(f"could not persist what was added: {persist_error}")
 
+            nodes_to_embed: List[Node] = []
+
+            def settle_landed_vectors() -> None:
+                # A node that landed stays, and every later event about it -
+                # an update's `before`, an external upsert's - is built from
+                # the object, with no by-name filter for `embedding`. So on a
+                # failure exit too the vector goes to the index or nowhere,
+                # never stays on the node.
+                try:
+                    self._adopt_supplied_vectors(nodes_to_embed)
+                except Exception as adopt_error:
+                    logger.warning(
+                        f"could not adopt supplied embeddings: {adopt_error}"
+                    )
+                for landed in nodes_to_embed:
+                    landed.embedding = None
+
             try:
                 # Add nodes
-                nodes_to_embed = []
                 for node in nodes:
                     if node.id in self.nodes:
+                        settle_landed_vectors()
                         persist_landed()
                         return AddNodesResult(
                             added_node_ids=[],
@@ -2545,6 +2562,7 @@ class GraphStorage:
                 )
 
             except Exception as e:
+                settle_landed_vectors()
                 persist_landed()
                 return AddNodesResult(
                     added_node_ids=[],
