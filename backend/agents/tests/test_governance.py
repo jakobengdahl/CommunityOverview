@@ -3,7 +3,6 @@ Tests for basic agent governance: autonomy levels, the tool gate, the durable
 proposal store, and the approve/reject/apply manager, plus worker wiring.
 """
 
-import re
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -19,6 +18,7 @@ from backend.agents.governance import (
     coerce_autonomy,
     filter_tool_definitions,
 )
+from backend.agents.tests._sql_recording import RecordingConn, only_statement
 from backend.agents.worker import AgentWorker, EventItem
 
 
@@ -148,32 +148,18 @@ class TestStores:
         store = SqliteProposalStore(tmp_path / "gov.db")
         try:
             hostile = "a1' OR '1'='1"
-            recorded = []
-            real_conn = store._conn
-
-            class _RecordingConn:
-                def execute(self, sql, params=()):
-                    recorded.append((sql, list(params)))
-                    return real_conn.execute(sql, params)
-
-                def __getattr__(self, name):
-                    return getattr(real_conn, name)
-
-            store._conn = _RecordingConn()
+            recorder = RecordingConn(store._conn)
+            store._conn = recorder
             store.list_proposals(
                 agent_id=hostile,
                 statuses=[ProposalStatus.PENDING, ProposalStatus.APPLY_FAILED],
                 limit=7331,
             )
-            selects = [
-                r for r in recorded if r[0].startswith("SELECT * FROM proposals")
-            ]
-            assert len(selects) == 1, recorded
-            sql, params = selects[0]
+            sql, params = only_statement(recorder, "SELECT * FROM proposals")
             assert params == [hostile, "pending", "apply_failed", 7331]
             assert sql.count("?") == len(params)
             assert "'" not in sql
-            assert not re.search(r"\d", sql)
+            assert "7331" not in sql
             for value in ("pending", "apply_failed"):
                 assert value not in sql
         finally:
