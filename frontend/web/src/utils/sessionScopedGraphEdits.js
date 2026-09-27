@@ -24,10 +24,12 @@ import { savedViewMetadataToCanvasMetadata } from './sessionAnnotations';
  * handlers here (applyEdgeUpdate, confirmNodeDelete) predate this and keep
  * their own checks.
  *
- * Not every awaiting handler in App comes through here. Image ingest and remote
- * op hydration carry their own sync-client guards; the `?view=` URL load is left
+ * Not every awaiting path comes through here. Image ingest and remote op
+ * hydration carry their own sync-client guards. The `?view=` URL load is left
  * as it is because it races the `?session=` bootstrap load, and which of the two
- * should win when both are in the URL is an open product decision.
+ * should win when both are in the URL is an open product decision. Awaits that
+ * only open a dialog (handleEdit's agent branch) or that live inside a dialog
+ * component (CreateNodeDialog) are not covered either.
  *
  * They live here rather than inline in App so the mid-await switch is covered by
  * a test — App itself is not rendered by the suite — following the same reasoning
@@ -176,9 +178,12 @@ export function captureCanvasScope() {
  * user cleared after a clear, and revert whatever else changed in between. A
  * switch drops the patch; after a clear there is simply nothing left to patch.
  *
- * `onApplied` runs only while the canvas the edit started on is still there:
- * a switch or a wholesale replace closes this session's dialogs, so whatever
- * it would close or reset by then is state the user opened after moving on.
+ * `onApplied` runs only while the canvas the edit started on is still there.
+ * Once the user has switched or the canvas was replaced, the dialog the edit
+ * came from has already closed — the store resets the node dialogs, and the
+ * create/save dialogs close themselves on save — so anything open by then was
+ * opened after moving on, and closing or resetting it would discard the user's
+ * newer work.
  *
  * Errors from the API propagate so each caller keeps its own message.
  *
@@ -187,7 +192,7 @@ export function captureCanvasScope() {
  * @param {Function} params.updateNode  API call: persist one node's updates.
  * @param {Function} params.updateVisualization  Store action: replace the canvas.
  * @param {Function} [params.onApplied]  Session-scoped follow-up, e.g. closing the dialog.
- * @returns {Promise<boolean>} Whether the session was still current, so the patch applied.
+ * @returns {Promise<boolean>} Whether the session was still current when the reply landed.
  */
 export async function persistNodeUpdates({ entries, updateNode, updateVisualization, onApplied }) {
   const scope = captureCanvasScope();
