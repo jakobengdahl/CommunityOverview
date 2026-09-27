@@ -491,10 +491,11 @@ describe('heat-map stylesheet', () => {
   // The element a selector styles is its last compound; a class further left
   // only scopes it, so `.kind-heatmap .graph-heatmap-level` styles the label.
   // Combinators inside :has(...), :nth-child(2n+1) or [attr~=x] do not split
-  // it, and a class inside :not(...) or :has(...) does not name it. A last
-  // compound with no class of its own (`*`, `div`), or one using :is(...) or
-  // :where(...), whose classes do name it, may be the circle, so it is judged
-  // by the whole selector.
+  // it. Only groups whose classes cannot name the element are dropped from it:
+  // :has(...), a flat :not(...), :nth-*(...) without `of`, and [attr]. A last
+  // compound left with any other group (:is, :where, `of S`, :not(:not(...)))
+  // or with no class of its own (`*`, `div`) may be the circle, so it is
+  // judged by the whole selector, as it was before this helper.
   const lastCompound = (sel) => {
     let depth = 0;
     let start = 0;
@@ -505,18 +506,28 @@ describe('heat-map stylesheet', () => {
       else if (c === ')' || c === ']') depth--;
       else if (depth === 0 && /[\s>+~]/.test(c)) start = i + 1;
     }
-    let own = text.slice(start);
-    for (let prev; prev !== own;) {
-      prev = own;
-      own = own.replace(/\([^()]*\)|\[[^\]]*\]/g, '');
+    return text.slice(start);
+  };
+  const withoutHas = (compound) => {
+    let out = compound;
+    for (let i; (i = out.indexOf(':has(')) !== -1;) {
+      let depth = 0;
+      let j = i + ':has'.length;
+      for (; j < out.length; j++) {
+        if (out[j] === '(') depth++;
+        else if (out[j] === ')' && --depth === 0) break;
+      }
+      out = out.slice(0, i) + out.slice(j + 1);
     }
-    return own;
+    return out;
   };
   const stylesHeatmapCircle = (sel) => {
-    const own = lastCompound(sel);
-    const byWhole =
-      !own.includes('.') || /:(is|where|matches|-(webkit|moz)-any)(?![\w-])/.test(own);
-    return onHeatmapCircle(byWhole ? withoutNot(sel) : own);
+    const own = withoutHas(lastCompound(sel)).replace(
+      /:not\([^()]*\)|:nth-[a-z-]+\((?![^()]*\bof\b)[^()]*\)|\[[^\]]*\]/g,
+      ''
+    );
+    const byWhole = !own.includes('.') || /[()]/.test(own);
+    return onHeatmapCircle(byWhole ? sel : own);
   };
 
   it.each([
@@ -609,6 +620,13 @@ describe('heat-map stylesheet', () => {
     );
     expect(stylesHeatmapCircle('.kind-heatmap .x:where(.graph-heatmap-circle)')).toBe(true);
     expect(stylesHeatmapCircle('.kind-heatmap .graph-heatmap-level:is(.a)')).toBe(true);
+    expect(
+      stylesHeatmapCircle('.graph-generic-annotation-node.is-empty:nth-child(n of .kind-heatmap)')
+    ).toBe(true);
+    expect(
+      stylesHeatmapCircle('.graph-generic-annotation-node.is-empty:not(:not(.kind-heatmap))')
+    ).toBe(true);
+    expect(stylesHeatmapCircle('.kind-heatmap .x:has(:is(.graph-heatmap-circle))')).toBe(false);
     expect(stylesHeatmapCircle('.kind-heatmap .label:has(.graph-heatmap-circle)')).toBe(false);
     expect(stylesHeatmapCircle('.kind-heatmap .graph-heatmap-level:nth-child(2n + 1)')).toBe(false);
   });
