@@ -303,6 +303,11 @@ class GraphStorage:
         # Thread lock for in-memory data structure protection
         # RLock allows same thread to acquire lock multiple times (reentrant)
         self._lock = threading.RLock()
+        # Set, under _lock, once this instance is being torn down. A backend
+        # is promised it will not call the listener after stop returns, but
+        # nothing here can make it keep that promise; this is what stops a
+        # late report from refreshing a model nobody owns any more.
+        self._shut_down = False
 
         # Executor for background I/O operations (saving to disk)
         # Using max_workers=1 to ensure sequential writes
@@ -405,6 +410,8 @@ class GraphStorage:
             # The listener stops first: it is the one that can still call
             # into this half-built object. The writer goes whatever that
             # does, or its thread outlives an instance nothing can reach.
+            with self._lock:
+                self._shut_down = True
             try:
                 if boot_gate is not None:
                     self._persistence_backend.stop_change_notification()
@@ -595,7 +602,11 @@ class GraphStorage:
 
     def shutdown_events(self) -> None:
         """Shutdown the event system and I/O executor gracefully."""
-        # First, so nothing arrives to refresh a model that is being torn down.
+        # First, so nothing arrives to refresh a model that is being torn down:
+        # the flag refuses a report the backend makes after this point, and
+        # taking _lock to set it waits out a refresh already under way.
+        with self._lock:
+            self._shut_down = True
         if self._backend_capabilities.change_notification:
             try:
                 self._persistence_backend.stop_change_notification()
@@ -1555,7 +1566,9 @@ class GraphStorage:
         thread of its own, when the store changed behind this instance's
         back. Which threads count as its own is the backend's obligation and
         is stated on ChangeNotifyingBackend; only one violation of it is
-        visible from here, and that one is refused below.
+        visible from here, and that one is refused below. A report that
+        arrives once shutdown_events() has begun - or once construction has
+        failed - is dropped without refreshing anything.
         Nothing here is persisted: the change is already in the store, and
         writing it back would fight the writer that made it.
 
@@ -1590,6 +1603,12 @@ class GraphStorage:
             )
 
         with self._lock:
+            # A report after shutdown has nothing to refresh: the model is
+            # being torn down, and the drain below would find the queue gone
+            # and go ahead anyway. Refused quietly, not raised - the only
+            # thread to raise into is the backend's.
+            if self._shut_down:
+                return
             if not self._settle_before_refresh():
                 return
             # Read AFTER the settle, never before. A backend that gathers the
