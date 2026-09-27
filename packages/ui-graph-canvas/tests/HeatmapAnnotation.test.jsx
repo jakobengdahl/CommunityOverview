@@ -495,18 +495,19 @@ describe('heat-map stylesheet', () => {
   // `.kind-heatmap .graph-heatmap-level` does. Anything else, such as
   // :has(...), :not(...), :is(...), [attr] or `*`, could still narrow to the
   // node or the circle, so it is judged as before, by the whole selector. So
-  // is any selector with a parenthesis, bracket, quote or escape anywhere in
-  // it: the rule parser splits lists on every comma, even one inside
-  // :is(a, b), so a fragment's plain-looking last piece may not be its last.
+  // is every selector of a rule whose selector list has a parenthesis,
+  // bracket, quote or escape anywhere in it: the rule parser splits lists on
+  // every comma, even one inside :is(a, b, c), so a fragment's plain-looking
+  // last piece may not be its selector's last compound.
   const NODE_OR_CIRCLE_CLASS =
     /\.(graph-generic-annotation-node|kind-heatmap|is-empty|selected|graph-heatmap-circle)(?![\w-])/;
-  const stylesHeatmapCircle = (sel) => {
+  const stylesHeatmapCircle = (sel, list = sel) => {
     const last = sel
       .trim()
       .split(/\s*[\s>+~]\s*/)
       .pop();
     const plain =
-      !/[()[\]"'\\]/.test(sel) && /^[\w-]*(?:(?:\.|::?)[\w-]+)+$/.test(last) && last.includes('.');
+      !/[()[\]"'\\]/.test(list) && /^[\w-]*(?:(?:\.|::?)[\w-]+)+$/.test(last) && last.includes('.');
     return onHeatmapCircle(sel) && !(plain && !NODE_OR_CIRCLE_CLASS.test(last));
   };
 
@@ -605,6 +606,18 @@ describe('heat-map stylesheet', () => {
     expect(stylesHeatmapCircle(sel)).toBe(expected);
   });
 
+  it('judges a list fragment by the whole selector list it came from', () => {
+    const list = ':is(.a, .kind-heatmap.is-empty .wrap, .b:hover) .graph-heatmap-circle';
+    expect(stylesHeatmapCircle('.kind-heatmap.is-empty .wrap', list)).toBe(true);
+    expect(stylesHeatmapCircle('.kind-heatmap .graph-heatmap-level', list)).toBe(true);
+    expect(
+      stylesHeatmapCircle(
+        '.kind-heatmap .graph-heatmap-level',
+        '.x, .kind-heatmap .graph-heatmap-level'
+      )
+    ).toBe(false);
+  });
+
   it('outlines only non-empty circles in every forced-colours heat-map rule', () => {
     const selectors = rules
       .filter(inForcedColours)
@@ -620,8 +633,7 @@ describe('heat-map stylesheet', () => {
   it('draws an empty circle only while it is selected or hovered', () => {
     const painting = rules
       .filter((r) => !inForcedColours(r) && paints(r.body))
-      .flatMap((r) => r.selectors)
-      .filter(stylesHeatmapCircle);
+      .flatMap((r) => r.selectors.filter((sel) => stylesHeatmapCircle(sel, r.selectors.join(','))));
     // The rim itself must exist, so the loop below checks something.
     expect(painting.some((sel) => withoutNot(sel).includes('.is-empty'))).toBe(true);
     for (const sel of painting) {
