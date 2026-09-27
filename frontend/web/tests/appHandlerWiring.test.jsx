@@ -111,9 +111,10 @@ async function renderApp() {
     </I18nProvider>
   );
   // Let the startup work settle before seeding the canvas, so nothing it
-  // does afterwards replaces the seed. The config load writes its stats last,
-  // and the mock returns a fresh object per call, so seeing this render's
-  // object in the store proves the load finished rather than that App mounted.
+  // does afterwards replaces the seed. The config load applies schema, stats
+  // and capabilities in one synchronous block, and the mock returns a fresh
+  // object per call, so seeing this render's stats object in the store proves
+  // that block ran rather than that App mounted.
   await waitFor(() => expect(api.getGraphStats).toHaveBeenCalled());
   const startupStats = await api.getGraphStats.mock.results[0].value;
   await waitFor(() => expect(store().stats).toBe(startupStats));
