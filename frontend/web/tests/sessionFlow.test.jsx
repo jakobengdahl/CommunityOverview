@@ -2166,7 +2166,8 @@ describe('Server-backed session lifecycle', () => {
     expect(window.location.search).not.toContain('session=aaaa-bbbb');
   });
 
-  // Regression: App.jsx's handleNodeCreated (guarded on isCoarsePointer) must
+  // Regression: App.jsx's focusCreatedNode (guarded on isCoarsePointer, and
+  // handed to createDialogNode as onDrawn by handleNodeCreated) must
   // schedule setFocusNodeId(createdNode.id) on a later tick than
   // addNodesToVisualization, not call it in the same synchronous update —
   // mirroring the identical two-step ordering FloatingSearch.jsx already uses
