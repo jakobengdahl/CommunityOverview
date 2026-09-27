@@ -661,6 +661,25 @@ class TestRejectedAddNodesLeavesNoInlineVector:
                 vector
             )
 
+    def test_a_supplied_vector_replaces_an_orphan_index_vector_for_a_new_id(
+        self, temp_storage
+    ):
+        temp_storage.vector_store.load_vectors({"a": [0.75, 1.0]})
+
+        result = temp_storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5]),
+                Node(id="a", type=NodeType.ACTOR, name="Again"),
+            ],
+            [],
+        )
+
+        assert result.success is False
+        assert temp_storage.get_node("a").embedding is None
+        assert temp_storage.vector_store.get_vector_list("a") == pytest.approx(
+            [0.25, 0.5]
+        )
+
 
 class TestAdoptionKeepsVectorsIfTheIndexRaises:
     """A supplied vector's only copy is the node object until the index export
@@ -765,41 +784,49 @@ class TestAdoptionSettlesSuppliedVectors:
             [1.0, 0.0]
         )
 
+    @pytest.mark.parametrize("order", [("z", "y", "b"), ("b", "z", "y")])
     def test_a_zero_length_vector_does_not_block_the_rest_of_the_batch(
-        self, temp_storage, monkeypatch
+        self, temp_storage, monkeypatch, order
     ):
+        # Zero-length vectors outnumber the real one, so without the filter
+        # they would set the width whatever the tie-break or node order.
         self._without_generation(monkeypatch, temp_storage)
+        vectors = {"z": [], "y": [], "b": [0.1, 0.2]}
 
         result = temp_storage.add_nodes(
             [
-                Node(id="z", type=NodeType.ACTOR, name="Zero", embedding=[]),
-                Node(id="b", type=NodeType.ACTOR, name="Beta", embedding=[0.1, 0.2]),
+                Node(
+                    id=node_id,
+                    type=NodeType.ACTOR,
+                    name=node_id,
+                    embedding=vectors[node_id],
+                )
+                for node_id in order
             ],
             [],
         )
 
         assert result.success is True
-        assert temp_storage.vector_store.get_vector_list("z") is None
         assert temp_storage.vector_store.get_vector_list("b") == pytest.approx(
             [0.1, 0.2]
         )
-        assert temp_storage.get_node("z").embedding is None
-        assert temp_storage.get_node("b").embedding is None
+        for node_id in order:
+            assert temp_storage.get_node(node_id).embedding is None
+        for node_id in ("z", "y"):
+            assert temp_storage.vector_store.get_vector_list(node_id) is None
 
     def test_a_supplied_vector_replaces_an_orphan_index_vector_for_a_new_id(
-        self, temp_storage
+        self, temp_storage, monkeypatch
     ):
+        self._without_generation(monkeypatch, temp_storage)
         temp_storage.vector_store.load_vectors({"a": [0.75, 1.0]})
 
         result = temp_storage.add_nodes(
-            [
-                Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5]),
-                Node(id="a", type=NodeType.ACTOR, name="Again"),
-            ],
+            [Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5])],
             [],
         )
 
-        assert result.success is False
+        assert result.success is True
         assert temp_storage.get_node("a").embedding is None
         assert temp_storage.vector_store.get_vector_list("a") == pytest.approx(
             [0.25, 0.5]
