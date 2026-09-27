@@ -815,6 +815,36 @@ class TestAdoptionSettlesSuppliedVectors:
         for node_id in ("z", "y"):
             assert temp_storage.vector_store.get_vector_list(node_id) is None
 
+    @pytest.mark.parametrize("order", [("z", "b"), ("b", "z")])
+    def test_a_zero_length_vector_does_not_win_a_width_tie(
+        self, temp_storage, monkeypatch, order
+    ):
+        # One zero-length vector against one real one ties on count, so without
+        # the filter the width seen first would decide the batch.
+        self._without_generation(monkeypatch, temp_storage)
+        vectors = {"z": [], "b": [0.1, 0.2]}
+
+        result = temp_storage.add_nodes(
+            [
+                Node(
+                    id=node_id,
+                    type=NodeType.ACTOR,
+                    name=node_id,
+                    embedding=vectors[node_id],
+                )
+                for node_id in order
+            ],
+            [],
+        )
+
+        assert result.success is True
+        assert temp_storage.vector_store.get_vector_list("b") == pytest.approx(
+            [0.1, 0.2]
+        )
+        assert temp_storage.vector_store.get_vector_list("z") is None
+        for node_id in order:
+            assert temp_storage.get_node(node_id).embedding is None
+
     def test_a_supplied_vector_replaces_an_orphan_index_vector_for_a_new_id(
         self, temp_storage, monkeypatch
     ):
