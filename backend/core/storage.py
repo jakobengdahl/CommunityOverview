@@ -304,9 +304,9 @@ class GraphStorage:
         # RLock allows same thread to acquire lock multiple times (reentrant)
         self._lock = threading.RLock()
         # Set, under _lock, once this instance is being torn down. A backend
-        # is promised it will not call the listener after stop returns, but
-        # nothing here can make it keep that promise; this is what stops a
-        # late report from refreshing a model nobody owns any more.
+        # promises not to call the listener after stop returns, but nothing
+        # here can make it keep that promise; this is what stops a late
+        # report from refreshing a model nobody owns any more.
         self._shut_down = False
 
         # Executor for background I/O operations (saving to disk)

@@ -488,6 +488,31 @@ class TestChangeNotificationWiring:
         assert {n.id for n in storage.get_all_nodes()} == {"a"}
         assert backend.calls == []
 
+    def test_a_report_made_while_stopping_changes_nothing(self):
+        """Refused from the top of shutdown, not from when stop returns: a
+        backend that reports on its way down is reporting into a teardown
+        that has already begun, while the write queue is still there to
+        drain and would let the refresh through."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+        listener = backend.listener
+        stop = backend.stop_change_notification
+
+        def reporting_stop():
+            listener(
+                ExternalChange.entities(
+                    [EntityOperation.upsert_node(_node_payload("b", "Beacon"))]
+                )
+            )
+            stop()
+
+        backend.stop_change_notification = reporting_stop
+        storage.shutdown_events()
+
+        assert storage.get_node("b") is None
+        assert {n.id for n in storage.get_all_nodes()} == {"a"}
+
     def test_a_report_after_a_failed_construction_changes_nothing(self, monkeypatch):
         """Construction that fails after the gate opened leaves a backend
         thread holding a listener into an object nobody owns. A report it
