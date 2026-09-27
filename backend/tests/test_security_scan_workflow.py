@@ -323,6 +323,8 @@ def test_dependency_audit_scope_is_not_narrowed_by_configuration(job_id):
         assert not AUDIT_CONFIG_VAR.search(body), f"{job_id}:{step['name']}"
     for var in workflow.get("env") or {}:
         assert not AUDIT_CONFIG_VAR.match(var), f"workflow env sets {var}"
+    run_defaults = (workflow.get("defaults") or {}).get("run") or {}
+    assert "working-directory" not in run_defaults, "workflow sets working-directory"
 
 
 def _npmrc_keys(text):
