@@ -395,9 +395,9 @@ describe('heat-map stylesheet', () => {
   // Every rule's selector list and body, with the @media block (if any) it
   // sits in. Enough of a parser for this stylesheet: comments stripped, one
   // level of nesting, no strings containing braces.
-  const rules = (() => {
+  const parseRules = (source) => {
     const out = [];
-    const text = css.replace(/\/\*[\s\S]*?\*\//g, '');
+    const text = source.replace(/\/\*[\s\S]*?\*\//g, '');
     let media = null;
     let i = 0;
     while (i < text.length) {
@@ -424,7 +424,8 @@ describe('heat-map stylesheet', () => {
       i = end + 1;
     }
     return out;
-  })();
+  };
+  const rules = parseRules(css);
   const inForcedColours = (r) => Boolean(r.media?.includes('forced-colors'));
   // Declarations that make an element visible. Every border property draws —
   // longhands and logical border-inline*/border-block* included — except the
@@ -499,20 +500,19 @@ describe('heat-map stylesheet', () => {
   // is every selector of a rule whose selector list has a parenthesis,
   // bracket, quote or escape anywhere in it: the rule parser splits lists on
   // every comma, even one inside :is(a, b, c), so a fragment's plain-looking
-  // last piece may not be its selector's last compound. And nothing is set
-  // aside unless every rule body in the sheet holds no `{`, `&`, quote,
-  // escape or unbalanced parenthesis. The parser ends a body at the first
-  // `}`, even one inside a string, escape or url(...), and reads a nested rule
-  // as part of the outer body and its siblings as top-level rules, where `&`,
-  // :scope or a folded-in parent declaration changes what they select; any
-  // such sheet leaves one of those marks in some parsed body. Nor unless no
-  // stripped comment holds a brace: the comments are stripped as text, so
-  // url(/*) ... url(*/), which CSS reads as two values, would swallow the
-  // rules between them and merge two bodies into one.
+  // last piece may not be its selector's last compound.
+  //
+  // And nothing in a sheet is set aside unless the sheet is flat enough for
+  // the parser to read it as CSS does: no stripped comment holds a brace (the
+  // comments are stripped as text, so url(/*) ... url(*/) would swallow the
+  // rules between them); the rest holds no `&`, quote or backslash anywhere,
+  // since a `}` in a string or escape ends a body or skips a prelude early
+  // and `&` refers to an outer rule; and no parsed body holds `{` or an
+  // unbalanced parenthesis, the marks a nested block or a `}` inside
+  // url(...) leaves behind.
   const NODE_OR_CIRCLE_CLASS =
     /\.(graph-generic-annotation-node|kind-heatmap|is-empty|selected|graph-heatmap-circle)(?![\w-])/;
-  const isCleanBody = (body) => {
-    if (/[{&"'\\]/.test(body)) return false;
+  const isBalanced = (body) => {
     let depth = 0;
     for (const c of body) {
       if (c === '(') depth++;
@@ -520,16 +520,21 @@ describe('heat-map stylesheet', () => {
     }
     return depth === 0;
   };
-  const comments = css.match(/\/\*[\s\S]*?\*\//g) ?? [];
-  const stylesHeatmapCircle = (sel, list = sel, bodies = [], strippedComments = []) => {
+  const isFlatSheet = (source) => {
+    const comments = source.match(/\/\*[\s\S]*?\*\//g) ?? [];
+    if (comments.some((c) => /[{}]/.test(c))) return false;
+    if (/[&"'\\]/.test(source.replace(/\/\*[\s\S]*?\*\//g, ''))) return false;
+    return parseRules(source).every((r) => !r.body.includes('{') && isBalanced(r.body));
+  };
+  const sheetIsFlat = isFlatSheet(css);
+  const stylesHeatmapCircle = (sel, list = sel, flat = true) => {
     const last = sel
       .trim()
       .split(/\s*[\s>+~]\s*/)
       .pop();
     const plain =
+      flat &&
       !/[()[\]"'\\]/.test(list) &&
-      bodies.every(isCleanBody) &&
-      !strippedComments.some((c) => /[{}]/.test(c)) &&
       /^[\w-]*(?:(?:\.|::?)[\w-]+)+$/.test(last) &&
       last.includes('.');
     return onHeatmapCircle(sel) && !(plain && !NODE_OR_CIRCLE_CLASS.test(last));
@@ -630,28 +635,21 @@ describe('heat-map stylesheet', () => {
     expect(stylesHeatmapCircle(sel)).toBe(expected);
   });
 
-  it('sets nothing aside from a sheet whose parsed bodies may hide nesting', () => {
-    const sel = '.kind-heatmap .graph-heatmap-level';
-    const judged = (...bodies) => stylesHeatmapCircle(sel, sel, bodies);
-    expect(judged('color: red;', 'background: rgba(15, 23, 42, 0.85);')).toBe(false);
-    expect(judged('color: red; :is(&, .x) { border: 1px solid; ')).toBe(true);
-    expect(judged('color: red; & .x { border: 1px solid; ')).toBe(true);
-    expect(judged('border: 1px solid;', '.a { color: red ')).toBe(true);
-    expect(judged('color: red;', '.a { color: red ')).toBe(true);
-    expect(judged('background-image: url(')).toBe(true);
-    expect(judged('background: red; grid-area: \\')).toBe(true);
-    expect(judged('content: "')).toBe(true);
-    expect(judged('width: calc(1px))')).toBe(true);
-  });
-
-  it('sets nothing aside from a sheet whose stripped comments hold a brace', () => {
-    const sel = '.kind-heatmap .graph-heatmap-level';
-    const judged = (...comments) => stylesHeatmapCircle(sel, sel, ['color: red;'], comments);
-    expect(judged('/* a plain note */')).toBe(false);
-    expect(judged('/*);\n}\n.kind-heatmap.is-empty .graph-heatmap-circle {\n  --b: url(*/')).toBe(
-      true
-    );
-    expect(judged('/* { */')).toBe(true);
+  it.each([
+    ['.a { color: red; }\n@media (x) { .b { background: rgba(1, 2, 3, 0.5); } }', true],
+    ['/* a plain note */ .a { color: red; }', true],
+    ['.a { color: red; :is(&, .x) { border: 1px solid; } }', false],
+    ['.a { color: red; & .x { border: 1px solid; } }', false],
+    ['.a { .b { color: red } border: 1px solid; .c { outline: 1px solid } }', false],
+    ['@scope (.a) { .b { color: red } :scope, .c { border: 1px solid } }', false],
+    ['.a { background-image: url(}); }', false],
+    ['.a { grid-area: \\}; }', false],
+    ['.a { content: "}"; }', false],
+    ['.a, .z\\}, .b { border: 1px solid; }', false],
+    ['.a { --p: url(/*); }\n.b { --q: url(*/); border: 1px solid; }', false],
+    ['/* { */ .a { color: red; }', false],
+  ])('reads `%s` as a flat sheet: %s', (source, expected) => {
+    expect(isFlatSheet(source)).toBe(expected);
   });
 
   it('judges a list fragment by the whole selector list it came from', () => {
@@ -682,14 +680,7 @@ describe('heat-map stylesheet', () => {
     const painting = rules
       .filter((r) => !inForcedColours(r) && paints(r.body))
       .flatMap((r) =>
-        r.selectors.filter((sel) =>
-          stylesHeatmapCircle(
-            sel,
-            r.selectors.join(','),
-            rules.map((o) => o.body),
-            comments
-          )
-        )
+        r.selectors.filter((sel) => stylesHeatmapCircle(sel, r.selectors.join(','), sheetIsFlat))
       );
     // The rim itself must exist, so the loop below checks something.
     expect(painting.some((sel) => withoutNot(sel).includes('.is-empty'))).toBe(true);
