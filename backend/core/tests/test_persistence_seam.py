@@ -4465,6 +4465,14 @@ class TestTheShutdownFlagIsGuardedByTheLock:
         # Made here, so the main thread can wait on it before the wrapper
         # that sets it exists.
         took_lock = threading.Event()
+        constructed = []
+        real_init = GraphStorage.__init__
+
+        def recording_init(self, *args, **kwargs):
+            constructed.append(self)
+            real_init(self, *args, **kwargs)
+
+        monkeypatch.setattr(GraphStorage, "__init__", recording_init)
 
         def refresh_then_fail(self):
             # The gate is open by now, so this report goes straight through
@@ -4477,10 +4485,13 @@ class TestTheShutdownFlagIsGuardedByTheLock:
             )
             refresh.start()
             started.append(refresh)
-            reloads.entered.wait(5)
-            # The instance under construction, reached through the gate it
-            # registered: its failure path must now say when it takes _lock.
-            storage = backend.listener._listener.__self__
+            if not reloads.entered.wait(5):
+                # Swapping the lock without a parked refresh would test
+                # nothing; fail the construction for a reason of its own.
+                raise RuntimeError("the refresh never parked inside _lock")
+            # The instance under construction: its failure path must now
+            # say when it takes _lock.
+            [storage] = constructed
             lock = _ContendedLock(storage._lock, "construction")
             lock.reached = took_lock
             storage._lock = lock
@@ -4501,7 +4512,7 @@ class TestTheShutdownFlagIsGuardedByTheLock:
         try:
             construction.start()
             started.append(construction)
-            assert reloads.entered.wait(5)
+            assert reloads.entered.wait(5), "the refresh never parked inside _lock"
             assert took_lock.wait(5), "a failed construction never took _lock"
             assert not stopped.is_set(), (
                 "a failed construction stopped the notification under a "
