@@ -42,6 +42,17 @@ def _make_pkce_pair():
     return verifier, challenge
 
 
+# RFC 7636 §4.1 unreserved characters, the full code_verifier alphabet.
+_UNRESERVED = (
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+)
+
+# Non-ASCII characters a Unicode-aware pattern (re.I case folding, \d, \w)
+# would accept as unreserved: KELVIN SIGN, LONG S, I WITH DOT ABOVE,
+# ARABIC-INDIC DIGIT ONE, FULLWIDTH A.
+_UNICODE_LOOKALIKES = ("\u212a", "\u017f", "\u0130", "\u0661", "\uff21")
+
+
 # RSA keypair used to sign fake Google ID tokens in tests. The gateway verifies
 # these against a mocked JWKS client that returns the matching public key.
 from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
@@ -432,6 +443,42 @@ class TestTokenEndpointMalformedBody(unittest.TestCase):
                 self._assert_invalid_request(resp)
         assert client.post("/token", data=body).status_code == 200
 
+    def _assert_rejected_without_consuming_code(self, bad):
+        # A fresh code per probe: a validation step that ran after the code was
+        # consumed would still answer 400, and only the follow-up exchange shows it.
+        for send in (lambda b: client.post("/token", json=b),
+                     lambda b: client.post("/token", data=b)):
+            body = self._issue()
+            resp = send({**body, "code_verifier": bad})
+            assert resp.status_code == 400, (repr(bad), resp.text)
+            assert resp.json()["error"] == "invalid_request", (repr(bad), resp.text)
+            assert send(body).status_code == 200, repr(bad)
+
+    def test_every_ascii_char_outside_unreserved_is_invalid_request(self):
+        valid = self._issue()["code_verifier"]
+        for c in map(chr, range(128)):
+            if c in _UNRESERVED:
+                continue
+            with self.subTest(char=repr(c)):
+                self._assert_rejected_without_consuming_code(valid[:20] + c + valid[21:])
+
+    def test_unicode_lookalikes_of_unreserved_chars_are_invalid_request(self):
+        for c in _UNICODE_LOOKALIKES:
+            with self.subTest(char=repr(c)):
+                self._assert_rejected_without_consuming_code(c * 43)
+
+    def test_verifier_with_every_unreserved_char_is_accepted(self):
+        verifier = _UNRESERVED
+        assert len(verifier) == 66
+        code = auth.issue_auth_code(
+            "alice@example.com", auth.compute_s256_challenge(verifier), "https://app/cb",
+        )
+        resp = client.post("/token", data={
+            "grant_type": "authorization_code", "code": code,
+            "code_verifier": verifier, "redirect_uri": "https://app/cb",
+        })
+        assert resp.status_code == 200, resp.text
+
     def test_code_verifier_length_bounds_are_inclusive(self):
         for length in (43, 128):
             verifier = ("aZ09-._~" * 16)[:length]
@@ -798,6 +845,27 @@ class TestPkceVerifierValidation(unittest.TestCase):
         code = auth.issue_auth_code("alice@example.com", challenge, "https://app/cb")
         assert auth.exchange_code_for_token(code, verifier + "\u00e9", "https://app/cb") is None
         assert auth.exchange_code_for_token(code, verifier, "https://app/cb") is not None
+
+    def test_ascii_verifier_outside_rfc7636_is_rejected_even_when_challenge_matches(self):
+        # The challenge is computed from the bad verifier itself, so only the
+        # syntax guard in verify_pkce can reject it.
+        base = "a" * 43
+        for bad in ("a" * 42, "a" * 129, base[:-1] + "+", base[:-1] + "=", base[:-1] + "%"):
+            with self.subTest(verifier=bad):
+                challenge = auth.compute_s256_challenge(bad)
+                assert auth.verify_pkce(bad, challenge) is False
+                code = auth.issue_auth_code("alice@example.com", challenge, "https://app/cb")
+                assert auth.exchange_code_for_token(code, bad, "https://app/cb") is None
+                assert not auth._code_store[code].used
+
+    def test_unicode_lookalike_verifier_is_rejected_without_raising(self):
+        _, challenge = _make_pkce_pair()
+        for c in _UNICODE_LOOKALIKES:
+            with self.subTest(char=repr(c)):
+                assert auth.verify_pkce(c * 43, challenge) is False
+                code = auth.issue_auth_code("alice@example.com", challenge, "https://app/cb")
+                assert auth.exchange_code_for_token(code, c * 43, "https://app/cb") is None
+                assert not auth._code_store[code].used
 
 
 class TestGatewayJwt(unittest.TestCase):
