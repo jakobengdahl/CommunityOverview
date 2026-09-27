@@ -1233,12 +1233,10 @@ describe('Server-backed session lifecycle', () => {
     }
   });
 
-  // Materialise a session with a live stream, start a resync whose reload is
-  // held on `gate`, and return the stream so a test can deliver ops while the
-  // reload is in flight.
-  // Renders the app and waits for its sync stream, without delivering any
-  // stream event: the client stays un-ready, so only a bypassReady flush (a
-  // session switch) can POST its queue.
+  // Materialise a session with a live stream and return the stream. Unlike
+  // startResyncHeldOnGate it sends no catch_up, so no resync (and no resync
+  // guard timer) runs; the fake's default snapshot still makes the client
+  // ready.
   async function startSyncedSession() {
     const { container } = renderApp();
     act(() => {
@@ -1256,6 +1254,9 @@ describe('Server-backed session lifecycle', () => {
     });
   }
 
+  // Materialise a session with a live stream, start a resync whose reload is
+  // held on `gate`, and return the stream so a test can deliver ops while the
+  // reload is in flight.
   async function startResyncHeldOnGate(gate, loadsById) {
     const source = await startSyncedSession();
     const sessionId = source.url.split('/api/sessions/')[1].split('/')[0];
