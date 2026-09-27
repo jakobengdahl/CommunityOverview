@@ -434,9 +434,10 @@ describe('heat-map stylesheet', () => {
   //
   // A value draws nothing when every token is a no-op (`border: 0 none`,
   // `outline: 0em`). A border or outline shorthand carries one width and one
-  // style, so either being zero, none or hidden draws nothing either. That
-  // shorthand rule does not extend to longhands (`border-width: 0 2px` still
-  // draws a side) or to box-shadow (`0 0 0 1px red` is a ring). `transparent`
+  // style, so either being zero, none or hidden draws nothing either — except
+  // an `auto` outline, whose width a browser may ignore. That shorthand rule
+  // does not extend to longhands (`border-width: 0 2px` still draws a side) or
+  // to box-shadow (`0 0 0 1px red` is a ring). `transparent`
   // hides only a background: forced-colours mode repaints border and outline
   // colours. `initial` is never a no-op, since on a border longhand it means
   // currentcolor or a medium width. A quoted string, or a parenthesised group
@@ -476,7 +477,9 @@ describe('heat-map stylesheet', () => {
       const noOp = (t) =>
         isNoOpToken(t) || (t === 'transparent' && property.startsWith('background'));
       if (tokens.every(noOp)) return false;
-      if (BORDER_SHORTHAND.test(property) && tokens.some(isNoOpToken)) return false;
+      if (BORDER_SHORTHAND.test(property) && !tokens.includes('auto') && tokens.some(isNoOpToken)) {
+        return false;
+      }
       return true;
     });
   const onHeatmapCircle = (sel) => /\.(kind-heatmap|graph-heatmap-circle)(?![\w-])/.test(sel);
@@ -513,6 +516,7 @@ describe('heat-map stylesheet', () => {
     ['border-top: 2px hidden red', false],
     ['outline: 0em', false],
     ['outline: 1px none red', false],
+    ['outline: 0 auto', true],
     ['border-color: initial', true],
     ['border-width: initial', true],
     ['border-style: hidden', false],
