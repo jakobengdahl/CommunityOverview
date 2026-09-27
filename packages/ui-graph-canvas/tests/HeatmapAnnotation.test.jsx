@@ -489,45 +489,23 @@ describe('heat-map stylesheet', () => {
   const onHeatmapCircle = (sel) => /\.(kind-heatmap|graph-heatmap-circle)(?![\w-])/.test(sel);
   const withoutNot = (sel) => sel.replace(/:not\([^)]*\)/g, '');
   // The element a selector styles is its last compound; a class further left
-  // only scopes it, so `.kind-heatmap .graph-heatmap-level` styles the label.
-  // Combinators inside :has(...), :nth-child(2n+1) or [attr~=x] do not split
-  // it. Only groups whose classes cannot name the element are dropped from it:
-  // :has(...), a flat :not(...), :nth-*(...) without `of`, and [attr]. A last
-  // compound left with any other group (:is, :where, `of S`, :not(:not(...)))
-  // or with no class of its own (`*`, `div`) may be the circle, so it is
-  // judged by the whole selector, as it was before this helper.
-  const lastCompound = (sel) => {
-    let depth = 0;
-    let start = 0;
-    const text = sel.trim();
-    for (let i = 0; i < text.length; i++) {
-      const c = text[i];
-      if (c === '(' || c === '[') depth++;
-      else if (c === ')' || c === ']') depth--;
-      else if (depth === 0 && /[\s>+~]/.test(c)) start = i + 1;
-    }
-    return text.slice(start);
-  };
-  const withoutHas = (compound) => {
-    let out = compound;
-    for (let i; (i = out.indexOf(':has(')) !== -1;) {
-      let depth = 0;
-      let j = i + ':has'.length;
-      for (; j < out.length; j++) {
-        if (out[j] === '(') depth++;
-        else if (out[j] === ')' && --depth === 0) break;
-      }
-      out = out.slice(0, i) + out.slice(j + 1);
-    }
-    return out;
-  };
+  // only scopes it. A selector is set aside only when its last compound is
+  // plain — classes, a type, argument-free pseudo-classes — and carries none
+  // of the classes the heat-map node or its circle can have, as
+  // `.kind-heatmap .graph-heatmap-level` does. Anything else, such as
+  // :has(...), :not(...), :is(...), [attr] or `*`, could still narrow to the
+  // node or the circle, so it is judged as before, by the whole selector. A
+  // split inside a group leaves a parenthesis, bracket or quote in the piece,
+  // so that piece is never plain.
+  const NODE_OR_CIRCLE_CLASS =
+    /\.(graph-generic-annotation-node|kind-heatmap|is-empty|selected|graph-heatmap-circle)(?![\w-])/;
   const stylesHeatmapCircle = (sel) => {
-    const own = withoutHas(lastCompound(sel)).replace(
-      /:not\([^()]*\)|:nth-[a-z-]+\((?![^()]*\bof\b)[^()]*\)|\[[^\]]*\]/g,
-      ''
-    );
-    const byWhole = !own.includes('.') || /[()]/.test(own);
-    return onHeatmapCircle(byWhole ? sel : own);
+    const last = sel
+      .trim()
+      .split(/\s*[\s>+~]\s*/)
+      .pop();
+    const plain = /^[\w-]*(?:(?:\.|::?)[\w-]+)+$/.test(last) && last.includes('.');
+    return onHeatmapCircle(sel) && !(plain && !NODE_OR_CIRCLE_CLASS.test(last));
   };
 
   it.each([
@@ -595,40 +573,32 @@ describe('heat-map stylesheet', () => {
     expect(onHeatmapCircle('.kind-heatmapx .graph-heatmap-circle_inner')).toBe(false);
   });
 
-  it('judges the rim rules by the element they style, not by their scope', () => {
-    expect(
-      stylesHeatmapCircle(
-        '.graph-generic-annotation-node.kind-heatmap.is-empty:hover .graph-heatmap-circle'
-      )
-    ).toBe(true);
-    expect(stylesHeatmapCircle('.graph-generic-annotation-node.kind-heatmap')).toBe(true);
-    expect(stylesHeatmapCircle('.kind-heatmap > .graph-heatmap-circle')).toBe(true);
-    expect(stylesHeatmapCircle('.kind-heatmap:not(.is-empty) .graph-heatmap-circle')).toBe(true);
-    expect(stylesHeatmapCircle('.kind-heatmap .graph-heatmap-level')).toBe(false);
-    expect(stylesHeatmapCircle('.kind-heatmap.is-empty > .graph-heatmap-level')).toBe(false);
-    expect(stylesHeatmapCircle('.kind-heatmap ~ .other')).toBe(false);
-    expect(stylesHeatmapCircle('.graph-heatmap-level:not(.kind-heatmap)')).toBe(false);
-    expect(stylesHeatmapCircle('.graph-heatmap-circle-label')).toBe(false);
-    expect(stylesHeatmapCircle('.kind-heatmap.is-empty:has(> .graph-heatmap-level)')).toBe(true);
-    expect(stylesHeatmapCircle('.kind-heatmap .graph-heatmap-circle:nth-child(2n + 1)')).toBe(true);
-    expect(stylesHeatmapCircle('.kind-heatmap .graph-heatmap-circle:not(.a .b)')).toBe(true);
-    expect(stylesHeatmapCircle('.kind-heatmap .graph-heatmap-circle[data-x~="y"]')).toBe(true);
-    expect(stylesHeatmapCircle('.kind-heatmap.is-empty > *')).toBe(true);
-    expect(stylesHeatmapCircle('.kind-heatmap.is-empty div')).toBe(true);
-    expect(stylesHeatmapCircle('.graph-generic-annotation-node:is(.kind-heatmap).is-empty')).toBe(
-      true
-    );
-    expect(stylesHeatmapCircle('.kind-heatmap .x:where(.graph-heatmap-circle)')).toBe(true);
-    expect(stylesHeatmapCircle('.kind-heatmap .graph-heatmap-level:is(.a)')).toBe(true);
-    expect(
-      stylesHeatmapCircle('.graph-generic-annotation-node.is-empty:nth-child(n of .kind-heatmap)')
-    ).toBe(true);
-    expect(
-      stylesHeatmapCircle('.graph-generic-annotation-node.is-empty:not(:not(.kind-heatmap))')
-    ).toBe(true);
-    expect(stylesHeatmapCircle('.kind-heatmap .x:has(:is(.graph-heatmap-circle))')).toBe(false);
-    expect(stylesHeatmapCircle('.kind-heatmap .label:has(.graph-heatmap-circle)')).toBe(false);
-    expect(stylesHeatmapCircle('.kind-heatmap .graph-heatmap-level:nth-child(2n + 1)')).toBe(false);
+  it.each([
+    ['.graph-generic-annotation-node.kind-heatmap.is-empty:hover .graph-heatmap-circle', true],
+    ['.graph-generic-annotation-node.kind-heatmap', true],
+    ['.kind-heatmap > .graph-heatmap-circle', true],
+    ['.kind-heatmap:not(.is-empty) .graph-heatmap-circle', true],
+    ['.kind-heatmap .selected', true],
+    ['.kind-heatmap.is-empty > *', true],
+    ['.kind-heatmap.is-empty div', true],
+    ['.kind-heatmap.is-empty:has(> .graph-heatmap-level)', true],
+    ['.graph-generic-annotation-node:has(> .graph-heatmap-circle)', true],
+    ['.graph-generic-annotation-node:not(.kind-heatmap:hover)', true],
+    ['.graph-generic-annotation-node:is(.kind-heatmap).is-empty', true],
+    ['.graph-generic-annotation-node.is-empty:nth-child(n of .kind-heatmap)', true],
+    ['.graph-generic-annotation-node.is-empty:nth-child(n OF .kind-heatmap)', true],
+    ['.graph-generic-annotation-node.is-empty:not(:not(.kind-heatmap))', true],
+    ['.kind-heatmap .graph-heatmap-circle:nth-child(2n + 1)', true],
+    ['.kind-heatmap .x:where(.graph-heatmap-circle)', true],
+    ['.graph-heatmap-circle[title="a] .b"]', true],
+    ['.graph-heatmap-circle[title=") .b"]', true],
+    ['.kind-heatmap .graph-heatmap-level', false],
+    ['.kind-heatmap.is-empty > .graph-heatmap-level', false],
+    ['.kind-heatmap.is-empty:hover .graph-heatmap-level::before', false],
+    ['.kind-heatmap ~ .other', false],
+    ['.graph-heatmap-circle-label', false],
+  ])('judges `%s` as styling the heat-map node or circle: %s', (sel, expected) => {
+    expect(stylesHeatmapCircle(sel)).toBe(expected);
   });
 
   it('outlines only non-empty circles in every forced-colours heat-map rule', () => {
