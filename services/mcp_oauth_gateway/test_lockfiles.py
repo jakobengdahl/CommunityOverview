@@ -295,6 +295,19 @@ class TestLockIntegrity(unittest.TestCase):
                     )
 
 
+def _runner_str(value):
+    """A YAML env value as the Actions runner passes it: lowercase booleans, null as empty."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return "" if value is None else str(value)
+
+
+def _step_env(workflow, job, step):
+    """The env a step runs with: workflow, then job, then step env."""
+    merged = {**(workflow.get("env") or {}), **(job.get("env") or {}), **(step.get("env") or {})}
+    return {k: _runner_str(v) for k, v in merged.items()}
+
+
 class TestImagePythonStep(unittest.TestCase):
     """ci.yml's image-python step must read the same Python as _image_python."""
 
@@ -333,8 +346,7 @@ class TestImagePythonStep(unittest.TestCase):
         job = workflow["jobs"]["gateway-tests-run"]
         (step,) = [s for s in job["steps"] if s.get("id") == "image-python"]
         self.assertEqual(step["working-directory"], "services/mcp_oauth_gateway")
-        merged = {**workflow.get("env", {}), **job.get("env", {}), **step.get("env", {})}
-        return step, {k: str(v) for k, v in merged.items()}
+        return step, _step_env(workflow, job, step)
 
     def _run_step(self, dockerfile):
         step, step_env = self._step()
@@ -385,17 +397,28 @@ class TestImagePythonStep(unittest.TestCase):
         self.assertEqual(output.strip().split("=")[1].split(".")[:2], list(_image_python(dockerfile)))
 
 
+def _audit_workflow():
+    return yaml.safe_load((HERE.parents[1] / ".github" / "workflows" / "gateway-deps-audit.yml").read_text())
+
+
 def _audit_step(job, step_id):
-    workflow = yaml.safe_load((HERE.parents[1] / ".github" / "workflows" / "gateway-deps-audit.yml").read_text())
-    (step,) = [s for s in workflow["jobs"][job]["steps"] if s.get("id") == step_id]
+    (step,) = [s for s in _audit_workflow()["jobs"][job]["steps"] if s.get("id") == step_id]
     return step
 
 
-def _run_audit_step(step, files, extra_env=None):
-    """Run a gateway-deps-audit.yml step in a temp dir holding ``files``.
+def _run_audit_step(job, step, files, extra_env=None):
+    """Run step ``step`` of gateway-deps-audit.yml job ``job`` in a temp dir holding ``files``.
 
     Returns (exit code, GITHUB_OUTPUT text, temp dir); the caller cleans up the dir.
     """
+    workflow = _audit_workflow()
+    job_def = workflow["jobs"][job]
+    assert step in job_def["steps"], f"step {step.get('id')!r} is not in job {job!r}"
+    step_env = _step_env(workflow, job_def, step)
+    # These are what the callers observe; an env key that redirected one would
+    # leave nothing real to assert on.
+    for key in ("PATH", "GITHUB_OUTPUT", "RUNNER_TEMP"):
+        assert key not in step_env, f"workflow env sets {key}"
     tmp = tempfile.mkdtemp()
     work = Path(tmp, "work")
     work.mkdir()
@@ -404,7 +427,7 @@ def _run_audit_step(step, files, extra_env=None):
     output = Path(tmp, "github_output")
     output.write_text("")
     env = {k: v for k, v in os.environ.items() if not k.startswith("LC_") and k not in ("LANG", "LANGUAGE")}
-    env.update({"LANG": "C.UTF-8", **step.get("env", {})})
+    env.update({"LANG": "C.UTF-8", **step_env})
     env.update({"GITHUB_OUTPUT": str(output), "RUNNER_TEMP": str(Path(tmp, "runner"))})
     env.update(extra_env or {})
     result = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=work, env=env, capture_output=True, text=True)
@@ -422,7 +445,7 @@ class TestAuditMarkerStripStep(unittest.TestCase):
         self.assertEqual(self.step["working-directory"], "services/mcp_oauth_gateway")
 
     def _run(self, files):
-        code, output, tmp = _run_audit_step(self.step, files)
+        code, output, tmp = _run_audit_step("pip-audit", self.step, files)
         self.addCleanup(subprocess.run, ["rm", "-rf", str(tmp)])
         return code, output, tmp
 
@@ -467,7 +490,8 @@ class TestAuditSteps(unittest.TestCase):
         self.assertNotIn("defaults", workflow)
         job = workflow["jobs"]["pip-audit"]
         self.assertNotIn("defaults", job)
-        self.inherited_env = {**workflow.get("env", {}), **job.get("env", {})}
+        self.workflow = workflow
+        self.job = job
         steps = job["steps"]
         ids = [s.get("id") for s in steps]
         start = ids.index("strip-markers")
@@ -477,7 +501,7 @@ class TestAuditSteps(unittest.TestCase):
         for step in [self.strip, *self.audits]:
             self.assertNotIn("shell", step)
 
-        code, output, tmp = _run_audit_step(self.strip, {lock: (HERE / lock).read_text() for lock in _LOCKS})
+        code, output, tmp = _run_audit_step("pip-audit", self.strip, {lock: (HERE / lock).read_text() for lock in _LOCKS})
         self.addCleanup(subprocess.run, ["rm", "-rf", str(tmp)])
         self.assertEqual(code, 0)
         self.assertTrue(output.startswith("dir="))
@@ -498,13 +522,20 @@ class TestAuditSteps(unittest.TestCase):
         summary.write_text("")
         self.assertEqual(step["run"].count("${{"), step["run"].count(self._DIR_EXPR))
         script = step["run"].replace(self._DIR_EXPR, self.dir)
-        step_env = {k: str(v) for k, v in {**self.inherited_env, **step.get("env", {})}.items()}
+        step_env = _step_env(self.workflow, self.job, step)
         # The stub and the summary file are what this test observes; an env key
         # that redirected either would leave nothing real to assert on.
         self.assertNotIn("PATH", step_env)
         self.assertNotIn("GITHUB_STEP_SUMMARY", step_env)
         env = {**os.environ, **step_env, "PATH": f"{tmp / 'bin'}:{os.environ['PATH']}", "GITHUB_STEP_SUMMARY": str(summary)}
-        cwd = tmp / "work" / step.get("working-directory", "")
+        # A path that left the temp dir would be created on the host and never
+        # cleaned up; an unexpanded expression would pass through literally.
+        workdir = step.get("working-directory", "")
+        self.assertFalse(Path(workdir).is_absolute(), workdir)
+        self.assertNotIn("..", Path(workdir).parts)
+        for value in [workdir, *step_env.values()]:
+            self.assertNotIn("${{", value)
+        cwd = tmp / "work" / workdir
         cwd.mkdir(parents=True, exist_ok=True)
         result = subprocess.run(["bash", "-e", "-c", script], cwd=cwd, env=env, capture_output=True, text=True)
         argv = (tmp / "argv").read_text().splitlines() if (tmp / "argv").exists() else None
@@ -560,7 +591,7 @@ class TestRecompileStep(unittest.TestCase):
             stub = bindir / name
             stub.write_text(f'#!/bin/sh\nprintf "%s\\n" "{prefix}$*" >> "{log}"\nexit {uv_exit}\n')
             stub.chmod(0o755)
-        code, _, tmp = _run_audit_step(self.step, files, {"PATH": f"{bindir}:{os.environ['PATH']}"})
+        code, _, tmp = _run_audit_step("lock-freshness", self.step, files, {"PATH": f"{bindir}:{os.environ['PATH']}"})
         self.addCleanup(subprocess.run, ["rm", "-rf", str(tmp)])
         return code, log.read_text().splitlines() if log.exists() else []
 
