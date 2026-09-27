@@ -467,6 +467,7 @@ class TestAuditSteps(unittest.TestCase):
         self.assertNotIn("defaults", workflow)
         job = workflow["jobs"]["pip-audit"]
         self.assertNotIn("defaults", job)
+        self.inherited_env = {**workflow.get("env", {}), **job.get("env", {})}
         steps = job["steps"]
         ids = [s.get("id") for s in steps]
         start = ids.index("strip-markers")
@@ -497,8 +498,15 @@ class TestAuditSteps(unittest.TestCase):
         summary.write_text("")
         self.assertEqual(step["run"].count("${{"), step["run"].count(self._DIR_EXPR))
         script = step["run"].replace(self._DIR_EXPR, self.dir)
-        env = {**os.environ, "PATH": f"{tmp / 'bin'}:{os.environ['PATH']}", "GITHUB_STEP_SUMMARY": str(summary)}
-        result = subprocess.run(["bash", "-e", "-c", script], cwd=tmp / "work", env=env, capture_output=True, text=True)
+        step_env = {k: str(v) for k, v in {**self.inherited_env, **step.get("env", {})}.items()}
+        # The stub and the summary file are what this test observes; an env key
+        # that redirected either would leave nothing real to assert on.
+        self.assertNotIn("PATH", step_env)
+        self.assertNotIn("GITHUB_STEP_SUMMARY", step_env)
+        env = {**os.environ, **step_env, "PATH": f"{tmp / 'bin'}:{os.environ['PATH']}", "GITHUB_STEP_SUMMARY": str(summary)}
+        cwd = tmp / "work" / step.get("working-directory", "")
+        cwd.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(["bash", "-e", "-c", script], cwd=cwd, env=env, capture_output=True, text=True)
         argv = (tmp / "argv").read_text().splitlines() if (tmp / "argv").exists() else None
         return result.returncode, argv, summary.read_text()
 
