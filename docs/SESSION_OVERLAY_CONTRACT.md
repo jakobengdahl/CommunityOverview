@@ -874,9 +874,9 @@ A hook that wants to treat these differently from a direct write reads them.
 
 - The session routes in `service/rest_api.py` call no hook today.
 - The ones that change a layer, set a write mode or merge must call it.
-- Two session routes the host serves already do: minting a trigger token asks
-  as `mutate`, and the auto-add agent routes ask as `mutate` to create or remove
-  an agent and as `read` to list them.
+- Two kinds of session route the host serves already do: minting a trigger
+  token asks as `mutate`, and the auto-add agent routes ask as `mutate` to create
+  or remove an agent and as `read` to list them.
 
 The core still has no accounts (D7). The actor recorded on entries and merge
 records is whatever the request resolved: an actor header, or failing that the
