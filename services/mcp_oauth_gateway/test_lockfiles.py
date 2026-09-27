@@ -324,21 +324,24 @@ class TestImagePythonStep(unittest.TestCase):
         "FROM python:\u0663.\u0661\u0662\n",
         "FROM\u2003python:3.12\n",
         "FROM --platform=x\u2003python:3.12\n",
+        "FROM \u2003python:3.12\n",
     ]
 
     def _step(self):
+        """The image-python step and the env it runs with: workflow, then job, then step env."""
         workflow = yaml.safe_load((HERE.parents[1] / ".github" / "workflows" / "ci.yml").read_text())
-        steps = workflow["jobs"]["gateway-tests-run"]["steps"]
-        (step,) = [s for s in steps if s.get("id") == "image-python"]
+        job = workflow["jobs"]["gateway-tests-run"]
+        (step,) = [s for s in job["steps"] if s.get("id") == "image-python"]
         self.assertEqual(step["working-directory"], "services/mcp_oauth_gateway")
-        return step
+        return step, {**workflow.get("env", {}), **job.get("env", {}), **step.get("env", {})}
 
     def _run_step(self, dockerfile):
-        step = self._step()
-        # Start from the runner's C.UTF-8, whatever the caller's locale, and let
-        # the step's own env override it as it does on the runner.
+        step, step_env = self._step()
+        # Start from a runner whose every locale variable says C.UTF-8, whatever
+        # the caller's locale, so only a pin that overrides all of them (LC_ALL)
+        # keeps [[:space:]] to ASCII.
         env = {k: v for k, v in os.environ.items() if not k.startswith("LC_") and k not in ("LANG", "LANGUAGE")}
-        env.update({"LANG": "C.UTF-8", **step.get("env", {})})
+        env.update({"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "LC_CTYPE": "C.UTF-8", **step_env})
         with tempfile.TemporaryDirectory() as tmp:
             Path(tmp, "Dockerfile").write_text(dockerfile)
             output = Path(tmp, "github_output")
@@ -367,6 +370,11 @@ class TestImagePythonStep(unittest.TestCase):
                 self.assertEqual(output, "")
                 with self.assertRaises(AssertionError):
                     _image_python(dockerfile)
+
+    def test_step_pins_an_ascii_locale(self):
+        # A locale the host lacks falls back to C, which would hide a UTF-8 one here.
+        _, step_env = self._step()
+        self.assertIn(step_env.get("LC_ALL"), ("C", "POSIX"))
 
     def test_step_reads_the_gateway_dockerfile(self):
         dockerfile = (HERE / "Dockerfile").read_text()
@@ -458,9 +466,12 @@ class TestRecompileStep(unittest.TestCase):
         bindir = Path(tempfile.mkdtemp())
         self.addCleanup(subprocess.run, ["rm", "-rf", str(bindir)])
         log = bindir / "calls"
-        stub = bindir / "uv"
-        stub.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\nexit {uv_exit}\n')
-        stub.chmod(0o755)
+        # uv logs its arguments; the other stubs log their name too, so a header
+        # naming another binary is caught when it runs, not only when it is missing.
+        for name, prefix in [("uv", ""), ("uvx", "uvx "), ("sh", "sh ")]:
+            stub = bindir / name
+            stub.write_text(f'#!/bin/sh\nprintf "%s\\n" "{prefix}$*" >> "{log}"\nexit {uv_exit}\n')
+            stub.chmod(0o755)
         code, _, tmp = _run_audit_step(self.step, files, {"PATH": f"{bindir}:{os.environ['PATH']}"})
         self.addCleanup(subprocess.run, ["rm", "-rf", str(tmp)])
         return code, log.read_text().splitlines() if log.exists() else []
@@ -515,6 +526,21 @@ class TestRecompileStep(unittest.TestCase):
             "uv pip compile --universal --python-version 3.11 requirements.in -o requirements.txt",
             "uv pip sync --universal --generate-hashes --python-version 3.11 requirements.in -o requirements.txt",
             f"uv  pip {base[7:]} requirements.in -o requirements.txt",
+            f"env {base} requirements.in -o requirements.txt",
+            f" {base} requirements.in -o requirements.txt",
+            f"x{base} requirements.in -o requirements.txt",
+            f"uvx {base[3:]} requirements.in -o requirements.txt",
+            f"sh {base[3:]} requirements.in -o requirements.txt",
+            f"{base} --upgrade requirements.in -o requirements.txt",
+            f"{base} -U requirements.in -o requirements.txt",
+            f"{base} requirements.in -o requirements.txt --upgrade",
+            f"{base} ../requirements.in -o requirements.txt",
+            f"{base} requirementsXin -o requirements.txt",
+            f"{base} requirements.in -o requirementsXtxt",
+            "uv pip compile --generate-hashes --python-version 3.11 requirements.in -o requirements.txt",
+            "uv pip compile --universal --generate-hashes --python-version 3 9 requirements.in -o requirements.txt",
+            "uv pip compile --universal --generate-hashes --python-version 3 requirements.in -o requirements.txt",
+            "uv pip compile --universal --generate-hashes --python-version 3..11 requirements.in -o requirements.txt",
         ]:
             with self.subTest(command=command):
                 code, calls = self._run(
@@ -523,12 +549,82 @@ class TestRecompileStep(unittest.TestCase):
                 self.assertNotEqual(code, 0)
                 self.assertEqual(calls, [])
 
+    def test_a_command_below_the_second_header_line_runs_nothing(self):
+        command = "uv pip compile --universal --generate-hashes --python-version 3.11 requirements.in -o requirements.txt"
+        files = self._real()
+        banner, rest = files["requirements.txt"].split("\n", 1)
+        files["requirements.txt"] = f"{banner}\n#\n#    {command}\n{rest}"
+        code, calls = self._run(files)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(calls, [])
+
     def test_a_lock_without_uvs_banner_runs_nothing(self):
         files = self._real()
         files["requirements.txt"] = "# hand-written\n" + files["requirements.txt"].split("\n", 1)[1]
         code, calls = self._run(files)
         self.assertNotEqual(code, 0)
         self.assertEqual(calls, [])
+
+
+class TestAuditWorkflowShape(unittest.TestCase):
+    """gateway-deps-audit.yml runs where its checks need it, read-only, and cannot pass by skipping."""
+
+    def setUp(self):
+        workflows = HERE.parents[1] / ".github" / "workflows"
+        self.workflow = yaml.safe_load((workflows / "gateway-deps-audit.yml").read_text())
+        self.ci = yaml.safe_load((workflows / "ci.yml").read_text())
+
+    def test_triggers_cover_every_lock_input(self):
+        # PyYAML reads the bare key `on` as True.
+        triggers = self.workflow[True]
+        self.assertEqual(set(triggers), {"pull_request", "schedule", "workflow_dispatch"})
+        self.assertEqual(
+            triggers["pull_request"],
+            {
+                "paths": [
+                    "services/mcp_oauth_gateway/requirements*.in",
+                    "services/mcp_oauth_gateway/requirements*.txt",
+                    "services/mcp_oauth_gateway/Dockerfile",
+                    ".github/workflows/gateway-deps-audit.yml",
+                ]
+            },
+        )
+        (schedule,) = triggers["schedule"]
+        self.assertEqual(set(schedule), {"cron"})
+
+    def test_token_is_read_only(self):
+        self.assertEqual(self.workflow["permissions"], {"contents": "read"})
+        for name, job in self.workflow["jobs"].items():
+            with self.subTest(job=name):
+                self.assertNotIn("permissions", job)
+
+    def test_actions_are_pinned_as_in_ci(self):
+        def pins(workflow):
+            found = {}
+            for job in workflow["jobs"].values():
+                for step in job.get("steps", []):
+                    if "uses" in step:
+                        action, ref = step["uses"].split("@")
+                        found.setdefault(action, set()).add(ref)
+            return found
+
+        ci = pins(self.ci)
+        audit = pins(self.workflow)
+        self.assertTrue(audit)
+        for action, refs in audit.items():
+            with self.subTest(action=action):
+                self.assertEqual(refs, ci[action])
+
+    def test_no_job_or_freshness_step_can_be_skipped_or_ignored(self):
+        for name, job in self.workflow["jobs"].items():
+            with self.subTest(job=name):
+                self.assertNotIn("if", job)
+                self.assertNotIn("continue-on-error", job)
+        for step_id in ("recompile", "unchanged"):
+            with self.subTest(step=step_id):
+                step = _audit_step("lock-freshness", step_id)
+                self.assertNotIn("if", step)
+                self.assertNotIn("continue-on-error", step)
 
 
 class TestLockChangedStep(unittest.TestCase):
