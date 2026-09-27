@@ -65,11 +65,16 @@ SUMMARY_HEADING = re.compile(r'^echo "## [^"$`\\]*" >> "\$GITHUB_STEP_SUMMARY"$'
 # reads `PIP_AUDIT_*` and pip's own `PIP_*`.
 AUDIT_CONFIG_VAR = re.compile(r"npm_config_|\bPIP_", re.I)
 NPMRC = REPO_ROOT / ".npmrc"
-NPMRC_SCOPE_KEY = re.compile(
-    r"^\s*(audit|audit[-_]level|omit|include|production|only|dev|registry"
-    r"|workspaces?|include[-_]workspace[-_]root)\s*=",
-    re.I | re.M,
-)
+# An allowlist: npm's ini parser takes `omit[]=peer`, `"audit-level"=critical`,
+# scoped registries and bare keys, too many spellings for a denylist to cover.
+NPMRC_HARMLESS_KEYS = {
+    "engine-strict",
+    "fund",
+    "loglevel",
+    "save-exact",
+    "save-prefix",
+    "update-notifier",
+}
 
 # The exact audit command lines, per job. Scope is what makes an audit blocking
 # mean anything: a swapped `-r` file, `--no-deps`, `--audit-level=critical` or a
@@ -308,18 +313,36 @@ def test_dependency_audit_scope_is_not_narrowed_by_configuration(job_id):
     workflow = _workflow()
     job = workflow["jobs"][job_id]
     assert not job.get("env"), f"job {job_id!r} sets env"
-    for step in _audit_steps(job):
-        assert not step.get("env"), f"{job_id}:{step['name']} sets env"
+    assert not job.get("defaults"), f"job {job_id!r} sets defaults"
     for step in job["steps"]:
+        where = f"{job_id}:{step.get('name')}"
+        assert not step.get("env"), f"{where} sets env"
+        # npm run from a workspace directory audits only that workspace.
+        assert "working-directory" not in step, f"{where} sets working-directory"
         body = step.get("run", "")
         assert not AUDIT_CONFIG_VAR.search(body), f"{job_id}:{step['name']}"
     for var in workflow.get("env") or {}:
         assert not AUDIT_CONFIG_VAR.match(var), f"workflow env sets {var}"
 
 
+def _npmrc_keys(text):
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        key = line.split("=", 1)[0].strip().strip("\"'")
+        yield key.removesuffix("[]").strip().lower()
+
+
 def test_npmrc_does_not_narrow_the_npm_audit():
     if NPMRC.exists():
-        assert not NPMRC_SCOPE_KEY.search(NPMRC.read_text())
+        keys = set(_npmrc_keys(NPMRC.read_text()))
+        assert keys <= NPMRC_HARMLESS_KEYS, f".npmrc sets {keys - NPMRC_HARMLESS_KEYS}"
+
+
+def test_npmrc_key_parsing_sees_every_spelling_npm_accepts():
+    text = 'omit[]=peer\n"audit-level"=critical\n@x:registry=https://x/\nglobal\n# c\n'
+    assert set(_npmrc_keys(text)) == {"omit", "audit-level", "@x:registry", "global"}
 
 
 def test_audits_run_nowhere_but_their_own_jobs():
