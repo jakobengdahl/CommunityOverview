@@ -429,11 +429,28 @@ describe('heat-map stylesheet', () => {
   // Declarations that make an element visible. Every border property draws —
   // longhands and logical border-inline*/border-block* included — except the
   // radii, which only shape the circle; outline-offset and background-size
-  // and the like only adjust what something else draws. A value that draws
-  // nothing (`background-color: transparent`, `border: none`) paints nothing.
+  // and the like only adjust what something else draws, and border-collapse
+  // and border-spacing are table layout. A -webkit- prefix draws the same.
+  //
+  // A value draws nothing when every token is a no-op (`border: 0 none`,
+  // `outline: 0em`). A border or outline shorthand carries one width and one
+  // style, so either being zero, none or hidden draws nothing either — unless
+  // the style is `auto`, whose width a browser may ignore, or any part is a
+  // function such as var(...) that could resolve to it. That shorthand rule
+  // does not extend to longhands (`border-width: 0 2px` still draws a side) or
+  // to box-shadow (`0 0 0 1px red` is a ring). `transparent` hides only a
+  // background: forced-colours mode repaints border and outline colours.
+  // `initial` is never a no-op, since on a border longhand it means
+  // currentcolor or a medium width. A quoted string, or a parenthesised group
+  // such as rgba(...) or calc((...)) with any nesting, counts as one opaque
+  // token; a value whose parentheses do not balance counts as painting, and so
+  // does anything else not listed here.
   const PAINTING_PROPERTY =
-    /^(border(-[a-z-]+)?|outline(-(color|style|width))?|box-shadow|background(-(color|image))?)$/;
-  const NON_PAINTING_VALUE = /^(none|transparent|0(px)?)$/;
+    /^(?:-webkit-)?(border(-[a-z-]+)?|outline(-(color|style|width))?|box-shadow|background(-(color|image))?)$/;
+  const BORDER_SHORTHAND =
+    /^(?:-webkit-)?(border(-(top|right|bottom|left|inline|block)(-(start|end))?)?|outline)$/;
+  const ZERO_LENGTH = /^0+(\.0+)?([a-z]+|%)?$/;
+  const isNoOpToken = (token) => ['none', 'hidden'].includes(token) || ZERO_LENGTH.test(token);
   const paints = (body) =>
     body.split(';').some((decl) => {
       const colon = decl.indexOf(':');
@@ -444,11 +461,26 @@ describe('heat-map stylesheet', () => {
         .replace(/!important/i, '')
         .trim()
         .toLowerCase();
-      return (
-        PAINTING_PROPERTY.test(property) &&
-        !property.endsWith('-radius') &&
-        !NON_PAINTING_VALUE.test(value)
-      );
+      if (
+        !PAINTING_PROPERTY.test(property) ||
+        property.endsWith('-radius') ||
+        /^(?:-webkit-)?border-(collapse|spacing)$/.test(property)
+      ) {
+        return false;
+      }
+      let flat = value.replace(/"[^"]*"|'[^']*'/g, 'str');
+      for (let prev; prev !== flat;) {
+        prev = flat;
+        flat = flat.replace(/[\w-]*\([^()]*\)/g, 'fn');
+      }
+      if (/[()]/.test(flat)) return true;
+      const tokens = flat.split(/\s+/);
+      const noOp = (t) =>
+        isNoOpToken(t) || (t === 'transparent' && property.startsWith('background'));
+      if (tokens.every(noOp)) return false;
+      const mayBeAuto = tokens.some((t) => t === 'auto' || t === 'fn');
+      if (BORDER_SHORTHAND.test(property) && !mayBeAuto && tokens.some(isNoOpToken)) return false;
+      return true;
     });
   const onHeatmapCircle = (sel) => /\.(kind-heatmap|graph-heatmap-circle)(?![\w-])/.test(sel);
   const withoutNot = (sel) => sel.replace(/:not\([^)]*\)/g, '');
@@ -471,6 +503,31 @@ describe('heat-map stylesheet', () => {
     ['border: none', false],
     ['box-shadow: none !important', false],
     ['--border: 1px solid red', false],
+    ['-webkit-box-shadow: 0 0 0 1px red', true],
+    ['-webkit-border-radius: 50%', false],
+    ['border-collapse: separate', false],
+    ['border-spacing: 2px', false],
+    ['border: 0 none', false],
+    ['border: 0em solid red', false],
+    ['border: 1px solid transparent', true],
+    ['outline: 2px solid transparent', true],
+    ['border-color: transparent', true],
+    ['background: transparent none', false],
+    ['border-top: 2px hidden red', false],
+    ['outline: 0em', false],
+    ['outline: 1px none red', false],
+    ['outline: 0 auto', true],
+    ['outline: 0 var(--ring-style, auto)', true],
+    ['border-color: initial', true],
+    ['border-width: initial', true],
+    ['border-style: hidden', false],
+    ['border-width: 0 2px', true],
+    ['border-color: transparent red', true],
+    ['border: 1px solid rgba(0 0 0 / 0.5)', true],
+    ['border: 2px solid hsl(var(--h) 0% 40%)', true],
+    ['border: 2px solid rgb(calc((0)) 0 0)', true],
+    ['border: 2px solid rgb(0 0 0', true],
+    ['box-shadow: 0 0 0 1px transparent, 0 0 0 2px red', true],
   ])('treats `%s` as painting: %s', (decl, expected) => {
     expect(paints(`\n  width: 10px;\n  ${decl};\n`)).toBe(expected);
   });
@@ -482,6 +539,9 @@ describe('heat-map stylesheet', () => {
     expect(onHeatmapCircle('.graph-heatmap-circle')).toBe(true);
     expect(onHeatmapCircle('.heatmap-level-button.active')).toBe(false);
     expect(onHeatmapCircle('.context-menu-heatmap-intensity')).toBe(false);
+    expect(onHeatmapCircle('.kind-heatmap-legend')).toBe(false);
+    expect(onHeatmapCircle('.graph-heatmap-circle-label')).toBe(false);
+    expect(onHeatmapCircle('.kind-heatmapx .graph-heatmap-circle_inner')).toBe(false);
   });
 
   it('outlines only non-empty circles in every forced-colours heat-map rule', () => {
