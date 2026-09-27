@@ -433,6 +433,22 @@ describe('openAgentEditor (handleEdit, Agent branch)', () => {
     expect(showNotification).toHaveBeenCalledWith('error', 'Could not load agent details');
   });
 
+  it('still reports a failed fetch after a clear in the same session', async () => {
+    const call = deferred();
+    const showNotification = vi.fn();
+    const inFlight = openAgentEditor({
+      agent,
+      getNodeDetails: vi.fn(() => call.promise),
+      openEditor: vi.fn(),
+      showNotification,
+    });
+    useGraphStore.getState().clearVisualization();
+    call.reject(new Error('boom'));
+
+    expect(await inFlight).toBe(false);
+    expect(showNotification).toHaveBeenCalledWith('error', 'Could not load agent details');
+  });
+
   it('does not report a failed fetch into a session switched to mid-await', async () => {
     const call = deferred();
     const showNotification = vi.fn();
@@ -596,6 +612,12 @@ describe('agentUpdateEntries (handleSaveAgent update branch)', () => {
       { id: 'ag', updates: { name: 'x' } },
       { id: 'sub', updates: { filters: {} } },
     ]);
+  });
+
+  it('persists only the agent when there is no subscription to update', () => {
+    expect(
+      agentUpdateEntries({ agentId: 'ag', agentUpdates: {}, subscriptionUpdates: { a: 1 } })
+    ).toEqual([{ id: 'ag', updates: {} }]);
   });
 
   it('persists only the agent when the subscription did not change', () => {
