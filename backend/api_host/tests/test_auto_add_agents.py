@@ -4,8 +4,8 @@
     GET    /sessions/{id}/auto-add-agents
     DELETE /sessions/{id}/auto-add-agents/{agent_id}
 
-Creation/removal go through the graph authorization/mutate seam (permissive in
-open core); listing is a read. The matching/isolation behaviour is covered in
+Creation/removal go through the graph authorization/mutate seam and listing
+through the read seam (permissive in open core). The matching/isolation behaviour is covered in
 ``backend/core/tests/test_session_auto_add.py`` — here we lock in the HTTP
 contract (validation, shape, lifecycle).
 """
@@ -13,6 +13,8 @@ contract (validation, shape, lifecycle).
 import logging
 
 from fastapi.testclient import TestClient
+
+from backend.runtime.authorization import AUTHORIZATION_MODE_ENV
 
 SESSION = "1000-2000"
 
@@ -110,3 +112,27 @@ class TestListAndDelete:
         resp = test_app.get(f"/sessions/{SESSION}/auto-add-agents")
         assert resp.status_code == 200
         assert resp.json()["agents"] == []
+
+
+class TestListAuthorization:
+    def test_deny_all_blocks_list(self, test_app: TestClient, monkeypatch):
+        test_app.post(f"/sessions/{SESSION}/auto-add-agents", json={"keywords": ["ai"]})
+        monkeypatch.setenv(AUTHORIZATION_MODE_ENV, "deny-all")
+
+        resp = test_app.get(f"/sessions/{SESSION}/auto-add-agents")
+
+        assert resp.status_code == 403
+        assert resp.json().get("error_code") == "access_denied"
+        assert "agents" not in resp.json()
+
+    def test_read_only_mode_still_lists(self, test_app: TestClient, monkeypatch):
+        created = test_app.post(
+            f"/sessions/{SESSION}/auto-add-agents", json={"keywords": ["ai"]}
+        )
+        agent_id = created.json()["agent"]["agent_id"]
+        monkeypatch.setenv(AUTHORIZATION_MODE_ENV, "read-only")
+
+        resp = test_app.get(f"/sessions/{SESSION}/auto-add-agents")
+
+        assert resp.status_code == 200
+        assert [a["agent_id"] for a in resp.json()["agents"]] == [agent_id]
