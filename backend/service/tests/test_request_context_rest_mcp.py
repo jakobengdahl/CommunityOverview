@@ -398,6 +398,87 @@ class TestRequestContextMcpTools:
         assert context.scope["workspace_kind"] == "team"
         assert context.scope["graph_id"] == "graph-mcp"
 
+    def test_streamable_transport_request_binds_request_authorization_headers(
+        self, tmp_path, monkeypatch
+    ):
+        from mcp.server.fastmcp import FastMCP
+
+        for var in (
+            "COMMUNITYOVERVIEW_ACTOR_ID",
+            "COMMUNITYOVERVIEW_ACTOR_TYPE",
+            "COMMUNITYOVERVIEW_AUTH_SOURCE",
+            "COMMUNITYOVERVIEW_WORKSPACE_ID",
+            "COMMUNITYOVERVIEW_WORKSPACE_KIND",
+            "COMMUNITYOVERVIEW_GRAPH_SCOPE_ID",
+            "COMMUNITYOVERVIEW_AUTHORIZATION_MODE",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+        hook = CaptureAuthorizationHook(allow=True)
+        holder = {}
+        reached = []
+
+        async def fake_streamable_app(scope, receive, send):
+            reached.append("streamable")
+            result = holder["app"].state.graph_service.search_graph(query="", limit=1)
+            response = JSONResponse(result)
+            await response(scope, receive, send)
+
+        async def fake_sse_app(scope, receive, send):
+            reached.append("sse")
+            await JSONResponse({}, status_code=599)(scope, receive, send)
+
+        real_streamable_http_app = FastMCP.streamable_http_app
+
+        def streamable_http_app(self):
+            # Still build the real app: it creates the session manager whose
+            # startup gates routing to the streamable transport.
+            real_streamable_http_app(self)
+            return fake_streamable_app
+
+        with (
+            patch(
+                "backend.api_host.server.FastMCP.streamable_http_app",
+                new=streamable_http_app,
+            ),
+            patch(
+                "backend.api_host.server.FastMCP.sse_app",
+                return_value=fake_sse_app,
+            ),
+        ):
+            config = AppConfig(
+                auth_enabled=False, graph_file=str(tmp_path / "graph.json")
+            )
+            app = create_app(config)
+        holder["app"] = app
+        app.state.graph_service._authorization_hook = hook
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/mcp",
+                headers={
+                    "Accept": "application/json, text/event-stream",
+                    "X-CommunityOverview-Actor-Id": "streamable-actor",
+                    "X-CommunityOverview-Actor-Type": "member",
+                    "X-CommunityOverview-Auth-Source": "streamable",
+                    "X-CommunityOverview-Workspace-Id": "workspace-streamable",
+                    "X-CommunityOverview-Workspace-Kind": "team",
+                    "X-CommunityOverview-Graph-Id": "graph-streamable",
+                },
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+            )
+
+        assert response.status_code == 200
+        assert reached == ["streamable"]
+        assert len(hook.seen_contexts) == 1
+        context = hook.seen_contexts[0]
+        assert context.actor["actor_id"] == "streamable-actor"
+        assert context.actor["actor_type"] == "member"
+        assert context.actor["auth_source"] == "streamable"
+        assert context.scope["workspace_id"] == "workspace-streamable"
+        assert context.scope["workspace_kind"] == "team"
+        assert context.scope["graph_id"] == "graph-streamable"
+
 
 class TestAuthorizationNarrowingRestAndMcp:
     def test_rest_search_is_narrowed_to_selected_graph(self, app_client):
