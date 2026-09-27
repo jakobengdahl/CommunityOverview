@@ -201,8 +201,10 @@ class TestStartupBackfillPass:
         release = threading.Event()
         unrelated = threading.Thread(target=release.wait, daemon=True)
         unrelated.start()
+        probed = []
 
         def _absent_and_unrelated_thread_exits(name):
+            probed.append(name)
             release.set()
             unrelated.join()
             return None
@@ -212,6 +214,9 @@ class TestStartupBackfillPass:
             "find_spec",
             _absent_and_unrelated_thread_exits,
         )
+        backfills_before = {
+            t for t in threading.enumerate() if t.name == "embedding-backfill"
+        }
         caller = threading.current_thread()
         started = []
         real_start = threading.Thread.start
@@ -229,15 +234,24 @@ class TestStartupBackfillPass:
             monkeypatch.setattr(threading.Thread, "start", real_start)
             release.set()
 
-        # The probe ran, so the mid-call thread exit above was exercised.
+        # Recorded by the stub rather than read off the thread's liveness:
+        # the `finally` releases it too, so a skipped probe could still find
+        # it dead. The stub joins it, so the mid-call exit was exercised.
+        assert probed == ["sentence_transformers"]
         assert not unrelated.is_alive()
         assert started == []
         # The recorder sees only the caller's own starts; a backfill thread
         # started on its behalf from another thread must not exist either.
-        assert "embedding-backfill" not in {t.name for t in threading.enumerate()}
+        # Drained first, so one the io executor would start has started;
+        # compared with the threads before the call, so a lingering real
+        # backfill from an earlier test is not blamed on this one.
+        storage.flush()
+        backfills_after = {
+            t for t in threading.enumerate() if t.name == "embedding-backfill"
+        }
+        assert backfills_after <= backfills_before
         assert any("have no" in m for m in storage_log()[logging.WARNING])
         assert not storage.vector_store.has_embedding("a")
-        storage.flush()
 
     def test_backfills_in_the_background_when_the_ml_stack_is_available(
         self, tmpdir_path, monkeypatch, storage_log
