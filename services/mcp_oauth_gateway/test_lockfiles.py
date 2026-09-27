@@ -308,6 +308,33 @@ def _step_env(workflow, job, step):
     return {k: _runner_str(v) for k, v in merged.items()}
 
 
+def _assert_expanded(step_env):
+    """The runner expands ``${{ }}`` before the step runs; a local run would pass it through literally."""
+    for key, value in step_env.items():
+        assert "${{" not in value, f"env {key} holds an unexpanded expression: {value!r}"
+
+
+class TestStepEnvHelpers(unittest.TestCase):
+    def test_values_are_passed_as_the_runner_passes_them(self):
+        self.assertEqual(
+            _step_env({"env": {"A": True, "B": None, "C": 1, "D": False}}, {}, {}),
+            {"A": "true", "B": "", "C": "1", "D": "false"},
+        )
+
+    def test_step_env_wins_over_job_env_which_wins_over_workflow_env(self):
+        self.assertEqual(
+            _step_env({"env": {"A": True, "B": None, "C": 1}}, {"env": {"C": 2}}, {"env": {"C": 3}}),
+            {"A": "true", "B": "", "C": "3"},
+        )
+        self.assertEqual(_step_env({"env": {"C": 1}}, {"env": {"C": 2}}, {}), {"C": "2"})
+        self.assertEqual(_step_env({}, {"env": {"C": 2}}, {"env": {"C": None}}), {"C": ""})
+
+    def test_an_unexpanded_expression_is_rejected(self):
+        _assert_expanded({"A": "x", "B": ""})
+        with self.assertRaises(AssertionError):
+            _assert_expanded({"A": "x", "B": "${{ github.repository }}"})
+
+
 class TestImagePythonStep(unittest.TestCase):
     """ci.yml's image-python step must read the same Python as _image_python."""
 
@@ -419,6 +446,7 @@ def _run_audit_step(job, step, files, extra_env=None):
     # leave nothing real to assert on.
     for key in ("PATH", "GITHUB_OUTPUT", "RUNNER_TEMP"):
         assert key not in step_env, f"workflow env sets {key}"
+    _assert_expanded(step_env)
     tmp = tempfile.mkdtemp()
     work = Path(tmp, "work")
     work.mkdir()
@@ -485,7 +513,7 @@ class TestAuditSteps(unittest.TestCase):
     _DIR_EXPR = "${{ steps.strip-markers.outputs.dir }}"
 
     def setUp(self):
-        workflow = yaml.safe_load((HERE.parents[1] / ".github" / "workflows" / "gateway-deps-audit.yml").read_text())
+        workflow = _audit_workflow()
         # Unset shell means GitHub runs `bash -e {0}`, without pipefail: what _run below reproduces.
         self.assertNotIn("defaults", workflow)
         job = workflow["jobs"]["pip-audit"]
@@ -533,8 +561,8 @@ class TestAuditSteps(unittest.TestCase):
         workdir = step.get("working-directory", "")
         self.assertFalse(Path(workdir).is_absolute(), workdir)
         self.assertNotIn("..", Path(workdir).parts)
-        for value in [workdir, *step_env.values()]:
-            self.assertNotIn("${{", value)
+        self.assertNotIn("${{", workdir)
+        _assert_expanded(step_env)
         cwd = tmp / "work" / workdir
         cwd.mkdir(parents=True, exist_ok=True)
         result = subprocess.run(["bash", "-e", "-c", script], cwd=cwd, env=env, capture_output=True, text=True)
@@ -764,8 +792,11 @@ class TestLockChangedStep(unittest.TestCase):
         work.mkdir(parents=True)
         (work / "requirements.txt").write_text("a\n")
         (work / ".gitignore").write_text("build/\n")
+        workflow = _audit_workflow()
+        step_env = _step_env(workflow, workflow["jobs"]["lock-freshness"], self.step)
+        _assert_expanded(step_env)
         # Keep the caller's git config (signing, hooks) out of the fixture repo.
-        env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        env = {**os.environ, **step_env, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
         git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-C", str(tmp)]
         subprocess.run([*git, "init", "-q"], check=True, env=env)
         subprocess.run([*git, "add", "."], check=True, env=env)
