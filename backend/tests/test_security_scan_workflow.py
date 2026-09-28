@@ -137,10 +137,10 @@ COMMAND_P = re.compile(r"\b(command|hash)\b[^;&|\n]*\s-[a-zA-Z]*p")
 # `/usr/bin/npm audit` never meets the stubs. Only the command word counts: the
 # audits name relative paths as arguments, and the summary headings name paths in
 # prose.
-ASSIGNMENT_PREFIX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+ASSIGNMENT_PREFIX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
 # An assignment to PATH puts the real tools back within reach of the very next
 # command, with no absolute path anywhere for the check above to see.
-PATH_ASSIGNMENT = re.compile(r"^PATH=")
+PATH_ASSIGNMENT = re.compile(r"^PATH\+?=")
 # Builtins whose arguments are assignments rather than a command.
 ASSIGNMENT_BUILTINS = frozenset({"export", "declare", "typeset", "local", "readonly"})
 # Tokens after which a new command begins.
@@ -267,6 +267,8 @@ def _assignments(body):
                 yield token
             elif expect_command and token in ASSIGNMENT_BUILTINS:
                 expect_command, exporting = False, True
+            elif expect_command and token in COMMAND_PREFIXES:
+                continue  # `env PATH=x cmd`, `then PATH=x cmd`: still assigning
             elif expect_command:
                 expect_command = False
 
@@ -893,6 +895,15 @@ def test_relative_command_words_are_not_flagged(body):
         "PATH=/usr/bin:$PATH",
         "export PATH=/usr/bin:$PATH",
         "PATH='/usr/bin' npm audit",
+        # `+=` appends, which puts the real tools back just as surely.
+        "PATH+=:/usr/bin",
+        "export PATH+=:/usr/bin",
+        # Behind a wrapper or a keyword. `env` execvp's with the new PATH, so
+        # this one genuinely reaches the real npm.
+        "env PATH=/usr/bin npm audit",
+        "if true; then PATH=/usr/bin npm audit; fi",
+        "time PATH=/usr/bin npm audit",
+        "! PATH=/usr/bin npm audit",
     ],
 )
 def test_a_path_assignment_is_seen(body):
