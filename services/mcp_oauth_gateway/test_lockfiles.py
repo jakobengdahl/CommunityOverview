@@ -809,6 +809,11 @@ class TestLockChangedStep(unittest.TestCase):
         work = tmp / "services" / "mcp_oauth_gateway"
         work.mkdir(parents=True)
         (work / "requirements.txt").write_text("a\n")
+        # Not only a lock: the step's contract is the whole directory, and a
+        # pathspec that excluded `*.in` or `*.py` would hide the compile inputs
+        # the recompile step reads, and the service's own source.
+        (work / "requirements.in").write_text("a\n")
+        (work / "main.py").write_text("x = 1\n")
         (work / ".gitignore").write_text("build/\n")
         step_env = self._committed_step_env(workflow_env)
         # Keep the caller's git config (signing, hooks) out of the fixture repo.
@@ -854,6 +859,31 @@ class TestLockChangedStep(unittest.TestCase):
         # GIT_* are how the step and the fixture repo are reached at all.
         self._committed_step_env()
 
+    def test_the_guard_on_the_fixtures_own_keys_can_fail(self):
+        # The committed env for this step is empty, so the loop in
+        # _committed_step_env never runs against real data and the test above
+        # would pass with the guard deleted. Drive it directly instead.
+        for key in ("PATH", "HOME", "GIT_CONFIG_GLOBAL", "GIT_DIR"):
+            with self.subTest(key=key):
+                workflow = _audit_workflow()
+                workflow["env"] = {**(workflow.get("env") or {}), key: "x"}
+                job = workflow["jobs"]["lock-freshness"]
+                step_env = _step_env(workflow, job, self.step)
+                with self.assertRaises(AssertionError):
+                    for name in step_env:
+                        assert name not in ("PATH", "HOME") and not name.startswith(
+                            "GIT_"
+                        ), f"workflow env sets {name}"
+
+    def test_the_step_looks_at_the_whole_directory(self):
+        # `-- .` and nothing narrower. An exclude pathspec is the one-line edit
+        # that keeps every assertion above green while hiding a real change.
+        run = self.step["run"]
+        self.assertIn("-- .", run)
+        for narrowing in (":(exclude)", ":!", "--exclude", ":(glob)"):
+            self.assertNotIn(narrowing, run)
+        self.assertIn("--ignored", run)
+
     def test_a_modified_new_deleted_or_ignored_file_fails(self):
         def ignored(work):
             (work / "build").mkdir()
@@ -863,6 +893,11 @@ class TestLockChangedStep(unittest.TestCase):
             lambda work: (work / "requirements.txt").write_text("b\n"),
             lambda work: (work / "requirements-new.txt").write_text("b\n"),
             lambda work: (work / "requirements.txt").unlink(),
+            # Other extensions too, so no case leaves an exclude pathspec room
+            # to pass by covering only `*.txt`.
+            lambda work: (work / "requirements.in").write_text("b\n"),
+            lambda work: (work / "main.py").write_text("x = 2\n"),
+            lambda work: (work / "notes.md").write_text("b\n"),
             ignored,
         ]:
             with self.subTest(change=change):
