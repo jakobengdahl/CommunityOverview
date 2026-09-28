@@ -1085,6 +1085,17 @@ class TestShortSigningKeyWarning(unittest.TestCase):
             result.stderr.decode("utf-8", "surrogateescape"),
         )
 
+    # The log format leads with asctime (`%Y-%m-%d %H:%M:%S,%f`), whose clock
+    # fields can equal a key length by coincidence - a run at 14:20:03 puts a
+    # bare `20` in every line. Strip it, so the digit check below reads only what
+    # the gateway CHOSE to say.
+    _LOG_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}\s*")
+
+    def _chosen_text(self, output):
+        return "\n".join(
+            self._LOG_PREFIX.sub("", line) for line in output.splitlines()
+        )
+
     def _assert_key_absent(self, text, key):
         assert key not in text
         for i in range(len(key) - 3):
@@ -1165,6 +1176,14 @@ class TestShortSigningKeyWarning(unittest.TestCase):
         assert "bytes long" not in output, output
         length = len(self.SHORT_KEY.encode("utf-8", "surrogateescape"))
         assert f"{length} bytes" not in output, output
+        # The NUMBER, not just PyJWT's phrasing for it: the guarantee is that the
+        # length never reaches the logs, so an `INFO  signing key: 20 octets` line
+        # has to fail here too. SHORT_KEY is 20 bytes, and the only numbers the
+        # legitimate warning carries are 32 and 256, so this cannot collide with
+        # it - a SHORT_KEY of length 32 or 256 would make the check vacuous.
+        assert length not in (32, 256), "SHORT_KEY length collides with the warning"
+        chosen = self._chosen_text(output)
+        assert not re.search(rf"\b{length}\b", chosen), chosen
         self._assert_key_absent(output, self.SHORT_KEY)
         # The gateway's own warning is still the one and only report.
         warning_lines = [
