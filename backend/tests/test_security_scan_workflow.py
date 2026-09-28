@@ -56,11 +56,21 @@ AUDIT_INVOCATION = re.compile(r"^\s*(?:pip-audit|npm\s+audit)\b.*$", re.M)
 # Any line that could run an audit, however spelled: `python -m pip_audit`,
 # `npx audit-ci`, `npm --prefix . audit`, `FOO=1 npm audit`. Every npm and npx
 # line counts too: `npm config set omit=peer` narrows a later audit, and npm
-# accepts abbreviations such as `npm aud`. So does `pip config`.
+# accepts abbreviations such as `npm aud`. So does EVERY pip line: `pip config
+# set global.no-deps true` narrows a later audit, and an option may sit before
+# the subcommand (`pip --isolated config set`, `python -m pip -v config`), which
+# no `pip <subcommand>` pattern can enumerate. So the pinned pip lines below are
+# the allowlist and every other pip spelling - `pip3.11`, `python3 -m pip` - is
+# audit-relevant by default.
 AUDIT_MENTION = re.compile(
-    r"\baudit\b|pip[-_]audit|\bnpm\b|\bnpx\b|\bpip3?\s+config\b", re.I
+    r"\baudit\b|pip[-_]audit|\bnpm\b|\bnpx\b|\bpip[0-9.]*\b", re.I
 )
-AUDIT_INSTALL = "pip install pip-audit"
+# The exact pip lines each job may run, by job. A second install, a `pip config`
+# or a `pip download` has to be added here deliberately.
+PINNED_PIP_LINES = {
+    "pip-audit": ["pip install pip-audit"],
+    "bandit": ["pip install bandit"],
+}
 # A literal summary heading: no expansion or substitution inside the quotes.
 SUMMARY_HEADING = re.compile(r'^echo "## [^"$`\\]*" >> "\$GITHUB_STEP_SUMMARY"$')
 
@@ -119,8 +129,37 @@ AUDIT_JOB_ACTION_INPUTS = {
 # in its own process group, out of reach of the group drain in _run_step.
 JOB_CONTROL = re.compile(r"\bset\b[^;&|\n]*\s(?:-[a-zA-Z]*m|-o\s+monitor\b)")
 # `command -p` searches bash's default PATH and `hash -p` binds a name to any
-# file, both reaching real tools past the stubs.
-COMMAND_P = re.compile(r"\b(?:command|hash)\b[^;&|\n]*\s-[a-zA-Z]*p")
+# file, both reaching real tools past the stubs. The group names which one
+# matched, so the failure below does not report the wrong builtin.
+COMMAND_P = re.compile(r"\b(command|hash)\b[^;&|\n]*\s-[a-zA-Z]*p")
+# An absolute path as a command word runs the real tool whatever PATH holds, so
+# `/usr/bin/npm audit` never meets the stubs. Only the command word counts: the
+# audits name relative paths as arguments, and the summary headings name paths in
+# prose.
+COMMAND_SEPARATORS = re.compile(r"\|\||&&|[\n;&|()]")
+ASSIGNMENT_PREFIX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _unquoted(body):
+    """``body`` with shell quote characters dropped.
+
+    Bash reads `set -o 'monitor'`, `set "-m"` and `'/usr/bin/npm' audit` as the
+    instructions their bare spellings give, but the patterns above and the word
+    split below match text. Quoting is how a step would otherwise slip one of
+    them past a static check.
+    """
+    return body.replace("'", "").replace('"', "")
+
+
+def _command_words(body):
+    """The first word of every command in ``body``."""
+    for segment in COMMAND_SEPARATORS.split(body):
+        for word in segment.split():
+            if ASSIGNMENT_PREFIX.match(word):
+                continue  # `FOO=1 cmd`: an assignment prefix, not the command
+            yield word
+            break
+
 
 # The only file a `run:` body may write to. Only `N>&M` / `>&-` is an fd dup;
 # `N>file`, `&>file` and `>&file` all write to a file.
@@ -351,16 +390,38 @@ def test_dependency_audit_scope_is_pinned(job_id):
 def test_every_line_that_could_run_an_audit_is_a_pinned_command():
     # AUDIT_INVOCATION only finds audits spelled the way the pinned ones are.
     for job_id, job in _workflow()["jobs"].items():
-        pinned = AUDIT_COMMANDS.get(job_id, [])
+        pinned = AUDIT_COMMANDS.get(job_id, []) + PINNED_PIP_LINES.get(job_id, [])
         for step in job.get("steps", []):
             body = step.get("run", "").replace("\\\n", "")
             for line in body.splitlines():
                 line = line.strip()
                 if not AUDIT_MENTION.search(line) or SUMMARY_HEADING.match(line):
                     continue
-                if job_id == "pip-audit" and line == AUDIT_INSTALL:
-                    continue
                 assert line in pinned, f"{job_id}:{step['name']} runs {line!r}"
+
+
+def test_audit_mention_sees_every_pip_spelling_an_option_can_hide():
+    for line in (
+        "pip --isolated config set global.no-deps true",
+        "python -m pip -v config set global.no-deps true",
+        "python3.11 -m pip config set global.no-deps true",
+        "pip3.11 config set global.no-deps true",
+        "pip3 download requests",
+        "pip install --upgrade pip",
+    ):
+        assert AUDIT_MENTION.search(line), line
+
+
+def test_audit_mention_leaves_the_non_pip_scanner_lines_alone():
+    # The broadened pattern must not swallow the bandit invocation, which is
+    # neither an audit nor a pip line and is pinned nowhere.
+    for line in (
+        "bandit -r backend services -x '*/tests/*,*/test_*.py' -ll",
+        "echo '```' >> \"$GITHUB_STEP_SUMMARY\"",
+        'status="${PIPESTATUS[0]}"',
+        'exit "${PIPESTATUS[0]}"',
+    ):
+        assert not AUDIT_MENTION.search(line), line
 
 
 @pytest.mark.parametrize("job_id", sorted(AUDIT_COMMANDS))
@@ -544,8 +605,14 @@ def _run_bodies():
 
 def test_no_step_turns_on_job_control_or_reaches_past_the_stubs():
     for where, body in _run_bodies():
-        assert not JOB_CONTROL.search(body), f"{where} turns on job control"
-        assert not COMMAND_P.search(body), f"{where} runs `command -p`"
+        unquoted = _unquoted(body)
+        assert not JOB_CONTROL.search(unquoted), f"{where} turns on job control"
+        reaches = COMMAND_P.search(unquoted)
+        assert not reaches, f"{where} runs `{reaches.group(1)} -p`"
+        for word in _command_words(unquoted):
+            assert not word.startswith("/"), (
+                f"{where} runs {word} by absolute path, past the stubs"
+            )
 
 
 @pytest.mark.parametrize(
@@ -557,15 +624,21 @@ def test_no_step_turns_on_job_control_or_reaches_past_the_stubs():
         "set -e -m",
         "set -o monitor",
         "  set  -o   monitor",
+        # Quoted: the same instruction, invisible to a pattern matching words.
+        "set -o 'monitor'",
+        'set -o "monitor"',
+        'set "-m"',
+        "set '-m'",
+        "set -o mon'itor'",
     ],
 )
 def test_job_control_check_sees_every_spelling(body):
-    assert JOB_CONTROL.search(body)
+    assert JOB_CONTROL.search(_unquoted(body))
 
 
 @pytest.mark.parametrize("body", ["set -e", "set -o pipefail", "set +x", "echo -m"])
 def test_job_control_check_passes_other_options(body):
-    assert not JOB_CONTROL.search(body)
+    assert not JOB_CONTROL.search(_unquoted(body))
 
 
 @pytest.mark.parametrize(
@@ -573,7 +646,55 @@ def test_job_control_check_passes_other_options(body):
     ["command -p git", "command -pv git", "command -v -p git", "hash -p /x/git git"],
 )
 def test_command_p_check_sees_every_spelling(body):
-    assert COMMAND_P.search(body)
+    assert COMMAND_P.search(_unquoted(body))
+
+
+@pytest.mark.parametrize(
+    "body,builtin",
+    [
+        ('command "-p" git', "command"),
+        ("command '-p' git", "command"),
+        ('hash "-p" /x/git git', "hash"),
+        ("hash -p /x/git git", "hash"),
+    ],
+)
+def test_command_p_check_names_the_builtin_that_matched(body, builtin):
+    # The failure message used to say `command -p` for a `hash -p` hit.
+    match = COMMAND_P.search(_unquoted(body))
+    assert match and match.group(1) == builtin
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "/usr/bin/npm audit",
+        "/bin/sh -c 'npm audit'",
+        "FOO=1 /usr/bin/pip-audit -r r.txt",
+        "echo hi; /usr/bin/pip-audit",
+        "echo hi && /sbin/x",
+        "true | /bin/cat",
+        "(/usr/bin/npm audit)",
+        "'/usr/bin/npm' audit",
+        'FOO=1 "/usr/bin/npm" audit',
+    ],
+)
+def test_absolute_path_command_words_are_seen(body):
+    assert any(w.startswith("/") for w in _command_words(_unquoted(body)))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "npm audit --omit=dev",
+        "pip-audit -r backend/requirements.txt -f markdown",
+        "pip-audit -r services/mcp_oauth_gateway/requirements.txt -f markdown",
+        'echo "## pip-audit — /usr/bin is not a command here" >> "$GITHUB_STEP_SUMMARY"',
+        "bandit -r backend services -x '*/tests/*,*/test_*.py' -ll",
+        'status="${PIPESTATUS[0]}"',
+    ],
+)
+def test_relative_command_words_are_not_flagged(body):
+    assert not any(w.startswith("/") for w in _command_words(_unquoted(body)))
 
 
 def test_audit_mention_sees_npm_configuration_and_abbreviations():
