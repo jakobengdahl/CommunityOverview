@@ -566,6 +566,17 @@ class TestRequiredChecksInstallFromTheLockfile:
     ):
         installs = []
         for job_id in sorted(required_check_jobs(workflow)):
+            # Job level too, and for every job behind a required check, not just
+            # the ones that install. A `continue-on-error` job REPORTS SUCCESS
+            # when its steps fail, so it neutralises the step-level assert below
+            # from one level up — on `frontend-lint` that turns the required
+            # check green over failed eslint; on a worker it turns the gate green,
+            # because the gate reads `needs.<worker>.result` and GitHub hands it
+            # `success` for a failed continue-on-error job.
+            assert not workflow["jobs"][job_id].get("continue-on-error", False), (
+                f"{job_id} is behind a required check and must fail closed; "
+                "do not set job-level continue-on-error"
+            )
             for step in workflow["jobs"][job_id].get("steps", []):
                 body = step.get("run", "")
                 if not any(m.group(1) == "ci" for m in NPM_CALL.finditer(body)):
