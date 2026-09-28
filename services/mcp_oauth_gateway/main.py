@@ -25,7 +25,9 @@ import os
 import time
 import urllib.parse
 import uuid
+import warnings
 
+import jwt.warnings
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -61,6 +63,16 @@ def _warn_if_short_signing_key(key: str) -> None:
 
 
 _warn_if_short_signing_key(config.GW_JWT_SIGNING_KEY)
+
+# PyJWT raises InsecureKeyLengthWarning on every encode and decode with an HMAC
+# key below the same 32 bytes, and its message states the key's EXACT length. The
+# warning above reports the condition without that length on purpose, so leaving
+# the library's version enabled would publish it anyway on the first token
+# issued. Silencing it changes nothing else: it carries no enforcement, and the
+# short key is used as-is either way, warned about once at startup.
+warnings.filterwarnings(
+    "ignore", category=jwt.warnings.InsecureKeyLengthWarning
+)
 
 app = FastAPI(title="MCP OAuth Gateway", version="1.0.0")
 
