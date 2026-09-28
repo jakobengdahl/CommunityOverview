@@ -812,6 +812,7 @@ class TestLockChangedStep(unittest.TestCase):
         # Not only a lock: the step's contract is the whole directory, and a
         # pathspec that excluded `*.in` or `*.py` would hide the compile inputs
         # the recompile step reads, and the service's own source.
+        (work / "requirements-dev.txt").write_text("a\n")
         (work / "requirements.in").write_text("a\n")
         (work / "main.py").write_text("x = 1\n")
         (work / ".gitignore").write_text("build/\n")
@@ -883,6 +884,12 @@ class TestLockChangedStep(unittest.TestCase):
         for narrowing in (":(exclude)", ":!", "--exclude", ":(glob)"):
             self.assertNotIn(narrowing, run)
         self.assertIn("--ignored", run)
+        # And no pipe. `git status --porcelain --ignored -- . | grep -v
+        # requirements-dev` satisfies every assertion above - the pathspec is
+        # untouched - while hiding a change to the dev lock. grep exiting 1 on no
+        # match is harmless here, because the substitution sits in an `if`
+        # condition where errexit is suspended.
+        self.assertNotIn("|", run)
 
     def test_a_modified_new_deleted_or_ignored_file_fails(self):
         def ignored(work):
@@ -895,6 +902,9 @@ class TestLockChangedStep(unittest.TestCase):
             lambda work: (work / "requirements.txt").unlink(),
             # Other extensions too, so no case leaves an exclude pathspec room
             # to pass by covering only `*.txt`.
+            # The DEV lock: one of the two this job exists to police, and the
+            # one a `| grep -v requirements-dev` filter would hide.
+            lambda work: (work / "requirements-dev.txt").write_text("b\n"),
             lambda work: (work / "requirements.in").write_text("b\n"),
             lambda work: (work / "main.py").write_text("x = 2\n"),
             lambda work: (work / "notes.md").write_text("b\n"),
