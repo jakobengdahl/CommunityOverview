@@ -444,7 +444,15 @@ class TestTheWorkerGateWiringItself:
 # `npm audit` (dev included) sees that one — which the Security Scan workflow
 # runs, and `main`'s branch protection does not require.
 # ---------------------------------------------------------------------------
-NPM_INSTALL = re.compile(r"^\s*npm\s+(ci|install|i|add)\b", re.M)
+# Every `npm` subcommand a required-check job may run. An ALLOWLIST, because the
+# other side cannot be enumerated: npm accepts `install`, `i`, `in`, `inst`,
+# `instal`, `isntall`, `add` and more for the same resolving install, and `ic` /
+# `clean-install` for `ci`. And not line-anchored, because the edit that actually
+# removes the gate is a chained one a reviewer would wave through -
+# `npm ci || npm install` installs from the lockfile, and on the lockfile `npm ci`
+# rejects it falls back to rewriting it.
+NPM_SUBCOMMANDS_ALLOWED = frozenset({"ci", "run"})
+NPM_CALL = re.compile(r"\bnpm\s+(\S+)")
 
 
 def required_check_jobs(workflow):
@@ -476,50 +484,59 @@ class TestRequiredChecksInstallFromTheLockfile:
             "frontend-lint",
         }
 
-    def test_every_node_install_is_npm_ci(self, workflow):
-        installs = []
+    def test_every_npm_call_is_an_allowed_subcommand(self, workflow):
+        calls = []
         for job_id in sorted(required_check_jobs(workflow)):
             for step in workflow["jobs"][job_id].get("steps", []):
-                for match in NPM_INSTALL.finditer(step.get("run", "")):
-                    installs.append((job_id, match.group(1)))
-                    assert match.group(1) == "ci", (
-                        f"{job_id}:{step.get('name')} runs `npm {match.group(1)}`; a "
+                for match in NPM_CALL.finditer(step.get("run", "")):
+                    subcommand = match.group(1)
+                    calls.append((job_id, subcommand))
+                    assert subcommand in NPM_SUBCOMMANDS_ALLOWED, (
+                        f"{job_id}:{step.get('name')} runs `npm {subcommand}`; a "
                         "required check installs with `npm ci`, which refuses a "
-                        "lockfile its manifests do not satisfy — `npm install` "
-                        "would rewrite the lockfile instead and report green"
+                        "lockfile its manifests do not satisfy — anything else "
+                        "either rewrites the lockfile instead and reports green, "
+                        f"or is not a required check's job. Allowed: "
+                        f"{sorted(NPM_SUBCOMMANDS_ALLOWED)}"
                     )
-        # Not vacuous: these two really do install node dependencies.
-        assert {job_id for job_id, _ in installs} == {
-            "frontend-lint",
-            "frontend-tests-run",
-        }
+        # Not vacuous, and counted rather than just collected: an ADDED install
+        # cannot hide behind a compliant one in the same job.
+        assert sorted(calls) == [
+            ("frontend-lint", "ci"),
+            ("frontend-lint", "run"),
+            ("frontend-lint", "run"),
+            ("frontend-tests-run", "ci"),
+            ("frontend-tests-run", "run"),
+        ]
 
     @pytest.mark.parametrize(
-        "body,subcommand",
+        "body,subcommands",
         [
-            ("npm ci --no-audit --no-fund", "ci"),
-            ("  npm  ci", "ci"),
-            ("npm install", "install"),
-            ("npm install --no-save\n", "install"),
-            ("npm i", "i"),
-            ("npm add left-pad", "add"),
-            ("echo setting up\nnpm install\n", "install"),
+            ("npm ci --no-audit --no-fund", ["ci"]),
+            ("  npm  ci", ["ci"]),
+            ("npm install", ["install"]),
+            ("npm i", ["i"]),
+            ("npm add left-pad", ["add"]),
+            ("echo setting up\nnpm install\n", ["install"]),
+            # The chained fallback, which a line-anchored pattern read as `ci`.
+            ("npm ci --no-audit || npm install --no-audit", ["ci", "install"]),
+            ("cd frontend && npm install", ["install"]),
+            ("sudo npm install", ["install"]),
+            ("npm_config_x=1 npm install", ["install"]),
+            # npm's install aliases, which a subcommand denylist would miss.
+            ("npm isntall x", ["isntall"]),
+            ("npm in x", ["in"]),
+            ("npm ic", ["ic"]),
+            ("npm clean-install", ["clean-install"]),
+            ("npm run lint\nnpm ci", ["run", "ci"]),
         ],
     )
-    def test_the_install_pattern_reads_the_subcommand(self, body, subcommand):
-        match = NPM_INSTALL.search(body)
-        assert match and match.group(1) == subcommand
+    def test_every_npm_subcommand_in_a_body_is_read(self, body, subcommands):
+        assert [m.group(1) for m in NPM_CALL.finditer(body)] == subcommands
 
     @pytest.mark.parametrize(
-        "body",
-        [
-            "npm run test:unit",
-            "npm audit --omit=dev",
-            "npm ls --all",
-            "npm run lint",
-            # Not a command: an install named inside a message.
-            'echo "run npm install locally"',
-        ],
+        "subcommand",
+        ["install", "i", "add", "isntall", "ic", "clean-install", "update"],
     )
-    def test_the_install_pattern_ignores_other_npm_commands(self, body):
-        assert not NPM_INSTALL.search(body)
+    def test_the_allowlist_admits_no_installing_subcommand(self, subcommand):
+        assert subcommand not in NPM_SUBCOMMANDS_ALLOWED
