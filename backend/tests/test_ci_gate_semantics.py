@@ -454,6 +454,26 @@ class TestTheWorkerGateWiringItself:
 NPM_SUBCOMMANDS_ALLOWED = frozenset({"ci", "run"})
 NPM_CALL = re.compile(r"\bnpm\s+(\S+)")
 
+# The install step's whole run body, per required-check job. Pinned ENTIRE, not
+# just the subcommand, because every way of defeating the gate keeps a compliant
+# `npm ci` in the body and adds to it:
+#
+#   npm ci --no-audit --no-fund || true
+#   npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+#   npm ci --no-audit --no-fund || { n=npm; "$n" install --no-audit --no-fund; }
+#
+# The last defeats a subcommand scan outright - there is no whitespace after
+# `npm` in `n=npm;` - and unlike the others it leaves node_modules correct, so
+# the suite passes and the required check reports GREEN over a lockfile `npm ci`
+# had refused. `continue-on-error: true` on the step is the same hole again.
+NODE_INSTALL_BODIES = {
+    "frontend-tests-run": "npm ci --no-audit --no-fund",
+    "frontend-lint": (
+        "npm ci --no-audit --no-fund --workspace @community-graph/web "
+        "--workspace @community-graph/widget --include-workspace-root"
+    ),
+}
+
 
 def required_check_jobs(workflow):
     """The jobs behind `main`'s required checks: each named job, plus its workers."""
@@ -540,3 +560,23 @@ class TestRequiredChecksInstallFromTheLockfile:
     )
     def test_the_allowlist_admits_no_installing_subcommand(self, subcommand):
         assert subcommand not in NPM_SUBCOMMANDS_ALLOWED
+
+    def test_each_install_step_body_is_pinned_whole_and_can_fail_the_job(
+        self, workflow
+    ):
+        installs = []
+        for job_id in sorted(required_check_jobs(workflow)):
+            for step in workflow["jobs"][job_id].get("steps", []):
+                body = step.get("run", "")
+                if not any(m.group(1) == "ci" for m in NPM_CALL.finditer(body)):
+                    continue
+                installs.append((job_id, body.strip()))
+                where = f"{job_id}:{step.get('name')}"
+                assert not step.get("continue-on-error", False), (
+                    f"{where} is continue-on-error, so the lockfile refusal "
+                    "cannot fail the job"
+                )
+                assert "if" not in step, f"{where} is conditional"
+        # A list, not a dict: a SECOND install step added to a job that already
+        # has a compliant one must fail here rather than overwrite it.
+        assert installs == sorted(NODE_INSTALL_BODIES.items())
