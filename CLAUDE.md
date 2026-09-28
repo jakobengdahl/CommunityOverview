@@ -414,9 +414,10 @@ Agent(   # 2. mutation — its survivors are residue, not blockers
 
             Edit ONLY the executable half of the diff — the module, script
             or config the PR changes. Never edit prose (documentation,
-            CLAUDE.md, any normative text) and never edit the tests or
-            fixtures themselves: nothing covers those, so such a mutation
-            survives by construction and its survival says nothing.
+            CLAUDE.md, any normative text): the correctness reviewer already
+            judges that, so a mutation only buys a second opinion on it.
+            Never edit the tests or fixtures either: mutating the artifact
+            you then ask the suite about is a question with no referent.
 
             A mutation counts ONLY if it violates a named guarantee. Harness
             identity (can the code tell it is under test) is out of scope.
@@ -467,8 +468,9 @@ block, so each stands in for production code, **each under its own condition**:
   than into this loop.
 
 **The mutation reviewer works on the executable half only** — the module, script
-or config — never on prose or on the tests themselves. Each of the three has its
-own reason, and "no suite covers it" is not one of them: a few `CLAUDE.md`
+or config — never on prose or on the tests themselves. Prose, the tests and
+`config` are each in or out for their own reason, and "no suite covers it" is not
+one of them: a few `CLAUDE.md`
 sentences are pinned by `backend/tests/test_ci_gate_semantics.py` and
 `backend/tests/test_ci_e2e_jobs.py`, so mutating one goes red and still proves
 nothing about the change.

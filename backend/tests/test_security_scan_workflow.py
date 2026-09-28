@@ -185,6 +185,33 @@ COMMAND_PREFIXES = frozenset(
 )
 
 
+def _strip_comment(line):
+    """``line`` without its bash comment: an unquoted `#` that BEGINS a word.
+
+    shlex's own `commenters` cuts a token at `#` anywhere inside a word, which
+    bash does not, and that difference was a hole rather than a nuisance: it made
+    `pip install pip-audit#x; pip config set global.no-deps true` normalise to
+    exactly the pinned install, so the allowlist passed a line bash runs as two
+    commands, the second narrowing every later audit in the job. `main` caught
+    that line; normalising without this would not.
+    """
+    quote = None
+    escaped = False
+    for i, ch in enumerate(line):
+        if escaped:
+            escaped = False
+        elif ch == "\\" and quote != "'":
+            escaped = True
+        elif quote:
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "#" and (i == 0 or line[i - 1].isspace()):
+            return line[:i]
+    return line
+
+
 def _shell_tokens(line):
     r"""One line of a `run:` body, tokenised the way bash reads it.
 
@@ -194,8 +221,11 @@ def _shell_tokens(line):
     bash obeys: `set -\m` turns on job control, `p''ip config set` runs pip, and
     `'/usr/bin/npm'` is the absolute path it looks like.
     """
-    lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
+    lexer = shlex.shlex(_strip_comment(line), posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
+    # Comments are handled above, bash's way. Left to shlex, `#` would truncate a
+    # token mid-word and hide the rest of the line from every check below.
+    lexer.commenters = ""
     try:
         return list(lexer)
     except ValueError as exc:
@@ -883,6 +913,49 @@ def test_a_path_assignment_is_seen(body):
 )
 def test_a_path_assignment_check_leaves_other_lines_alone(body):
     assert not any(PATH_ASSIGNMENT.match(tok) for tok in _assignments(body))
+
+
+@pytest.mark.parametrize(
+    "line,stripped",
+    [
+        # A `#` mid-word is a literal, so the rest of the line still runs.
+        ("echo a#b", "echo a#b"),
+        (
+            "pip install pip-audit#x; pip config set global.no-deps true",
+            "pip install pip-audit#x; pip config set global.no-deps true",
+        ),
+        # A `#` that begins a word starts a comment, wherever on the line.
+        ("npm audit --omit=dev # note", "npm audit --omit=dev "),
+        ("# whole line", ""),
+        ("  # indented", "  "),
+        # Quoted, so not a comment at all.
+        (
+            'echo "## heading" >> "$GITHUB_STEP_SUMMARY"',
+            'echo "## heading" >> "$GITHUB_STEP_SUMMARY"',
+        ),
+        ("echo '#hash'", "echo '#hash'"),
+        ("echo \\#escaped", "echo \\#escaped"),
+    ],
+)
+def test_comments_are_stripped_the_way_bash_strips_them(line, stripped):
+    assert _strip_comment(line) == stripped
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "pip install pip-audit#x; pip config set global.no-deps true",
+        "pip install pip-audit#x; PATH=/usr/bin:$PATH",
+        "npm audit --omit=dev#x; npm config set omit=peer",
+    ],
+)
+def test_a_mid_word_hash_does_not_hide_the_rest_of_the_line(line):
+    # Letting shlex cut the token at `#` made each of these normalise to exactly
+    # a pinned command, so the allowlist passed a line bash runs as two.
+    normalised = _normalised(line)
+    assert ";" in normalised, normalised
+    for pinned in AUDIT_COMMANDS["pip-audit"] + PINNED_PIP_LINES["pip-audit"]:
+        assert normalised != _normalised(pinned)
 
 
 def test_an_unparsable_line_fails_rather_than_passing_vacuously():
