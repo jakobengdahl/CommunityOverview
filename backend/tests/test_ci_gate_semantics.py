@@ -425,3 +425,101 @@ class TestTheWorkerGateWiringItself:
             assert not (set(needs) & set(GATES)), (
                 f"{job_id} depends on a gate job: {needs}"
             )
+
+
+# ---------------------------------------------------------------------------
+# What a required check buys against a hand-edited lockfile.
+#
+# `npm ci` refuses a package-lock.json the manifests it was resolved from do not
+# satisfy — `Invalid: lock file's ws@7.5.10 does not satisfy ws@8.22.0` — and
+# that refusal is the ONLY thing in the required checks that notices such an
+# edit. `npm install` would instead resolve the tree afresh and rewrite the
+# lockfile to make it valid, so swapping one subcommand for the other is a
+# one-word edit that removes the gate and reports green. Nothing else in the
+# repo pins it, which is the same shape of hole as the permissive gate above.
+#
+# It is a narrow guarantee, and worth stating so it is not over-read: `npm ci`
+# sees a lockfile that contradicts a declared RANGE. A revert to an older
+# version still inside its range is valid by construction, and only a full
+# `npm audit` (dev included) sees that one — which the Security Scan workflow
+# runs, and `main`'s branch protection does not require.
+# ---------------------------------------------------------------------------
+NPM_INSTALL = re.compile(r"^\s*npm\s+(ci|install|i|add)\b", re.M)
+
+
+def required_check_jobs(workflow):
+    """The jobs behind `main`'s required checks: each named job, plus its workers."""
+    named = {
+        job_id
+        for job_id, job in workflow["jobs"].items()
+        if job.get("name") in BRANCH_PROTECTION_CHECKS
+    }
+    workers = set()
+    for job_id in named:
+        needs = workflow["jobs"][job_id].get("needs") or []
+        workers.update([needs] if isinstance(needs, str) else needs)
+    return named | (workers - {"detect-changes"})
+
+
+class TestRequiredChecksInstallFromTheLockfile:
+    def test_the_job_set_is_discovered(self, workflow):
+        # The five required check names, plus the four workers their gates need.
+        assert required_check_jobs(workflow) == {
+            "backend-tests",
+            "backend-tests-run",
+            "frontend-tests",
+            "frontend-tests-run",
+            "gateway-tests",
+            "gateway-tests-run",
+            "python-lint",
+            "python-lint-run",
+            "frontend-lint",
+        }
+
+    def test_every_node_install_is_npm_ci(self, workflow):
+        installs = []
+        for job_id in sorted(required_check_jobs(workflow)):
+            for step in workflow["jobs"][job_id].get("steps", []):
+                for match in NPM_INSTALL.finditer(step.get("run", "")):
+                    installs.append((job_id, match.group(1)))
+                    assert match.group(1) == "ci", (
+                        f"{job_id}:{step.get('name')} runs `npm {match.group(1)}`; a "
+                        "required check installs with `npm ci`, which refuses a "
+                        "lockfile its manifests do not satisfy — `npm install` "
+                        "would rewrite the lockfile instead and report green"
+                    )
+        # Not vacuous: these two really do install node dependencies.
+        assert {job_id for job_id, _ in installs} == {
+            "frontend-lint",
+            "frontend-tests-run",
+        }
+
+    @pytest.mark.parametrize(
+        "body,subcommand",
+        [
+            ("npm ci --no-audit --no-fund", "ci"),
+            ("  npm  ci", "ci"),
+            ("npm install", "install"),
+            ("npm install --no-save\n", "install"),
+            ("npm i", "i"),
+            ("npm add left-pad", "add"),
+            ("echo setting up\nnpm install\n", "install"),
+        ],
+    )
+    def test_the_install_pattern_reads_the_subcommand(self, body, subcommand):
+        match = NPM_INSTALL.search(body)
+        assert match and match.group(1) == subcommand
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "npm run test:unit",
+            "npm audit --omit=dev",
+            "npm ls --all",
+            "npm run lint",
+            # Not a command: an install named inside a message.
+            'echo "run npm install locally"',
+        ],
+    )
+    def test_the_install_pattern_ignores_other_npm_commands(self, body):
+        assert not NPM_INSTALL.search(body)
