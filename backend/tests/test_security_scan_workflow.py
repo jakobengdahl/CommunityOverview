@@ -15,6 +15,7 @@ masking unnoticed.
 
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -63,7 +64,7 @@ AUDIT_INVOCATION = re.compile(r"^\s*(?:pip-audit|npm\s+audit)\b.*$", re.M)
 # the allowlist and every other pip spelling - `pip3.11`, `python3 -m pip` - is
 # audit-relevant by default.
 AUDIT_MENTION = re.compile(
-    r"\baudit\b|pip[-_]audit|\bnpm\b|\bnpx\b|\bpip[0-9.]*\b", re.I
+    r"\baudit\b|pip[-_]audit|\bnpm\b|\bnpx\b|\bpip[0-9.]*\b|-m\s*pip", re.I
 )
 # The exact pip lines each job may run, by job. A second install, a `pip config`
 # or a `pip download` has to be added here deliberately.
@@ -136,29 +137,128 @@ COMMAND_P = re.compile(r"\b(command|hash)\b[^;&|\n]*\s-[a-zA-Z]*p")
 # `/usr/bin/npm audit` never meets the stubs. Only the command word counts: the
 # audits name relative paths as arguments, and the summary headings name paths in
 # prose.
-COMMAND_SEPARATORS = re.compile(r"\|\||&&|[\n;&|()]")
 ASSIGNMENT_PREFIX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# An assignment to PATH puts the real tools back within reach of the very next
+# command, with no absolute path anywhere for the check above to see.
+PATH_ASSIGNMENT = re.compile(r"^PATH=")
+# Builtins whose arguments are assignments rather than a command.
+ASSIGNMENT_BUILTINS = frozenset({"export", "declare", "typeset", "local", "readonly"})
+# Tokens after which a new command begins.
+COMMAND_OPERATORS = frozenset({";", ";;", "&", "&&", "|", "|&", "||", "(", ")"})
+# Words that stand in front of the real command: shell keywords, and the
+# builtins and wrappers that take a command as their argument. `then /bin/cat`
+# and `command /bin/cat` reach the real tool exactly as a bare `/bin/cat` does,
+# so the scan has to look past them rather than stop at the first word.
+COMMAND_PREFIXES = frozenset(
+    {
+        "if",
+        "then",
+        "elif",
+        "else",
+        "fi",
+        "while",
+        "until",
+        "do",
+        "done",
+        "case",
+        "esac",
+        "for",
+        "in",
+        "select",
+        "{",
+        "}",
+        "!",
+        "time",
+        "coproc",
+        "env",
+        "exec",
+        "eval",
+        "nohup",
+        "nice",
+        "sudo",
+        "xargs",
+        "command",
+        "builtin",
+        "source",
+        ".",
+    }
+)
 
 
-def _unquoted(body):
-    """``body`` with shell quote characters dropped.
+def _shell_tokens(line):
+    r"""One line of a `run:` body, tokenised the way bash reads it.
 
-    Bash reads `set -o 'monitor'`, `set "-m"` and `'/usr/bin/npm' audit` as the
-    instructions their bare spellings give, but the patterns above and the word
-    split below match text. Quoting is how a step would otherwise slip one of
-    them past a static check.
+    Resolves all THREE of bash's quoting mechanisms - `'`, `"` and backslash -
+    so the checks below never see raw text. Quoting is the obvious way past a
+    check that matches characters, and each spelling below is a real instruction
+    bash obeys: `set -\m` turns on job control, `p''ip config set` runs pip, and
+    `'/usr/bin/npm'` is the absolute path it looks like.
     """
-    return body.replace("'", "").replace('"', "")
+    lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        return list(lexer)
+    except ValueError as exc:
+        # A line bash cannot parse would not run either, so failing is right.
+        # Returning no tokens instead would silently disarm every check below.
+        raise AssertionError(f"{line!r} does not tokenise as shell: {exc}") from exc
+
+
+def _normalised(line):
+    """``line`` with quoting resolved and spacing collapsed, for comparison.
+
+    Both a workflow line and the command it is pinned against go through this,
+    so they are compared as what bash would run rather than as how it was typed.
+    """
+    return " ".join(_shell_tokens(line))
+
+
+def _shell_words(body):
+    """Every token of every line of ``body``."""
+    for line in body.splitlines():
+        yield from _shell_tokens(line)
+
+
+def _assignments(body):
+    """Every assignment ``body`` would actually perform.
+
+    Assignment position only: a leading `VAR=x` on a command, a bare `VAR=x`
+    statement, or one handed to `export` and friends. A `VAR=x` that is an
+    ARGUMENT assigns nothing - `echo "PATH=/usr/bin"` prints a string - so
+    reading every token that merely looks like one would cry wolf on it.
+    """
+    for line in body.splitlines():
+        expect_command = True
+        exporting = False
+        for token in _shell_tokens(line):
+            if token in COMMAND_OPERATORS:
+                expect_command, exporting = True, False
+            elif (expect_command or exporting) and ASSIGNMENT_PREFIX.match(token):
+                yield token
+            elif expect_command and token in ASSIGNMENT_BUILTINS:
+                expect_command, exporting = False, True
+            elif expect_command:
+                expect_command = False
 
 
 def _command_words(body):
-    """The first word of every command in ``body``."""
-    for segment in COMMAND_SEPARATORS.split(body):
-        for word in segment.split():
-            if ASSIGNMENT_PREFIX.match(word):
-                continue  # `FOO=1 cmd`: an assignment prefix, not the command
-            yield word
-            break
+    """Every word of ``body`` that is in a command position.
+
+    A line starts one command and each operator starts another; an assignment
+    prefix or a keyword is passed over rather than mistaken for the command.
+    """
+    for line in body.splitlines():
+        expect_command = True
+        for token in _shell_tokens(line):
+            if token in COMMAND_OPERATORS:
+                expect_command = True
+            elif not expect_command:
+                continue
+            elif ASSIGNMENT_PREFIX.match(token) or token in COMMAND_PREFIXES:
+                continue
+            else:
+                yield token
+                expect_command = False
 
 
 # The only file a `run:` body may write to. Only `N>&M` / `>&-` is an fd dup;
@@ -389,15 +489,24 @@ def test_dependency_audit_scope_is_pinned(job_id):
 
 def test_every_line_that_could_run_an_audit_is_a_pinned_command():
     # AUDIT_INVOCATION only finds audits spelled the way the pinned ones are.
+    # Both sides are normalised, so a line is compared as what bash would run:
+    # matching raw text let `p''ip config set global.no-deps true` - a real pip
+    # invocation that narrows every later audit in its job - match nothing at all.
     for job_id, job in _workflow()["jobs"].items():
-        pinned = AUDIT_COMMANDS.get(job_id, []) + PINNED_PIP_LINES.get(job_id, [])
+        pinned = {
+            _normalised(c)
+            for c in AUDIT_COMMANDS.get(job_id, []) + PINNED_PIP_LINES.get(job_id, [])
+        }
         for step in job.get("steps", []):
             body = step.get("run", "").replace("\\\n", "")
             for line in body.splitlines():
                 line = line.strip()
-                if not AUDIT_MENTION.search(line) or SUMMARY_HEADING.match(line):
+                if not line:
                     continue
-                assert line in pinned, f"{job_id}:{step['name']} runs {line!r}"
+                normalised = _normalised(line)
+                if not AUDIT_MENTION.search(normalised) or SUMMARY_HEADING.match(line):
+                    continue
+                assert normalised in pinned, f"{job_id}:{step['name']} runs {line!r}"
 
 
 def test_audit_mention_sees_every_pip_spelling_an_option_can_hide():
@@ -408,8 +517,26 @@ def test_audit_mention_sees_every_pip_spelling_an_option_can_hide():
         "pip3.11 config set global.no-deps true",
         "pip3 download requests",
         "pip install --upgrade pip",
+        # No space after -m, so no word boundary before `pip`.
+        "python -mpip config set global.no-deps true",
     ):
         assert AUDIT_MENTION.search(line), line
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "p''ip config set global.no-deps true",
+        'p"i"p config set global.no-deps true',
+        "pi\\p config set global.no-deps true",
+        "n''pm config set omit=peer --location=project",
+        'n""pm audit --audit-level=critical',
+        "np\\m config set omit=peer",
+    ],
+)
+def test_audit_mention_sees_a_quote_split_or_escaped_invocation(line):
+    # Bash runs all of these; only the normalised form shows what they are.
+    assert AUDIT_MENTION.search(_normalised(line)), line
 
 
 def test_audit_mention_leaves_the_non_pip_scanner_lines_alone():
@@ -605,13 +732,17 @@ def _run_bodies():
 
 def test_no_step_turns_on_job_control_or_reaches_past_the_stubs():
     for where, body in _run_bodies():
-        unquoted = _unquoted(body)
-        assert not JOB_CONTROL.search(unquoted), f"{where} turns on job control"
-        reaches = COMMAND_P.search(unquoted)
+        normalised = "\n".join(_normalised(line) for line in body.splitlines())
+        assert not JOB_CONTROL.search(normalised), f"{where} turns on job control"
+        reaches = COMMAND_P.search(normalised)
         assert not reaches, f"{where} runs `{reaches.group(1)} -p`"
-        for word in _command_words(unquoted):
+        for word in _command_words(body):
             assert not word.startswith("/"), (
                 f"{where} runs {word} by absolute path, past the stubs"
+            )
+        for token in _assignments(body):
+            assert not PATH_ASSIGNMENT.match(token), (
+                f"{where} sets {token}, putting the real tools back on PATH"
             )
 
 
@@ -624,21 +755,25 @@ def test_no_step_turns_on_job_control_or_reaches_past_the_stubs():
         "set -e -m",
         "set -o monitor",
         "  set  -o   monitor",
-        # Quoted: the same instruction, invisible to a pattern matching words.
+        # Quoted and escaped: the same instructions, invisible to a pattern
+        # matching characters. `set -\m` really does turn job control on.
         "set -o 'monitor'",
         'set -o "monitor"',
         'set "-m"',
         "set '-m'",
         "set -o mon'itor'",
+        "set -\\m",
+        "set -o \\monitor",
+        "set -o mon\\itor",
     ],
 )
 def test_job_control_check_sees_every_spelling(body):
-    assert JOB_CONTROL.search(_unquoted(body))
+    assert JOB_CONTROL.search(_normalised(body))
 
 
 @pytest.mark.parametrize("body", ["set -e", "set -o pipefail", "set +x", "echo -m"])
 def test_job_control_check_passes_other_options(body):
-    assert not JOB_CONTROL.search(_unquoted(body))
+    assert not JOB_CONTROL.search(_normalised(body))
 
 
 @pytest.mark.parametrize(
@@ -646,7 +781,7 @@ def test_job_control_check_passes_other_options(body):
     ["command -p git", "command -pv git", "command -v -p git", "hash -p /x/git git"],
 )
 def test_command_p_check_sees_every_spelling(body):
-    assert COMMAND_P.search(_unquoted(body))
+    assert COMMAND_P.search(_normalised(body))
 
 
 @pytest.mark.parametrize(
@@ -656,11 +791,13 @@ def test_command_p_check_sees_every_spelling(body):
         ("command '-p' git", "command"),
         ('hash "-p" /x/git git', "hash"),
         ("hash -p /x/git git", "hash"),
+        ("command -\\p git", "command"),
+        ("hash -\\p /x/git git", "hash"),
     ],
 )
 def test_command_p_check_names_the_builtin_that_matched(body, builtin):
     # The failure message used to say `command -p` for a `hash -p` hit.
-    match = COMMAND_P.search(_unquoted(body))
+    match = COMMAND_P.search(_normalised(body))
     assert match and match.group(1) == builtin
 
 
@@ -676,10 +813,26 @@ def test_command_p_check_names_the_builtin_that_matched(body, builtin):
         "(/usr/bin/npm audit)",
         "'/usr/bin/npm' audit",
         'FOO=1 "/usr/bin/npm" audit',
+        "\\/usr/bin/npm audit",
+        # Behind a keyword or a wrapper builtin, which is always available
+        # whatever the stub PATH holds.
+        "if true; then /bin/cat /etc/hostname; fi",
+        "command /bin/cat /etc/hostname",
+        "builtin . /bin/x",
+        "! /usr/bin/npm audit",
+        "{ /usr/bin/npm audit; }",
+        "env /usr/bin/npm audit",
+        "exec /bin/sh",
+        "eval /bin/sh",
+        "time /usr/bin/npm audit",
+        "xargs /bin/cat",
+        "sudo /bin/cat",
+        # On the second line, where a line-oriented scan must still look.
+        "echo hi\n/bin/cat x",
     ],
 )
 def test_absolute_path_command_words_are_seen(body):
-    assert any(w.startswith("/") for w in _command_words(_unquoted(body)))
+    assert any(w.startswith("/") for w in _command_words(body))
 
 
 @pytest.mark.parametrize(
@@ -689,12 +842,52 @@ def test_absolute_path_command_words_are_seen(body):
         "pip-audit -r backend/requirements.txt -f markdown",
         "pip-audit -r services/mcp_oauth_gateway/requirements.txt -f markdown",
         'echo "## pip-audit — /usr/bin is not a command here" >> "$GITHUB_STEP_SUMMARY"',
+        # Quoted parens stay inside their word, so the heading is one argument
+        # and `/backend` never reaches a command position.
+        'echo "## bandit (/backend + /services)" >> "$GITHUB_STEP_SUMMARY"',
         "bandit -r backend services -x '*/tests/*,*/test_*.py' -ll",
         'status="${PIPESTATUS[0]}"',
+        'exit "${PIPESTATUS[0]}"',
+        'pip-audit -r r.txt 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"',
+        "echo hi > /dev/null",
     ],
 )
 def test_relative_command_words_are_not_flagged(body):
-    assert not any(w.startswith("/") for w in _command_words(_unquoted(body)))
+    assert not any(w.startswith("/") for w in _command_words(body))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "PATH=/usr/bin npm audit",
+        "PATH=/usr/bin:$PATH",
+        "export PATH=/usr/bin:$PATH",
+        "PATH='/usr/bin' npm audit",
+    ],
+)
+def test_a_path_assignment_is_seen(body):
+    # An absolute path in a command word is not the only way back to the real
+    # tools: re-pointing PATH reaches them with no absolute path to find.
+    assert any(PATH_ASSIGNMENT.match(tok) for tok in _assignments(body))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "npm audit --omit=dev",
+        'status="${PIPESTATUS[0]}"',
+        # An argument, not an assignment: this prints a string.
+        'echo "PATH=/usr/bin" >> "$GITHUB_STEP_SUMMARY"',
+        "pip-audit -r backend/requirements.txt -f markdown",
+    ],
+)
+def test_a_path_assignment_check_leaves_other_lines_alone(body):
+    assert not any(PATH_ASSIGNMENT.match(tok) for tok in _assignments(body))
+
+
+def test_an_unparsable_line_fails_rather_than_passing_vacuously():
+    with pytest.raises(AssertionError, match="does not tokenise"):
+        list(_command_words("echo 'unbalanced"))
 
 
 def test_audit_mention_sees_npm_configuration_and_abbreviations():
