@@ -296,7 +296,17 @@ def register_session_stream(
     # trigger-token endpoint, so the hosted layer can bind it to a real actor;
     # the open-core default is permissive. It never mutates the graph.
 
-    def _auto_add_authorize(request: Request, action: str):
+    # One target per operation, spelled as the MCP tool that performs the same
+    # operation spells it (backend/service/mcp_tools.py). The contract says the
+    # target is the tool or route name; a single resource-shaped string for all
+    # three would be neither, and a hosted hook keyed on target would then see
+    # the REST and MCP paths for one operation as different operations, and all
+    # three REST operations as the same one.
+    _AUTO_ADD_CREATE_TARGET = "create_session_auto_add_agent"
+    _AUTO_ADD_LIST_TARGET = "list_session_auto_add_agents"
+    _AUTO_ADD_REMOVE_TARGET = "remove_session_auto_add_agent"
+
+    def _auto_add_authorize(request: Request, action: str, target: str):
         """Return a denial JSONResponse if the auto-add call is refused."""
         if graph_service is None:
             return None
@@ -304,14 +314,11 @@ def register_session_stream(
             denied = authorize_graph_access(
                 graph_service.authorization_hook,
                 action=action,
-                target="session_auto_add_agent",
+                target=target,
             )
         if denied:
             return JSONResponse(denied, status_code=403)
         return None
-
-    def _auto_add_authorize_mutate(request: Request):
-        return _auto_add_authorize(request, GRAPH_ACTION_MUTATE)
 
     @app.post("/sessions/{session_id}/auto-add-agents")
     async def create_auto_add_agent(
@@ -325,7 +332,9 @@ def register_session_stream(
         if not session_registry.is_valid_session_id(session_id):
             return JSONResponse({"error": "invalid session_id format"}, status_code=400)
 
-        denied = _auto_add_authorize_mutate(request)
+        denied = _auto_add_authorize(
+            request, GRAPH_ACTION_MUTATE, _AUTO_ADD_CREATE_TARGET
+        )
         if denied is not None:
             return denied
         if _rate_limited(request):
@@ -380,7 +389,7 @@ def register_session_stream(
             )
         if not session_registry.is_valid_session_id(session_id):
             return JSONResponse({"error": "invalid session_id format"}, status_code=400)
-        denied = _auto_add_authorize(request, GRAPH_ACTION_READ)
+        denied = _auto_add_authorize(request, GRAPH_ACTION_READ, _AUTO_ADD_LIST_TARGET)
         if denied is not None:
             return denied
         if _rate_limited(request):
@@ -398,7 +407,9 @@ def register_session_stream(
         if not session_registry.is_valid_session_id(session_id):
             return JSONResponse({"error": "invalid session_id format"}, status_code=400)
 
-        denied = _auto_add_authorize_mutate(request)
+        denied = _auto_add_authorize(
+            request, GRAPH_ACTION_MUTATE, _AUTO_ADD_REMOVE_TARGET
+        )
         if denied is not None:
             return denied
         if _rate_limited(request):

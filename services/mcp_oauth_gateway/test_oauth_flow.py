@@ -1046,10 +1046,29 @@ class TestShortSigningKeyWarning(unittest.TestCase):
         "sys.exit(0 if config.GW_JWT_SIGNING_KEY == os.environ['GW_JWT_SIGNING_KEY'] else 3)\n"
     )
 
-    def _start_gateway(self, key):
+    # Issues and verifies one token through the production path, so PyJWT's own
+    # short-key warning fires. Importing main first is what installs the filter.
+    _TOKEN_SCRIPT = (
+        "import main\n"
+        "import auth\n"
+        "import base64, hashlib, sys\n"
+        "verifier = 'test-verifier-that-is-long-enough-for-pkce-requirements'\n"
+        "digest = hashlib.sha256(verifier.encode('ascii')).digest()\n"
+        "challenge = base64.urlsafe_b64encode(digest).rstrip(b'=').decode('ascii')\n"
+        "code = auth.issue_auth_code('alice@example.com', challenge, 'https://app/cb')\n"
+        "token = auth.exchange_code_for_token(code, verifier, 'https://app/cb')\n"
+        "sys.exit(0 if token and auth.validate_token(token) else 4)\n"
+    )
+    # The same round-trip without main.py, so no filter is installed. It is the
+    # control for the test above: it proves the library warning does fire here,
+    # and that the assertions are about the filter rather than about a warning
+    # that a PyJWT upgrade has quietly stopped emitting.
+    _TOKEN_CONTROL_SCRIPT = _TOKEN_SCRIPT.replace("import main\n", "", 1)
+
+    def _start_gateway(self, key, script=None):
         env = dict(os.environ, GW_JWT_SIGNING_KEY=key)
         result = subprocess.run(
-            [sys.executable, "-c", self._STARTUP_SCRIPT],
+            [sys.executable, "-c", script or self._STARTUP_SCRIPT],
             cwd=os.path.dirname(os.path.abspath(__file__)),
             env=env,
             capture_output=True,
@@ -1064,6 +1083,17 @@ class TestShortSigningKeyWarning(unittest.TestCase):
             result.returncode,
             result.stdout.decode("utf-8", "surrogateescape"),
             result.stderr.decode("utf-8", "surrogateescape"),
+        )
+
+    # The log format leads with asctime (`%Y-%m-%d %H:%M:%S,%f`), whose clock
+    # fields can equal a key length by coincidence - a run at 14:20:03 puts a
+    # bare `20` in every line. Strip it, so the digit check below reads only what
+    # the gateway CHOSE to say.
+    _LOG_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}\s*")
+
+    def _chosen_text(self, output):
+        return "\n".join(
+            self._LOG_PREFIX.sub("", line) for line in output.splitlines()
         )
 
     def _assert_key_absent(self, text, key):
@@ -1130,6 +1160,51 @@ class TestShortSigningKeyWarning(unittest.TestCase):
 
     def test_gateway_startup_is_quiet_with_a_32_byte_key(self):
         result = self._start_gateway("test-jwt-key-at-least-32-chars!!")
+        assert result.returncode == 0, result.stderr
+        output = result.stdout + result.stderr
+        assert "GW_JWT_SIGNING_KEY" not in output
+        assert "WARNING" not in output, output
+
+    def test_issuing_a_token_with_a_short_key_never_prints_its_length(self):
+        # The startup warning omits the length; PyJWT's own InsecureKeyLengthWarning
+        # states it outright on each encode and decode, so without the filter in
+        # main.py the first token undoes that. Run the real issue/verify path.
+        result = self._start_gateway(self.SHORT_KEY, script=self._TOKEN_SCRIPT)
+        assert result.returncode == 0, result.stderr
+        output = result.stdout + result.stderr
+        assert "InsecureKeyLengthWarning" not in output, output
+        assert "bytes long" not in output, output
+        length = len(self.SHORT_KEY.encode("utf-8", "surrogateescape"))
+        assert f"{length} bytes" not in output, output
+        # The NUMBER, not just PyJWT's phrasing for it: the guarantee is that the
+        # length never reaches the logs, so an `INFO  signing key: 20 octets` line
+        # has to fail here too. SHORT_KEY is 20 bytes, and the only numbers the
+        # legitimate warning carries are 32 and 256, so this cannot collide with
+        # it - a SHORT_KEY of length 32 or 256 would make the check vacuous.
+        assert length not in (32, 256), "SHORT_KEY length collides with the warning"
+        chosen = self._chosen_text(output)
+        assert not re.search(rf"\b{length}\b", chosen), chosen
+        self._assert_key_absent(output, self.SHORT_KEY)
+        # The gateway's own warning is still the one and only report.
+        warning_lines = [
+            line
+            for line in output.splitlines()
+            if "WARNING" in line and "GW_JWT_SIGNING_KEY" in line
+        ]
+        assert len(warning_lines) == 1, output
+
+    def test_the_library_would_otherwise_print_the_key_length(self):
+        result = self._start_gateway(self.SHORT_KEY, script=self._TOKEN_CONTROL_SCRIPT)
+        assert result.returncode == 0, result.stderr
+        output = result.stdout + result.stderr
+        assert "InsecureKeyLengthWarning" in output, output
+        length = len(self.SHORT_KEY.encode("utf-8", "surrogateescape"))
+        assert f"{length} bytes long" in output, output
+
+    def test_a_long_enough_key_issues_a_token_with_no_warning_at_all(self):
+        result = self._start_gateway(
+            "test-jwt-key-at-least-32-chars!!", script=self._TOKEN_SCRIPT
+        )
         assert result.returncode == 0, result.stderr
         output = result.stdout + result.stderr
         assert "GW_JWT_SIGNING_KEY" not in output

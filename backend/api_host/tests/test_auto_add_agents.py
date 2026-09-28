@@ -11,10 +11,14 @@ contract (validation, shape, lifecycle).
 """
 
 import logging
+from unittest.mock import MagicMock, Mock
 
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.core import GraphStorage
+from backend.core.session_auto_add import SessionAutoAddRegistry
+from backend.core.session_registry import SessionRegistry
 from backend.runtime.authorization import (
     AUTHORIZATION_MODE_ENV,
     GRAPH_ACTION_MUTATE,
@@ -23,6 +27,7 @@ from backend.runtime.authorization import (
     GraphAuthorizationDecision,
 )
 from backend.runtime.request_context import ACTOR_ID_HEADER
+from backend.service import GraphService, register_mcp_tools
 
 SESSION = "1000-2000"
 # A second valid id, in the long form, so a denial keyed on the fixture id fails.
@@ -33,10 +38,15 @@ _SESSIONS = pytest.mark.parametrize("session_id", [SESSION, OTHER_SESSION])
 # must never see it, but the server log must.
 _RAW_ONLY_DETAIL = "a rule with neither would add every created node to the view"
 
-_TARGET = "session_auto_add_agent"
+# One authorization target per operation, spelled as the MCP tool for the same
+# operation spells it. The cross-check against the registered MCP tool names is
+# TestGateActionAndTarget.test_targets_are_the_mcp_tool_names.
+_CREATE_TARGET = "create_session_auto_add_agent"
+_LIST_TARGET = "list_session_auto_add_agents"
+_REMOVE_TARGET = "remove_session_auto_add_agent"
 
 
-def _denied_body(action: str, mode: str, reason: str) -> dict:
+def _denied_body(action: str, mode: str, reason: str, target: str) -> dict:
     return {
         "success": False,
         "error": "Graph access denied",
@@ -44,7 +54,7 @@ def _denied_body(action: str, mode: str, reason: str) -> dict:
         "error_code": "access_denied",
         "authorization": {
             "action": action,
-            "target": _TARGET,
+            "target": target,
             "mode": mode,
             "source": "environment",
         },
@@ -208,7 +218,7 @@ class TestListAuthorization:
 
         assert resp.status_code == 403
         assert resp.json() == _denied_body(
-            GRAPH_ACTION_READ, "deny-all", _DENY_ALL_REASON
+            GRAPH_ACTION_READ, "deny-all", _DENY_ALL_REASON, _LIST_TARGET
         )
 
     @_SESSIONS
@@ -233,7 +243,7 @@ class TestListAuthorization:
 
         assert resp.status_code == 403
         assert resp.json() == _denied_body(
-            GRAPH_ACTION_READ, "deny-all", _DENY_ALL_REASON
+            GRAPH_ACTION_READ, "deny-all", _DENY_ALL_REASON, _LIST_TARGET
         )
 
 
@@ -244,7 +254,7 @@ class TestGateActionAndTarget:
         resp = test_app.get(f"/sessions/{SESSION}/auto-add-agents")
 
         assert resp.status_code == 200
-        assert hook.seen == [(GRAPH_ACTION_READ, _TARGET)]
+        assert hook.seen == [(GRAPH_ACTION_READ, _LIST_TARGET)]
 
     def test_create_asks_the_gate_once_as_a_mutation(self, test_app: TestClient):
         hook = _install_recording_hook(test_app)
@@ -254,7 +264,7 @@ class TestGateActionAndTarget:
         )
 
         assert resp.status_code == 200, resp.text
-        assert hook.seen == [(GRAPH_ACTION_MUTATE, _TARGET)]
+        assert hook.seen == [(GRAPH_ACTION_MUTATE, _CREATE_TARGET)]
 
     def test_delete_asks_the_gate_once_as_a_mutation(self, test_app: TestClient):
         agent_id = _create_agent(test_app)
@@ -263,7 +273,40 @@ class TestGateActionAndTarget:
         resp = test_app.delete(f"/sessions/{SESSION}/auto-add-agents/{agent_id}")
 
         assert resp.status_code == 200
-        assert hook.seen == [(GRAPH_ACTION_MUTATE, _TARGET)]
+        assert hook.seen == [(GRAPH_ACTION_MUTATE, _REMOVE_TARGET)]
+
+    @pytest.mark.parametrize(
+        "target,action,kwargs",
+        [
+            (_CREATE_TARGET, GRAPH_ACTION_MUTATE, {"node_types": ["Actor"]}),
+            (_LIST_TARGET, GRAPH_ACTION_READ, {}),
+            (_REMOVE_TARGET, GRAPH_ACTION_MUTATE, {"agent_id": "a-1"}),
+        ],
+    )
+    def test_the_mcp_twin_asks_the_gate_with_the_same_target(
+        self, target, action, kwargs
+    ):
+        """The contract (docs/SESSION_OVERLAY_CONTRACT.md §14) says the target is
+        the tool or route name, and that an operation reachable over both
+        transports asks with ONE name. So it is not enough that a tool of this
+        name exists: the tool has to ask the hook with it, which is what a hosted
+        hook keyed on target actually sees. Asserting only registration let the
+        MCP side's own target drift while this file stayed green.
+        """
+        hook = RecordingHook()
+        mcp = Mock()
+        mcp.tool = MagicMock(return_value=lambda f: f)
+        tools_map = register_mcp_tools(
+            mcp,
+            GraphService(GraphStorage(), authorization_hook=hook),
+            session_registry=SessionRegistry(),
+            auto_add_registry=SessionAutoAddRegistry(),
+        )
+
+        assert target in tools_map, f"no MCP tool named {target!r}"
+        tools_map[target](SESSION, **kwargs)
+
+        assert hook.seen == [(action, target)]
 
 
 class TestMalformedIdBeforeGate:
@@ -306,7 +349,7 @@ class TestMutationAuthorization:
 
         assert resp.status_code == 403
         assert resp.json() == _denied_body(
-            GRAPH_ACTION_MUTATE, "read-only", _READ_ONLY_REASON
+            GRAPH_ACTION_MUTATE, "read-only", _READ_ONLY_REASON, _CREATE_TARGET
         )
         assert test_app.app.state.auto_add_registry.list_rules(session_id) == []
 
@@ -321,14 +364,14 @@ class TestMutationAuthorization:
 
         assert resp.status_code == 403
         assert resp.json() == _denied_body(
-            GRAPH_ACTION_MUTATE, "read-only", _READ_ONLY_REASON
+            GRAPH_ACTION_MUTATE, "read-only", _READ_ONLY_REASON, _REMOVE_TARGET
         )
         listed = test_app.get(f"/sessions/{session_id}/auto-add-agents")
         assert [a["agent_id"] for a in listed.json()["agents"]] == [agent_id]
 
 
-def _actor_denied_body(action: str) -> dict:
-    body = _denied_body(action, "actor", _ACTOR_REASON)
+def _actor_denied_body(action: str, target: str) -> dict:
+    body = _denied_body(action, "actor", _ACTOR_REASON, target)
     body["authorization"]["source"] = "test-actor"
     return body
 
@@ -382,7 +425,7 @@ class TestGateSeesTheRequestActor:
         )
 
         assert resp.status_code == 403
-        assert resp.json() == _actor_denied_body(GRAPH_ACTION_MUTATE)
+        assert resp.json() == _actor_denied_body(GRAPH_ACTION_MUTATE, _CREATE_TARGET)
         assert test_app.app.state.auto_add_registry.list_rules(SESSION) == []
 
     @_OTHER_ACTORS
@@ -390,7 +433,7 @@ class TestGateSeesTheRequestActor:
         resp = test_app.get(f"/sessions/{SESSION}/auto-add-agents", headers=headers)
 
         assert resp.status_code == 403
-        assert resp.json() == _actor_denied_body(GRAPH_ACTION_READ)
+        assert resp.json() == _actor_denied_body(GRAPH_ACTION_READ, _LIST_TARGET)
 
     @_OTHER_ACTORS
     def test_delete_is_denied_for_any_other_actor_and_keeps_the_agent(
@@ -403,6 +446,6 @@ class TestGateSeesTheRequestActor:
         )
 
         assert resp.status_code == 403
-        assert resp.json() == _actor_denied_body(GRAPH_ACTION_MUTATE)
+        assert resp.json() == _actor_denied_body(GRAPH_ACTION_MUTATE, _REMOVE_TARGET)
         rules = test_app.app.state.auto_add_registry.list_rules(SESSION)
         assert [r.agent_id for r in rules] == [agent_id]

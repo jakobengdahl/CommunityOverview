@@ -868,7 +868,14 @@ The authorization context gains two optional fields:
 - **`session_id`:** the session concerned.
 
 A hook that wants to treat these differently from a direct write reads them.
-`target` keeps its existing meaning, the tool or route name.
+`target` keeps its existing meaning, the tool or route name. Where one operation
+is reachable over both transports, both ask with the *same* name — the MCP tool's
+— so a hook keyed on `target` gates the operation rather than the transport. The
+auto-add agent routes are the worked example: they ask as
+`create_session_auto_add_agent`, `list_session_auto_add_agents` and
+`remove_session_auto_add_agent`, matching their MCP twins. A route with no MCP
+twin uses its own handler name, as minting a trigger token does
+(`mint_pulse_trigger_token`).
 
 **Session routes.**
 

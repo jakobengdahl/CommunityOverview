@@ -778,37 +778,118 @@ class TestLockChangedStep(unittest.TestCase):
     """After re-compiling, any change to the gateway directory must fail the job."""
 
     def setUp(self):
-        workflow = yaml.safe_load((HERE.parents[1] / ".github" / "workflows" / "gateway-deps-audit.yml").read_text())
+        workflow = _audit_workflow()
         ids = [s.get("id") for s in workflow["jobs"]["lock-freshness"]["steps"]]
         self.assertEqual(ids[-2:], ["recompile", "unchanged"])
         self.step = _audit_step("lock-freshness", "unchanged")
         self.assertEqual(self.step["working-directory"], "services/mcp_oauth_gateway")
         self.assertNotIn("if", self.step)
 
-    def _run(self, change):
+    def _committed_step_env(self, workflow_env=None):
+        """The env the committed workflow hands this step, plus any test override.
+
+        The same guard the audit runners apply, and for the same reason: the keys
+        below are what the fixture and the step itself are built out of, so a
+        workflow env that set one would leave nothing real to assert on. Checked
+        against the workflow AS COMMITTED, before ``workflow_env`` - which exists
+        precisely to set one of them on purpose.
+        """
+        workflow = _audit_workflow()
+        step_env = _step_env(workflow, workflow["jobs"]["lock-freshness"], self.step)
+        _assert_expanded(step_env)
+        for key in step_env:
+            assert key not in ("PATH", "HOME") and not key.startswith("GIT_"), (
+                f"workflow env sets {key}"
+            )
+        return {**step_env, **(workflow_env or {})}
+
+    def _run(self, change, workflow_env=None):
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(subprocess.run, ["rm", "-rf", str(tmp)])
         work = tmp / "services" / "mcp_oauth_gateway"
         work.mkdir(parents=True)
         (work / "requirements.txt").write_text("a\n")
+        # Not only a lock: the step's contract is the whole directory, and a
+        # pathspec that excluded `*.in` or `*.py` would hide the compile inputs
+        # the recompile step reads, and the service's own source.
+        (work / "requirements-dev.txt").write_text("a\n")
+        (work / "requirements.in").write_text("a\n")
+        (work / "main.py").write_text("x = 1\n")
         (work / ".gitignore").write_text("build/\n")
-        workflow = _audit_workflow()
-        step_env = _step_env(workflow, workflow["jobs"]["lock-freshness"], self.step)
-        _assert_expanded(step_env)
+        step_env = self._committed_step_env(workflow_env)
         # Keep the caller's git config (signing, hooks) out of the fixture repo.
-        env = {**os.environ, **step_env, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        # The step's env is the STEP's: handing it to git init/add/commit as well
+        # would let a key that only breaks the step build a matching fixture, and
+        # the run would pass on both halves being wrong together.
+        fixture_env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
         git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-C", str(tmp)]
-        subprocess.run([*git, "init", "-q"], check=True, env=env)
-        subprocess.run([*git, "add", "."], check=True, env=env)
-        subprocess.run([*git, "commit", "-q", "-m", "init"], check=True, env=env)
+        subprocess.run([*git, "init", "-q"], check=True, env=fixture_env)
+        subprocess.run([*git, "add", "."], check=True, env=fixture_env)
+        subprocess.run([*git, "commit", "-q", "-m", "init"], check=True, env=fixture_env)
         change(work)
         result = subprocess.run(
-            ["bash", "-e", "-c", self.step["run"]], cwd=work, env=env, capture_output=True, text=True
+            ["bash", "-e", "-c", self.step["run"]],
+            cwd=work,
+            env={**fixture_env, **step_env},
+            capture_output=True,
+            text=True,
         )
         return result.returncode
 
     def test_an_unchanged_directory_passes(self):
         self.assertEqual(self._run(lambda work: None), 0)
+
+    def test_the_step_runs_with_the_env_the_workflow_gives_it(self):
+        """Dropping the merged step env from _run must not pass unnoticed.
+
+        The committed workflow sets no env this step reads, so the merge is
+        invisible on its own: without an override, removing it changes nothing.
+        A synthetic workflow env pointing git at an index file that does not
+        exist makes it visible - every tracked file then reads as untracked, so
+        `git status --porcelain --ignored` is non-empty and the step fails on a
+        directory it would otherwise pass.
+        """
+        self.assertEqual(self._run(lambda work: None), 0)
+        self.assertNotEqual(
+            self._run(lambda work: None, workflow_env={"GIT_INDEX_FILE": "no-such-index"}),
+            0,
+        )
+
+    def test_the_committed_workflow_leaves_the_fixtures_own_keys_alone(self):
+        # Asserted on its own, not only as a side effect of a run: PATH, HOME and
+        # GIT_* are how the step and the fixture repo are reached at all.
+        self._committed_step_env()
+
+    def test_the_guard_on_the_fixtures_own_keys_can_fail(self):
+        # The committed env for this step is empty, so the loop in
+        # _committed_step_env never runs against real data and the test above
+        # would pass with the guard deleted. Drive it directly instead.
+        for key in ("PATH", "HOME", "GIT_CONFIG_GLOBAL", "GIT_DIR"):
+            with self.subTest(key=key):
+                workflow = _audit_workflow()
+                workflow["env"] = {**(workflow.get("env") or {}), key: "x"}
+                job = workflow["jobs"]["lock-freshness"]
+                step_env = _step_env(workflow, job, self.step)
+                with self.assertRaises(AssertionError):
+                    for name in step_env:
+                        assert name not in ("PATH", "HOME") and not name.startswith(
+                            "GIT_"
+                        ), f"workflow env sets {name}"
+
+    def test_the_step_looks_at_the_whole_directory(self):
+        # `-- .` and nothing narrower. An exclude pathspec is the one-line edit
+        # that keeps every assertion above green while hiding a real change.
+        run = self.step["run"]
+        self.assertIn("-- .", run)
+        for narrowing in (":(exclude)", ":!", "--exclude", ":(glob)"):
+            self.assertNotIn(narrowing, run)
+        self.assertIn("--ignored", run)
+        # And no pipe. `git status --porcelain --ignored -- . | grep -v
+        # requirements-dev` satisfies every assertion above - the pathspec is
+        # untouched - while hiding a change to the dev lock. grep exiting 1 on no
+        # match is harmless here, because the substitution sits in an `if`
+        # condition where errexit is suspended.
+        self.assertNotIn("|", run)
 
     def test_a_modified_new_deleted_or_ignored_file_fails(self):
         def ignored(work):
@@ -819,6 +900,14 @@ class TestLockChangedStep(unittest.TestCase):
             lambda work: (work / "requirements.txt").write_text("b\n"),
             lambda work: (work / "requirements-new.txt").write_text("b\n"),
             lambda work: (work / "requirements.txt").unlink(),
+            # Other extensions too, so no case leaves an exclude pathspec room
+            # to pass by covering only `*.txt`.
+            # The DEV lock: one of the two this job exists to police, and the
+            # one a `| grep -v requirements-dev` filter would hide.
+            lambda work: (work / "requirements-dev.txt").write_text("b\n"),
+            lambda work: (work / "requirements.in").write_text("b\n"),
+            lambda work: (work / "main.py").write_text("x = 2\n"),
+            lambda work: (work / "notes.md").write_text("b\n"),
             ignored,
         ]:
             with self.subTest(change=change):
