@@ -412,6 +412,12 @@ Agent(   # 2. mutation — its survivors are residue, not blockers
 
             Guarantees this change must hold: <G1…Gn, one line each>.
 
+            Edit ONLY the executable half of the diff — the module, script
+            or config the PR changes. Never edit prose (documentation,
+            CLAUDE.md, any normative text) and never edit the tests or
+            fixtures themselves: nothing covers those, so such a mutation
+            survives by construction and its survival says nothing.
+
             A mutation counts ONLY if it violates a named guarantee. Harness
             identity (can the code tell it is under test) is out of scope.
             Label each survivor test-durability or unfalsifiable, and say
@@ -461,9 +467,16 @@ block, so each stands in for production code, **each under its own condition**:
   than into this loop.
 
 **The mutation reviewer works on the executable half only** — the module, script
-or config — never on prose or on the tests themselves, because no suite covers
-those and every such mutation would survive by construction. For the same reason
-the 10× backstop counts only that half as the production diff.
+or config — never on prose or on the tests themselves. What decides the two lists
+is whether a suite in this repo would catch the break: with none, every mutation
+survives by construction and the survivor says nothing about the change. That is
+why `config` sits in the executable half and prose does not — the workflow YAML
+and the gateway lockfiles are config a suite does exercise
+(`backend/tests/test_security_scan_workflow.py` executes the Security Scan step
+bodies; `services/mcp_oauth_gateway/test_lockfiles.py` runs the audit workflow's
+scripts and pins the locks), so they are mutable. Config no suite exercises is
+prose for this purpose, whatever its file extension. For the same reason the 10×
+backstop counts only that half as the production diff.
 
 Address every finding labelled `production-defect`. Then run another round
 (briefing both reviewers on what changed between rounds).
@@ -476,7 +489,10 @@ than the change. Only `production-defect` blocks: log **both** other classes —
 every surviving `test-durability` and `unfalsifiable` finding — as **one**
 `small-fix`-tagged Task node in the Corp planning graph, one node for the whole
 residue, attached in the same write per item 3 of MCP-first planning, and merge.
-A "meaningful gap" in the tests is a `test-durability`
+If the planning MCP is unreachable, that does not hold the merge and it does not
+license dropping the residue: record it in the PR body under its own heading and
+flag it to the owner so it can be captured in the graph later, as step 5b does
+for a pre-existing issue. A "meaningful gap" in the tests is a `test-durability`
 finding and goes to that node, not into this loop. A round that comes back with
 its findings unlabelled is not a completed round — ask the reviewers for the
 labels rather than guessing them — but it counts toward the ten-round backstop
@@ -505,6 +521,12 @@ threshold. Check the backstops only when the round just read left a
 
 Tripping one does not mean the loop was wrong; it means the cost should be
 visible while it is being paid.
+
+**These three figures are restated outside this repo.** The orchestration
+guidance that drives these sessions carries its own copy of the ten rounds, the
+10×/500-line ratio and the 3× cost multiple. Change one here and change it there
+in the same turn; two copies that disagree about when a loop must stop are worse
+than one, because each side can cite a rule for carrying on.
 
 **Review the fixes, not just the original change.** A round that only fixes what
 the previous round found is not reviewed. Fixes are written under time pressure
@@ -607,8 +629,10 @@ Merge only when **all** of the following are true:
 - [ ] CI is green on the PR (not red, not pending)
 - [ ] Review loop has reached its termination criterion (last round raised no
       `production-defect`; **both** residue classes — test-durability and
-      unfalsifiable — logged as one follow-up node), and the LAST round reviewed
-      the fixes rather than only the original change
+      unfalsifiable — logged as one follow-up node, or recorded in the PR body
+      and flagged to the owner where the planning MCP is unreachable, per step
+      8), and the LAST round reviewed the fixes rather than only the original
+      change
 - [ ] Documentation affected by the change is updated in the same PR (see the
       Documentation section for which files map to which changes)
 - [ ] No debug artifacts in the diff (`print`, `pdb`, hardcoded credentials)
