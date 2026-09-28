@@ -467,16 +467,25 @@ block, so each stands in for production code, **each under its own condition**:
   than into this loop.
 
 **The mutation reviewer works on the executable half only** — the module, script
-or config — never on prose or on the tests themselves. What decides the two lists
-is whether a suite in this repo would catch the break: with none, every mutation
-survives by construction and the survivor says nothing about the change. That is
-why `config` sits in the executable half and prose does not — the workflow YAML
-and the gateway lockfiles are config a suite does exercise
-(`backend/tests/test_security_scan_workflow.py` executes the Security Scan step
-bodies; `services/mcp_oauth_gateway/test_lockfiles.py` runs the audit workflow's
-scripts and pins the locks), so they are mutable. Config no suite exercises is
-prose for this purpose, whatever its file extension. For the same reason the 10×
-backstop counts only that half as the production diff.
+or config — never on prose or on the tests themselves. Each of the three has its
+own reason, and "no suite covers it" is not one of them: a few `CLAUDE.md`
+sentences are pinned by `backend/tests/test_ci_gate_semantics.py` and
+`backend/tests/test_ci_e2e_jobs.py`, so mutating one goes red and still proves
+nothing about the change.
+
+- **Prose is out** because the correctness reviewer already judges it, under the
+  Text bullet above. A mutation buys a second opinion on the same question.
+- **The tests are out** because mutating the artifact you then ask the suite
+  about is a question with no referent — the same reason a PR that changes no
+  executable code gets no mutation reviewer at all.
+- **`config` is in** because it is what actually runs, and the suites exist to
+  catch a break in it: `backend/tests/test_security_scan_workflow.py` executes
+  the Security Scan step bodies, and
+  `services/mcp_oauth_gateway/test_lockfiles.py` runs the audit workflow's
+  scripts and pins the locks. A survivor there is a real gap in a real check.
+
+For the same reason the 10× backstop counts only the executable half as the
+production diff.
 
 Address every finding labelled `production-defect`. Then run another round
 (briefing both reviewers on what changed between rounds).
@@ -522,11 +531,14 @@ threshold. Check the backstops only when the round just read left a
 Tripping one does not mean the loop was wrong; it means the cost should be
 visible while it is being paid.
 
-**These three figures are restated outside this repo.** The orchestration
-guidance that drives these sessions carries its own copy of the ten rounds, the
-10×/500-line ratio and the 3× cost multiple. Change one here and change it there
-in the same turn; two copies that disagree about when a loop must stop are worse
-than one, because each side can cite a rule for carrying on.
+**This is not the only copy of these figures.** The orchestration guidance that
+drives these sessions restates them and points back here. So changing a threshold
+is a two-place edit: change it there in the same turn, or the two disagree about
+when a loop must stop and each side can cite a rule for carrying on. If that
+guidance is not reachable from the session — it lives outside this repo, so
+usually it is not — do not change the figures here alone: say so and flag it to
+the owner, as step 5b does for anything else that has to be recorded elsewhere.
+Nothing mechanical keeps the copies in step, which is why this says so out loud.
 
 **Review the fixes, not just the original change.** A round that only fixes what
 the previous round found is not reviewed. Fixes are written under time pressure
