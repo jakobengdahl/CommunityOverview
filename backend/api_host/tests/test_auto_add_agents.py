@@ -275,24 +275,38 @@ class TestGateActionAndTarget:
         assert resp.status_code == 200
         assert hook.seen == [(GRAPH_ACTION_MUTATE, _REMOVE_TARGET)]
 
-    def test_targets_are_the_mcp_tool_names_for_the_same_operations(self):
-        # The contract (docs/SESSION_OVERLAY_CONTRACT.md §14) says the target is
-        # the tool or route name, and that an operation reachable over both
-        # transports asks with one name. Read the names off the MCP registration
-        # rather than repeating them, so renaming a tool fails here instead of
-        # silently splitting a hosted hook's view of the operation in two.
+    @pytest.mark.parametrize(
+        "target,action,kwargs",
+        [
+            (_CREATE_TARGET, GRAPH_ACTION_MUTATE, {"node_types": ["Actor"]}),
+            (_LIST_TARGET, GRAPH_ACTION_READ, {}),
+            (_REMOVE_TARGET, GRAPH_ACTION_MUTATE, {"agent_id": "a-1"}),
+        ],
+    )
+    def test_the_mcp_twin_asks_the_gate_with_the_same_target(
+        self, target, action, kwargs
+    ):
+        """The contract (docs/SESSION_OVERLAY_CONTRACT.md §14) says the target is
+        the tool or route name, and that an operation reachable over both
+        transports asks with ONE name. So it is not enough that a tool of this
+        name exists: the tool has to ask the hook with it, which is what a hosted
+        hook keyed on target actually sees. Asserting only registration let the
+        MCP side's own target drift while this file stayed green.
+        """
+        hook = RecordingHook()
         mcp = Mock()
         mcp.tool = MagicMock(return_value=lambda f: f)
         tools_map = register_mcp_tools(
             mcp,
-            GraphService(GraphStorage()),
+            GraphService(GraphStorage(), authorization_hook=hook),
             session_registry=SessionRegistry(),
             auto_add_registry=SessionAutoAddRegistry(),
         )
 
-        for target in (_CREATE_TARGET, _LIST_TARGET, _REMOVE_TARGET):
-            assert target in tools_map, f"no MCP tool named {target!r}"
-        assert len({_CREATE_TARGET, _LIST_TARGET, _REMOVE_TARGET}) == 3
+        assert target in tools_map, f"no MCP tool named {target!r}"
+        tools_map[target](SESSION, **kwargs)
+
+        assert hook.seen == [(action, target)]
 
 
 class TestMalformedIdBeforeGate:
