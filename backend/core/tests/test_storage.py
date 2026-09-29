@@ -751,6 +751,179 @@ class TestAdoptionKeepsVectorsIfTheIndexRaises:
         assert too_wide.embedding == pytest.approx([0.1, 0.2, 0.3])
 
 
+class TestFailedAddNodesGeneratesLandedVectors:
+    """A node that lands in a failed add_nodes stays and is persisted, so it
+    gets a generated vector exactly as on success - once per call, and never
+    at the cost of the failure result the caller is owed."""
+
+    @staticmethod
+    def _recording_generation(monkeypatch, storage, fail=False):
+        calls = []
+
+        def generate(nodes):
+            calls.append([node.id for node in nodes])
+            if fail:
+                raise RuntimeError("no embedding model")
+            storage.vector_store.absorb_embeddings(
+                {node.id: [1.0, float(len(node.id))] for node in nodes}
+            )
+
+        monkeypatch.setattr(storage.vector_store, "update_nodes_embeddings", generate)
+        return calls
+
+    @staticmethod
+    def _add_existing(storage, monkeypatch):
+        monkeypatch.setattr(
+            storage.vector_store, "update_nodes_embeddings", lambda nodes: None
+        )
+        assert storage.add_nodes(
+            [Node(id="old", type=NodeType.ACTOR, name="Old")], []
+        ).success
+        monkeypatch.undo()
+
+    @staticmethod
+    def _raise_on_node(monkeypatch, storage, node_id):
+        build = storage._build_match_fields
+
+        def build_or_raise(node):
+            if node.id == node_id:
+                raise RuntimeError("index build failed")
+            return build(node)
+
+        monkeypatch.setattr(storage, "_build_match_fields", build_or_raise)
+
+    def test_a_rejected_duplicate_id_still_generates_for_the_landed_nodes(
+        self, temp_storage, monkeypatch
+    ):
+        self._add_existing(temp_storage, monkeypatch)
+        calls = self._recording_generation(monkeypatch, temp_storage)
+
+        result = temp_storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha"),
+                Node(id="bb", type=NodeType.ACTOR, name="Beta"),
+                Node(id="old", type=NodeType.ACTOR, name="Again"),
+            ],
+            [],
+        )
+
+        assert result.success is False
+        assert "already exists" in result.message
+        assert calls == [["a", "bb"]]
+        assert temp_storage.vector_store.get_vector_list("a") == pytest.approx(
+            [1.0, 1.0]
+        )
+        assert temp_storage.vector_store.get_vector_list("bb") == pytest.approx(
+            [1.0, 2.0]
+        )
+        assert temp_storage.vector_store.get_vector_list("old") is None
+
+    def test_a_raise_mid_batch_still_generates_for_the_landed_nodes(
+        self, temp_storage, monkeypatch
+    ):
+        calls = self._recording_generation(monkeypatch, temp_storage)
+        self._raise_on_node(monkeypatch, temp_storage, "boom")
+
+        result = temp_storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha"),
+                Node(id="boom", type=NodeType.ACTOR, name="Boom"),
+            ],
+            [],
+        )
+
+        assert result.success is False
+        assert "index build failed" in result.message
+        assert calls == [["a"]]
+        assert temp_storage.vector_store.get_vector_list("a") == pytest.approx(
+            [1.0, 1.0]
+        )
+
+    def test_a_raise_in_adoption_still_generates_for_the_landed_nodes(
+        self, temp_storage, monkeypatch
+    ):
+        calls = self._recording_generation(monkeypatch, temp_storage)
+
+        def refuse(nodes):
+            raise RuntimeError("index unavailable")
+
+        monkeypatch.setattr(temp_storage, "_adopt_supplied_vectors", refuse)
+
+        result = temp_storage.add_nodes(
+            [Node(id="a", type=NodeType.ACTOR, name="Alpha")], []
+        )
+
+        assert result.success is False
+        assert "index unavailable" in result.message
+        assert calls == [["a"]]
+        assert temp_storage.vector_store.get_vector_list("a") == pytest.approx(
+            [1.0, 1.0]
+        )
+
+    @pytest.mark.parametrize("edge_failure", ["missing_endpoint", "duplicate_id"])
+    def test_an_edge_failure_does_not_generate_a_second_time(
+        self, temp_storage, monkeypatch, edge_failure
+    ):
+        self._add_existing(temp_storage, monkeypatch)
+        existing = Edge(source="old", target="old", type=RelationshipType.RELATES_TO)
+        if edge_failure == "duplicate_id":
+            monkeypatch.setattr(
+                temp_storage.vector_store, "update_nodes_embeddings", lambda n: None
+            )
+            assert temp_storage.add_nodes([], [existing]).success
+            monkeypatch.undo()
+            edge = Edge(
+                id=existing.id,
+                source="a",
+                target="old",
+                type=RelationshipType.RELATES_TO,
+            )
+        else:
+            edge = Edge(source="a", target="missing", type=RelationshipType.RELATES_TO)
+        calls = self._recording_generation(monkeypatch, temp_storage)
+
+        result = temp_storage.add_nodes(
+            [Node(id="a", type=NodeType.ACTOR, name="Alpha")], [edge]
+        )
+
+        assert result.success is False
+        assert calls == [["a"]]
+        assert temp_storage.vector_store.get_vector_list("a") == pytest.approx(
+            [1.0, 1.0]
+        )
+
+    def test_a_generation_failure_on_a_failed_add_keeps_its_result(
+        self, temp_storage, monkeypatch
+    ):
+        self._add_existing(temp_storage, monkeypatch)
+        calls = self._recording_generation(monkeypatch, temp_storage, fail=True)
+
+        result = temp_storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha"),
+                Node(id="old", type=NodeType.ACTOR, name="Again"),
+            ],
+            [],
+        )
+
+        assert result.success is False
+        assert result.message == "Node with ID old already exists"
+        assert calls == [["a"]]
+        assert temp_storage.get_node("a") is not None
+        assert temp_storage.vector_store.get_vector_list("a") is None
+
+    def test_a_first_node_rejected_generates_nothing(self, temp_storage, monkeypatch):
+        self._add_existing(temp_storage, monkeypatch)
+        calls = self._recording_generation(monkeypatch, temp_storage)
+
+        result = temp_storage.add_nodes(
+            [Node(id="old", type=NodeType.ACTOR, name="Again")], []
+        )
+
+        assert result.success is False
+        assert calls == []
+
+
 class TestAdoptionSettlesSuppliedVectors:
     """On success every supplied vector leaves its node: the index holds the
     ones it accepts, and the ones it cannot use are cleared rather than left
