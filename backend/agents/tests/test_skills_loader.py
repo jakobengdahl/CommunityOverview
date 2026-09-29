@@ -1150,15 +1150,26 @@ class TestFetchTextRedirects:
 
     @pytest.mark.asyncio
     async def test_an_advertised_content_length_is_rejected_before_the_body(self):
+        """BEFORE is the whole claim, so the body must go unread.
+
+        Asserting only that it raises cannot see the ordering: moving the
+        Content-Length check after the body is read raises the same error with
+        the same message, just having buffered the body first. The recording
+        stream is what distinguishes them, and the oversize body here is
+        deliberately larger than the cap the header already blew.
+        """
         config = SkillsConfig(
             allow_external_skills=True,
             trusted_domains=["api.github.com"],
             max_skill_content_bytes=10,
         )
+        reads = []
         handler, _seen = _recording_handler(
             [
                 loader_module.httpx.Response(
-                    200, headers={"content-length": "999"}, text="short"
+                    200,
+                    headers={"content-length": "999"},
+                    stream=_recording_body(b"x" * 50, reads, "terminal"),
                 )
             ]
         )
@@ -1169,6 +1180,8 @@ class TestFetchTextRedirects:
         ):
             with pytest.raises(ValueError, match="exceeds max size"):
                 await SkillsLoader(config)._fetch_text("https://api.github.com/start")
+
+        assert reads == []
 
     @pytest.mark.asyncio
     async def test_a_redirected_response_is_cached_under_the_url_the_caller_asked_for(

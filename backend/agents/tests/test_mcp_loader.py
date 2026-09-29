@@ -583,11 +583,14 @@ class _StubHttpxModule:
         return httpx.Client(transport=self._transport, **kwargs)
 
 
-def _install_transport(monkeypatch, handler):
+def _install_transport(monkeypatch, handler, client_kwargs=None):
     """Bind `handler` as mcp_loader's transport and record what it requested.
 
     The handler is called with (request, index) so a test can script a chain
     by hop position. Returns the list the requested URLs accumulate into.
+    With `client_kwargs`, every kwarg dict the walker passes to httpx.Client
+    is appended to it, so a test can pin the client's own configuration --
+    otherwise nothing stops the timeout from growing without bound.
     """
     seen = []
 
@@ -595,9 +598,13 @@ def _install_transport(monkeypatch, handler):
         seen.append(str(request.url))
         return handler(request, len(seen) - 1)
 
-    monkeypatch.setattr(
-        mcp_loader, "httpx", _StubHttpxModule(httpx.MockTransport(recording))
-    )
+    class _Stub(_StubHttpxModule):
+        def Client(self, **kwargs):
+            if client_kwargs is not None:
+                client_kwargs.append(dict(kwargs))
+            return super().Client(**kwargs)
+
+    monkeypatch.setattr(mcp_loader, "httpx", _Stub(httpx.MockTransport(recording)))
     return seen
 
 
@@ -780,6 +787,47 @@ class TestConnectHttpInfoQuery:
         assert MCPLoader([integration])._connect_http(integration) == []
         assert seen == []
 
+    @pytest.mark.parametrize("status_code", [404, 500])
+    def test_info_endpoint_non_200_is_not_trusted_and_is_requested_once(
+        self, monkeypatch, public_dns, status_code
+    ):
+        """An error page that happens to carry an endpoints key is not discovery.
+
+        Two separate ways to get this wrong: widening the status check (>= 200)
+        makes a 404 body the tool list, and moving the loop's break inside the
+        200 branch re-requests the same error page up to the redirect cap and
+        then reports a redirect limit that was never hit.
+        """
+        seen = _install_transport(
+            monkeypatch,
+            lambda request, index: httpx.Response(
+                status_code, json={"endpoints": ["/mcp"]}
+            ),
+        )
+        integration = self._integration()
+
+        assert MCPLoader([integration])._connect_http(integration) == []
+        assert len(seen) == 1
+
+    def test_info_endpoint_client_is_configured_with_the_expected_timeout(
+        self, monkeypatch, public_dns
+    ):
+        """Discovery runs on a short timeout, and httpx must not follow hops.
+
+        MAX_REDIRECTS hops at an unbounded timeout is a hang, not a fetch.
+        """
+        client_kwargs = []
+        _install_transport(
+            monkeypatch,
+            lambda request, index: httpx.Response(200, json={"endpoints": ["/mcp"]}),
+            client_kwargs=client_kwargs,
+        )
+        integration = self._integration()
+
+        MCPLoader([integration])._connect_http(integration)
+
+        assert client_kwargs == [{"timeout": 5, "follow_redirects": False}]
+
     @pytest.mark.parametrize("internal_hop", [0, 1, 2, MAX_REDIRECTS - 2])
     def test_info_endpoint_every_redirect_hop_is_revalidated(
         self, monkeypatch, public_dns, internal_hop
@@ -839,7 +887,10 @@ class TestConnectHttpInfoQuery:
         ["http://example.com/info", "/info", "info"],
         ids=["absolute", "root-relative", "path-relative"],
     )
-    @pytest.mark.parametrize("status_code", [301, 302, 307])
+    # Every status httpx itself treats as a redirect. A walker that keyed on
+    # a narrower set (say 301/302/307) would silently DROP a 303 or 308 hop and
+    # report no tools, which follow_redirects=True on main did follow.
+    @pytest.mark.parametrize("status_code", [301, 302, 303, 307, 308])
     def test_info_endpoint_redirect_cap_is_the_shared_limit(
         self, monkeypatch, public_dns, location, status_code
     ):
@@ -1102,7 +1153,10 @@ class TestFetchToolSSRFGuard:
         ["http://example.com/next", "/next", "next"],
         ids=["absolute", "root-relative", "path-relative"],
     )
-    @pytest.mark.parametrize("status_code", [301, 302, 307])
+    # Every status httpx itself treats as a redirect. A walker that keyed on
+    # a narrower set (say 301/302/307) would silently DROP a 303 or 308 hop and
+    # report no tools, which follow_redirects=True on main did follow.
+    @pytest.mark.parametrize("status_code", [301, 302, 303, 307, 308])
     def test_redirect_chain_stops_at_the_shared_cap_with_an_explicit_error(
         self, monkeypatch, public_dns, location, status_code
     ):
@@ -1137,6 +1191,39 @@ class TestFetchToolSSRFGuard:
 
         assert result == {"error": "Redirect without a Location header"}
         assert len(seen) == 1
+
+    @pytest.mark.parametrize("status_code", [404, 500])
+    def test_a_terminal_error_status_is_an_error_not_content(
+        self, monkeypatch, public_dns, status_code
+    ):
+        """raise_for_status still runs, so an error page is never handed back.
+
+        Without it the tool answers {"status": 404, "content": "<error page>"}
+        and an agent reads the error page as if it were the page it asked for.
+        """
+        _install_transport(
+            monkeypatch,
+            lambda request, index: httpx.Response(status_code, text="<html>nope"),
+        )
+
+        result = self._fetch()
+
+        assert "error" in result
+        assert "content" not in result
+
+    def test_fetch_client_is_configured_with_the_expected_timeout(
+        self, monkeypatch, public_dns
+    ):
+        client_kwargs = []
+        _install_transport(
+            monkeypatch,
+            lambda request, index: httpx.Response(200, text="ok"),
+            client_kwargs=client_kwargs,
+        )
+
+        self._fetch()
+
+        assert client_kwargs == [{"timeout": 30, "follow_redirects": False}]
 
     def test_body_over_max_length_is_truncated(self, monkeypatch, public_dns):
         """The size cap on the returned content still applies after the rewrite."""
