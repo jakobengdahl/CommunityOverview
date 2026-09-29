@@ -77,8 +77,11 @@ round. It does not implement anything.
 - **Graph identity is thin.** `default_graph_name()` is the file stem for
   the file backend. For PostgreSQL it is the constructor's `graph_name`,
   which `build_persistence_backend` never sets, so it is always `"graph"`.
-  What separates instances that share one PostgreSQL store is the optional
-  row scope (`GRAPH_POSTGRES_SCOPE`, see `PERSISTENCE_BACKENDS.md`).
+  What separates PostgreSQL graphs is the schema (`GRAPH_POSTGRES_SCHEMA`:
+  one database can hold several graphs, one per schema). Inside one schema,
+  the optional row scope (`GRAPH_POSTGRES_SCOPE`) separates instances, and an
+  unscoped instance sees only the rows that carry no scope
+  (`PERSISTENCE_BACKENDS.md`).
 - **Adoption makes a local copy.** Adopting a federated node creates a new
   local node with its own id, plus a local reference node that keeps the
   `federated::…` id (`adopt_federated_node` in
@@ -235,26 +238,44 @@ Rules for readers and deleters:
   whatever exists on disk.
 - A record with no blob must never be observable. `delete` therefore rewrites
   the index without the record first, and only then removes the blob.
-- `delete` and `delete_node` take the same per-node lock as `commit`. A
-  commit racing a node delete therefore either completes before the
-  directory is removed (and is removed with it), or finds the node gone in
-  its precondition.
+- `delete` and `delete_node` take the same per-node lock as `commit`.
+  Within one instance, a commit racing a node delete therefore either
+  completes before the directory is removed (and is removed with it), or
+  finds the node gone in its precondition.
+- Across instances, the precondition reads that instance's in-memory graph,
+  which learns of another instance's delete only asynchronously. A commit
+  can therefore land just after another instance's `delete_node` and
+  recreate the directory. The result is an orphan node directory (§8): a
+  file the graph no longer references, never a live node that has lost its
+  files.
 - `iter_nodes` exists for reconciliation and validation (§8, §10), not for
   request handling.
 
-`namespace` separates graphs that share one attachment root. The service
-layer uses the persistence backend's `default_graph_name()`: the file stem
-for the file backend, and `"graph"` for PostgreSQL today.
+`namespace` separates graphs that share one attachment root. It is the
+`ATTACHMENT_NAMESPACE` setting, which defaults to:
 
-The PostgreSQL row scope is deliberately **not** part of the namespace. Node
-`id` is the primary key of the whole table, not of one scope
+- **file backend:** the graph file's stem, the persistence backend's
+  `default_graph_name()`;
+- **PostgreSQL backend:** `pg:<GRAPH_POSTGRES_SCHEMA>`, because the schema,
+  not the graph name (always `"graph"` today), is what tells PostgreSQL
+  graphs apart.
+
+**One namespace per graph.** Every graph whose files share an attachment
+root must have a distinct namespace. Where the defaults would collide — two
+file-backed graphs with the same stem, or two databases that use the same
+schema name — the operator sets `ATTACHMENT_NAMESPACE` explicitly. A graph
+keeps its namespace for life, because changing it detaches every stored
+file.
+
+**Why the row scope is not part of the namespace.** Node `id` is the primary
+key of the whole table in a schema, not of one scope
 (`CrossScopeWriteRefused` in `backend/core/postgres_backend.py`), so node
-ids cannot collide between scopes. A row with no scope is visible to every
-scope, so a scope-qualified namespace would give one shared node a separate
-attachment set per scope. Isolation between scopes comes from §7 instead:
-every route resolves the node through the instance's own storage and
-visibility check before it touches the store, so an instance never reaches
-the files of a node it cannot see.
+ids cannot collide between scopes. A row with no scope is shared, and a
+scope-qualified namespace would give one shared node a separate attachment
+set per scope. Isolation between scopes comes from §7 instead: every route
+resolves the node through the instance's own storage and visibility check
+before it touches the store, so an instance never reaches the files of a
+node it cannot see.
 
 Backend selection follows the persistence backend's pattern:
 
@@ -526,7 +547,7 @@ changing this design.
   touched. Nodes that do not survive the import leave orphan node
   directories. They are not deleted automatically, because the import may be
   the restore of a backup that brings those nodes back.
-- **Two kinds of orphan:**
+- **Three kinds of leftover:**
   - an *orphan node directory* — its `node_id` is not in the graph;
   - an *unindexed node directory* — a `<node_key>/` with blobs but no
     `index.json`. A crash between a node's first blob move and its first
@@ -536,10 +557,9 @@ changing this design.
 - **The start-up sweep** removes only entries in `.tmp/` whose modification
   time is more than one hour old (§11). An upload in flight on another
   instance that shares the root keeps writing, and so keeps its mtime fresh.
-- **The reconcile routine** (the validator in §10, run with `--prune`) reports
-  both kinds of orphan. It deletes orphan node directories and unindexed
-  blobs only when asked, and only blobs older than one hour, so it can never
-  race an in-flight commit.
+- **The reconcile routine** is the validator in §10. It reports all three
+  kinds of leftover. It deletes them only when asked, under the guards in
+  §10.
 
 ### 9. Federation
 
@@ -565,8 +585,9 @@ the wrong default for an export.
 file backend:
 
 ```
-python scripts/validate_attachments.py --attachments <root> --graph <graph.json or GET /export output>
-                                       --namespace <ns> [--strict] [--prune]
+python scripts/validate_attachments.py --attachments <root> --namespace <ns>
+                                       --graph <GET /export output> [--graph <...> ...]
+                                       [--strict] [--prune] [--prune-orphan-nodes]
 ```
 
 It walks every node directory in the one namespace given (the argument is
@@ -590,24 +611,28 @@ finding plus a summary, so a backup or restore job can log it verbatim.
 (§8), and a restored attachment set is often newer or older than the graph it
 is checked against.
 
-**`--graph` must be a complete view.** It must list every node that can own
-files in the namespace:
+**`--graph` may be repeated.** The orphan check uses the union of the node
+ids in every `--graph` given. Each should be `GET /export` output from a
+caller whose authorization is not narrowed. `GET /export` serves the
+in-memory graph, so it includes mutations still sitting in the file
+backend's journal, which `graph.json` alone may not yet contain.
 
-- `graph.json` itself;
-- or `GET /export` from a caller whose authorization is not narrowed, served
-  by an instance with no row scope when the store is PostgreSQL, since the
-  namespace spans every scope (§1).
+For a PostgreSQL schema with row scopes, no single instance sees every
+scope: an unscoped instance sees only unscoped rows. The operator therefore
+passes one export per scope, plus one from an unscoped instance. A view that
+misses nodes only produces false orphan *warnings*, which is why deleting
+orphan node directories needs its own flag (below).
 
-A narrowed or scoped export hides nodes, and they would look like orphans.
+**Pruning.** It never touches anything classed as an error, and comes in two
+flags:
 
-**`--prune`.** It deletes the warnings' subjects, under these guards:
-
-- Unindexed blobs, and unindexed node directories, are deleted only when
-  every file in them is more than one hour old.
-- An orphan node directory is deleted only when its `index.json` was last
-  modified before the `--graph` file was. A node created after the graph
-  was written is therefore never pruned as an orphan.
-- It never touches anything classed as an error.
+- **`--prune`** deletes unindexed blobs and unindexed node directories, and
+  only when every file in them is more than one hour old. These need no
+  graph at all to be judged, so they are safe whatever `--graph` covers.
+- **`--prune-orphan-nodes`** also deletes orphan node directories, and only
+  those whose `index.json` was last modified before the oldest `--graph`
+  file. It is a separate, explicit opt-in because its safety depends on the
+  `--graph` set being complete, which the validator cannot check.
 
 **Backup.** An operator backup copies the attachment root to a timestamped,
 write-once location, on its own schedule rather than with the graph's,
@@ -630,7 +655,8 @@ still has errors, the job fails and keeps the validator output. A corrupt
 index is not something a retry can fix.
 
 **Restore.** Restore extracts into an empty directory, runs the validator
-against the graph that will be live, and only then swaps the directory into
+against the graph that will be live (its `GET /export`, or, while that graph
+is itself still a restored file not yet served, the file), and only then swaps the directory into
 place.
 
 ### 11. File-backend layout
@@ -661,8 +687,8 @@ data/active/
   a root therefore never interleave commits and deletes on one node.
 - With the PostgreSQL graph backend there is no graph file to sit beside.
   `ATTACHMENT_DIR` is therefore required, and is refused at boot if unset.
-- All instances serving one PostgreSQL store, whatever their scopes, must
-  share the attachment root, or use a backend that is itself shared. A per-instance
+- All instances serving one PostgreSQL schema, whatever their row scopes,
+  must share the attachment root, or use a backend that is itself shared. A per-instance
   local directory would silently give each instance a different set of
   files.
 
