@@ -212,12 +212,11 @@ class MCPLoader:
             # they are listed explicitly to preserve that behaviour. The SSRF
             # refusals above are ValueErrors and join that degrade-to-no-tools
             # path: a server that cannot be reached safely discovers no tools.
-            # InvalidURL stays listed because is_safe_url does not reject every
-            # URL httpx refuses, and the two disagree in both directions. It
-            # fail-closes on "http://[::1/info" (urlparse raises before httpx
-            # is reached) but ACCEPTS "http://host:abc/info", whose hostname
-            # parses and resolves -- is_safe_url never looks at the port -- so
-            # httpx raises InvalidURL when it builds that initial request.
+            # InvalidURL stays listed because NOTHING screens the initial URL
+            # any more (see the comment above the walk): whatever httpx cannot
+            # build a request from -- "http://[::1/info", "http://host:abc/info"
+            # -- reaches it and raises here. is_safe_url is not consulted on
+            # that URL at all, so it cannot fail those closed first.
             # A server-controlled Location httpx cannot parse is NOT InvalidURL:
             # httpx wraps it as RemoteProtocolError, already an httpx.RequestError.
             logger.warning(f"Could not query {integration.id} info: {e}")

@@ -631,6 +631,14 @@ def public_dns(monkeypatch):
     )
 
 
+# Every status that carries a redirect Location. The hop guards sit inside
+# `if response.is_redirect:`, which spans the whole 3xx range, so a guard made
+# conditional on the status is a one-word edit -- and a suite whose safety
+# tests all script 302 cannot see it. The cap tests already vary this; these
+# are the tests that assert a hop is REFUSED, which matters more.
+REDIRECT_STATUSES = [301, 302, 303, 307, 308]
+
+
 def _redirect(location, status_code=302):
     return httpx.Response(status_code, headers={"location": location})
 
@@ -705,11 +713,11 @@ class TestConnectHttpInfoQuery:
     def test_info_endpoint_malformed_url_is_swallowed(self, monkeypatch):
         """A malformed configured URL must not escape _connect_http.
 
-        It is now refused by the pre-request is_safe_url check rather than by
-        httpx: urlparse raises ValueError on the unclosed bracket and
-        is_safe_url catches that fail-closed. Either way _connect_http must
-        degrade to an empty tool list, and the transport asserts that no
-        request was attempted.
+        The configured URL is no longer address-checked, so is_safe_url is not
+        consulted here at all -- httpx refuses the unclosed bracket when it
+        builds the request, and httpx.InvalidURL is not a ValueError subclass.
+        _connect_http must still degrade to an empty tool list, and the
+        transport asserts no request reached the network.
         """
 
         def handler(request, index):  # pragma: no cover - must not be reached
@@ -724,19 +732,15 @@ class TestConnectHttpInfoQuery:
         assert seen == []
 
     def test_info_endpoint_url_httpx_rejects_is_swallowed(self, monkeypatch):
-        """is_safe_url and httpx disagree about which URLs are malformed.
+        """A second URL shape httpx cannot build a request from.
 
-        "http://example.com:abc/info" has a hostname that parses and resolves,
-        and is_safe_url never looks at the port, so it returns True and the
-        walk proceeds -- only for httpx to raise InvalidURL when it builds the
-        request. InvalidURL is not a ValueError subclass, so dropping it from
-        _connect_http's except tuple makes that escape to the caller. This
-        pins the clause the malformed-IPv6 test above no longer reaches.
+        A bad port rather than a bad bracket, so the two tests cover different
+        httpx parse failures; neither consults is_safe_url, which is not
+        applied to the configured URL. What both pin is the httpx.InvalidURL
+        entry in _connect_http's except tuple -- it is not a ValueError
+        subclass, so removing it makes the error escape to the caller for an
+        operator URL that is merely mistyped.
         """
-        monkeypatch.setattr(
-            "backend.core.events.delivery.socket.getaddrinfo",
-            lambda *args, **kwargs: _addrinfo(),
-        )
 
         def handler(request, index):  # pragma: no cover - httpx refuses first
             raise AssertionError(
@@ -815,6 +819,8 @@ class TestConnectHttpInfoQuery:
             for integration in AgentsSettings._get_default_integrations()
             if integration.id == "GRAPH"
         )
+        # Read the real default rather than restating it. PORT is env-driven,
+        # so the expected URL is derived from it below, not written out.
         assert default_graph.url.startswith("http://localhost:"), default_graph.url
 
         seen = _install_transport(
@@ -826,7 +832,52 @@ class TestConnectHttpInfoQuery:
         tools = MCPLoader([integration])._connect_http(integration)
 
         assert [tool.original_name for tool in tools]
-        assert seen == ["http://localhost:8000/info"]
+        expected_base = default_graph.url.replace("/sse", "").replace("/mcp", "")
+        assert seen == [f"{expected_base}/info"]
+
+    def test_graph_falls_back_to_its_known_tools_when_discovery_fails(
+        self, monkeypatch, public_dns
+    ):
+        """The GRAPH fallback is what keeps the default install working.
+
+        Every other test here uses id="WEB" precisely so the fallback cannot
+        mask a discovery regression -- which left the fallback itself with no
+        coverage at all. Deleting it would give the shipped GRAPH integration
+        zero tools whenever /info is unreachable, which is its normal state
+        before the graph service is up.
+        """
+
+        def handler(request, index):
+            raise httpx.ConnectError("refused", request=request)
+
+        _install_transport(monkeypatch, handler)
+        integration = MCPIntegration(
+            id="GRAPH",
+            name="Graph API",
+            transport=MCPTransport.HTTP,
+            url="http://localhost:8000/mcp/sse",
+        )
+
+        tools = MCPLoader([integration])._connect_http(integration)
+
+        assert [tool.original_name for tool in tools]
+
+    def test_a_connection_is_recorded_even_when_nothing_is_discovered(
+        self, monkeypatch, public_dns
+    ):
+        """_connections is the handle disconnect_all() and is_connected() use.
+
+        An HTTP integration that discovers no tools is still a connection on
+        main, so dropping the bookkeeping would silently orphan it.
+        """
+        _install_transport(
+            monkeypatch, lambda request, index: httpx.Response(404, text="nope")
+        )
+        integration = self._integration()
+        loader = MCPLoader([integration])
+
+        assert loader._connect_http(integration) == []
+        assert "WEB" in loader._connections
 
     def test_a_configured_internal_address_still_gets_its_hops_checked(
         self, monkeypatch
@@ -988,6 +1039,48 @@ class TestConnectHttpInfoQuery:
 
         assert MCPLoader([integration])._connect_http(integration) == []
 
+    @pytest.mark.parametrize("status_code", REDIRECT_STATUSES)
+    def test_info_endpoint_hop_is_address_checked_on_every_redirect_status(
+        self, monkeypatch, public_dns, status_code
+    ):
+        """The guard cannot depend on WHICH 3xx carried the Location."""
+        seen = _install_transport(
+            monkeypatch,
+            lambda request, index: _redirect(INTERNAL_TARGETS[0], status_code),
+        )
+        integration = self._integration()
+
+        assert MCPLoader([integration])._connect_http(integration) == []
+        assert seen == ["http://example.com/info"]
+
+    @pytest.mark.parametrize("status_code", REDIRECT_STATUSES)
+    def test_info_endpoint_redirect_body_is_never_read_on_any_status(
+        self, monkeypatch, public_dns, status_code
+    ):
+        """The memory bound cannot depend on the status either."""
+        reads = []
+
+        def handler(request, index):
+            if index == 0:
+                return httpx.Response(
+                    status_code,
+                    headers={"location": "http://cdn.example.com/x"},
+                    stream=_recording_body(b"filler", reads, "redirect"),
+                )
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                stream=_recording_body(b'{"endpoints": ["/mcp"]}', reads, "terminal"),
+            )
+
+        _install_transport(monkeypatch, handler)
+        integration = self._integration()
+
+        assert [
+            t.original_name for t in MCPLoader([integration])._connect_http(integration)
+        ]
+        assert reads == ["terminal"]
+
     def test_info_endpoint_relative_location_resolves_against_the_current_url(
         self, monkeypatch, public_dns
     ):
@@ -1045,14 +1138,16 @@ class TestConnectHttpInfoQuery:
         assert MCPLoader([integration])._connect_http(integration) == []
         assert len(seen) == delivery.MAX_REDIRECTS
 
+    @pytest.mark.parametrize("status_code", REDIRECT_STATUSES)
     @pytest.mark.parametrize("headers", [{}, {"location": ""}], ids=["absent", "empty"])
     def test_info_endpoint_redirect_without_a_location_is_refused(
-        self, monkeypatch, public_dns, headers
+        self, monkeypatch, public_dns, headers, status_code
     ):
         """urljoin("", current) is current, so an empty Location used to
         re-request the same URL until the cap ran out."""
         seen = _install_transport(
-            monkeypatch, lambda request, index: httpx.Response(302, headers=headers)
+            monkeypatch,
+            lambda request, index: httpx.Response(status_code, headers=headers),
         )
         integration = self._integration()
 
@@ -1331,6 +1426,47 @@ class TestFetchToolSSRFGuard:
 
         assert self._fetch(max_length=10)["content"] == "x" * 10
 
+    @pytest.mark.parametrize("status_code", REDIRECT_STATUSES)
+    def test_hop_is_address_checked_on_every_redirect_status(
+        self, monkeypatch, public_dns, status_code
+    ):
+        """The guard cannot depend on WHICH 3xx carried the Location.
+
+        This walker hands the body back to the agent, so a status-conditional
+        guard here leaks the internal response rather than merely fetching it.
+        """
+        seen = _install_transport(
+            monkeypatch,
+            lambda request, index: _redirect(INTERNAL_TARGETS[0], status_code),
+        )
+
+        result = self._fetch()
+
+        assert result == {"error": "Redirected to unsafe URL"}
+        assert seen == ["http://example.com/start"]
+
+    @pytest.mark.parametrize("status_code", REDIRECT_STATUSES)
+    def test_redirect_body_is_never_read_on_any_status(
+        self, monkeypatch, public_dns, status_code
+    ):
+        reads = []
+
+        def handler(request, index):
+            if index == 0:
+                return httpx.Response(
+                    status_code,
+                    headers={"location": "http://example.com/final"},
+                    stream=_recording_body(b"y" * 5000, reads, "redirect"),
+                )
+            return httpx.Response(
+                200, stream=_recording_body(b"<html>final", reads, "terminal")
+            )
+
+        _install_transport(monkeypatch, handler)
+
+        assert self._fetch()["content"] == "<html>final"
+        assert reads == ["terminal"]
+
     def test_relative_location_resolves_against_the_current_url(
         self, monkeypatch, public_dns
     ):
@@ -1393,14 +1529,16 @@ class TestFetchToolSSRFGuard:
         assert result == {"error": f"Too many redirects (limit {MAX_REDIRECTS})"}
         assert len(seen) == delivery.MAX_REDIRECTS
 
+    @pytest.mark.parametrize("status_code", REDIRECT_STATUSES)
     @pytest.mark.parametrize("headers", [{}, {"location": ""}], ids=["absent", "empty"])
     def test_a_redirect_without_a_location_is_refused_not_spun_to_the_cap(
-        self, monkeypatch, public_dns, headers
+        self, monkeypatch, public_dns, headers, status_code
     ):
         """urljoin of an empty Location is the current URL, so it used to be
         re-requested until the redirect cap ran out."""
         seen = _install_transport(
-            monkeypatch, lambda request, index: httpx.Response(302, headers=headers)
+            monkeypatch,
+            lambda request, index: httpx.Response(status_code, headers=headers),
         )
 
         result = self._fetch()

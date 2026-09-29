@@ -586,8 +586,14 @@ def _recording_handler(responses):
     return handle, seen
 
 
-def _redirect_to(location):
-    return loader_module.httpx.Response(302, headers={"location": location})
+# Every status that carries a redirect Location. is_redirect spans the whole
+# 3xx range, so a guard made conditional on the status is a one-word edit that
+# a suite scripting only 302 cannot see.
+REDIRECT_STATUSES = [301, 302, 303, 307, 308]
+
+
+def _redirect_to(location, status_code=302):
+    return loader_module.httpx.Response(status_code, headers={"location": location})
 
 
 def _ok(body="# skill"):
@@ -631,11 +637,12 @@ class TestFetchTextRedirectBodies:
         )
 
     @pytest.mark.asyncio
-    async def test_a_redirect_body_is_never_pulled_off_the_wire(self):
+    @pytest.mark.parametrize("status_code", REDIRECT_STATUSES)
+    async def test_a_redirect_body_is_never_pulled_off_the_wire(self, status_code):
         reads = []
         responses = [
             loader_module.httpx.Response(
-                302,
+                status_code,
                 headers={"location": "https://cdn.githubusercontent.com/SKILL.md"},
                 stream=_recording_body(b"x" * 10_000, reads, "redirect"),
             ),
@@ -677,8 +684,9 @@ class TestFetchTextRedirects:
         return SkillsLoader(config)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("status_code", REDIRECT_STATUSES)
     async def test_a_redirect_to_an_internal_address_is_refused_and_never_requested(
-        self,
+        self, status_code
     ):
         """Isolates the SSRF guard from the allowlist: the redirect target is
         ON the allowlist here, so only is_safe_url can refuse it.
@@ -692,7 +700,10 @@ class TestFetchTextRedirects:
             trusted_domains=["raw.githubusercontent.com", "169.254.169.254"],
         )
         handler, seen = _recording_handler(
-            [_redirect_to("http://169.254.169.254/latest/meta-data/"), _ok()]
+            [
+                _redirect_to("http://169.254.169.254/latest/meta-data/", status_code),
+                _ok(),
+            ]
         )
 
         with _mock_http(handler), _public_dns():
