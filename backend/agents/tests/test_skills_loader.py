@@ -540,9 +540,11 @@ def _public_dns():
 def _mock_http(handler, returned=None):
     """Give the loader's AsyncClient a MockTransport, keeping its own kwargs.
 
-    With `returned`, every response the client's get() hands the loader is
-    appended to it, so a test can judge what the loader saw rather than the
-    fixture it built.
+    With `returned`, every response the client hands the loader is appended to
+    it, so a test can judge what the loader saw rather than the fixture it
+    built. Both get() and stream() are wrapped: _fetch_text walks its hops
+    with stream() so a redirect body is never buffered, and a recorder that
+    only knew about get() would silently observe nothing.
     """
     real_client = loader_module.httpx.AsyncClient
 
@@ -552,13 +554,21 @@ def _mock_http(handler, returned=None):
         )
         if returned is not None:
             real_get = client.get
+            real_stream = client.stream
 
             async def recording_get(*args, **get_kwargs):
                 response = await real_get(*args, **get_kwargs)
                 returned.append(response)
                 return response
 
+            @contextlib.asynccontextmanager
+            async def recording_stream(*args, **stream_kwargs):
+                async with real_stream(*args, **stream_kwargs) as response:
+                    returned.append(response)
+                    yield response
+
             client.get = recording_get
+            client.stream = recording_stream
         return client
 
     with patch.object(loader_module.httpx, "AsyncClient", factory):
@@ -576,12 +586,87 @@ def _recording_handler(responses):
     return handle, seen
 
 
-def _redirect_to(location):
-    return loader_module.httpx.Response(302, headers={"location": location})
+# Every status that carries a redirect Location. is_redirect spans the whole
+# 3xx range, so a guard made conditional on the status is a one-word edit that
+# a suite scripting only 302 cannot see.
+REDIRECT_STATUSES = [301, 302, 303, 307, 308]
+
+# The context a hop is judged IN, as opposed to the target being judged: this
+# walker's refusal tests otherwise always start on https and never pass
+# headers, so a guard made conditional on either would not be noticed.
+START_SCHEMES = ["http", "https"]
+
+
+def _redirect_to(location, status_code=302):
+    return loader_module.httpx.Response(status_code, headers={"location": location})
 
 
 def _ok(body="# skill"):
     return loader_module.httpx.Response(200, text=body)
+
+
+def _recording_body(payload, reads, label):
+    """A response body that appends `label` to `reads` when it is iterated.
+
+    httpx only iterates a response's stream when the body is actually pulled
+    off the wire: client.get() always does, client.stream() only if the caller
+    reads it. Building the fixture with `text=` instead would leave `.content`
+    readable either way and measure nothing.
+    """
+
+    class _Stream(loader_module.httpx.AsyncByteStream):
+        async def __aiter__(self):
+            reads.append(label)
+            yield payload
+
+    return _Stream()
+
+
+class TestFetchTextRedirectBodies:
+    """The size guard bounds the final body; the walk must not buffer the rest.
+
+    A chain may carry MAX_REDIRECTS hops, so reading each hop's body to throw
+    it away puts that many full-size bodies through memory no matter what the
+    content cap says about the last one.
+    """
+
+    def _loader(self):
+        return SkillsLoader(
+            SkillsConfig(
+                allow_external_skills=True,
+                trusted_domains=[
+                    "raw.githubusercontent.com",
+                    "cdn.githubusercontent.com",
+                ],
+            )
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status_code", REDIRECT_STATUSES)
+    async def test_a_redirect_body_is_never_pulled_off_the_wire(self, status_code):
+        reads = []
+        responses = [
+            loader_module.httpx.Response(
+                status_code,
+                headers={"location": "https://cdn.githubusercontent.com/SKILL.md"},
+                stream=_recording_body(b"x" * 10_000, reads, "redirect"),
+            ),
+            loader_module.httpx.Response(
+                200, stream=_recording_body(b"# skill", reads, "terminal")
+            ),
+        ]
+        handler, seen = _recording_handler(responses)
+
+        with _mock_http(handler), _public_dns():
+            content = await self._loader()._fetch_text(
+                "https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"
+            )
+
+        assert content == "# skill"
+        assert len(seen) == 2
+        # The terminal read is asserted too, so a loader that streamed and
+        # then read nothing could not pass by returning an empty body.
+        assert reads == ["terminal"]
 
 
 class TestFetchTextRedirects:
@@ -604,8 +689,33 @@ class TestFetchTextRedirects:
         return SkillsLoader(config)
 
     @pytest.mark.asyncio
+    async def test_supplying_headers_does_not_relax_the_initial_guard(self):
+        """The caller's headers are context, not permission.
+
+        _fetch_text is called both with and without headers (the GitHub token
+        path supplies them), and every other refusal test here omits them, so
+        a guard made conditional on `headers` would go unnoticed.
+        """
+        config = SkillsConfig(
+            allow_external_skills=True,
+            trusted_domains=["169.254.169.254"],
+        )
+        handler, seen = _recording_handler([_ok()])
+
+        with _mock_http(handler):
+            with pytest.raises(ValueError, match="disallowed address"):
+                await SkillsLoader(config)._fetch_text(
+                    "http://169.254.169.254/latest/SKILL.md",
+                    headers={"Authorization": "Bearer x"},
+                )
+
+        assert seen == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("scheme", START_SCHEMES)
+    @pytest.mark.parametrize("status_code", REDIRECT_STATUSES)
     async def test_a_redirect_to_an_internal_address_is_refused_and_never_requested(
-        self,
+        self, status_code, scheme
     ):
         """Isolates the SSRF guard from the allowlist: the redirect target is
         ON the allowlist here, so only is_safe_url can refuse it.
@@ -619,13 +729,16 @@ class TestFetchTextRedirects:
             trusted_domains=["raw.githubusercontent.com", "169.254.169.254"],
         )
         handler, seen = _recording_handler(
-            [_redirect_to("http://169.254.169.254/latest/meta-data/"), _ok()]
+            [
+                _redirect_to("http://169.254.169.254/latest/meta-data/", status_code),
+                _ok(),
+            ]
         )
 
         with _mock_http(handler), _public_dns():
             with pytest.raises(ValueError, match="disallowed address"):
                 await SkillsLoader(config)._fetch_text(
-                    "https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"
+                    f"{scheme}://raw.githubusercontent.com/o/r/HEAD/SKILL.md"
                 )
 
         assert len(seen) == 1, "the internal address must never be requested"
@@ -1058,14 +1171,30 @@ class TestFetchTextRedirects:
     @pytest.mark.asyncio
     async def test_the_size_guards_apply_to_a_response_reached_through_a_redirect(self):
         """The guards moved inside the redirect loop; pin them to the final
-        response rather than to the un-redirected path."""
+        response rather than to the un-redirected path.
+
+        Matching on the message alone cannot tell the two guards apart -- the
+        body guard raises the same text -- so a walker that dropped the
+        advertised-length check for redirected responses only would pass. The
+        recording stream is what separates them: the header must reject this
+        before the body is pulled off the wire, on a redirected response just
+        as on a direct one.
+        """
         config = SkillsConfig(
             allow_external_skills=True,
             trusted_domains=["api.github.com"],
             max_skill_content_bytes=10,
         )
+        reads = []
         handler, _seen = _recording_handler(
-            [_redirect_to("https://api.github.com/final"), _ok("x" * 50)]
+            [
+                _redirect_to("https://api.github.com/final"),
+                loader_module.httpx.Response(
+                    200,
+                    headers={"content-length": "999"},
+                    stream=_recording_body(b"x" * 50, reads, "terminal"),
+                ),
+            ]
         )
 
         with (
@@ -1075,17 +1204,30 @@ class TestFetchTextRedirects:
             with pytest.raises(ValueError, match="exceeds max size"):
                 await SkillsLoader(config)._fetch_text("https://api.github.com/start")
 
+        assert reads == []
+
     @pytest.mark.asyncio
     async def test_an_advertised_content_length_is_rejected_before_the_body(self):
+        """BEFORE is the whole claim, so the body must go unread.
+
+        Asserting only that it raises cannot see the ordering: moving the
+        Content-Length check after the body is read raises the same error with
+        the same message, just having buffered the body first. The recording
+        stream is what distinguishes them, and the oversize body here is
+        deliberately larger than the cap the header already blew.
+        """
         config = SkillsConfig(
             allow_external_skills=True,
             trusted_domains=["api.github.com"],
             max_skill_content_bytes=10,
         )
+        reads = []
         handler, _seen = _recording_handler(
             [
                 loader_module.httpx.Response(
-                    200, headers={"content-length": "999"}, text="short"
+                    200,
+                    headers={"content-length": "999"},
+                    stream=_recording_body(b"x" * 50, reads, "terminal"),
                 )
             ]
         )
@@ -1096,6 +1238,8 @@ class TestFetchTextRedirects:
         ):
             with pytest.raises(ValueError, match="exceeds max size"):
                 await SkillsLoader(config)._fetch_text("https://api.github.com/start")
+
+        assert reads == []
 
     @pytest.mark.asyncio
     async def test_a_redirected_response_is_cached_under_the_url_the_caller_asked_for(
@@ -1391,6 +1535,36 @@ class TestFetchTextRemainingGuards:
         )
 
         assert await self._fetch_one(response) == ""
+
+    @pytest.mark.asyncio
+    async def test_an_advertised_length_one_over_the_cap_is_refused_unread(self):
+        """Pins the UPPER boundary, which 999-against-10 leaves wide open.
+
+        Every other case advertises a multiple of the cap, so a threshold of
+        max_bytes * 2 -- which would let a 100 KB body through on the
+        production 50 KB cap -- passes all of them.
+        """
+        reads = []
+        handler, _seen = _recording_handler(
+            [
+                loader_module.httpx.Response(
+                    200,
+                    headers={"content-length": "11"},
+                    stream=_recording_body(b"x" * 11, reads, "terminal"),
+                )
+            ]
+        )
+
+        with (
+            _mock_http(handler),
+            patch.object(loader_module, "is_safe_url", lambda _url: True),
+        ):
+            with pytest.raises(ValueError, match="exceeds max size"):
+                await self._loader(max_skill_content_bytes=10)._fetch_text(
+                    "https://api.github.com/start"
+                )
+
+        assert reads == []
 
     @pytest.mark.asyncio
     async def test_an_advertised_length_of_exactly_the_cap_is_accepted(self):
