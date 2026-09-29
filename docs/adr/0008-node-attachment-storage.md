@@ -67,8 +67,22 @@ round. It does not implement anything.
 - **There is prior art for untrusted uploads.** `backend/core/image_ingest.py`
   validates image bytes by decoding them (never by trusting a declared content
   type), caps the raw source before decoding, and rejects SVG because it can
-  carry script. `POST /import/archive` caps its upload at 200 MB, but it does
-  so after `await file.read()` has already buffered the whole body.
+  carry script. `POST /import/archive` declares its body as an `UploadFile`,
+  so Starlette's multipart parser has already spooled the whole upload to a
+  temporary file before the handler runs. Its 200 MB check after
+  `await file.read()` therefore bounds only what is pulled into memory, not
+  what reaches disk. `_read_body_within_cap` (`backend/service/rest_api.py`)
+  is the existing precedent for refusing an oversized body from its
+  `Content-Length` before reading it.
+- **Graph identity is thin.** `default_graph_name()` is the file stem for
+  the file backend. For PostgreSQL it is the constructor's `graph_name`,
+  which `build_persistence_backend` never sets, so it is always `"graph"`.
+  What separates instances that share one PostgreSQL store is the optional
+  row scope (`GRAPH_POSTGRES_SCOPE`, see `PERSISTENCE_BACKENDS.md`).
+- **Adoption makes a local copy.** Adopting a federated node creates a new
+  local node with its own id, plus a local reference node that keeps the
+  `federated::…` id (`adopt_federated_node` in
+  `backend/service/mutations.py`).
 - **"Attachment" already means something else.** Annotation content carries
   an `attachment` field — the binding of an annotation to a node anchor
   (`docs/ANNOTATION_CONTRACT.md`). The two concepts share a word and nothing
@@ -129,7 +143,8 @@ file, as the other sidecars do, but the seam is chosen independently of
 
 - **For:**
   - Works with every graph backend; the graph backend contract is unchanged.
-  - No user input reaches a storage key.
+  - No user input is used to build a storage key: an attachment id taken
+    from a URL is only ever looked up in the index.
   - One source of truth (the index), so there is nothing to keep in step.
   - Deleting a node's attachments is deleting one prefix.
   - The recorded checksum gives backup and restore an integrity check without
@@ -146,69 +161,128 @@ builds against.
 
 ### 1. The seam: `AttachmentStore`
 
-A new module, `backend/core/attachment_store.py`, defines a protocol and a
-file-backed default. It is deliberately not part of
-`GraphPersistenceBackend`: that contract moves graph entities that
-`GraphStorage` holds in memory, while attachment bytes must stream and never
-be held whole.
+A new module, `backend/core/attachment_store.py`, defines a protocol, its
+record types and errors, and a file-backed default. It is deliberately not
+part of `GraphPersistenceBackend`. That contract moves graph entities that
+`GraphStorage` holds in memory, while attachment bytes must stream and must
+never be held whole.
 
 ```python
+@dataclass(frozen=True)
+class AttachmentRecord:
+    id: str                      # 32 lowercase hex chars, server-minted (uuid4().hex)
+    node_id: str
+    filename: str                # sanitised display name (§7); never a path
+    size: int                    # bytes
+    content_type: str            # sniffed (§5)
+    declared_content_type: str   # as sent by the client; diagnostic, never served
+    sha256: str                  # lowercase hex of the stored bytes
+    uploaded_at: str             # ISO-8601 UTC
+    uploaded_by: Optional[str]   # actor id when the request has one, else None
+
+@dataclass(frozen=True)
+class NewAttachment:
+    filename: str                # already sanitised by the service layer
+    declared_content_type: str
+    content_type: str            # already sniffed by the service layer
+    uploaded_by: Optional[str]
+
+@dataclass(frozen=True)
+class AttachmentLimits:
+    max_file_bytes: int
+    max_files_per_node: int
+    max_bytes_per_node: int
+
 class AttachmentStore(Protocol):
-    def list(self, graph: str, node_id: str) -> list[AttachmentRecord]: ...
-    def get_record(self, graph: str, node_id: str, attachment_id: str) -> AttachmentRecord | None: ...
-    def open_read(self, graph: str, node_id: str, attachment_id: str) -> BinaryIO: ...
-    def put(self, graph: str, node_id: str, stream: BinaryIO, record: NewAttachment) -> AttachmentRecord: ...
-    def delete(self, graph: str, node_id: str, attachment_id: str) -> bool: ...
-    def delete_node(self, graph: str, node_id: str) -> int: ...
-    def iter_nodes(self, graph: str) -> Iterator[str]: ...
+    def list(self, namespace: str, node_id: str) -> list[AttachmentRecord]: ...
+    def get_record(self, namespace: str, node_id: str, attachment_id: str) -> AttachmentRecord | None: ...
+    def open_read(self, namespace: str, node_id: str, attachment_id: str) -> BinaryIO: ...
+    async def stage(self, namespace: str, node_id: str, chunks: AsyncIterator[bytes], max_bytes: int) -> StagedUpload: ...
+    async def commit(self, staged: StagedUpload, record: NewAttachment, limits: AttachmentLimits) -> AttachmentRecord: ...
+    def discard(self, staged: StagedUpload) -> None: ...
+    def delete(self, namespace: str, node_id: str, attachment_id: str) -> bool: ...
+    def delete_node(self, namespace: str, node_id: str) -> int: ...
+    def iter_nodes(self, namespace: str) -> Iterator[str]: ...
 ```
 
-- `graph` is the graph's name as the persistence backend reports it
-  (`default_graph_name()`: the file stem for the file backend, the configured
-  graph name for PostgreSQL), so one store can serve several graphs without
-  their keys colliding.
-- `put` reads the stream in chunks, enforces the size limits (§4) while it
-  reads, computes the SHA-256 as it goes, and makes the blob and its index
-  record visible together or not at all. A blob with no record is garbage; a
-  record with no blob must never be observable.
-- `iter_nodes` exists for reconciliation and restore validation (§8), not for
+Upload is two-phase, so type policy stays out of the store:
+
+1. `stage` writes the incoming chunks to a temporary location, computing the
+   size and the SHA-256 as it goes. It raises `AttachmentTooLarge` as soon as
+   more than `max_bytes` have arrived, and deletes the partial file. The
+   returned `StagedUpload` exposes `size`, `sha256` and `open()`, which reads
+   the staged bytes back.
+2. The service layer sniffs the staged bytes (§5). A refusal raises
+   `UnsupportedAttachmentType` from the sniffing module, and the service calls
+   `discard`.
+3. `commit` takes the per-node lock, re-reads the node's index, and re-checks
+   the count and total limits against the index *as it now stands*. That
+   check is what stops two concurrent uploads that each passed an earlier
+   check from exceeding the limit together. On a breach it raises
+   `AttachmentLimitExceeded` and discards the staged file. Otherwise it moves
+   the blob into place and then rewrites the index (§11).
+
+Rules for readers and deleters:
+
+- `get_record`, `open_read` and `delete` resolve `attachment_id` **only**
+  through the node's index. An id that has no index record is "not found",
+  whatever exists on disk.
+- A record with no blob must never be observable. `delete` therefore rewrites
+  the index without the record first, and only then removes the blob.
+- `iter_nodes` exists for reconciliation and validation (§8, §10), not for
   request handling.
-- A deployment that needs object storage or a database-held store implements
-  the protocol; that backend is out of scope for the core. Selection follows
-  the persistence backend's pattern: an `ATTACHMENT_BACKEND` setting
-  (default `file`) read at boot, with an unknown value refused at boot.
+
+`namespace` separates graphs that share one store. The service layer derives
+it from the persistence backend: the backend's `default_graph_name()`,
+followed by `|scope=<scope>` when a PostgreSQL row scope is configured. Two
+scoped instances that share one attachment root therefore never share keys,
+even for a node id that exists in both scopes.
+
+Backend selection follows the persistence backend's pattern:
+
+- An `ATTACHMENT_BACKEND` setting (default `file`) is read at boot.
+- An unknown value is refused at boot.
+- A deployment that needs object storage, or a database-held store,
+  implements the protocol. That backend is out of scope for the core; a
+  deployment may provide a different backend.
 
 ### 2. Addressing: id-addressed keys, never user input
 
-A blob's storage key is
+In the file backend, a blob lives at
 
 ```
-<graph_key>/<node_key>/<attachment_id>
+<namespace_key>/<node_key>/blobs/<attachment_id>
 ```
 
-- `attachment_id` — a server-minted UUID4 (hex). Never client-supplied.
+and the node's index at `<namespace_key>/<node_key>/index.json`. The index
+sits outside the `blobs/` directory, so no attachment id can name it.
+
+- `attachment_id` — minted by the server (`uuid4().hex`), never supplied by
+  the client. Every route validates a path id against `^[0-9a-f]{32}$`, and
+  anything else is `404` before the store is called. The store then still
+  resolves the id only through the index (§1). Either check alone would stop
+  traversal; both are required.
 - `node_key` — the lowercase hex SHA-256 of the UTF-8 node id. Node ids are
-  free strings and federated ids contain `::`; hashing them gives a fixed,
-  path-safe segment for every id without an escaping scheme to get wrong. The
-  real node id is kept in the index.
-- `graph_key` — the same treatment for the graph name.
+  free strings and federated ids contain `::`, so hashing gives every id a
+  fixed, path-safe segment without an escaping scheme to get wrong. The real
+  node id is kept in the index.
+- `namespace_key` — the same treatment for the namespace (§1).
 - The original file name is **metadata only**. It is never used to build a
   path, a key or a URL segment.
 
-This is path-addressing on server-minted ids, not content-addressing:
-deleting a node's files is deleting `<graph_key>/<node_key>/`, with no
-reference counting. The SHA-256 is recorded in the index (§3) for integrity,
-not used as the key.
+This is path-addressing on server-minted ids, not content-addressing.
+Deleting a node's files is deleting `<namespace_key>/<node_key>/`, with no
+reference counting. The SHA-256 is recorded in the index (§3) for integrity;
+it is not used as the key.
 
 ### 3. The metadata index — the single source of truth
 
-Each node with attachments has one index document, stored at
-`<graph_key>/<node_key>/index.json` in the file backend:
+Each node with attachments has one index document:
 
 ```json
 {
   "schema_version": 1,
-  "graph": "graph",
+  "namespace": "graph",
   "node_id": "5f0c…",
   "attachments": [
     {
@@ -219,36 +293,28 @@ Each node with attachments has one index document, stored at
       "declared_content_type": "application/pdf",
       "sha256": "…",
       "uploaded_at": "2026-09-29T08:00:00Z",
-      "uploaded_by": "…"
+      "uploaded_by": null
     }
   ]
 }
 ```
 
-- **How it relates to the node:** the node carries nothing. There is no
-  list, count or pointer in `node.metadata`. "Which files does node X have"
-  is answered by `AttachmentStore.list`. This keeps attachments out of
-  `graph.json`, out of `GET /export`, out of mutation history, and out of
-  federation (§6). Uploading or deleting a file does not change the node or
-  its `updated_at`.
-- `content_type` is the *sniffed* type (§5); `declared_content_type` is what
-  the client sent, kept for diagnosis only and never served.
-- `uploaded_by` is the actor the request's attribution resolves to, where one
-  exists; otherwise it is omitted rather than invented.
-- The index document is rewritten whole and atomically (temp file plus
-  rename, the same pattern `FileGraphPersistenceBackend` uses for
-  `graph.json`), under a per-node lock. Per-node documents keep that rewrite
-  small, and a corrupted index damages one node rather than the graph.
-- **Why this shape is enough for backup and restore:** each node directory is
-  self-describing (its real node id, and a checksum per blob). A restore
-  validator can check, with no other input than the graph, that every
-  record's blob exists with a matching SHA-256 and that every `node_id` exists
-  in the graph.
+- **How it relates to the node:** the node carries nothing — no list, no
+  count, no pointer in `node.metadata`. "Which files does node X have" is
+  answered by `AttachmentStore.list`. This keeps attachments out of
+  `graph.json`, `GET /export`, mutation history and federation (§9).
+  Uploading or deleting a file does not change the node or its `updated_at`.
+- **Types:** `content_type` is the sniffed type (§5). `declared_content_type`
+  is what the client sent, kept for diagnosis only and never served.
+- **Writes:** the index is rewritten whole and atomically (temp file plus
+  rename, the pattern `FileGraphPersistenceBackend` uses for `graph.json`),
+  under the per-node lock.
+- **Why per node:** each rewrite stays small, and a corrupted index damages
+  one node rather than the graph.
+- **Self-describing:** each node directory records its real node id and a
+  checksum per blob. That is all a validator needs (§10).
 
 ### 4. Size and count limits
-
-Enforced by `put` while it streams, not after a whole-body read. The route
-must not `await file.read()` the upload the way `POST /import/archive` does.
 
 | Setting | Default | Meaning |
 |---|---|---|
@@ -256,119 +322,258 @@ must not `await file.read()` the upload the way `POST /import/archive` does.
 | `ATTACHMENT_MAX_FILES_PER_NODE` | 10 | files on one node |
 | `ATTACHMENT_MAX_BYTES_PER_NODE` | 100 MiB | total bytes on one node |
 
-- These are conservative defaults. An operator may raise or lower them. A
-  value of `0` or less is refused at boot rather than read as "unlimited".
-- A limit breach is `413` for the file-size case and `409` for the per-node
-  count/total case, with a machine-readable `error` code in each case. No
-  partial blob is left behind.
+These are conservative defaults, and an operator may change them. A value of
+`0` or less is refused at boot rather than read as "unlimited".
+
+Enforcement happens at four points:
+
+1. **`Content-Length` pre-check.** The upload route reads the raw request
+   body, not an `UploadFile` (§7). When `Content-Length` is present and
+   exceeds the smaller of the per-file limit and the node's remaining byte
+   budget, the route answers before reading anything, as
+   `_read_body_within_cap` does.
+2. **Count pre-check.** When the node already has
+   `ATTACHMENT_MAX_FILES_PER_NODE` files, the upload is refused before any
+   bytes are read.
+3. **While streaming.** `stage` is given the same smaller cap as its
+   `max_bytes`. A missing or false `Content-Length` is therefore still caught
+   while the body arrives.
+4. **At commit.** The count and total are checked again under the lock
+   (§1).
+
+| Breach | Status | `error` |
+|---|---|---|
+| per-file size | `413` | `attachment_too_large` |
+| per-node total | `409` | `node_attachment_limit` |
+| per-node count | `409` | `node_attachment_limit` |
+
+No partial blob is left behind in any of these cases.
 
 ### 5. Type policy and content-type sniffing
 
-- The type is determined from the bytes, as `image_ingest` does for images,
-  never from the client's declared type or the file extension alone. The core
-  ships a small signature table (magic bytes) rather than a dependency on a
-  system library. For ZIP-container formats (OOXML and ODF documents), the
-  detected container is confirmed by its expected internal member, and the
-  extension then picks among the allowed container types.
-- **Default allowlist:** PDF, PNG, JPEG, WebP, plain text, CSV, and the
-  OOXML/ODF document, spreadsheet and presentation formats. Anything that
-  sniffs to another type, or fails to sniff, is refused with `415`.
-- **Always refused, whatever the allowlist says:** HTML, SVG, XML and any
-  other type a browser may render as an active document, and executables.
-  They are refused rather than served defensively, because a rule that is
-  never relaxed cannot be misconfigured.
-- The allowlist is configurable (`ATTACHMENT_ALLOWED_TYPES`) but cannot
-  re-admit the always-refused set.
-- Text types are stored as uploaded. Nothing re-encodes or rewrites a file:
-  unlike images, an attachment is evidence, and the bytes returned must be the
-  bytes received.
+The type is determined from the bytes, never from the client's declared type
+alone — the same stance `image_ingest` takes for images. The core ships a
+small detection module, not a dependency on a system library.
+
+| Accepted type | How it is detected |
+|---|---|
+| `application/pdf` | leading `%PDF-` |
+| `image/png`, `image/jpeg`, `image/webp` | their signatures |
+| OOXML (`.docx`, `.xlsx`, `.pptx`) | ZIP signature, then the ZIP's central directory contains `[Content_Types].xml` and the extension-specific part (`word/`, `xl/`, `ppt/`) |
+| ODF (`.odt`, `.ods`, `.odp`) | ZIP signature, then the `mimetype` member names the matching ODF type |
+| `text/plain`, `text/csv` | no signature exists, so by rule (below) |
+
+**The text rule.** The whole staged file must be valid UTF-8, with a leading
+BOM allowed. It must contain no NUL byte. Its first non-whitespace character
+(after any BOM) must not be `<`. The extension then picks the type: `.csv`
+gives `text/csv`; anything else gives `text/plain`.
+
+- The `<` test is what keeps HTML and XML out of the text types: both start
+  with `<` in any form a browser would render.
+- Text in another encoding is refused rather than served under a wrong
+  charset.
+
+**Refusals.** Anything that matches no row is refused with `415`
+(`error: "unsupported_attachment_type"`). That covers HTML, SVG, XML,
+executables, and bare ZIP or other archives. Refusing them, rather than
+serving them defensively, keeps the rule impossible to misconfigure.
+
+**Allowlist setting.** `ATTACHMENT_ALLOWED_TYPES` narrows the table. Its
+value is a comma-separated list of MIME types from the left column; the
+default is all of them. A value outside the table is refused at boot, so the
+setting can never re-admit a type the table does not detect.
+
+**No re-encoding.** Nothing re-encodes or rewrites a file. Unlike an image
+annotation, an attachment is evidence, and the bytes returned must be the
+bytes received.
 
 ### 6. Serving files
 
-Downloads are served by the application, never from a static file mount, so
-authorization runs on every request. Every download response carries:
+Downloads are streamed by the application, never from a static file mount,
+so authorization runs on every request. Every download response carries:
 
-- `Content-Type:` the stored sniffed type. Plain text is sent as
-  `text/plain; charset=utf-8`.
+- `Content-Type:` the stored sniffed type; the text types carry
+  `; charset=utf-8`, which §5 guarantees is true.
 - `Content-Disposition: attachment; filename="<ascii fallback>";
-  filename*=UTF-8''<percent-encoded name>`. Always `attachment`, never
+  filename*=UTF-8''<percent-encoded name>`. It is always `attachment`, never
   `inline`, so the browser saves the file rather than rendering it in the
   application's origin.
 - `X-Content-Type-Options: nosniff`
 - `Content-Security-Policy: default-src 'none'; sandbox`
 - `Cache-Control: private, no-store`
 
-The file name in the header is sanitised when served: control characters,
-quotes, path separators and CR/LF are stripped, so a stored name cannot
-inject a header. It is also sanitised on upload (§7).
+The ASCII fallback replaces every non-ASCII character, `"` and `\` with `_`.
+The stored name contains no control characters, CR or LF (§7), so it cannot
+inject a header.
 
-### 7. API surface and authorization
+### 7. API surface, authorization and per-route behaviour
 
-The routes below are what the REST task implements. They belong under the
-existing `/api` router.
+These are the routes the REST task implements, under the existing `/api`
+router:
 
-| Method | Path | Authorization | Notes |
+| Method | Path | Action / target | Success |
 |---|---|---|---|
-| GET | `/nodes/{node_id}/attachments` | read | list the index records (without `declared_content_type`) |
-| POST | `/nodes/{node_id}/attachments` | mutate | multipart, one file per request |
-| GET | `/nodes/{node_id}/attachments/{attachment_id}` | read | streams the bytes with the §6 headers |
-| DELETE | `/nodes/{node_id}/attachments/{attachment_id}` | mutate | |
+| GET | `/nodes/{node_id}/attachments` | read / `list_node_attachments` | `200` `{attachments: [...], limits: {...}, uploads_allowed: bool}` |
+| POST | `/nodes/{node_id}/attachments?filename=<name>` | mutate / `add_node_attachment` | `201` with the new record |
+| GET | `/nodes/{node_id}/attachments/{attachment_id}` | read / `get_node_attachment` | `200`, streamed, with the §6 headers |
+| DELETE | `/nodes/{node_id}/attachments/{attachment_id}` | mutate / `delete_node_attachment` | `200` `{success: true}` |
 
-- Authorization uses the existing graph authorization hook
-  (`GRAPH_ACTION_READ` / `GRAPH_ACTION_MUTATE` in
-  `backend/runtime/authorization.py`), entered the same way as the other
-  routes (`use_request_authorization`). It does not grow a second check.
-- Upload is refused with `404` if the node does not exist, and with `422`
-  (`error: "attachments_not_allowed"`) if the node's type does not have
-  `allows_attachments: true` — a new declared field on `NodeTypeConfig`,
-  default `false`, exposed by `get_schema`. `403` stays reserved for the
-  authorization hook's denial, so the two causes stay distinguishable.
-- Upload is also refused for federated nodes (ids starting `federated::`):
-  they are read-only replicas of another graph's nodes.
-- On upload the file name is normalised to NFC, stripped of path components
-  and control characters, and capped at 255 bytes. An empty result becomes
-  `attachment`.
-- No MCP tool is added in this slice: multipart bodies do not fit MCP's
-  tool-call parameter model, the same reason ADR 0006 and ADR 0007 gave for
-  their REST-only endpoints. A read-only listing tool can follow later
-  without changing this design.
+**Records in responses.** The records omit `declared_content_type`. `limits`
+reports the three §4 values; `uploads_allowed` is the upload rule below,
+evaluated for this node.
 
-### 8. Lifecycle: delete, archive, import
+**Upload body.** The request body is the raw file bytes; it is not
+multipart. The declared type is the request's `Content-Type` header, and the
+name is the `filename` query parameter. This is what lets §4 stream-check the
+body. With multipart the framework spools the file before the handler runs,
+which is the `POST /import/archive` problem.
 
-- **Node archived:** attachments are untouched. Archiving hides the node from
-  search and traversal and is reversible, so its attachments must survive it.
+**Authorization.** Each route runs its service call inside
+`use_request_authorization(headers=request.headers)`, as the existing routes
+do. That call only binds the request's inputs. The decision is made in the
+service layer by `access.evaluate_graph_access(hook, action=…, target=…)`,
+with the action and target from the table above. The service then resolves
+the node with `storage.get_node` and requires
+`access.is_node_visible(node, decision.graph_access)`, exactly as
+`queries.get_node_details` does.
+
+- A denied decision is `403`, mapped with `_raise_for_access_denied`.
+- An invisible node is indistinguishable from a missing one.
+
+**Per-route behaviour.** Checks run top to bottom, and the first that
+applies wins:
+
+| Condition | List | Download | Upload | Delete |
+|---|---|---|---|---|
+| authorization denied | `403` | `403` | `403` | `403` |
+| node missing or not visible | `404` | `404` | `404` | `404` |
+| id starts with `federated::` | `200`, empty, `uploads_allowed: false` | `404` | `422` `federated_node` | `404` |
+| path `attachment_id` malformed or not in index | — | `404` | — | `404` |
+| node type lacks `allows_attachments: true` | `200` | `200` | `422` `attachments_not_allowed` | `200` |
+| node archived | `200` | `200` | `409` `node_archived` | `200` |
+| otherwise | `200` | `200` | §4/§5 checks, then `201` | `200` |
+
+**Why the flag gates only uploads.** Turning `allows_attachments` off must
+not strand files a user already attached: they stay listable, downloadable
+and deletable, so they can be retrieved or cleaned up.
+
+**Federated nodes.** A `federated::…` node — a cached remote node, or the
+local reference an adoption leaves — is a read-only replica of another
+graph's node. The adopted local copy has its own id and is an ordinary local
+node.
+
+**The schema flag.** `allows_attachments` becomes a declared `bool` field on
+`NodeTypeConfig`, default `false`, and `get_schema` returns it on each node
+type.
+
+**File-name sanitising.** On upload the service turns the `filename`
+parameter into the stored name, in this order:
+
+1. Normalise to NFC.
+2. Keep only the part after the last `/` or `\`.
+3. Remove control characters, CR and LF.
+4. Strip surrounding whitespace.
+5. Truncate to 255 UTF-8 bytes on a character boundary.
+
+An empty result becomes `attachment`.
+
+**No MCP tool in this slice.** A raw binary body does not fit MCP's tool-call
+parameter model — the same reason ADR 0006 and ADR 0007 gave for their
+REST-only endpoints. A read-only listing tool can follow later without
+changing this design.
+
+### 8. Lifecycle: delete, archive, import, orphans
+
+- **Node archived:** attachments are untouched (§7 table). Archiving is
+  reversible, so the files must survive it.
 - **Node deleted:** the service calls `AttachmentStore.delete_node` after the
   graph delete has succeeded, never before. A crash between the two leaves an
-  orphan directory, never a live node that has lost its files.
+  orphan node directory, never a live node that has lost its files.
 - **Graph import in REPLACE mode (ADR 0006):** the attachment store is not
-  touched. Nodes that do not survive the import leave orphans. They are not
-  deleted automatically, because the import may be the restore of a backup
-  that brings those nodes back. A reconcile routine, built on `iter_nodes`,
-  reports orphans and deletes them only when explicitly asked to.
+  touched. Nodes that do not survive the import leave orphan node
+  directories. They are not deleted automatically, because the import may be
+  the restore of a backup that brings those nodes back.
+- **Two kinds of orphan:**
+  - an *orphan node directory* — its `node_id` is not in the graph;
+  - an *unindexed blob* — a file under `blobs/` with no index record. A crash
+    between `commit`'s blob move and its index rewrite leaves one.
+- **The start-up sweep** removes only `.tmp/` (§11).
+- **The reconcile routine** (the validator in §10, run with `--prune`) reports
+  both kinds of orphan. It deletes orphan node directories and unindexed
+  blobs only when asked, and only blobs older than one hour, so it can never
+  race an in-flight commit.
 
 ### 9. Federation
 
 Attachments are not federated. Because nothing about them lives in
 `node.metadata`, `FederationManager`'s copy of a remote node's metadata
-carries no dangling reference. The consumer's node detail view shows no
-attachment panel for a federated node. Exposing a remote graph's attachment
-list, or proxying its downloads, would need its own design for cross-instance
-authorization and is out of scope here.
+carries no dangling reference. A federated node's list is empty and its
+uploads are refused (§7).
 
-### 10. Export and backup
+Exposing a remote graph's attachment list, or proxying its downloads, would
+need its own design for cross-instance authorization. It is out of scope
+here.
 
-- `GET /export` and `graph.json` are unchanged. They never contained
-  attachments and do not start to.
-- Adding attachments to the ADR 0007 archive, as an optional
-  `attachments/` member set covered by the manifest's per-member SHA-256
-  checksums, is a natural extension but is **not** part of this decision. Such
-  an archive would grow with every file ever attached, which is the wrong
-  default for an export.
-- Operator backup copies the file backend's attachment root as-is. Every
-  index record carries the checksum a restore validator needs (§3).
-  Timestamped, write-once copies follow the same pattern as a graph snapshot
-  backup, but run on their own schedule, since the two differ in size and in
-  how often they change.
+### 10. Export, backup and the restore validator
+
+**Export.** `GET /export` and `graph.json` are unchanged: they never
+contained attachments and do not start to. Adding attachments to the ADR 0007
+archive, as an optional `attachments/` member set covered by the manifest's
+per-member checksums, is a possible extension but is **not** part of this
+decision. Such an archive would grow with every file ever attached, which is
+the wrong default for an export.
+
+**The validator.** The core ships `scripts/validate_attachments.py` for the
+file backend:
+
+```
+python scripts/validate_attachments.py --attachments <root> --graph <graph.json or GET /export output>
+                                       [--namespace <ns>] [--strict] [--prune]
+```
+
+It walks every node directory in the namespace (all namespaces when none is
+given) and classifies each finding:
+
+| Class | Finding |
+|---|---|
+| **error** | an unreadable or schema-invalid `index.json` |
+| **error** | a record whose blob is missing |
+| **error** | a blob whose size or SHA-256 differs from its record |
+| **error** | an index whose `node_id` does not hash to its directory name |
+| **warning** | an orphan node directory |
+| **warning** | an unindexed blob |
+
+**Exit codes.** `0` when there are no errors, `1` when there are, `2` on a
+usage error. `--strict` turns warnings into errors. Output is one line per
+finding plus a summary, so a backup or restore job can log it verbatim.
+
+**Why orphans are only warnings.** After a REPLACE import they are expected
+(§8), and a restored attachment set is often newer or older than the graph it
+is checked against.
+
+**`--prune`.** It deletes the warnings' subjects, applying §8's one-hour rule
+to blobs. It never touches anything classed as an error.
+
+**Backup.** An operator backup copies the attachment root to a timestamped,
+write-once location, on its own schedule rather than with the graph's,
+because the two differ in size and in how often they change. There is no
+graph snapshot backup job in this repository to reuse; the job belongs to
+whoever operates the deployment.
+
+**A consistent copy.** Take it from a point-in-time volume or filesystem
+snapshot where one is available. Otherwise copy in two passes — every
+`index.json` first, then every `blobs/` directory — and run the validator on
+the copy. The commit and delete orderings in §1 mean a copy taken this way
+while writes continue can hold only two kinds of inconsistency:
+
+- extra unindexed blobs (a warning);
+- a record whose blob was deleted between the passes (an error).
+
+The job retries the copy on an error.
+
+**Restore.** Restore extracts into an empty directory, runs the validator
+against the graph that will be live, and only then swaps the directory into
+place.
 
 ### 11. File-backend layout
 
@@ -378,42 +583,79 @@ data/active/
   graph.journal.ndjson
   graph.embeddings.bin
   graph.history.ndjson
-  graph.attachments/                  # ATTACHMENT_DIR overrides
-    <graph_key>/<node_key>/index.json
-    <graph_key>/<node_key>/<attachment_id>
-    .tmp/                             # in-flight uploads; swept at start-up
+  graph.attachments/                    # ATTACHMENT_DIR overrides
+    <namespace_key>/<node_key>/index.json
+    <namespace_key>/<node_key>/blobs/<attachment_id>
+    .tmp/                               # staged uploads; emptied at start-up
 ```
 
-- Uploads stream into `.tmp/`, on the same filesystem, and are renamed into
-  place before the index is rewritten, so a crash leaves at most a temp file.
-- With the PostgreSQL graph backend there is no graph file to sit beside, so
-  `ATTACHMENT_DIR` is required and is refused at boot if unset.
-- Several instances sharing one PostgreSQL graph must share the attachment
-  root, or use a backend that is itself shared. A per-instance local
-  directory would silently give each instance a different set of files.
+- `stage` writes into `.tmp/`, which is on the same filesystem, so `commit`'s
+  move is an atomic rename. The rename happens before the index rewrite. A
+  crash can therefore leave a staged file (removed at the next start-up) or
+  an unindexed blob (reported by the validator, §8), but never a record
+  without a blob.
+- The per-node lock is an in-process lock plus an OS lock file (`.lock`) in
+  the node directory. That is the same two-level locking `history_store`
+  takes, so two processes sharing a root do not interleave commits.
+- With the PostgreSQL graph backend there is no graph file to sit beside.
+  `ATTACHMENT_DIR` is therefore required, and is refused at boot if unset.
+- Several instances serving one PostgreSQL graph and scope must share the
+  attachment root, or use a backend that is itself shared. A per-instance
+  local directory would silently give each instance a different set of
+  files.
+
+### 12. Node-view panel
+
+The UI task builds against these rules:
+
+- **Where:** the panel appears in the node detail dialog.
+- **When it renders:** when the node's type has `allows_attachments: true`
+  in `get_schema`, or when the list returns at least one attachment.
+  Federated nodes never render it.
+- **Upload control:** shown only when the list response has
+  `uploads_allowed: true`.
+- **Pre-checks:** the client checks the file size and the node's remaining
+  count and bytes against `limits` before sending, and shows the same
+  message the server's error would produce.
+- **List rows:** file name, size and upload time. Each row has a download
+  link (the GET route, so the §6 headers apply) and a delete action that asks
+  for confirmation first.
+- **Errors:** each `error` code maps to a message key:
+  - `attachment_too_large`
+  - `node_attachment_limit`
+  - `unsupported_attachment_type`
+  - `attachments_not_allowed`
+  - `node_archived`
+  - `federated_node`
+  - a generic fallback
+- **Strings:** all of them go under an `attachments.` prefix in both
+  `frontend/web/src/i18n/en.json` and `sv.json`.
 
 ## Consequences
 
-- **Purely additive.** There is a new module, new routes, and a new schema
-  field that defaults to `false`, so no node type gains attachments until
+- **Purely additive.** There is a new module, new routes, a new script, and
+  a new schema field defaulting to `false`. No node type gains uploads until
   someone enables them. The graph persistence contract, `graph.json`,
   `GET /export`, the archive format and federation are all unchanged.
-- **Rollback:** set `allows_attachments` back to `false` (or deploy a build
-  without the routes). Uploads stop. Stored files stay inert on disk, and
-  because the graph never references them, an older build loads the graph
-  unchanged. Re-enabling brings the same files back.
-- **Moving to another backend:** list, read and put through the seam, one
-  node at a time, then verify the SHA-256 of each record. There is no graph
-  migration, because the graph holds nothing to rewrite.
-- **Search.** Surfacing attachment file names in graph search means querying
-  the index; they do not appear by indexing `node.metadata`. That is a
-  follow-up, not part of this slice. Content indexing of file bodies is
-  explicitly not planned here.
-- **Naming.** Code for this feature uses `AttachmentStore` /
-  `node attachment`. The annotation `content.attachment` binding keeps its
-  name. The two do not share code.
-- **Docs to update when the implementation lands:** `backend/DEVELOPMENT.md`
-  (endpoint table), `docs/DATA_MANAGEMENT.md` (directory structure),
-  `docs/PERSISTENCE_BACKENDS.md` (the second seam, and its PostgreSQL
-  requirement), `docs/PROFILES.md` (`allows_attachments`), and
-  `docs/USER_GUIDE.md` (the panel).
+- **Rollback, level 1:** set `allows_attachments` back to `false`. Uploads
+  stop; existing files stay listable, downloadable and deletable (§7).
+- **Rollback, level 2:** deploy a build without the routes. The files stay
+  inert on disk. The graph never references them, so an older build loads
+  the graph unchanged, and redeploying brings the same files back.
+- **Moving to another backend:** list, read, stage and commit through the
+  seam, one node at a time, then compare each record's SHA-256. There is no
+  graph migration, because the graph holds nothing to rewrite.
+- **Search:** surfacing attachment file names in graph search means querying
+  the index. Indexing `node.metadata` would not do it. That is a follow-up,
+  not part of this slice. Content indexing of file bodies is not planned
+  here.
+- **Naming:** code for this feature uses `AttachmentStore` and "node
+  attachment". The annotation `content.attachment` binding keeps its name,
+  and the two share no code.
+- **Docs to update when the implementation lands:**
+  - `backend/DEVELOPMENT.md` (the endpoint table);
+  - `docs/DATA_MANAGEMENT.md` (the directory structure and the validator);
+  - `docs/PERSISTENCE_BACKENDS.md` (the second seam and its PostgreSQL
+    requirement);
+  - `docs/PROFILES.md` (`allows_attachments`);
+  - `docs/USER_GUIDE.md` (the panel).
