@@ -672,8 +672,15 @@ place. The graph is that graph's `GET /export`, or the restored file itself
 while that graph is not yet served. A raw file carries no `exportDate`, so
 it supports reporting but not `--prune-orphan-nodes`.
 
-The restore runs the validator without `--strict`. Exit `1` refuses the
-swap: the live directory is left untouched, the extracted copy is kept for
+The restore unit is one namespace: `<namespace_key>/`, validated once
+against that namespace's graph. A backup of a root that holds several
+namespaces is restored one namespace at a time, each against its own graph.
+Each namespace's `.locks/` directory is swapped along with it. The swap
+therefore happens with every instance that serves that namespace stopped, so
+no running process holds a lock file that the swap replaces.
+
+The restore runs the validator without `--strict`. Any non-zero exit refuses
+the swap: the live directory is left untouched, the extracted copy is kept for
 inspection, and the validator output is reported. Warnings — the orphans
 and unindexed leftovers a restore is expected to produce — never block it.
 
