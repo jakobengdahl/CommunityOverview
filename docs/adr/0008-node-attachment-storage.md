@@ -1,6 +1,6 @@
 # ADR 0008 — Node attachment storage layer and metadata index
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-29
 - **Scope:** Open-source core only
 - **Related:** [`PERSISTENCE_BACKENDS.md`](../PERSISTENCE_BACKENDS.md) (the
