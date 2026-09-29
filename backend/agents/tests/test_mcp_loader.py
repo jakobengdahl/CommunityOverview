@@ -651,7 +651,13 @@ def _recording_body(payload, reads, label):
     return _Stream()
 
 
-INTERNAL = "http://169.254.169.254/latest/meta-data/"
+# Both schemes. is_safe_url is scheme-agnostic once it has a host, but a
+# guard made conditional on the scheme is a one-word edit, and an http-only
+# suite cannot see it. Every refusal test below is parametrised over these.
+INTERNAL_TARGETS = [
+    "http://169.254.169.254/latest/meta-data/",
+    "https://169.254.169.254/latest/meta-data/",
+]
 
 
 class TestConnectHttpInfoQuery:
@@ -749,11 +755,15 @@ class TestConnectHttpInfoQuery:
         "url",
         [
             "http://127.0.0.1/mcp",
+            "https://127.0.0.1/mcp",
             "http://10.0.0.1/mcp",
+            "https://10.0.0.1/mcp",
             "http://192.168.1.1/mcp",
             "http://169.254.169.254/mcp",
+            "https://169.254.169.254/mcp",
             "http://100.64.0.1/mcp",
             "http://[::1]/mcp",
+            "https://[::1]/mcp",
             "http://[fc00::1]/mcp",
         ],
     )
@@ -771,7 +781,10 @@ class TestConnectHttpInfoQuery:
         assert MCPLoader([integration])._connect_http(integration) == []
         assert seen == []
 
-    def test_info_endpoint_hostname_resolving_internally_is_rejected(self, monkeypatch):
+    @pytest.mark.parametrize("scheme", ["http", "https"])
+    def test_info_endpoint_hostname_resolving_internally_is_rejected(
+        self, monkeypatch, scheme
+    ):
         """A public-looking hostname whose DNS answer is internal is blocked."""
         monkeypatch.setattr(
             "backend.core.events.delivery.socket.getaddrinfo",
@@ -782,7 +795,7 @@ class TestConnectHttpInfoQuery:
             raise AssertionError(f"internal address requested: {request.url}")
 
         seen = _install_transport(monkeypatch, handler)
-        integration = self._integration("http://internal.example.com/mcp")
+        integration = self._integration(f"{scheme}://internal.example.com/mcp")
 
         assert MCPLoader([integration])._connect_http(integration) == []
         assert seen == []
@@ -826,11 +839,14 @@ class TestConnectHttpInfoQuery:
 
         MCPLoader([integration])._connect_http(integration)
 
-        assert client_kwargs == [{"timeout": 5, "follow_redirects": False}]
+        assert len(client_kwargs) == 1
+        assert client_kwargs[0]["timeout"] == 5
+        assert client_kwargs[0]["follow_redirects"] is False
 
+    @pytest.mark.parametrize("internal", INTERNAL_TARGETS)
     @pytest.mark.parametrize("internal_hop", [0, 1, 2, MAX_REDIRECTS - 2])
     def test_info_endpoint_every_redirect_hop_is_revalidated(
-        self, monkeypatch, public_dns, internal_hop
+        self, monkeypatch, public_dns, internal_hop, internal
     ):
         """The internal address is refused wherever it sits in the chain.
 
@@ -843,7 +859,7 @@ class TestConnectHttpInfoQuery:
             if index < internal_hop:
                 return _redirect(f"http://hop{index + 1}.example.com/info")
             if index == internal_hop:
-                return _redirect(INTERNAL)
+                return _redirect(internal)
             raise AssertionError(f"unexpected request {request.url}")
 
         seen = _install_transport(monkeypatch, handler)
@@ -852,6 +868,55 @@ class TestConnectHttpInfoQuery:
         assert MCPLoader([integration])._connect_http(integration) == []
         assert len(seen) == internal_hop + 1
         assert all("169.254.169.254" not in url for url in seen)
+
+    def test_info_endpoint_same_host_hop_is_still_address_checked(self, monkeypatch):
+        """DNS rebinding: the name does not change, what it resolves to does.
+
+        Every other hop test turns internal by changing host, so a walk that
+        remembered "this hostname was already safe" and skipped the re-check
+        would pass all of them. Here the host is identical across the hop and
+        only the DNS answer moves, which is the actual rebinding shape.
+        """
+        answers = iter([_addrinfo(), _addrinfo("169.254.169.254")])
+        monkeypatch.setattr(
+            "backend.core.events.delivery.socket.getaddrinfo",
+            lambda *args, **kwargs: next(answers),
+        )
+        seen = _install_transport(
+            monkeypatch,
+            lambda request, index: _redirect("http://example.com/second"),
+        )
+        integration = self._integration()
+
+        assert MCPLoader([integration])._connect_http(integration) == []
+        assert seen == ["http://example.com/info"]
+
+    def test_info_endpoint_200_without_an_endpoints_key_discovers_nothing(
+        self, monkeypatch, public_dns
+    ):
+        """Discovery is "200 AND endpoints", not "200 AND parseable JSON"."""
+        _install_transport(
+            monkeypatch,
+            lambda request, index: httpx.Response(200, json={"something_else": 1}),
+        )
+        integration = self._integration()
+
+        assert MCPLoader([integration])._connect_http(integration) == []
+
+    @pytest.mark.parametrize("status_code", [201, 204])
+    def test_info_endpoint_other_2xx_is_not_discovery(
+        self, monkeypatch, public_dns, status_code
+    ):
+        """Only 200 is the info endpoint answering; a 201 is something else."""
+        _install_transport(
+            monkeypatch,
+            lambda request, index: httpx.Response(
+                status_code, json={"endpoints": ["/mcp"]}
+            ),
+        )
+        integration = self._integration()
+
+        assert MCPLoader([integration])._connect_http(integration) == []
 
     def test_info_endpoint_relative_location_resolves_against_the_current_url(
         self, monkeypatch, public_dns
@@ -887,9 +952,12 @@ class TestConnectHttpInfoQuery:
         ["http://example.com/info", "/info", "info"],
         ids=["absolute", "root-relative", "path-relative"],
     )
-    # Every status httpx itself treats as a redirect. A walker that keyed on
-    # a narrower set (say 301/302/307) would silently DROP a 303 or 308 hop and
-    # report no tools, which follow_redirects=True on main did follow.
+    # Every status a server actually redirects with. httpx's is_redirect is
+    # status-only and spans the whole 3xx range, so a 300 or 304 reaches the
+    # Location check below instead; these five are has_redirect_location's set.
+    # A walker narrowed to a subset (say 301/302/307) would silently DROP a 303
+    # or 308 hop and report no tools -- and main, which passed
+    # follow_redirects=True here, did follow all five.
     @pytest.mark.parametrize("status_code", [301, 302, 303, 307, 308])
     def test_info_endpoint_redirect_cap_is_the_shared_limit(
         self, monkeypatch, public_dns, location, status_code
@@ -982,11 +1050,15 @@ class TestFetchToolSSRFGuard:
         "url",
         [
             "http://127.0.0.1/admin",
+            "https://127.0.0.1/admin",
             "http://10.0.0.1/internal",
+            "https://10.0.0.1/internal",
             "http://192.168.1.1/router",
             "http://169.254.169.254/latest/meta-data/",
+            "https://169.254.169.254/latest/meta-data/",
             "http://100.64.0.1/cgnat",
             "http://[::1]/admin",
+            "https://[::1]/admin",
             "http://[fc00::1]/internal",
         ],
     )
@@ -1004,7 +1076,10 @@ class TestFetchToolSSRFGuard:
         assert "content" not in result
         assert seen == []
 
-    def test_hostname_resolving_into_private_range_is_rejected(self, monkeypatch):
+    @pytest.mark.parametrize("scheme", ["http", "https"])
+    def test_hostname_resolving_into_private_range_is_rejected(
+        self, monkeypatch, scheme
+    ):
         """A public-looking hostname whose DNS answer is internal is still blocked."""
         monkeypatch.setattr(
             "backend.core.events.delivery.socket.getaddrinfo",
@@ -1016,7 +1091,7 @@ class TestFetchToolSSRFGuard:
 
         seen = _install_transport(monkeypatch, handler)
 
-        result = self._fetch("http://internal.example.com/secrets")
+        result = self._fetch(f"{scheme}://internal.example.com/secrets")
 
         assert "error" in result
         assert "content" not in result
@@ -1063,14 +1138,17 @@ class TestFetchToolSSRFGuard:
         assert "content" not in result
         assert seen == []
 
-    def test_redirect_into_private_range_is_not_followed(self, monkeypatch, public_dns):
+    @pytest.mark.parametrize("internal", INTERNAL_TARGETS)
+    def test_redirect_into_private_range_is_not_followed(
+        self, monkeypatch, public_dns, internal
+    ):
         """A public URL that redirects to an internal address must stop at the hop.
 
         The initial host passes the pre-request check, so only the per-hop
         re-validation can catch this one.
         """
         seen = _install_transport(
-            monkeypatch, lambda request, index: _redirect(INTERNAL)
+            monkeypatch, lambda request, index: _redirect(internal)
         )
 
         result = self._fetch()
@@ -1094,9 +1172,10 @@ class TestFetchToolSSRFGuard:
         assert result["status"] == 200
         assert len(seen) == 2
 
+    @pytest.mark.parametrize("internal", INTERNAL_TARGETS)
     @pytest.mark.parametrize("internal_hop", [0, 1, 2, MAX_REDIRECTS - 2])
     def test_every_redirect_hop_is_revalidated(
-        self, monkeypatch, public_dns, internal_hop
+        self, monkeypatch, public_dns, internal_hop, internal
     ):
         """The internal address is refused wherever it sits in the chain.
 
@@ -1109,7 +1188,7 @@ class TestFetchToolSSRFGuard:
             if index < internal_hop:
                 return _redirect(f"http://hop{index + 1}.example.com/p")
             if index == internal_hop:
-                return _redirect(INTERNAL)
+                return _redirect(internal)
             raise AssertionError(f"unexpected request {request.url}")
 
         seen = _install_transport(monkeypatch, handler)
@@ -1119,6 +1198,66 @@ class TestFetchToolSSRFGuard:
         assert result == {"error": "Redirected to unsafe URL"}
         assert len(seen) == internal_hop + 1
         assert all("169.254.169.254" not in url for url in seen)
+
+    def test_same_host_hop_is_still_address_checked(self, monkeypatch):
+        """DNS rebinding: the name does not change, what it resolves to does."""
+        answers = iter([_addrinfo(), _addrinfo("169.254.169.254")])
+        monkeypatch.setattr(
+            "backend.core.events.delivery.socket.getaddrinfo",
+            lambda *args, **kwargs: next(answers),
+        )
+        seen = _install_transport(
+            monkeypatch,
+            lambda request, index: _redirect("http://example.com/second"),
+        )
+
+        result = self._fetch()
+
+        assert result == {"error": "Redirected to unsafe URL"}
+        assert seen == ["http://example.com/start"]
+
+    def test_the_result_reports_the_requested_url_and_the_real_status(
+        self, monkeypatch, public_dns
+    ):
+        """After a redirect the tool answers for the URL it was ASKED for.
+
+        Pinning content and status alone leaves "url" free to drift to the
+        final hop, and every other terminal fixture is a 200, so the status
+        could be hard-coded and nothing would notice.
+        """
+
+        def handler(request, index):
+            if index == 0:
+                return _redirect("http://example.com/final")
+            return httpx.Response(201, text="made")
+
+        _install_transport(monkeypatch, handler)
+
+        assert self._fetch() == {
+            "url": "http://example.com/start",
+            "status": 201,
+            "content": "made",
+        }
+
+    def test_the_default_max_length_bounds_the_content(self, monkeypatch, public_dns):
+        """max_length is the only thing bounding what an agent is handed."""
+        _install_transport(
+            monkeypatch, lambda request, index: httpx.Response(200, text="x" * 10_001)
+        )
+
+        result = self._fetch()
+
+        assert result["content"] == "x" * 10_000 + "... (truncated)"
+
+    def test_a_body_of_exactly_max_length_is_not_truncated(
+        self, monkeypatch, public_dns
+    ):
+        """The cap is "longer than", not "at least" -- pins the boundary."""
+        _install_transport(
+            monkeypatch, lambda request, index: httpx.Response(200, text="x" * 10)
+        )
+
+        assert self._fetch(max_length=10)["content"] == "x" * 10
 
     def test_relative_location_resolves_against_the_current_url(
         self, monkeypatch, public_dns
@@ -1153,9 +1292,14 @@ class TestFetchToolSSRFGuard:
         ["http://example.com/next", "/next", "next"],
         ids=["absolute", "root-relative", "path-relative"],
     )
-    # Every status httpx itself treats as a redirect. A walker that keyed on
-    # a narrower set (say 301/302/307) would silently DROP a 303 or 308 hop and
-    # report no tools, which follow_redirects=True on main did follow.
+    # Every status a server actually redirects with. httpx's is_redirect is
+    # status-only and spans the whole 3xx range, so a 300 or 304 reaches the
+    # Location check below instead; these five are has_redirect_location's set.
+    # A walker narrowed to a subset (say 301/302/307) would treat a 303 or 308
+    # as terminal, where raise_for_status turns it into an error rather than
+    # following it. main hand-walked THIS walker too (follow_redirects=False),
+    # so that narrowing is a regression against main here as well -- unlike
+    # _connect_http, whose main version did pass follow_redirects=True.
     @pytest.mark.parametrize("status_code", [301, 302, 303, 307, 308])
     def test_redirect_chain_stops_at_the_shared_cap_with_an_explicit_error(
         self, monkeypatch, public_dns, location, status_code
@@ -1166,7 +1310,7 @@ class TestFetchToolSSRFGuard:
         never fires; only the cap can end it. Parametrising the Location form
         and the status code catches a counter that advanced on one flavour of
         hop and left the others unbounded. The count is taken against
-        delivery.py's constant, the one all four walkers import.
+        delivery.py's constant, the one all five walkers import.
         """
         seen = _install_transport(
             monkeypatch, lambda request, index: _redirect(location, status_code)
@@ -1223,7 +1367,9 @@ class TestFetchToolSSRFGuard:
 
         self._fetch()
 
-        assert client_kwargs == [{"timeout": 30, "follow_redirects": False}]
+        assert len(client_kwargs) == 1
+        assert client_kwargs[0]["timeout"] == 30
+        assert client_kwargs[0]["follow_redirects"] is False
 
     def test_body_over_max_length_is_truncated(self, monkeypatch, public_dns):
         """The size cap on the returned content still applies after the rewrite."""
@@ -1269,7 +1415,7 @@ class TestFetchToolSSRFGuard:
 
 
 class TestRedirectCapIsShared:
-    """One cap for the four hop-validating paths, so they cannot drift again."""
+    """One cap for the five hop-validating paths, so they cannot drift again."""
 
     def test_every_walker_agrees_on_the_value(self):
         assert MAX_REDIRECTS == delivery.MAX_REDIRECTS
@@ -1312,3 +1458,34 @@ class TestRedirectCapIsShared:
 
         assert imported_from_delivery
         assert not assigned_locally
+
+    @pytest.mark.parametrize(
+        "module",
+        [mcp_loader, image_ingest, skills_loader, delivery],
+        ids=lambda module: module.__name__.rsplit(".", 1)[-1],
+    )
+    def test_every_walker_loop_ranges_over_the_imported_name(self, module):
+        """Per-module is not enough once a module holds two walkers.
+
+        mcp_loader imports the cap for its fetch tool, so a SECOND walker in
+        the same file could write range(10) and the import test above would
+        still pass -- the module imports the name and assigns it nowhere, and
+        a literal 10 satisfies the count assertions today. Every range() in
+        these four modules is a redirect walk, so requiring the argument to be
+        a bare name closes that per-call-site hole.
+        """
+        tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+
+        ranges = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "range"
+        ]
+
+        assert ranges, "expected at least one redirect walk in this module"
+        for node in ranges:
+            assert len(node.args) == 1
+            assert isinstance(node.args[0], ast.Name), ast.dump(node)
+            assert node.args[0].id == "MAX_REDIRECTS"

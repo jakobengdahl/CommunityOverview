@@ -1131,14 +1131,30 @@ class TestFetchTextRedirects:
     @pytest.mark.asyncio
     async def test_the_size_guards_apply_to_a_response_reached_through_a_redirect(self):
         """The guards moved inside the redirect loop; pin them to the final
-        response rather than to the un-redirected path."""
+        response rather than to the un-redirected path.
+
+        Matching on the message alone cannot tell the two guards apart -- the
+        body guard raises the same text -- so a walker that dropped the
+        advertised-length check for redirected responses only would pass. The
+        recording stream is what separates them: the header must reject this
+        before the body is pulled off the wire, on a redirected response just
+        as on a direct one.
+        """
         config = SkillsConfig(
             allow_external_skills=True,
             trusted_domains=["api.github.com"],
             max_skill_content_bytes=10,
         )
+        reads = []
         handler, _seen = _recording_handler(
-            [_redirect_to("https://api.github.com/final"), _ok("x" * 50)]
+            [
+                _redirect_to("https://api.github.com/final"),
+                loader_module.httpx.Response(
+                    200,
+                    headers={"content-length": "999"},
+                    stream=_recording_body(b"x" * 50, reads, "terminal"),
+                ),
+            ]
         )
 
         with (
@@ -1147,6 +1163,8 @@ class TestFetchTextRedirects:
         ):
             with pytest.raises(ValueError, match="exceeds max size"):
                 await SkillsLoader(config)._fetch_text("https://api.github.com/start")
+
+        assert reads == []
 
     @pytest.mark.asyncio
     async def test_an_advertised_content_length_is_rejected_before_the_body(self):
@@ -1477,6 +1495,36 @@ class TestFetchTextRemainingGuards:
         )
 
         assert await self._fetch_one(response) == ""
+
+    @pytest.mark.asyncio
+    async def test_an_advertised_length_one_over_the_cap_is_refused_unread(self):
+        """Pins the UPPER boundary, which 999-against-10 leaves wide open.
+
+        Every other case advertises a multiple of the cap, so a threshold of
+        max_bytes * 2 -- which would let a 100 KB body through on the
+        production 50 KB cap -- passes all of them.
+        """
+        reads = []
+        handler, _seen = _recording_handler(
+            [
+                loader_module.httpx.Response(
+                    200,
+                    headers={"content-length": "11"},
+                    stream=_recording_body(b"x" * 11, reads, "terminal"),
+                )
+            ]
+        )
+
+        with (
+            _mock_http(handler),
+            patch.object(loader_module, "is_safe_url", lambda _url: True),
+        ):
+            with pytest.raises(ValueError, match="exceeds max size"):
+                await self._loader(max_skill_content_bytes=10)._fetch_text(
+                    "https://api.github.com/start"
+                )
+
+        assert reads == []
 
     @pytest.mark.asyncio
     async def test_an_advertised_length_of_exactly_the_cap_is_accepted(self):

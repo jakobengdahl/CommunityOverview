@@ -120,16 +120,20 @@ def is_safe_url(url: str) -> bool:
         return False
 
 
-# The redirect cap for the four paths that walk redirects by hand and
+# The redirect cap for the five paths that walk redirects by hand and
 # re-validate every hop with is_safe_url: the webhook delivery below, the image
-# ingest in core/image_ingest.py, the agent fetch tool in agents/mcp_loader.py
-# and the skills loader in skills/loader.py. Each hop is re-validated before it
-# is requested, so the cap bounds that cost; they import this constant rather
-# than keeping their own copy, so the four cannot drift apart. The skills
-# loader additionally re-applies its own trusted_domains allowlist per hop,
-# which the other three have no equivalent of. Other outbound requests in the
-# backend do not use this cap: they either leave redirect handling to their
-# HTTP client, or follow no redirects at all.
+# ingest in core/image_ingest.py, BOTH walkers in agents/mcp_loader.py (the
+# agent fetch tool, and the MCP server info-endpoint discovery in
+# _connect_http) and the skills loader in skills/loader.py. Each hop is
+# re-validated before it is requested, so the cap bounds that cost; they import
+# this constant rather than keeping their own copy, so the five cannot drift
+# apart. The skills loader additionally re-applies its own trusted_domains
+# allowlist per hop, which the other four have no equivalent of. Other outbound
+# requests in the backend do not use this cap: they either leave redirect
+# handling to their HTTP client, or follow no redirects at all.
+#
+# This list is what an audit of "every hop-validating path" reads, so a new
+# walker is not added without being named here.
 MAX_REDIRECTS = 10
 
 
