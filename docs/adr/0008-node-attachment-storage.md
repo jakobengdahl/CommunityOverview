@@ -672,6 +672,11 @@ place. The graph is that graph's `GET /export`, or the restored file itself
 while that graph is not yet served. A raw file carries no `exportDate`, so
 it supports reporting but not `--prune-orphan-nodes`.
 
+The restore runs the validator without `--strict`. Exit `1` refuses the
+swap: the live directory is left untouched, the extracted copy is kept for
+inspection, and the validator output is reported. Warnings — the orphans
+and unindexed leftovers a restore is expected to produce — never block it.
+
 ### 11. File-backend layout
 
 ```
