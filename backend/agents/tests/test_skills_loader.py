@@ -591,6 +591,11 @@ def _recording_handler(responses):
 # a suite scripting only 302 cannot see.
 REDIRECT_STATUSES = [301, 302, 303, 307, 308]
 
+# The context a hop is judged IN, as opposed to the target being judged: this
+# walker's refusal tests otherwise always start on https and never pass
+# headers, so a guard made conditional on either would not be noticed.
+START_SCHEMES = ["http", "https"]
+
 
 def _redirect_to(location, status_code=302):
     return loader_module.httpx.Response(status_code, headers={"location": location})
@@ -684,9 +689,33 @@ class TestFetchTextRedirects:
         return SkillsLoader(config)
 
     @pytest.mark.asyncio
+    async def test_supplying_headers_does_not_relax_the_initial_guard(self):
+        """The caller's headers are context, not permission.
+
+        _fetch_text is called both with and without headers (the GitHub token
+        path supplies them), and every other refusal test here omits them, so
+        a guard made conditional on `headers` would go unnoticed.
+        """
+        config = SkillsConfig(
+            allow_external_skills=True,
+            trusted_domains=["169.254.169.254"],
+        )
+        handler, seen = _recording_handler([_ok()])
+
+        with _mock_http(handler):
+            with pytest.raises(ValueError, match="disallowed address"):
+                await SkillsLoader(config)._fetch_text(
+                    "http://169.254.169.254/latest/SKILL.md",
+                    headers={"Authorization": "Bearer x"},
+                )
+
+        assert seen == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("scheme", START_SCHEMES)
     @pytest.mark.parametrize("status_code", REDIRECT_STATUSES)
     async def test_a_redirect_to_an_internal_address_is_refused_and_never_requested(
-        self, status_code
+        self, status_code, scheme
     ):
         """Isolates the SSRF guard from the allowlist: the redirect target is
         ON the allowlist here, so only is_safe_url can refuse it.
@@ -709,7 +738,7 @@ class TestFetchTextRedirects:
         with _mock_http(handler), _public_dns():
             with pytest.raises(ValueError, match="disallowed address"):
                 await SkillsLoader(config)._fetch_text(
-                    "https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"
+                    f"{scheme}://raw.githubusercontent.com/o/r/HEAD/SKILL.md"
                 )
 
         assert len(seen) == 1, "the internal address must never be requested"

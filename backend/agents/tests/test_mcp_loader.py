@@ -638,6 +638,13 @@ def public_dns(monkeypatch):
 # are the tests that assert a hop is REFUSED, which matters more.
 REDIRECT_STATUSES = [301, 302, 303, 307, 308]
 
+# The context a hop is judged IN, as opposed to the target being judged.
+# INTERNAL_TARGETS and REDIRECT_STATUSES vary what the guard looks at; these
+# vary the situation it looks from, so a guard made conditional on the current
+# scheme or port -- the same one-word edit -- cannot hide behind a suite that
+# always starts on plain http and a default port.
+START_CONTEXTS = ["http://example.com", "https://example.com:8443"]
+
 
 def _redirect(location, status_code=302):
     return httpx.Response(status_code, headers={"location": location})
@@ -714,10 +721,12 @@ class TestConnectHttpInfoQuery:
         """A malformed configured URL must not escape _connect_http.
 
         The configured URL is no longer address-checked, so is_safe_url is not
-        consulted here at all -- httpx refuses the unclosed bracket when it
-        builds the request, and httpx.InvalidURL is not a ValueError subclass.
-        _connect_http must still degrade to an empty tool list, and the
-        transport asserts no request reached the network.
+        consulted here at all -- httpx refuses the URL when it builds the
+        request, and httpx.InvalidURL is not a ValueError subclass. (httpx2
+        reads the unclosed bracket as a port, so it reports Invalid port
+        ":1" rather than diagnosing the bracket.) _connect_http must still
+        degrade to an empty tool list, and the transport asserts no request
+        reached the network.
         """
 
         def handler(request, index):  # pragma: no cover - must not be reached
@@ -734,12 +743,13 @@ class TestConnectHttpInfoQuery:
     def test_info_endpoint_url_httpx_rejects_is_swallowed(self, monkeypatch):
         """A second URL shape httpx cannot build a request from.
 
-        A bad port rather than a bad bracket, so the two tests cover different
-        httpx parse failures; neither consults is_safe_url, which is not
-        applied to the configured URL. What both pin is the httpx.InvalidURL
-        entry in _connect_http's except tuple -- it is not a ValueError
-        subclass, so removing it makes the error escape to the caller for an
-        operator URL that is merely mistyped.
+        Not a second httpx code path: httpx2 rejects this and the unclosed
+        bracket above at the same raise site, both as "Invalid port". It is a
+        second way an operator can mistype the configured URL, and neither
+        consults is_safe_url, which is not applied to that URL. What both pin
+        is the httpx.InvalidURL entry in _connect_http's except tuple -- it is
+        not a ValueError subclass, so removing it makes the error escape to
+        the caller.
         """
 
         def handler(request, index):  # pragma: no cover - httpx refuses first
@@ -958,10 +968,11 @@ class TestConnectHttpInfoQuery:
         assert client_kwargs[0]["timeout"] == 5
         assert client_kwargs[0]["follow_redirects"] is False
 
+    @pytest.mark.parametrize("start", START_CONTEXTS)
     @pytest.mark.parametrize("internal", INTERNAL_TARGETS)
     @pytest.mark.parametrize("internal_hop", [0, 1, 2, MAX_REDIRECTS - 2])
     def test_info_endpoint_every_redirect_hop_is_revalidated(
-        self, monkeypatch, public_dns, internal_hop, internal
+        self, monkeypatch, public_dns, internal_hop, internal, start
     ):
         """The internal address is refused wherever it sits in the chain.
 
@@ -972,13 +983,13 @@ class TestConnectHttpInfoQuery:
 
         def handler(request, index):
             if index < internal_hop:
-                return _redirect(f"http://hop{index + 1}.example.com/info")
+                return _redirect(f"{start}/hop{index + 1}/info")
             if index == internal_hop:
                 return _redirect(internal)
             raise AssertionError(f"unexpected request {request.url}")
 
         seen = _install_transport(monkeypatch, handler)
-        integration = self._integration()
+        integration = self._integration(f"{start}/mcp")
 
         assert MCPLoader([integration])._connect_http(integration) == []
         assert len(seen) == internal_hop + 1
@@ -1053,33 +1064,47 @@ class TestConnectHttpInfoQuery:
         assert MCPLoader([integration])._connect_http(integration) == []
         assert seen == ["http://example.com/info"]
 
-    @pytest.mark.parametrize("status_code", REDIRECT_STATUSES)
-    def test_info_endpoint_redirect_body_is_never_read_on_any_status(
-        self, monkeypatch, public_dns, status_code
-    ):
-        """The memory bound cannot depend on the status either."""
-        reads = []
+    def test_a_reused_loader_still_checks_every_hop(self, monkeypatch, public_dns):
+        """A loader that has already connected something judges hops the same.
 
-        def handler(request, index):
-            if index == 0:
-                return httpx.Response(
-                    status_code,
-                    headers={"location": "http://cdn.example.com/x"},
-                    stream=_recording_body(b"filler", reads, "redirect"),
-                )
-            return httpx.Response(
-                200,
-                headers={"content-type": "application/json"},
-                stream=_recording_body(b'{"endpoints": ["/mcp"]}', reads, "terminal"),
-            )
-
-        _install_transport(monkeypatch, handler)
+        connect_all() walks the integrations in turn, so by the second one
+        _connections is populated -- state no refusal test here would
+        otherwise exercise.
+        """
+        seen = _install_transport(
+            monkeypatch, lambda request, index: _redirect(INTERNAL_TARGETS[0])
+        )
         integration = self._integration()
+        loader = MCPLoader([integration])
+        loader._connections["PRIOR"] = object()
 
-        assert [
-            t.original_name for t in MCPLoader([integration])._connect_http(integration)
-        ]
-        assert reads == ["terminal"]
+        assert loader._connect_http(integration) == []
+        assert seen == ["http://example.com/info"]
+
+    @pytest.mark.parametrize("integration_id", ["WEB", "GRAPH"])
+    def test_info_endpoint_hop_guard_does_not_trust_the_integration_id(
+        self, monkeypatch, public_dns, integration_id
+    ):
+        """ "Our own graph MCP is trusted" would disable the guard by id.
+
+        GRAPH is the integration that ships by default, so a guard keyed on
+        the id would be off exactly where it matters most. Asserted on the
+        requests rather than the tool list, since the GRAPH fallback returns
+        its known tools whatever discovery does.
+        """
+        seen = _install_transport(
+            monkeypatch, lambda request, index: _redirect(INTERNAL_TARGETS[0])
+        )
+        integration = MCPIntegration(
+            id=integration_id,
+            name="n",
+            transport=MCPTransport.HTTP,
+            url="http://example.com/mcp",
+        )
+
+        MCPLoader([integration])._connect_http(integration)
+
+        assert seen == ["http://example.com/info"]
 
     def test_info_endpoint_relative_location_resolves_against_the_current_url(
         self, monkeypatch, public_dns
@@ -1154,8 +1179,9 @@ class TestConnectHttpInfoQuery:
         assert MCPLoader([integration])._connect_http(integration) == []
         assert len(seen) == 1
 
+    @pytest.mark.parametrize("status_code", REDIRECT_STATUSES)
     def test_info_endpoint_redirect_bodies_are_never_pulled_off_the_wire(
-        self, monkeypatch, public_dns
+        self, monkeypatch, public_dns, status_code
     ):
         """A bounded walk still pulls MAX_REDIRECTS bodies if each is buffered.
 
@@ -1168,7 +1194,7 @@ class TestConnectHttpInfoQuery:
         def handler(request, index):
             if index == 0:
                 return httpx.Response(
-                    302,
+                    status_code,
                     headers={"location": "http://cdn.example.com/x"},
                     stream=_recording_body(b"redirect filler", reads, "redirect"),
                 )
@@ -1337,10 +1363,11 @@ class TestFetchToolSSRFGuard:
         assert result["status"] == 200
         assert len(seen) == 2
 
+    @pytest.mark.parametrize("start", START_CONTEXTS)
     @pytest.mark.parametrize("internal", INTERNAL_TARGETS)
     @pytest.mark.parametrize("internal_hop", [0, 1, 2, MAX_REDIRECTS - 2])
     def test_every_redirect_hop_is_revalidated(
-        self, monkeypatch, public_dns, internal_hop, internal
+        self, monkeypatch, public_dns, internal_hop, internal, start
     ):
         """The internal address is refused wherever it sits in the chain.
 
@@ -1351,14 +1378,14 @@ class TestFetchToolSSRFGuard:
 
         def handler(request, index):
             if index < internal_hop:
-                return _redirect(f"http://hop{index + 1}.example.com/p")
+                return _redirect(f"{start}/hop{index + 1}/p")
             if index == internal_hop:
                 return _redirect(internal)
             raise AssertionError(f"unexpected request {request.url}")
 
         seen = _install_transport(monkeypatch, handler)
 
-        result = self._fetch()
+        result = self._fetch(f"{start}/start")
 
         assert result == {"error": "Redirected to unsafe URL"}
         assert len(seen) == internal_hop + 1
@@ -1426,6 +1453,37 @@ class TestFetchToolSSRFGuard:
 
         assert self._fetch(max_length=10)["content"] == "x" * 10
 
+    def test_extra_tool_arguments_do_not_relax_the_initial_guard(
+        self, monkeypatch, public_dns
+    ):
+        """input_args is whatever the model emits, so it must not steer the guard."""
+
+        def handler(request, index):  # pragma: no cover - must not be reached
+            raise AssertionError(f"internal address requested: {request.url}")
+
+        seen = _install_transport(monkeypatch, handler)
+
+        result = self._fetch(INTERNAL_TARGETS[0], max_length=500)
+
+        assert "error" in result
+        assert "content" not in result
+        assert seen == []
+
+    def test_a_reused_loader_still_checks_every_hop(self, monkeypatch, public_dns):
+        """A loader with connections already cached judges hops the same way."""
+        seen = _install_transport(
+            monkeypatch, lambda request, index: _redirect(INTERNAL_TARGETS[0])
+        )
+        loader = MCPLoader([])
+        loader._connections["PRIOR"] = object()
+
+        result = loader._execute_fetch_tool(
+            "fetch", {"url": "http://example.com/start"}
+        )
+
+        assert result == {"error": "Redirected to unsafe URL"}
+        assert seen == ["http://example.com/start"]
+
     @pytest.mark.parametrize("status_code", REDIRECT_STATUSES)
     def test_hop_is_address_checked_on_every_redirect_status(
         self, monkeypatch, public_dns, status_code
@@ -1444,28 +1502,6 @@ class TestFetchToolSSRFGuard:
 
         assert result == {"error": "Redirected to unsafe URL"}
         assert seen == ["http://example.com/start"]
-
-    @pytest.mark.parametrize("status_code", REDIRECT_STATUSES)
-    def test_redirect_body_is_never_read_on_any_status(
-        self, monkeypatch, public_dns, status_code
-    ):
-        reads = []
-
-        def handler(request, index):
-            if index == 0:
-                return httpx.Response(
-                    status_code,
-                    headers={"location": "http://example.com/final"},
-                    stream=_recording_body(b"y" * 5000, reads, "redirect"),
-                )
-            return httpx.Response(
-                200, stream=_recording_body(b"<html>final", reads, "terminal")
-            )
-
-        _install_transport(monkeypatch, handler)
-
-        assert self._fetch()["content"] == "<html>final"
-        assert reads == ["terminal"]
 
     def test_relative_location_resolves_against_the_current_url(
         self, monkeypatch, public_dns
@@ -1591,8 +1627,9 @@ class TestFetchToolSSRFGuard:
 
         assert result["content"] == "x" * 10 + "... (truncated)"
 
+    @pytest.mark.parametrize("status_code", REDIRECT_STATUSES)
     def test_redirect_bodies_are_never_pulled_off_the_wire(
-        self, monkeypatch, public_dns
+        self, monkeypatch, public_dns, status_code
     ):
         """A bounded walk still pulls MAX_REDIRECTS bodies if each is buffered.
 
@@ -1607,7 +1644,7 @@ class TestFetchToolSSRFGuard:
         def handler(request, index):
             if index == 0:
                 return httpx.Response(
-                    302,
+                    status_code,
                     headers={"location": "http://example.com/final"},
                     stream=_recording_body(b"y" * 10_000, reads, "redirect"),
                 )
