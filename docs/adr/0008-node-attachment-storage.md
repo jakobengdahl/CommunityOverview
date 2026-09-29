@@ -591,7 +591,8 @@ python scripts/validate_attachments.py --attachments <root> --namespace <ns>
 ```
 
 It walks every node directory in the one namespace given (the argument is
-required, so one graph is never checked against another graph's files) and classifies each finding:
+required, so one graph is never checked against another graph's files) and
+classifies each finding:
 
 | Class | Finding |
 |---|---|
@@ -623,16 +624,25 @@ passes one export per scope, plus one from an unscoped instance. A view that
 misses nodes only produces false orphan *warnings*, which is why deleting
 orphan node directories needs its own flag (below).
 
-**Pruning.** It never touches anything classed as an error, and comes in two
-flags:
+**Pruning.** It never touches anything classed as an error. Every deletion
+takes the per-node lock (`<namespace_key>/.locks/<node_key>.lock`, §11),
+re-checks the condition under the lock (still unindexed or still orphaned,
+and still old enough), and only then deletes. A check made before the lock
+is taken is never acted on. Pruning comes in two flags:
 
 - **`--prune`** deletes unindexed blobs and unindexed node directories, and
   only when every file in them is more than one hour old. These need no
   graph at all to be judged, so they are safe whatever `--graph` covers.
-- **`--prune-orphan-nodes`** also deletes orphan node directories, and only
-  those whose `index.json` was last modified before the oldest `--graph`
-  file. It is a separate, explicit opt-in because its safety depends on the
-  `--graph` set being complete, which the validator cannot check.
+- **`--prune-orphan-nodes`** implies `--prune` and additionally deletes
+  orphan node directories. It deletes only those whose `index.json` was
+  last modified before the reference time: the earliest `exportDate` among
+  the `--graph` documents (the field `GET /export` writes).
+  - File modification times of the `--graph` files are never used. A copied
+    or re-downloaded export gets a newer mtime than its content.
+  - If any `--graph` document has no `exportDate` (for example a raw graph
+    file), the flag is refused as a usage error (exit `2`).
+  - It is a separate, explicit opt-in because its safety depends on the
+    `--graph` set being complete, which the validator cannot check.
 
 **Backup.** An operator backup copies the attachment root to a timestamped,
 write-once location, on its own schedule rather than with the graph's,
@@ -643,8 +653,10 @@ whoever operates the deployment.
 **A consistent copy.** Take it from a point-in-time volume or filesystem
 snapshot where one is available. Otherwise copy in two passes — every
 `index.json` first, then every `blobs/` directory — and run the validator on
-the copy. The commit and delete orderings in §1 mean a copy taken this way
-while writes continue can hold only two kinds of inconsistency:
+the copy, with any current export as `--graph` (the retry decision below rests
+only on error-class findings, which do not depend on the graph). The commit
+and delete orderings in §1 mean a copy taken this way while writes continue
+can hold only two kinds of inconsistency:
 
 - extra unindexed blobs, or unindexed node directories created between the
   passes (warnings);
@@ -655,9 +667,10 @@ still has errors, the job fails and keeps the validator output. A corrupt
 index is not something a retry can fix.
 
 **Restore.** Restore extracts into an empty directory, runs the validator
-against the graph that will be live (its `GET /export`, or, while that graph
-is itself still a restored file not yet served, the file), and only then swaps the directory into
-place.
+against the graph that will be live, and only then swaps the directory into
+place. The graph is that graph's `GET /export`, or the restored file itself
+while that graph is not yet served. A raw file carries no `exportDate`, so
+it supports reporting but not `--prune-orphan-nodes`.
 
 ### 11. File-backend layout
 
@@ -676,21 +689,21 @@ data/active/
 
 - `stage` writes into `.tmp/`, which is on the same filesystem, so `commit`'s
   move is an atomic rename. The rename happens before the index rewrite. A
-  crash can therefore leave a staged file (removed by a later start-up sweep once stale) or
-  an unindexed blob (reported by the validator, §8), but never a record
-  without a blob.
-- The per-node lock is an in-process lock plus an OS lock
-  (`_lock_file`, as `history_store` uses) on
-  `<namespace_key>/.locks/<node_key>.lock`. The lock file lives outside the
-  node directory and is never deleted, so `delete_node` removing the
-  directory cannot split the lock between two holders. Two processes sharing
-  a root therefore never interleave commits and deletes on one node.
+  crash can therefore leave a staged file (removed by a later start-up sweep
+  once stale) or an unindexed blob (reported by the validator, §8), but never
+  a record without a blob.
+- The per-node lock is an in-process lock plus an OS lock (`_lock_file`, as
+  `history_store` uses) on `<namespace_key>/.locks/<node_key>.lock`. The lock
+  file lives outside the node directory and is never deleted, so `delete_node`
+  removing the directory cannot split the lock between two holders. Two
+  processes sharing a root therefore never interleave commits and deletes on
+  one node.
 - With the PostgreSQL graph backend there is no graph file to sit beside.
   `ATTACHMENT_DIR` is therefore required, and is refused at boot if unset.
-- All instances serving one PostgreSQL schema, whatever their row scopes,
-  must share the attachment root, or use a backend that is itself shared. A per-instance
-  local directory would silently give each instance a different set of
-  files.
+- All instances serving one PostgreSQL schema, whatever their row scopes, must
+  share the attachment root, or use a backend that is itself shared. A
+  per-instance local directory would silently give each instance a different
+  set of files.
 
 ### 12. Node-view panel
 
