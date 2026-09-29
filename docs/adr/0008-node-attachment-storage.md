@@ -198,7 +198,8 @@ class AttachmentStore(Protocol):
     def get_record(self, namespace: str, node_id: str, attachment_id: str) -> AttachmentRecord | None: ...
     def open_read(self, namespace: str, node_id: str, attachment_id: str) -> BinaryIO: ...
     async def stage(self, namespace: str, node_id: str, chunks: AsyncIterator[bytes], max_bytes: int) -> StagedUpload: ...
-    async def commit(self, staged: StagedUpload, record: NewAttachment, limits: AttachmentLimits) -> AttachmentRecord: ...
+    async def commit(self, staged: StagedUpload, record: NewAttachment, limits: AttachmentLimits,
+                     precondition: Callable[[], None]) -> AttachmentRecord: ...
     def discard(self, staged: StagedUpload) -> None: ...
     def delete(self, namespace: str, node_id: str, attachment_id: str) -> bool: ...
     def delete_node(self, namespace: str, node_id: str) -> int: ...
@@ -215,12 +216,17 @@ Upload is two-phase, so type policy stays out of the store:
 2. The service layer sniffs the staged bytes (§5). A refusal raises
    `UnsupportedAttachmentType` from the sniffing module, and the service calls
    `discard`.
-3. `commit` takes the per-node lock, re-reads the node's index, and re-checks
-   the count and total limits against the index *as it now stands*. That
-   check is what stops two concurrent uploads that each passed an earlier
-   check from exceeding the limit together. On a breach it raises
-   `AttachmentLimitExceeded` and discards the staged file. Otherwise it moves
-   the blob into place and then rewrites the index (§11).
+3. `commit` takes the per-node lock and first calls `precondition()`. The
+   service passes a callback that re-reads the node from `GraphStorage` and
+   raises `AttachmentNodeGone` if it no longer exists, or
+   `AttachmentNodeArchived` if it is now archived. The route maps these to
+   `404` and to `409 node_archived`, and the staged file is discarded.
+   `commit` then re-reads the node's index and re-checks the count and total
+   limits against the index *as it now stands*. That check is what stops two
+   concurrent uploads that each passed an earlier check from exceeding the
+   limit together. On a breach it raises `AttachmentLimitExceeded` and
+   discards the staged file. Otherwise it moves the blob into place and then
+   rewrites the index (§11).
 
 Rules for readers and deleters:
 
@@ -229,14 +235,26 @@ Rules for readers and deleters:
   whatever exists on disk.
 - A record with no blob must never be observable. `delete` therefore rewrites
   the index without the record first, and only then removes the blob.
+- `delete` and `delete_node` take the same per-node lock as `commit`. A
+  commit racing a node delete therefore either completes before the
+  directory is removed (and is removed with it), or finds the node gone in
+  its precondition.
 - `iter_nodes` exists for reconciliation and validation (§8, §10), not for
   request handling.
 
-`namespace` separates graphs that share one store. The service layer derives
-it from the persistence backend: the backend's `default_graph_name()`,
-followed by `|scope=<scope>` when a PostgreSQL row scope is configured. Two
-scoped instances that share one attachment root therefore never share keys,
-even for a node id that exists in both scopes.
+`namespace` separates graphs that share one attachment root. The service
+layer uses the persistence backend's `default_graph_name()`: the file stem
+for the file backend, and `"graph"` for PostgreSQL today.
+
+The PostgreSQL row scope is deliberately **not** part of the namespace. Node
+`id` is the primary key of the whole table, not of one scope
+(`CrossScopeWriteRefused` in `backend/core/postgres_backend.py`), so node
+ids cannot collide between scopes. A row with no scope is visible to every
+scope, so a scope-qualified namespace would give one shared node a separate
+attachment set per scope. Isolation between scopes comes from §7 instead:
+every route resolves the node through the instance's own storage and
+visibility check before it touches the store, so an instance never reaches
+the files of a node it cannot see.
 
 Backend selection follows the persistence backend's pattern:
 
@@ -341,6 +359,13 @@ Enforcement happens at four points:
 4. **At commit.** The count and total are checked again under the lock
    (§1).
 
+When the pre-check or `stage` trips, the service reports the cap that was
+the smaller of the two:
+
+- the per-file limit gives `413 attachment_too_large`;
+- the node's remaining byte budget gives `409 node_attachment_limit`;
+- when the two are equal, it is reported as the per-file limit.
+
 | Breach | Status | `error` |
 |---|---|---|
 | per-file size | `413` | `attachment_too_large` |
@@ -359,9 +384,17 @@ small detection module, not a dependency on a system library.
 |---|---|
 | `application/pdf` | leading `%PDF-` |
 | `image/png`, `image/jpeg`, `image/webp` | their signatures |
-| OOXML (`.docx`, `.xlsx`, `.pptx`) | ZIP signature, then the ZIP's central directory contains `[Content_Types].xml` and the extension-specific part (`word/`, `xl/`, `ppt/`) |
-| ODF (`.odt`, `.ods`, `.odp`) | ZIP signature, then the `mimetype` member names the matching ODF type |
+| `application/vnd.openxmlformats-officedocument.wordprocessingml.document` | ZIP signature; central directory has `[Content_Types].xml` and `word/document.xml` |
+| `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` | ZIP signature; `[Content_Types].xml` and `xl/workbook.xml` |
+| `application/vnd.openxmlformats-officedocument.presentationml.presentation` | ZIP signature; `[Content_Types].xml` and `ppt/presentation.xml` |
+| `application/vnd.oasis.opendocument.text` | ZIP signature; the `mimetype` member's content is exactly this string |
+| `application/vnd.oasis.opendocument.spreadsheet` | same, with this string |
+| `application/vnd.oasis.opendocument.presentation` | same, with this string |
 | `text/plain`, `text/csv` | no signature exists, so by rule (below) |
+
+**The archive decides.** For the ZIP-based types, the archive's contents
+decide the type, and the file extension is ignored. An OOXML archive
+containing more than one of the three main parts is refused.
 
 **The text rule.** The whole staged file must be valid UTF-8, with a leading
 BOM allowed. It must contain no NUL byte. Its first non-whitespace character
@@ -495,9 +528,14 @@ changing this design.
   the restore of a backup that brings those nodes back.
 - **Two kinds of orphan:**
   - an *orphan node directory* — its `node_id` is not in the graph;
+  - an *unindexed node directory* — a `<node_key>/` with blobs but no
+    `index.json`. A crash between a node's first blob move and its first
+    index write leaves one;
   - an *unindexed blob* — a file under `blobs/` with no index record. A crash
     between `commit`'s blob move and its index rewrite leaves one.
-- **The start-up sweep** removes only `.tmp/` (§11).
+- **The start-up sweep** removes only entries in `.tmp/` whose modification
+  time is more than one hour old (§11). An upload in flight on another
+  instance that shares the root keeps writing, and so keeps its mtime fresh.
 - **The reconcile routine** (the validator in §10, run with `--prune`) reports
   both kinds of orphan. It deletes orphan node directories and unindexed
   blobs only when asked, and only blobs older than one hour, so it can never
@@ -528,11 +566,11 @@ file backend:
 
 ```
 python scripts/validate_attachments.py --attachments <root> --graph <graph.json or GET /export output>
-                                       [--namespace <ns>] [--strict] [--prune]
+                                       --namespace <ns> [--strict] [--prune]
 ```
 
-It walks every node directory in the namespace (all namespaces when none is
-given) and classifies each finding:
+It walks every node directory in the one namespace given (the argument is
+required, so one graph is never checked against another graph's files) and classifies each finding:
 
 | Class | Finding |
 |---|---|
@@ -541,6 +579,7 @@ given) and classifies each finding:
 | **error** | a blob whose size or SHA-256 differs from its record |
 | **error** | an index whose `node_id` does not hash to its directory name |
 | **warning** | an orphan node directory |
+| **warning** | an unindexed node directory, reported by its `node_key` |
 | **warning** | an unindexed blob |
 
 **Exit codes.** `0` when there are no errors, `1` when there are, `2` on a
@@ -551,8 +590,24 @@ finding plus a summary, so a backup or restore job can log it verbatim.
 (§8), and a restored attachment set is often newer or older than the graph it
 is checked against.
 
-**`--prune`.** It deletes the warnings' subjects, applying §8's one-hour rule
-to blobs. It never touches anything classed as an error.
+**`--graph` must be a complete view.** It must list every node that can own
+files in the namespace:
+
+- `graph.json` itself;
+- or `GET /export` from a caller whose authorization is not narrowed, served
+  by an instance with no row scope when the store is PostgreSQL, since the
+  namespace spans every scope (§1).
+
+A narrowed or scoped export hides nodes, and they would look like orphans.
+
+**`--prune`.** It deletes the warnings' subjects, under these guards:
+
+- Unindexed blobs, and unindexed node directories, are deleted only when
+  every file in them is more than one hour old.
+- An orphan node directory is deleted only when its `index.json` was last
+  modified before the `--graph` file was. A node created after the graph
+  was written is therefore never pruned as an orphan.
+- It never touches anything classed as an error.
 
 **Backup.** An operator backup copies the attachment root to a timestamped,
 write-once location, on its own schedule rather than with the graph's,
@@ -566,10 +621,13 @@ snapshot where one is available. Otherwise copy in two passes — every
 the copy. The commit and delete orderings in §1 mean a copy taken this way
 while writes continue can hold only two kinds of inconsistency:
 
-- extra unindexed blobs (a warning);
+- extra unindexed blobs, or unindexed node directories created between the
+  passes (warnings);
 - a record whose blob was deleted between the passes (an error).
 
-The job retries the copy on an error.
+On an error, the job retries the copy at most twice more. If the third copy
+still has errors, the job fails and keeps the validator output. A corrupt
+index is not something a retry can fix.
 
 **Restore.** Restore extracts into an empty directory, runs the validator
 against the graph that will be live, and only then swaps the directory into
@@ -586,21 +644,25 @@ data/active/
   graph.attachments/                    # ATTACHMENT_DIR overrides
     <namespace_key>/<node_key>/index.json
     <namespace_key>/<node_key>/blobs/<attachment_id>
-    .tmp/                               # staged uploads; emptied at start-up
+    <namespace_key>/.locks/<node_key>.lock
+    .tmp/                               # staged uploads; stale ones swept at start-up
 ```
 
 - `stage` writes into `.tmp/`, which is on the same filesystem, so `commit`'s
   move is an atomic rename. The rename happens before the index rewrite. A
-  crash can therefore leave a staged file (removed at the next start-up) or
+  crash can therefore leave a staged file (removed by a later start-up sweep once stale) or
   an unindexed blob (reported by the validator, §8), but never a record
   without a blob.
-- The per-node lock is an in-process lock plus an OS lock file (`.lock`) in
-  the node directory. That is the same two-level locking `history_store`
-  takes, so two processes sharing a root do not interleave commits.
+- The per-node lock is an in-process lock plus an OS lock
+  (`_lock_file`, as `history_store` uses) on
+  `<namespace_key>/.locks/<node_key>.lock`. The lock file lives outside the
+  node directory and is never deleted, so `delete_node` removing the
+  directory cannot split the lock between two holders. Two processes sharing
+  a root therefore never interleave commits and deletes on one node.
 - With the PostgreSQL graph backend there is no graph file to sit beside.
   `ATTACHMENT_DIR` is therefore required, and is refused at boot if unset.
-- Several instances serving one PostgreSQL graph and scope must share the
-  attachment root, or use a backend that is itself shared. A per-instance
+- All instances serving one PostgreSQL store, whatever their scopes, must
+  share the attachment root, or use a backend that is itself shared. A per-instance
   local directory would silently give each instance a different set of
   files.
 
