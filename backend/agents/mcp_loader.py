@@ -154,14 +154,23 @@ class MCPLoader:
 
             # Try info endpoint
             info_url = f"{base_url}/info"
-            # The integration URL is operator-supplied, but the server on the
-            # other end chooses the redirect chain, so this walks the hops by
-            # hand and re-validates each one -- the same shape as the fetch
-            # tool in _execute_fetch_tool below. Handing follow_redirects=True
-            # to httpx would let one 302 from that server pull this request to
-            # an address is_safe_url rejects, with only the first URL checked.
-            if not is_safe_url(info_url):
-                raise ValueError(f"Info URL is not safe to fetch: {info_url}")
+            # info_url is OPERATOR CONFIGURATION, so it is not address-checked:
+            # an MCP server on localhost is the normal deployment, and the
+            # shipped default GRAPH integration is exactly that
+            # (http://localhost:PORT/mcp/sse -- see agents/config.py). What the
+            # operator cannot vouch for is where that server then SENDS this
+            # request, so every redirect hop below is re-validated with
+            # is_safe_url before it is requested. Handing follow_redirects=True
+            # to httpx, as this did before, let one 302 from that server pull
+            # the request to any internal address with nothing checked at all.
+            #
+            # This is the one place the three sibling walkers differ from each
+            # other on purpose. _execute_fetch_tool below DOES check its
+            # initial URL, because that URL comes from the agent rather than
+            # from config; the skills loader checks its own, because a skill
+            # URL is meant to name a public host and it has a trusted_domains
+            # allowlist to match. Here the initial address is the operator's
+            # own choice, and refusing it would break the default install.
 
             with httpx.Client(timeout=5, follow_redirects=False) as client:
                 current_url = info_url

@@ -3,6 +3,7 @@ Tests for MCP loader and tool namespacing.
 """
 
 import ast
+import urllib.parse
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,7 +11,7 @@ import httpx2 as httpx
 import pytest
 
 from backend.agents import mcp_loader
-from backend.agents.config import MCPIntegration, MCPTransport
+from backend.agents.config import AgentsSettings, MCPIntegration, MCPTransport
 from backend.agents.mcp_loader import MAX_REDIRECTS, MCPLoader, NamespacedTool
 from backend.core import image_ingest
 from backend.core.events import delivery
@@ -651,13 +652,28 @@ def _recording_body(payload, reads, label):
     return _Stream()
 
 
-# Both schemes. is_safe_url is scheme-agnostic once it has a host, but a
-# guard made conditional on the scheme is a one-word edit, and an http-only
-# suite cannot see it. Every refusal test below is parametrised over these.
+# The SHAPE of a hop target, not just its scheme. is_safe_url resolves
+# whatever urljoin produces, but a guard made conditional on any surface
+# property of the Location string -- "does it contain ://", "does it contain
+# [", "does it contain @" -- is a one-word edit, and a suite that only ever
+# sends one shape cannot see it. The initial-URL tests already vary this
+# richly; these are the same forms carried onto the hop axis, which is where
+# the far end chooses the string.
 INTERNAL_TARGETS = [
     "http://169.254.169.254/latest/meta-data/",
     "https://169.254.169.254/latest/meta-data/",
+    # no "://" at all, but urljoin makes it absolute onto the metadata address
+    "//169.254.169.254/latest/meta-data/",
+    "http://[::1]/latest/meta-data/",
+    "https://[fc00::1]/latest/meta-data/",
+    # urlparse discards the userinfo; the host is still link-local
+    "http://anything@169.254.169.254/latest/meta-data/",
 ]
+
+# Hostnames INTERNAL_TARGETS resolve to once urljoin has done its work. Keying
+# the "never requested" assertion off this rather than off a literal IPv4
+# string keeps it honest for the IPv6 and userinfo forms.
+INTERNAL_HOSTS = {"169.254.169.254", "::1", "fc00::1"}
 
 
 class TestConnectHttpInfoQuery:
@@ -754,51 +770,99 @@ class TestConnectHttpInfoQuery:
     @pytest.mark.parametrize(
         "url",
         [
-            "http://127.0.0.1/mcp",
-            "https://127.0.0.1/mcp",
+            "http://127.0.0.1:8000/mcp",
+            "http://localhost:8000/mcp/sse",
             "http://10.0.0.1/mcp",
-            "https://10.0.0.1/mcp",
-            "http://192.168.1.1/mcp",
-            "http://169.254.169.254/mcp",
-            "https://169.254.169.254/mcp",
-            "http://100.64.0.1/mcp",
-            "http://[::1]/mcp",
-            "https://[::1]/mcp",
-            "http://[fc00::1]/mcp",
+            "http://[::1]:8000/mcp",
         ],
     )
-    def test_info_endpoint_literal_internal_ip_never_reaches_the_network(
+    def test_info_endpoint_operator_configured_internal_address_is_requested(
         self, monkeypatch, url
     ):
-        """The initial info URL is checked before any request is made."""
+        """The CONFIGURED address is deliberately not address-checked.
 
-        def handler(request, index):  # pragma: no cover - must not be reached
-            raise AssertionError(f"internal address requested: {request.url}")
-
-        seen = _install_transport(monkeypatch, handler)
+        An MCP server on localhost or a private network is the normal
+        deployment, and the shipped default GRAPH integration is exactly
+        that. is_safe_url is the guard against a server steering this
+        request somewhere the operator did not choose -- it is not a policy
+        about where the operator may run their own server. Checking the
+        initial URL here refused the default install's own info endpoint.
+        """
+        seen = _install_transport(
+            monkeypatch,
+            lambda request, index: httpx.Response(200, json={"endpoints": ["/mcp"]}),
+        )
         integration = self._integration(url)
 
-        assert MCPLoader([integration])._connect_http(integration) == []
-        assert seen == []
+        tools = MCPLoader([integration])._connect_http(integration)
 
-    @pytest.mark.parametrize("scheme", ["http", "https"])
-    def test_info_endpoint_hostname_resolving_internally_is_rejected(
-        self, monkeypatch, scheme
+        assert [tool.original_name for tool in tools]
+        assert len(seen) == 1
+
+    def test_the_shipped_default_graph_integration_discovers_through_info(
+        self, monkeypatch
     ):
-        """A public-looking hostname whose DNS answer is internal is blocked."""
+        """The default config must reach tools through /info, not the fallback.
+
+        _connect_http ends with `if not tools and integration.id == "GRAPH"`,
+        which would mask a broken discovery path for this one integration and
+        for no other. Using a non-GRAPH id with the default's loopback URL
+        removes that safety net, so this fails if the walk refuses its own
+        configured address again.
+        """
+        default_graph = next(
+            integration
+            for integration in AgentsSettings._get_default_integrations()
+            if integration.id == "GRAPH"
+        )
+        assert default_graph.url.startswith("http://localhost:"), default_graph.url
+
+        seen = _install_transport(
+            monkeypatch,
+            lambda request, index: httpx.Response(200, json={"endpoints": ["/mcp"]}),
+        )
+        integration = self._integration(default_graph.url)
+
+        tools = MCPLoader([integration])._connect_http(integration)
+
+        assert [tool.original_name for tool in tools]
+        assert seen == ["http://localhost:8000/info"]
+
+    def test_a_configured_internal_address_still_gets_its_hops_checked(
+        self, monkeypatch
+    ):
+        """Trusting the configured address does not extend to where it sends us."""
+        seen = _install_transport(
+            monkeypatch, lambda request, index: _redirect(INTERNAL_TARGETS[0])
+        )
+        integration = self._integration("http://localhost:8000/mcp")
+
+        assert MCPLoader([integration])._connect_http(integration) == []
+        assert seen == ["http://localhost:8000/info"]
+
+    def test_info_endpoint_configured_hostname_resolving_internally_is_requested(
+        self, monkeypatch
+    ):
+        """Same decision by name: an operator's internal hostname is configuration.
+
+        The fetch tool's equivalent test asserts the opposite, and that
+        difference is the point -- its URL comes from the agent, this one from
+        the operator.
+        """
         monkeypatch.setattr(
             "backend.core.events.delivery.socket.getaddrinfo",
             lambda *args, **kwargs: _addrinfo("10.0.0.5"),
         )
+        seen = _install_transport(
+            monkeypatch,
+            lambda request, index: httpx.Response(200, json={"endpoints": ["/mcp"]}),
+        )
+        integration = self._integration("http://mcp.internal.example.com/mcp")
 
-        def handler(request, index):  # pragma: no cover - must not be reached
-            raise AssertionError(f"internal address requested: {request.url}")
+        tools = MCPLoader([integration])._connect_http(integration)
 
-        seen = _install_transport(monkeypatch, handler)
-        integration = self._integration(f"{scheme}://internal.example.com/mcp")
-
-        assert MCPLoader([integration])._connect_http(integration) == []
-        assert seen == []
+        assert [tool.original_name for tool in tools]
+        assert len(seen) == 1
 
     @pytest.mark.parametrize("status_code", [404, 500])
     def test_info_endpoint_non_200_is_not_trusted_and_is_requested_once(
@@ -867,17 +931,23 @@ class TestConnectHttpInfoQuery:
 
         assert MCPLoader([integration])._connect_http(integration) == []
         assert len(seen) == internal_hop + 1
-        assert all("169.254.169.254" not in url for url in seen)
+        assert all(
+            urllib.parse.urlparse(url).hostname not in INTERNAL_HOSTS for url in seen
+        )
 
     def test_info_endpoint_same_host_hop_is_still_address_checked(self, monkeypatch):
         """DNS rebinding: the name does not change, what it resolves to does.
 
         Every other hop test turns internal by changing host, so a walk that
-        remembered "this hostname was already safe" and skipped the re-check
-        would pass all of them. Here the host is identical across the hop and
-        only the DNS answer moves, which is the actual rebinding shape.
+        skipped the re-check when the hop kept the hostname -- because it had
+        "already seen" that host, or because the configured address is trusted
+        -- would pass all of them. Here the host is identical across the hop
+        and only the DNS answer moves, which is the actual rebinding shape.
+
+        One answer, not two: the configured URL is no longer address-checked,
+        so the hop is the first and only is_safe_url call in this walk.
         """
-        answers = iter([_addrinfo(), _addrinfo("169.254.169.254")])
+        answers = iter([_addrinfo("169.254.169.254")])
         monkeypatch.setattr(
             "backend.core.events.delivery.socket.getaddrinfo",
             lambda *args, **kwargs: next(answers),
@@ -1197,7 +1267,9 @@ class TestFetchToolSSRFGuard:
 
         assert result == {"error": "Redirected to unsafe URL"}
         assert len(seen) == internal_hop + 1
-        assert all("169.254.169.254" not in url for url in seen)
+        assert all(
+            urllib.parse.urlparse(url).hostname not in INTERNAL_HOSTS for url in seen
+        )
 
     def test_same_host_hop_is_still_address_checked(self, monkeypatch):
         """DNS rebinding: the name does not change, what it resolves to does."""
