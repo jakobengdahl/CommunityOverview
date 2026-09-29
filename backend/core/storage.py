@@ -2427,6 +2427,20 @@ class GraphStorage:
                     logger.warning(f"could not persist what was added: {persist_error}")
 
             nodes_to_embed: List[Node] = []
+            generation_attempted = False
+
+            def generate_landed_vectors() -> None:
+                # Once per call: an exit after the attempt - a rejected edge -
+                # must not encode the batch a second time.
+                nonlocal generation_attempted
+                if generation_attempted or not nodes_to_embed:
+                    return
+                generation_attempted = True
+                try:
+                    self.vector_store.update_nodes_embeddings(nodes_to_embed)
+                except Exception as embed_error:
+                    # Embedding generation is optional - log but don't fail
+                    logger.warning(f"could not generate embeddings: {embed_error}")
 
             def settle_landed_vectors() -> None:
                 # A node that landed stays, and every later event about it -
@@ -2442,6 +2456,10 @@ class GraphStorage:
                     )
                 for landed in nodes_to_embed:
                     landed.embedding = None
+                # A landed node stays and is persisted, so it is generated for
+                # as on success; otherwise semantic search misses it until the
+                # next startup backfill.
+                generate_landed_vectors()
 
             try:
                 # Add nodes
@@ -2472,13 +2490,7 @@ class GraphStorage:
                 # below still wins when the ML stack is available, as before.
                 self._adopt_supplied_vectors(nodes_to_embed)
 
-                # Generate embeddings for new nodes (non-blocking)
-                if nodes_to_embed:
-                    try:
-                        self.vector_store.update_nodes_embeddings(nodes_to_embed)
-                    except Exception as embed_error:
-                        # Embedding generation is optional - log but don't fail
-                        logger.warning(f"could not generate embeddings: {embed_error}")
+                generate_landed_vectors()
 
                 # Persisted before the edges so that, as before, a rejected
                 # edge leaves the nodes it was meant to join in place.
