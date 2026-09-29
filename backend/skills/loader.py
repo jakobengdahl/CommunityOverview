@@ -617,8 +617,11 @@ class SkillsLoader:
     ) -> str:
         """Fetch URL and return text, with size guard and raw-text caching.
 
-        Checks Content-Length before buffering to avoid receiving a large
-        response body from a trusted domain before detecting the oversize.
+        Every hop is streamed, so no body is held in memory until it has been
+        accepted: the Content-Length check runs before the final body is read,
+        and a redirect's body is never read at all. Without that the size
+        guard bounded only the last response, while the walk could still pull
+        ``MAX_REDIRECTS`` full-size bodies through memory on the way there.
         Caches the raw text so Stage 2 (full-skill load) can re-parse from
         cache without making a second HTTP request.
 
@@ -653,51 +656,64 @@ class SkillsLoader:
             current_url = url
             hop_headers = dict(headers or {})
             for _ in range(MAX_REDIRECTS):
-                response = await client.get(current_url, headers=hop_headers)
-                if response.is_redirect:
-                    location = str(response.headers.get("location", ""))
-                    if not location:
-                        raise ValueError(
-                            f"Redirect without a Location header from {current_url}"
-                        )
-                    next_url = urljoin(current_url, location)
-                    self._validate_domain(next_url)
-                    if not is_safe_url(next_url):
-                        raise ValueError(
-                            f"Redirect to a disallowed address: {next_url}"
-                        )
-                    # httpx drops credentials when a redirect leaves the
-                    # ORIGIN -- scheme, host and port, not host alone -- with
-                    # one exception: a plain http->https upgrade on the same
-                    # host keeps them. This walk must match that, or the
-                    # GitHub token in _github_headers() would be replayed to
-                    # a sibling subdomain (_validate_domain admits any
-                    # subdomain of a trusted domain), to another port, or
-                    # over cleartext after an https->http downgrade.
-                    if _leaves_origin(current_url, next_url):
-                        _drop_authorization(hop_headers)
-                    current_url = next_url
-                    continue
-                response.raise_for_status()
-                # Reject early if the server advertises a content length that is too big
-                cl = response.headers.get("content-length")
-                if cl:
-                    try:
-                        advertised = int(cl)
-                    except ValueError:
-                        advertised = -1
-                    if advertised < 0:
-                        raise ValueError(f"Malformed Content-Length from {url}: {cl!r}")
-                    if advertised > max_bytes:
+                # Streamed so a redirect's body is never buffered, and so the
+                # Content-Length check below runs before the final body is
+                # read rather than after client.get() has already held it in
+                # memory. The walk is bounded by MAX_REDIRECTS hops, each of
+                # which could otherwise carry a full-size body.
+                async with client.stream(
+                    "GET", current_url, headers=hop_headers
+                ) as response:
+                    if response.is_redirect:
+                        location = str(response.headers.get("location", ""))
+                        if not location:
+                            raise ValueError(
+                                f"Redirect without a Location header from {current_url}"
+                            )
+                        next_url = urljoin(current_url, location)
+                        self._validate_domain(next_url)
+                        if not is_safe_url(next_url):
+                            raise ValueError(
+                                f"Redirect to a disallowed address: {next_url}"
+                            )
+                        # httpx drops credentials when a redirect leaves the
+                        # ORIGIN -- scheme, host and port, not host alone --
+                        # with one exception: a plain http->https upgrade on
+                        # the same host keeps them. This walk must match that,
+                        # or the GitHub token in _github_headers() would be
+                        # replayed to a sibling subdomain (_validate_domain
+                        # admits any subdomain of a trusted domain), to another
+                        # port, or over cleartext after an https->http
+                        # downgrade.
+                        if _leaves_origin(current_url, next_url):
+                            _drop_authorization(hop_headers)
+                        current_url = next_url
+                        continue
+                    response.raise_for_status()
+                    # Reject early if the server advertises a content length
+                    # that is too big
+                    cl = response.headers.get("content-length")
+                    if cl:
+                        try:
+                            advertised = int(cl)
+                        except ValueError:
+                            advertised = -1
+                        if advertised < 0:
+                            raise ValueError(
+                                f"Malformed Content-Length from {url}: {cl!r}"
+                            )
+                        if advertised > max_bytes:
+                            raise ValueError(
+                                f"Content from {url} exceeds max size "
+                                f"({max_bytes} bytes)"
+                            )
+                    await response.aread()
+                    content = response.text
+                    if len(content.encode()) > max_bytes:
                         raise ValueError(
                             f"Content from {url} exceeds max size ({max_bytes} bytes)"
                         )
-                content = response.text
-                if len(content.encode()) > max_bytes:
-                    raise ValueError(
-                        f"Content from {url} exceeds max size ({max_bytes} bytes)"
-                    )
-                break
+                    break
             else:
                 raise ValueError(f"Exceeded {MAX_REDIRECTS} redirects for {url}")
         self._text_cache[url] = (content, datetime.now(timezone.utc))

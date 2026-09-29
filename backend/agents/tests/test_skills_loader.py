@@ -540,9 +540,11 @@ def _public_dns():
 def _mock_http(handler, returned=None):
     """Give the loader's AsyncClient a MockTransport, keeping its own kwargs.
 
-    With `returned`, every response the client's get() hands the loader is
-    appended to it, so a test can judge what the loader saw rather than the
-    fixture it built.
+    With `returned`, every response the client hands the loader is appended to
+    it, so a test can judge what the loader saw rather than the fixture it
+    built. Both get() and stream() are wrapped: _fetch_text walks its hops
+    with stream() so a redirect body is never buffered, and a recorder that
+    only knew about get() would silently observe nothing.
     """
     real_client = loader_module.httpx.AsyncClient
 
@@ -552,13 +554,21 @@ def _mock_http(handler, returned=None):
         )
         if returned is not None:
             real_get = client.get
+            real_stream = client.stream
 
             async def recording_get(*args, **get_kwargs):
                 response = await real_get(*args, **get_kwargs)
                 returned.append(response)
                 return response
 
+            @contextlib.asynccontextmanager
+            async def recording_stream(*args, **stream_kwargs):
+                async with real_stream(*args, **stream_kwargs) as response:
+                    returned.append(response)
+                    yield response
+
             client.get = recording_get
+            client.stream = recording_stream
         return client
 
     with patch.object(loader_module.httpx, "AsyncClient", factory):
@@ -582,6 +592,69 @@ def _redirect_to(location):
 
 def _ok(body="# skill"):
     return loader_module.httpx.Response(200, text=body)
+
+
+def _recording_body(payload, reads, label):
+    """A response body that appends `label` to `reads` when it is iterated.
+
+    httpx only iterates a response's stream when the body is actually pulled
+    off the wire: client.get() always does, client.stream() only if the caller
+    reads it. Building the fixture with `text=` instead would leave `.content`
+    readable either way and measure nothing.
+    """
+
+    class _Stream(loader_module.httpx.AsyncByteStream):
+        async def __aiter__(self):
+            reads.append(label)
+            yield payload
+
+    return _Stream()
+
+
+class TestFetchTextRedirectBodies:
+    """The size guard bounds the final body; the walk must not buffer the rest.
+
+    A chain may carry MAX_REDIRECTS hops, so reading each hop's body to throw
+    it away puts that many full-size bodies through memory no matter what the
+    content cap says about the last one.
+    """
+
+    def _loader(self):
+        return SkillsLoader(
+            SkillsConfig(
+                allow_external_skills=True,
+                trusted_domains=[
+                    "raw.githubusercontent.com",
+                    "cdn.githubusercontent.com",
+                ],
+            )
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_redirect_body_is_never_pulled_off_the_wire(self):
+        reads = []
+        responses = [
+            loader_module.httpx.Response(
+                302,
+                headers={"location": "https://cdn.githubusercontent.com/SKILL.md"},
+                stream=_recording_body(b"x" * 10_000, reads, "redirect"),
+            ),
+            loader_module.httpx.Response(
+                200, stream=_recording_body(b"# skill", reads, "terminal")
+            ),
+        ]
+        handler, seen = _recording_handler(responses)
+
+        with _mock_http(handler), _public_dns():
+            content = await self._loader()._fetch_text(
+                "https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"
+            )
+
+        assert content == "# skill"
+        assert len(seen) == 2
+        # The terminal read is asserted too, so a loader that streamed and
+        # then read nothing could not pass by returning an empty body.
+        assert reads == ["terminal"]
 
 
 class TestFetchTextRedirects:

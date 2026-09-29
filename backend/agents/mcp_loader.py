@@ -154,20 +154,58 @@ class MCPLoader:
 
             # Try info endpoint
             info_url = f"{base_url}/info"
-            response = httpx.get(info_url, timeout=5, follow_redirects=True)
-            if response.status_code == 200:
-                info = response.json()
-                # Our graph MCP includes tools in the info endpoint
-                if "endpoints" in info:
-                    # We know our graph MCP tools
-                    tools = self._get_graph_mcp_tools(integration)
+            # The integration URL is operator-supplied, but the server on the
+            # other end chooses the redirect chain, so this walks the hops by
+            # hand and re-validates each one -- the same shape as the fetch
+            # tool in _execute_fetch_tool below. Handing follow_redirects=True
+            # to httpx would let one 302 from that server pull this request to
+            # an address is_safe_url rejects, with only the first URL checked.
+            if not is_safe_url(info_url):
+                raise ValueError(f"Info URL is not safe to fetch: {info_url}")
+
+            with httpx.Client(timeout=5, follow_redirects=False) as client:
+                current_url = info_url
+                for _ in range(MAX_REDIRECTS):
+                    # Streamed so a redirect's body is never buffered: the walk
+                    # is bounded by MAX_REDIRECTS hops, and client.get() would
+                    # read every one of those bodies into memory to discard it.
+                    with client.stream("GET", current_url) as response:
+                        if response.is_redirect:
+                            location = str(response.headers.get("location", ""))
+                            if not location:
+                                raise ValueError(
+                                    "Redirect without a Location header from "
+                                    f"{current_url}"
+                                )
+                            next_url = urllib.parse.urljoin(current_url, location)
+                            if not is_safe_url(next_url):
+                                raise ValueError(
+                                    f"Redirected to unsafe URL: {next_url}"
+                                )
+                            current_url = next_url
+                            continue
+                        if response.status_code == 200:
+                            response.read()
+                            info = response.json()
+                            # Our graph MCP includes tools in the info endpoint
+                            if "endpoints" in info:
+                                # We know our graph MCP tools
+                                tools = self._get_graph_mcp_tools(integration)
+                        break
+                else:
+                    raise ValueError(f"Too many redirects (limit {MAX_REDIRECTS})")
 
         except (httpx.RequestError, httpx.InvalidURL, ValueError) as e:
             # requests folded both a non-JSON-body decode error and a malformed-URL
             # error into RequestException, so both were swallowed-and-logged here.
             # httpx surfaces them as a plain ValueError (json.JSONDecodeError) and
-            # httpx.InvalidURL respectively — neither is an httpx.RequestError, so
-            # they are listed explicitly to preserve that behaviour.
+            # httpx.InvalidURL respectively -- neither is an httpx.RequestError, so
+            # they are listed explicitly to preserve that behaviour. The SSRF
+            # refusals above are ValueErrors and join that degrade-to-no-tools
+            # path: a server that cannot be reached safely discovers no tools.
+            # A malformed URL now fails is_safe_url (urlparse raises, which it
+            # catches fail-closed) before httpx sees it; InvalidURL stays listed
+            # because the hop loop feeds server-controlled Locations to httpx.
             logger.warning(f"Could not query {integration.id} info: {e}")
 
         # If no tools discovered, use known tools for GRAPH integration
@@ -770,29 +808,42 @@ class MCPLoader:
                 with httpx.Client(timeout=30, follow_redirects=False) as client:
                     current_url = url
                     for _ in range(MAX_REDIRECTS):
-                        response = client.get(current_url)
-                        if not response.is_redirect:
-                            break
-                        location = str(response.headers.get("location", ""))
-                        next_url = urllib.parse.urljoin(current_url, location)
-                        if not is_safe_url(next_url):
-                            return {"error": "Redirected to unsafe URL"}
-                        current_url = next_url
-                    else:
-                        return {"error": f"Too many redirects (limit {MAX_REDIRECTS})"}
-                    response.raise_for_status()
+                        # Streamed so a redirect's body is never buffered: the
+                        # walk is bounded by MAX_REDIRECTS hops, and client.get()
+                        # would read every one of those bodies into memory only
+                        # to discard it.
+                        with client.stream("GET", current_url) as response:
+                            if response.is_redirect:
+                                location = str(response.headers.get("location", ""))
+                                if not location:
+                                    # urljoin("", current) is current, so an empty
+                                    # Location used to re-request the same URL
+                                    # until the cap ran out. Refuse it after one
+                                    # request, as the skills loader does.
+                                    return {
+                                        "error": "Redirect without a Location header"
+                                    }
+                                next_url = urllib.parse.urljoin(current_url, location)
+                                if not is_safe_url(next_url):
+                                    return {"error": "Redirected to unsafe URL"}
+                                current_url = next_url
+                                continue
 
-                # Simple HTML to text conversion
-                content = response.text
-                max_length = input_args.get("max_length", 10000)
-                if len(content) > max_length:
-                    content = content[:max_length] + "... (truncated)"
+                            response.raise_for_status()
+                            response.read()
 
-                return {
-                    "url": url,
-                    "status": response.status_code,
-                    "content": content,
-                }
+                            # Simple HTML to text conversion
+                            content = response.text
+                            max_length = input_args.get("max_length", 10000)
+                            if len(content) > max_length:
+                                content = content[:max_length] + "... (truncated)"
+
+                            return {
+                                "url": url,
+                                "status": response.status_code,
+                                "content": content,
+                            }
+                    return {"error": f"Too many redirects (limit {MAX_REDIRECTS})"}
             except Exception as e:
                 return {"error": f"Fetch failed: {e}"}
 

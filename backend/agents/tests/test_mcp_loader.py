@@ -2,14 +2,19 @@
 Tests for MCP loader and tool namespacing.
 """
 
-import json
+import ast
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import httpx2 as httpx
+import pytest
 
+from backend.agents import mcp_loader
 from backend.agents.config import MCPIntegration, MCPTransport
 from backend.agents.mcp_loader import MAX_REDIRECTS, MCPLoader, NamespacedTool
+from backend.core import image_ingest
+from backend.core.events import delivery
+from backend.skills import loader as skills_loader
 
 
 class TestMCPLoader:
@@ -550,102 +555,48 @@ class TestMCPLoaderLifecycle:
         assert outside_file.read_text(encoding="utf-8") == "original"
 
 
-class TestConnectHttpInfoQuery:
-    """Tests for the HTTP info-endpoint tool-discovery path."""
+class _StubHttpxModule:
+    """Stands in for the module-level `httpx` name in mcp_loader.py.
 
-    @patch("backend.agents.mcp_loader.httpx.get")
-    def test_info_endpoint_non_json_body_is_swallowed(self, mock_get):
-        """A 200 response with a non-JSON body must not raise.
+    Both redirect walkers build their own `httpx.Client()`, so replacing the
+    module attribute is the only way to bind a mock transport without opening
+    a real socket. Binding it here rather than @patch-ing the shared `httpx2`
+    module object keeps one test from mutating global state another worker is
+    reading under pytest-xdist (mirrors backend/core/tests/test_image_ingest.py
+    and the webhook tests in backend/core/events/tests/test_delivery.py).
 
-        httpx surfaces a JSON decode failure as a plain ValueError, which — unlike
-        requests' JSONDecodeError (a RequestException) — is not an httpx.RequestError.
-        The handler must still swallow-and-log it so tool discovery degrades to an
-        empty list instead of propagating out of _connect_http.
-        """
-        response = Mock()
-        response.status_code = 200
-        response.json.side_effect = json.JSONDecodeError("no json", "<html>", 0)
-        mock_get.return_value = response
-
-        integration = MCPIntegration(
-            id="WEB",
-            name="Some HTTP MCP",
-            transport=MCPTransport.HTTP,
-            url="http://localhost:9999/mcp",
-        )
-        loader = MCPLoader([integration])
-
-        tools = loader._connect_http(integration)
-
-        assert tools == []
-
-    def test_info_endpoint_malformed_url_is_swallowed(self):
-        """A malformed configured URL must not escape _connect_http.
-
-        httpx raises httpx.InvalidURL (neither a RequestError nor a ValueError) on
-        a malformed URL, where requests folded MissingSchema/InvalidURL into
-        RequestException. The handler must still degrade to an empty tool list.
-        """
-        integration = MCPIntegration(
-            id="WEB",
-            name="Some HTTP MCP",
-            transport=MCPTransport.HTTP,
-            url="http://[::1/mcp",  # unclosed IPv6 bracket -> httpx.InvalidURL
-        )
-        loader = MCPLoader([integration])
-
-        tools = loader._connect_http(integration)
-
-        assert tools == []
-
-
-def _redirect_response(location, status_code=302):
-    """A 3xx response pointing at *location*.
-
-    httpx2's raise_for_status() raises on any non-2xx, 3xx included, so the
-    fixture does too. A bare Mock silently no-ops there, which would let a
-    test assert behaviour that no real response has.
-
-    Nothing here reaches that raise on the current code path; it is there for
-    fidelity, not coverage. Note that it makes a reverted cap resemble the
-    fixed code MORE closely, not less, since the old loop fell through onto
-    raise_for_status() and so also produced an error. What pins the cap is the
-    exact error message and the call count asserted below, not this fixture.
+    The exception types are forwarded because `_connect_http` names them in
+    its `except` clause; a stub that dropped them would turn a caught error
+    into an AttributeError.
     """
-    response = Mock()
-    response.is_redirect = True
-    response.status_code = status_code
-    response.headers = {"location": location}
-    response.text = "<html>redirecting</html>"
-    response.raise_for_status = Mock(
-        side_effect=httpx.HTTPStatusError(
-            f"Redirect response '{status_code}'", request=Mock(), response=response
-        )
+
+    RequestError = httpx.RequestError
+    InvalidURL = httpx.InvalidURL
+    HTTPError = httpx.HTTPError
+
+    def __init__(self, transport):
+        self._transport = transport
+
+    def Client(self, **kwargs):
+        return httpx.Client(transport=self._transport, **kwargs)
+
+
+def _install_transport(monkeypatch, handler):
+    """Bind `handler` as mcp_loader's transport and record what it requested.
+
+    The handler is called with (request, index) so a test can script a chain
+    by hop position. Returns the list the requested URLs accumulate into.
+    """
+    seen = []
+
+    def recording(request):
+        seen.append(str(request.url))
+        return handler(request, len(seen) - 1)
+
+    monkeypatch.setattr(
+        mcp_loader, "httpx", _StubHttpxModule(httpx.MockTransport(recording))
     )
-    return response
-
-
-def _ok_response(text="<html>fetched</html>", status_code=200):
-    """A terminal 2xx response carrying *text*."""
-    response = Mock()
-    response.is_redirect = False
-    response.status_code = status_code
-    response.headers = {}
-    response.text = text
-    response.raise_for_status = Mock()
-    return response
-
-
-def _client_returning(*responses):
-    """A context-manager mock httpx.Client whose .get yields *responses* in order."""
-    client = Mock()
-    client.__enter__ = Mock(return_value=client)
-    client.__exit__ = Mock(return_value=None)
-    if len(responses) == 1:
-        client.get.return_value = responses[0]
-    else:
-        client.get.side_effect = list(responses)
-    return client
+    return seen
 
 
 def _addrinfo(*ips):
@@ -653,21 +604,304 @@ def _addrinfo(*ips):
     return [(None, None, None, None, (ip, 0)) for ip in (ips or ("93.184.216.34",))]
 
 
+@pytest.fixture
+def public_dns(monkeypatch):
+    """Resolve every hostname in these tests to a public address.
+
+    is_safe_url is deliberately not mocked -- mocking it would leave the tests
+    passing against a caller that had stopped calling it -- so DNS is stubbed
+    instead. Without this a scheme test passes offline for the wrong reason:
+    `ftp://example.com/x` is refused because the name does not resolve, not
+    because the scheme was rejected, so a guard that had dropped its scheme
+    check would still look green.
+    """
+    monkeypatch.setattr(
+        "backend.core.events.delivery.socket.getaddrinfo",
+        lambda *args, **kwargs: _addrinfo(),
+    )
+
+
+def _redirect(location, status_code=302):
+    return httpx.Response(status_code, headers={"location": location})
+
+
+def _recording_body(payload, reads, label):
+    """A response body that appends `label` to `reads` when it is iterated.
+
+    httpx only iterates a response's stream when the body is actually pulled
+    off the wire: client.get() always does, client.stream() only if the
+    caller reads it. Building the fixture with `text=`/`content=` instead
+    would make `.content` readable either way and measure nothing.
+    """
+
+    class _Stream(httpx.SyncByteStream):
+        def __iter__(self):
+            reads.append(label)
+            yield payload
+
+    return _Stream()
+
+
+INTERNAL = "http://169.254.169.254/latest/meta-data/"
+
+
+class TestConnectHttpInfoQuery:
+    """Tests for the HTTP info-endpoint tool-discovery path."""
+
+    def _integration(self, url="http://example.com/mcp"):
+        return MCPIntegration(
+            id="WEB",
+            name="Some HTTP MCP",
+            transport=MCPTransport.HTTP,
+            url=url,
+        )
+
+    def test_info_endpoint_non_json_body_is_swallowed(self, monkeypatch, public_dns):
+        """A 200 response with a non-JSON body must not raise.
+
+        httpx surfaces a JSON decode failure as a plain ValueError, which -- unlike
+        requests' JSONDecodeError (a RequestException) -- is not an httpx.RequestError.
+        The handler must still swallow-and-log it so tool discovery degrades to an
+        empty list instead of propagating out of _connect_http.
+        """
+        _install_transport(
+            monkeypatch, lambda request, index: httpx.Response(200, text="<html>")
+        )
+        integration = self._integration()
+
+        assert MCPLoader([integration])._connect_http(integration) == []
+
+    def test_info_endpoint_malformed_url_is_swallowed(self, monkeypatch):
+        """A malformed configured URL must not escape _connect_http.
+
+        It is now refused by the pre-request is_safe_url check rather than by
+        httpx: urlparse raises ValueError on the unclosed bracket and
+        is_safe_url catches that fail-closed. Either way _connect_http must
+        degrade to an empty tool list, and the transport asserts that no
+        request was attempted.
+        """
+
+        def handler(request, index):  # pragma: no cover - must not be reached
+            raise AssertionError(
+                f"a malformed URL must not be requested: {request.url}"
+            )
+
+        seen = _install_transport(monkeypatch, handler)
+        integration = self._integration("http://[::1/mcp")
+
+        assert MCPLoader([integration])._connect_http(integration) == []
+        assert seen == []
+
+    def test_info_endpoint_discovers_graph_tools_on_a_safe_url(
+        self, monkeypatch, public_dns
+    ):
+        """Positive control: the guard must not break ordinary discovery.
+
+        Without this every refusal test below would still pass against a
+        _connect_http that refused everything.
+        """
+        _install_transport(
+            monkeypatch,
+            lambda request, index: httpx.Response(200, json={"endpoints": ["/mcp"]}),
+        )
+        integration = self._integration()
+
+        tools = MCPLoader([integration])._connect_http(integration)
+
+        assert [tool.original_name for tool in tools]
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://127.0.0.1/mcp",
+            "http://10.0.0.1/mcp",
+            "http://192.168.1.1/mcp",
+            "http://169.254.169.254/mcp",
+            "http://100.64.0.1/mcp",
+            "http://[::1]/mcp",
+            "http://[fc00::1]/mcp",
+        ],
+    )
+    def test_info_endpoint_literal_internal_ip_never_reaches_the_network(
+        self, monkeypatch, url
+    ):
+        """The initial info URL is checked before any request is made."""
+
+        def handler(request, index):  # pragma: no cover - must not be reached
+            raise AssertionError(f"internal address requested: {request.url}")
+
+        seen = _install_transport(monkeypatch, handler)
+        integration = self._integration(url)
+
+        assert MCPLoader([integration])._connect_http(integration) == []
+        assert seen == []
+
+    def test_info_endpoint_hostname_resolving_internally_is_rejected(self, monkeypatch):
+        """A public-looking hostname whose DNS answer is internal is blocked."""
+        monkeypatch.setattr(
+            "backend.core.events.delivery.socket.getaddrinfo",
+            lambda *args, **kwargs: _addrinfo("10.0.0.5"),
+        )
+
+        def handler(request, index):  # pragma: no cover - must not be reached
+            raise AssertionError(f"internal address requested: {request.url}")
+
+        seen = _install_transport(monkeypatch, handler)
+        integration = self._integration("http://internal.example.com/mcp")
+
+        assert MCPLoader([integration])._connect_http(integration) == []
+        assert seen == []
+
+    @pytest.mark.parametrize("internal_hop", [0, 1, 2, MAX_REDIRECTS - 2])
+    def test_info_endpoint_every_redirect_hop_is_revalidated(
+        self, monkeypatch, public_dns, internal_hop
+    ):
+        """The internal address is refused wherever it sits in the chain.
+
+        Pinning only hops 0 and 1 leaves a guard that checks the first two
+        targets and then stops passing the suite while it walks an internal
+        address in at hop 2.
+        """
+
+        def handler(request, index):
+            if index < internal_hop:
+                return _redirect(f"http://hop{index + 1}.example.com/info")
+            if index == internal_hop:
+                return _redirect(INTERNAL)
+            raise AssertionError(f"unexpected request {request.url}")
+
+        seen = _install_transport(monkeypatch, handler)
+        integration = self._integration()
+
+        assert MCPLoader([integration])._connect_http(integration) == []
+        assert len(seen) == internal_hop + 1
+        assert all("169.254.169.254" not in url for url in seen)
+
+    def test_info_endpoint_relative_location_resolves_against_the_current_url(
+        self, monkeypatch, public_dns
+    ):
+        """urljoin's base is the CURRENT url, not the one discovery started at.
+
+        The chain changes host first, so resolving the relative Location
+        against the original URL would request a different, wrong address --
+        which a same-host chain could not tell apart.
+        """
+
+        def handler(request, index):
+            if index == 0:
+                return _redirect("http://cdn.example.com/api/")
+            if index == 1:
+                return _redirect("info", status_code=301)
+            return httpx.Response(200, json={"endpoints": ["/mcp"]})
+
+        seen = _install_transport(monkeypatch, handler)
+        integration = self._integration()
+
+        tools = MCPLoader([integration])._connect_http(integration)
+
+        assert [tool.original_name for tool in tools]
+        assert seen == [
+            "http://example.com/info",
+            "http://cdn.example.com/api/",
+            "http://cdn.example.com/api/info",
+        ]
+
+    @pytest.mark.parametrize(
+        "location",
+        ["http://example.com/info", "/info", "info"],
+        ids=["absolute", "root-relative", "path-relative"],
+    )
+    @pytest.mark.parametrize("status_code", [301, 302, 307])
+    def test_info_endpoint_redirect_cap_is_the_shared_limit(
+        self, monkeypatch, public_dns, location, status_code
+    ):
+        """The cap bounds the walk whatever flavour of hop the server sends.
+
+        A counter that only advanced on one flavour -- absolute Locations, or
+        one status code -- would be unbounded on the others.
+        """
+        seen = _install_transport(
+            monkeypatch, lambda request, index: _redirect(location, status_code)
+        )
+        integration = self._integration()
+
+        assert MCPLoader([integration])._connect_http(integration) == []
+        assert len(seen) == delivery.MAX_REDIRECTS
+
+    @pytest.mark.parametrize("headers", [{}, {"location": ""}], ids=["absent", "empty"])
+    def test_info_endpoint_redirect_without_a_location_is_refused(
+        self, monkeypatch, public_dns, headers
+    ):
+        """urljoin("", current) is current, so an empty Location used to
+        re-request the same URL until the cap ran out."""
+        seen = _install_transport(
+            monkeypatch, lambda request, index: httpx.Response(302, headers=headers)
+        )
+        integration = self._integration()
+
+        assert MCPLoader([integration])._connect_http(integration) == []
+        assert len(seen) == 1
+
+    def test_info_endpoint_redirect_bodies_are_never_pulled_off_the_wire(
+        self, monkeypatch, public_dns
+    ):
+        """A bounded walk still pulls MAX_REDIRECTS bodies if each is buffered.
+
+        Streaming is what keeps them out of memory. The observable is which
+        response streams the walk actually iterates: client.get() reads every
+        one, client.stream() only the body it goes on to read.
+        """
+        reads = []
+
+        def handler(request, index):
+            if index == 0:
+                return httpx.Response(
+                    302,
+                    headers={"location": "http://cdn.example.com/x"},
+                    stream=_recording_body(b"redirect filler", reads, "redirect"),
+                )
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                stream=_recording_body(b'{"endpoints": ["/mcp"]}', reads, "terminal"),
+            )
+
+        _install_transport(monkeypatch, handler)
+        integration = self._integration()
+
+        tools = MCPLoader([integration])._connect_http(integration)
+
+        assert [tool.original_name for tool in tools]
+        assert reads == ["terminal"]
+
+
 class TestFetchToolSSRFGuard:
     """The WEB/fetch tool must not reach addresses the caller cannot reach itself.
 
     These pin the guard added in PR #597 against the scenarios it was written
     for. The guard itself lives in backend/core/events/delivery.py (is_safe_url)
-    and is deliberately not mocked here — mocking it would leave the tests
+    and is deliberately not mocked here -- mocking it would leave the tests
     passing against a fetch tool that had stopped calling it.
     """
 
-    @patch("backend.agents.mcp_loader.httpx.Client")
-    def test_literal_internal_ip_is_rejected_before_any_request(self, mock_client_cls):
-        """A literal private/loopback/link-local/CGNAT target never reaches the network."""
-        loader = MCPLoader([])
+    def _fetch(self, url="http://example.com/start", **args):
+        return MCPLoader([])._execute_fetch_tool("fetch", {"url": url, **args})
 
-        for url in (
+    def test_fetches_a_safe_url(self, monkeypatch, public_dns):
+        """Positive control: the guard must not break an ordinary fetch."""
+        _install_transport(
+            monkeypatch, lambda request, index: httpx.Response(200, text="<html>ok")
+        )
+
+        assert self._fetch() == {
+            "url": "http://example.com/start",
+            "status": 200,
+            "content": "<html>ok",
+        }
+
+    @pytest.mark.parametrize(
+        "url",
+        [
             "http://127.0.0.1/admin",
             "http://10.0.0.1/internal",
             "http://192.168.1.1/router",
@@ -675,200 +909,291 @@ class TestFetchToolSSRFGuard:
             "http://100.64.0.1/cgnat",
             "http://[::1]/admin",
             "http://[fc00::1]/internal",
-        ):
-            result = loader._execute_fetch_tool("fetch", {"url": url})
+        ],
+    )
+    def test_literal_internal_ip_is_rejected_before_any_request(self, monkeypatch, url):
+        """A literal private/loopback/link-local/CGNAT target never reaches the network."""
 
-            assert "error" in result, url
-            assert "content" not in result, url
+        def handler(request, index):  # pragma: no cover - must not be reached
+            raise AssertionError(f"internal address requested: {request.url}")
 
-        mock_client_cls.assert_not_called()
+        seen = _install_transport(monkeypatch, handler)
 
-    @patch("backend.core.events.delivery.socket.getaddrinfo")
-    @patch("backend.agents.mcp_loader.httpx.Client")
-    def test_hostname_resolving_into_private_range_is_rejected(
-        self, mock_client_cls, mock_getaddrinfo
-    ):
-        """A public-looking hostname whose DNS answer is internal is still blocked."""
-        mock_getaddrinfo.return_value = _addrinfo("10.0.0.5")
-        loader = MCPLoader([])
-
-        result = loader._execute_fetch_tool(
-            "fetch", {"url": "http://internal.example.com/secrets"}
-        )
+        result = self._fetch(url)
 
         assert "error" in result
         assert "content" not in result
-        mock_client_cls.assert_not_called()
+        assert seen == []
 
-    @patch("backend.core.events.delivery.socket.getaddrinfo")
-    @patch("backend.agents.mcp_loader.httpx.Client")
-    def test_hostname_with_any_internal_address_is_rejected(
-        self, mock_client_cls, mock_getaddrinfo
-    ):
-        """Resolution is fail-closed: one internal address among public ones blocks."""
-        mock_getaddrinfo.return_value = _addrinfo("93.184.216.34", "fe80::1")
-        loader = MCPLoader([])
-
-        result = loader._execute_fetch_tool(
-            "fetch", {"url": "http://dual.example.com/page"}
+    def test_hostname_resolving_into_private_range_is_rejected(self, monkeypatch):
+        """A public-looking hostname whose DNS answer is internal is still blocked."""
+        monkeypatch.setattr(
+            "backend.core.events.delivery.socket.getaddrinfo",
+            lambda *args, **kwargs: _addrinfo("10.0.0.5"),
         )
 
+        def handler(request, index):  # pragma: no cover - must not be reached
+            raise AssertionError(f"internal address requested: {request.url}")
+
+        seen = _install_transport(monkeypatch, handler)
+
+        result = self._fetch("http://internal.example.com/secrets")
+
         assert "error" in result
-        mock_client_cls.assert_not_called()
+        assert "content" not in result
+        assert seen == []
 
-    @patch("backend.agents.mcp_loader.httpx.Client")
-    def test_non_http_scheme_is_rejected(self, mock_client_cls):
-        """Only http(s) is fetchable — file:// and friends never reach the client."""
-        loader = MCPLoader([])
+    def test_hostname_with_any_internal_address_is_rejected(self, monkeypatch):
+        """Resolution is fail-closed: one internal address among public ones blocks."""
+        monkeypatch.setattr(
+            "backend.core.events.delivery.socket.getaddrinfo",
+            lambda *args, **kwargs: _addrinfo("93.184.216.34", "fe80::1"),
+        )
 
-        for url in ("file:///etc/passwd", "ftp://example.com/x", "javascript:alert(1)"):
-            result = loader._execute_fetch_tool("fetch", {"url": url})
+        def handler(request, index):  # pragma: no cover - must not be reached
+            raise AssertionError(f"internal address requested: {request.url}")
 
-            assert "error" in result, url
-            assert "content" not in result, url
+        seen = _install_transport(monkeypatch, handler)
 
-        mock_client_cls.assert_not_called()
+        result = self._fetch("http://dual.example.com/page")
 
-    @patch("backend.core.events.delivery.socket.getaddrinfo")
-    @patch("backend.agents.mcp_loader.httpx.Client")
-    def test_redirect_into_private_range_is_not_followed(
-        self, mock_client_cls, mock_getaddrinfo
-    ):
+        assert "error" in result
+        assert seen == []
+
+    @pytest.mark.parametrize(
+        "url",
+        ["file:///etc/passwd", "ftp://example.com/x", "javascript:alert(1)"],
+    )
+    def test_non_http_scheme_is_rejected(self, monkeypatch, public_dns, url):
+        """Only http(s) is fetchable -- file:// and friends never reach the client.
+
+        DNS is stubbed public (see the fixture), so `ftp://example.com/x` can
+        only fail on its scheme. Without that stub it would fail offline
+        because the name does not resolve, and a tool that had dropped its
+        scheme check would still pass.
+        """
+
+        def handler(request, index):  # pragma: no cover - must not be reached
+            raise AssertionError(f"non-http scheme requested: {request.url}")
+
+        seen = _install_transport(monkeypatch, handler)
+
+        result = self._fetch(url)
+
+        assert "error" in result
+        assert "content" not in result
+        assert seen == []
+
+    def test_redirect_into_private_range_is_not_followed(self, monkeypatch, public_dns):
         """A public URL that redirects to an internal address must stop at the hop.
 
         The initial host passes the pre-request check, so only the per-hop
         re-validation can catch this one.
         """
-        mock_getaddrinfo.return_value = _addrinfo()
-        client = _client_returning(
-            _redirect_response("http://169.254.169.254/latest/meta-data/")
-        )
-        mock_client_cls.return_value = client
-        loader = MCPLoader([])
-
-        result = loader._execute_fetch_tool(
-            "fetch", {"url": "http://example.com/start"}
+        seen = _install_transport(
+            monkeypatch, lambda request, index: _redirect(INTERNAL)
         )
 
-        assert "error" in result
-        assert "content" not in result
-        # The internal hop was never requested — only the original URL was.
-        assert client.get.call_count == 1
-        assert client.get.call_args.args[0] == "http://example.com/start"
-        # The hand-rolled hop loop only runs if httpx is told not to follow
-        # redirects itself; with follow_redirects=True every check below is
-        # dead code and the mock replays its script regardless.
-        assert mock_client_cls.call_args.kwargs["follow_redirects"] is False
+        result = self._fetch()
 
-    @patch("backend.core.events.delivery.socket.getaddrinfo")
-    @patch("backend.agents.mcp_loader.httpx.Client")
-    def test_redirect_to_public_address_is_followed(
-        self, mock_client_cls, mock_getaddrinfo
-    ):
+        assert result == {"error": "Redirected to unsafe URL"}
+        assert seen == ["http://example.com/start"]
+
+    def test_redirect_to_public_address_is_followed(self, monkeypatch, public_dns):
         """The guard must not break ordinary redirects to public addresses."""
-        mock_getaddrinfo.return_value = _addrinfo()
-        client = _client_returning(
-            _redirect_response("http://example.com/final"),
-            _ok_response("<html>final page</html>"),
-        )
-        mock_client_cls.return_value = client
-        loader = MCPLoader([])
 
-        result = loader._execute_fetch_tool(
-            "fetch", {"url": "http://example.com/start"}
-        )
+        def handler(request, index):
+            if index == 0:
+                return _redirect("http://example.com/final")
+            return httpx.Response(200, text="<html>final page</html>")
+
+        seen = _install_transport(monkeypatch, handler)
+
+        result = self._fetch()
 
         assert result["content"] == "<html>final page</html>"
         assert result["status"] == 200
-        assert client.get.call_count == 2
+        assert len(seen) == 2
 
-    @patch("backend.core.events.delivery.socket.getaddrinfo")
-    @patch("backend.agents.mcp_loader.httpx.Client")
-    def test_redirect_chain_stops_at_the_shared_cap_with_an_explicit_error(
-        self, mock_client_cls, mock_getaddrinfo
+    @pytest.mark.parametrize("internal_hop", [0, 1, 2, MAX_REDIRECTS - 2])
+    def test_every_redirect_hop_is_revalidated(
+        self, monkeypatch, public_dns, internal_hop
     ):
-        """An exhausted redirect chain reports the limit it hit.
+        """The internal address is refused wherever it sits in the chain.
 
-        The chain here is endless but every hop is public, so the SSRF check
-        never fires; only the cap can end it. Before the cap was shared this
-        path fell out of the loop onto raise_for_status(), which raises on a
-        3xx too — so it did error, but with a message about a redirect
-        response rather than about the limit, and after a different number of
-        hops. The call count pins the shared cap; the message distinguishes
-        the deliberate error from the incidental one.
+        A guard that validated only the first one or two redirect targets
+        would pass the single-hop test above and still walk a longer
+        public -> public -> internal chain all the way in.
         """
-        mock_getaddrinfo.return_value = _addrinfo()
-        client = _client_returning(_redirect_response("http://example.com/next"))
-        mock_client_cls.return_value = client
-        loader = MCPLoader([])
 
-        result = loader._execute_fetch_tool(
-            "fetch", {"url": "http://example.com/start"}
-        )
+        def handler(request, index):
+            if index < internal_hop:
+                return _redirect(f"http://hop{index + 1}.example.com/p")
+            if index == internal_hop:
+                return _redirect(INTERNAL)
+            raise AssertionError(f"unexpected request {request.url}")
 
-        assert result == {"error": f"Too many redirects (limit {MAX_REDIRECTS})"}
-        assert client.get.call_count == MAX_REDIRECTS
+        seen = _install_transport(monkeypatch, handler)
 
-    @patch("backend.core.events.delivery.socket.getaddrinfo")
-    @patch("backend.agents.mcp_loader.httpx.Client")
-    def test_later_redirect_hop_into_private_range_is_not_followed(
-        self, mock_client_cls, mock_getaddrinfo
+        result = self._fetch()
+
+        assert result == {"error": "Redirected to unsafe URL"}
+        assert len(seen) == internal_hop + 1
+        assert all("169.254.169.254" not in url for url in seen)
+
+    def test_relative_location_resolves_against_the_current_url(
+        self, monkeypatch, public_dns
     ):
-        """Every hop is re-checked, not just the first one.
+        """urljoin's base is the CURRENT url, not the one the fetch started at.
 
-        A guard that validated only the first redirect target would pass the
-        one-hop test above and still walk a public -> public -> internal chain
-        all the way in.
+        The chain changes host first, so resolving against the original URL
+        would request a different address -- which a same-host chain could
+        not distinguish.
         """
-        mock_getaddrinfo.return_value = _addrinfo()
-        client = _client_returning(
-            _redirect_response("http://example.com/second"),
-            _redirect_response("http://169.254.169.254/latest/meta-data/"),
-        )
-        mock_client_cls.return_value = client
-        loader = MCPLoader([])
 
-        result = loader._execute_fetch_tool(
-            "fetch", {"url": "http://example.com/start"}
-        )
+        def handler(request, index):
+            if index == 0:
+                return _redirect("http://cdn.example.com/docs/")
+            if index == 1:
+                return _redirect("final", status_code=301)
+            return httpx.Response(200, text="<html>final page</html>")
 
-        assert "error" in result
-        assert "content" not in result
-        assert client.get.call_count == 2
-        requested = [call.args[0] for call in client.get.call_args_list]
-        assert requested == ["http://example.com/start", "http://example.com/second"]
+        seen = _install_transport(monkeypatch, handler)
 
-    @patch("backend.core.events.delivery.socket.getaddrinfo")
-    @patch("backend.agents.mcp_loader.httpx.Client")
-    def test_relative_redirect_to_public_address_is_followed(
-        self, mock_client_cls, mock_getaddrinfo
-    ):
-        """A relative Location is resolved against the current URL, as in delivery.py.
-
-        Dropping the urljoin would leave the hop hostless, fail the check and
-        turn an ordinary relative redirect into an error.
-        """
-        mock_getaddrinfo.return_value = _addrinfo()
-        client = _client_returning(
-            _redirect_response("/final"),
-            _ok_response("<html>final page</html>"),
-        )
-        mock_client_cls.return_value = client
-        loader = MCPLoader([])
-
-        result = loader._execute_fetch_tool(
-            "fetch", {"url": "http://example.com/start"}
-        )
+        result = self._fetch()
 
         assert result["content"] == "<html>final page</html>"
-        assert client.get.call_args_list[1].args[0] == "http://example.com/final"
+        assert seen == [
+            "http://example.com/start",
+            "http://cdn.example.com/docs/",
+            "http://cdn.example.com/docs/final",
+        ]
 
-    def test_redirect_cap_is_shared_with_the_other_hop_validating_paths(self):
-        """One cap for the four hop-validating paths, so they cannot drift again."""
-        from backend.core import image_ingest
-        from backend.core.events import delivery
-        from backend.skills import loader as skills_loader
+    @pytest.mark.parametrize(
+        "location",
+        ["http://example.com/next", "/next", "next"],
+        ids=["absolute", "root-relative", "path-relative"],
+    )
+    @pytest.mark.parametrize("status_code", [301, 302, 307])
+    def test_redirect_chain_stops_at_the_shared_cap_with_an_explicit_error(
+        self, monkeypatch, public_dns, location, status_code
+    ):
+        """An exhausted redirect chain reports the limit it hit, on every flavour.
 
+        The chain here is endless but every hop is public, so the SSRF check
+        never fires; only the cap can end it. Parametrising the Location form
+        and the status code catches a counter that advanced on one flavour of
+        hop and left the others unbounded. The count is taken against
+        delivery.py's constant, the one all four walkers import.
+        """
+        seen = _install_transport(
+            monkeypatch, lambda request, index: _redirect(location, status_code)
+        )
+
+        result = self._fetch()
+
+        assert result == {"error": f"Too many redirects (limit {MAX_REDIRECTS})"}
+        assert len(seen) == delivery.MAX_REDIRECTS
+
+    @pytest.mark.parametrize("headers", [{}, {"location": ""}], ids=["absent", "empty"])
+    def test_a_redirect_without_a_location_is_refused_not_spun_to_the_cap(
+        self, monkeypatch, public_dns, headers
+    ):
+        """urljoin of an empty Location is the current URL, so it used to be
+        re-requested until the redirect cap ran out."""
+        seen = _install_transport(
+            monkeypatch, lambda request, index: httpx.Response(302, headers=headers)
+        )
+
+        result = self._fetch()
+
+        assert result == {"error": "Redirect without a Location header"}
+        assert len(seen) == 1
+
+    def test_body_over_max_length_is_truncated(self, monkeypatch, public_dns):
+        """The size cap on the returned content still applies after the rewrite."""
+        _install_transport(
+            monkeypatch, lambda request, index: httpx.Response(200, text="x" * 50)
+        )
+
+        result = self._fetch(max_length=10)
+
+        assert result["content"] == "x" * 10 + "... (truncated)"
+
+    def test_redirect_bodies_are_never_pulled_off_the_wire(
+        self, monkeypatch, public_dns
+    ):
+        """A bounded walk still pulls MAX_REDIRECTS bodies if each is buffered.
+
+        Streaming is what keeps them out of memory. The observable is which
+        response streams the walk actually iterates: client.get() reads every
+        one, client.stream() only the body it goes on to read. The terminal
+        read is asserted too, so a tool that streamed and then never read
+        anything could not pass this by returning nothing.
+        """
+        reads = []
+
+        def handler(request, index):
+            if index == 0:
+                return httpx.Response(
+                    302,
+                    headers={"location": "http://example.com/final"},
+                    stream=_recording_body(b"y" * 10_000, reads, "redirect"),
+                )
+            return httpx.Response(
+                200,
+                stream=_recording_body(b"<html>final page</html>", reads, "terminal"),
+            )
+
+        _install_transport(monkeypatch, handler)
+
+        result = self._fetch()
+
+        assert result["content"] == "<html>final page</html>"
+        assert reads == ["terminal"]
+
+
+class TestRedirectCapIsShared:
+    """One cap for the four hop-validating paths, so they cannot drift again."""
+
+    def test_every_walker_agrees_on_the_value(self):
         assert MAX_REDIRECTS == delivery.MAX_REDIRECTS
         assert image_ingest.MAX_REDIRECTS == delivery.MAX_REDIRECTS
         assert skills_loader.MAX_REDIRECTS == delivery.MAX_REDIRECTS
+
+    @pytest.mark.parametrize(
+        "module",
+        [mcp_loader, image_ingest, skills_loader],
+        ids=lambda module: module.__name__.rsplit(".", 1)[-1],
+    )
+    def test_every_walker_imports_the_cap_rather_than_restating_it(self, module):
+        """Comparing values alone passes a module that redefined the same number.
+
+        A local `MAX_REDIRECTS = 10` is equal to delivery's today and drifts
+        the moment delivery's changes -- exactly the drift the shared constant
+        was introduced to end. So this reads the source: the name must arrive
+        by import from delivery, and must never be assigned in the module.
+        The module is matched on the suffix because image_ingest.py reaches
+        delivery by a relative import (`from .events.delivery import ...`).
+        """
+        tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+
+        imported_from_delivery = any(
+            isinstance(node, ast.ImportFrom)
+            and (node.module or "").endswith("events.delivery")
+            and any(alias.name == "MAX_REDIRECTS" for alias in node.names)
+            for node in ast.walk(tree)
+        )
+        assigned_locally = any(
+            isinstance(node, (ast.Assign, ast.AnnAssign))
+            and any(
+                isinstance(target, ast.Name) and target.id == "MAX_REDIRECTS"
+                for target in (
+                    node.targets if isinstance(node, ast.Assign) else [node.target]
+                )
+            )
+            for node in ast.walk(tree)
+        )
+
+        assert imported_from_delivery
+        assert not assigned_locally
