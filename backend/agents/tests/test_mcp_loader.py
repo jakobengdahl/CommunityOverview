@@ -565,9 +565,11 @@ class _StubHttpxModule:
     reading under pytest-xdist (mirrors backend/core/tests/test_image_ingest.py
     and the webhook tests in backend/core/events/tests/test_delivery.py).
 
-    The exception types are forwarded because `_connect_http` names them in
-    its `except` clause; a stub that dropped them would turn a caught error
-    into an AttributeError.
+    `RequestError` and `InvalidURL` are forwarded because `_connect_http`
+    names them in its `except` clause; a stub that dropped them would turn a
+    caught error into an AttributeError. `HTTPError` is not named anywhere in
+    mcp_loader.py -- it is forwarded only so the stub stays usable if a future
+    walker reaches for it.
     """
 
     RequestError = httpx.RequestError
@@ -688,6 +690,32 @@ class TestConnectHttpInfoQuery:
 
         seen = _install_transport(monkeypatch, handler)
         integration = self._integration("http://[::1/mcp")
+
+        assert MCPLoader([integration])._connect_http(integration) == []
+        assert seen == []
+
+    def test_info_endpoint_url_httpx_rejects_is_swallowed(self, monkeypatch):
+        """is_safe_url and httpx disagree about which URLs are malformed.
+
+        "http://example.com:abc/info" has a hostname that parses and resolves,
+        and is_safe_url never looks at the port, so it returns True and the
+        walk proceeds -- only for httpx to raise InvalidURL when it builds the
+        request. InvalidURL is not a ValueError subclass, so dropping it from
+        _connect_http's except tuple makes that escape to the caller. This
+        pins the clause the malformed-IPv6 test above no longer reaches.
+        """
+        monkeypatch.setattr(
+            "backend.core.events.delivery.socket.getaddrinfo",
+            lambda *args, **kwargs: _addrinfo(),
+        )
+
+        def handler(request, index):  # pragma: no cover - httpx refuses first
+            raise AssertionError(
+                f"unparseable URL must not be requested: {request.url}"
+            )
+
+        seen = _install_transport(monkeypatch, handler)
+        integration = self._integration("http://example.com:abc/mcp")
 
         assert MCPLoader([integration])._connect_http(integration) == []
         assert seen == []

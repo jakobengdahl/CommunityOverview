@@ -617,11 +617,15 @@ class SkillsLoader:
     ) -> str:
         """Fetch URL and return text, with size guard and raw-text caching.
 
-        Every hop is streamed, so no body is held in memory until it has been
-        accepted: the Content-Length check runs before the final body is read,
-        and a redirect's body is never read at all. Without that the size
-        guard bounded only the last response, while the walk could still pull
-        ``MAX_REDIRECTS`` full-size bodies through memory on the way there.
+        Every hop is streamed: a redirect's body is never read at all, and the
+        advertised-length check runs before the final body is read. Without
+        that the size guard bounded only the last response, while the walk
+        could still pull ``MAX_REDIRECTS`` full-size bodies through memory on
+        the way there. It does not make the fetch incrementally bounded: a
+        terminal response with no Content-Length, or one that advertises less
+        than it sends, is still buffered whole below before the byte cap
+        rejects it. ``core/image_ingest.py`` is the walker that caps as it
+        reads.
         Caches the raw text so Stage 2 (full-skill load) can re-parse from
         cache without making a second HTTP request.
 
