@@ -734,12 +734,12 @@ class TestReadCapped:
     A broken join they do catch, but asymmetrically, and only by accident of
     the payloads. Measured with this class deselected: returning only the
     FIRST chunk fails exactly one case (the within-cap info fixture, on
-    invalid JSON), while dropping the LAST fails 38 cases across 20 functions
-    -- 20 of those cases in TestFetchToolSSRFGuard -- because almost every
-    other fixture is a single chunk, where dropping "the last" drops the whole
-    body. So the wide failure count comes from bodies that are not chunked at
-    all, not from any assertion that the bytes were reassembled. This class
-    pins the join directly instead.
+    invalid JSON), while dropping the LAST fails 38 cases, 20 of them in
+    TestFetchToolSSRFGuard -- because almost every other fixture is a single
+    chunk, where dropping "the last" drops the whole body. So the wide failure
+    count comes from bodies that are not chunked at all, not from any
+    assertion that the bytes were reassembled. This class pins the join
+    directly instead.
     """
 
     class _Stream:
@@ -1173,9 +1173,10 @@ class TestConnectHttpInfoQuery:
         refusal") was simply false. Measured with this test deselected:
         dropping the `continue` fails 63 cases across five sibling functions --
         hop-revalidation 36, shared-cap 15, redirect-bodies 9, later-hop
-        no-Location 2, relative-Location 1. Four of those drive a chain to
-        completion; the fifth is refused at its second hop, which is enough to
-        notice a walk that never reaches one. Narrowing `is_redirect` to
+        no-Location 2, relative-Location 1. They catch it for assorted
+        reasons -- two reach a terminal 200, one exhausts the cap, two are
+        refused mid-chain -- and what they share is only that each needs the
+        walk to advance past its first hop at all. Narrowing `is_redirect` to
         `has_redirect_location` fails 4 --
         test_info_endpoint_redirect_bodies_are_never_pulled_off_the_wire on
         exactly the 300/304/305/399 parameters, which it has because
