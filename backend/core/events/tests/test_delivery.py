@@ -495,6 +495,10 @@ class TestDeliveryWorker:
             assert len(results) == 1
             assert results[0].status == DeliveryStatus.DROPPED
             assert mock_client.post.call_count == 1
+            # The reason reaches the operator, not just the status: emptying the
+            # exception message leaves "Redirect refused: ... ." with no stated
+            # cause, and every other assertion here still passes.
+            assert "Location" in results[0].error_message
         finally:
             worker.stop(wait=True)
 
@@ -937,6 +941,38 @@ class TestWebhookRedirectHops:
         assert not isinstance(outcome, httpx.TooManyRedirects)
         assert len(seen) == 1, "the same URL must not be requested again"
         assert [method for method, _ in seen] == ["POST"]
+
+    @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+    @pytest.mark.parametrize(
+        "location_headers", [{}, {"location": ""}], ids=["absent", "empty"]
+    )
+    def test_a_missing_location_is_refused_on_a_later_hop_too(
+        self, monkeypatch, location_headers, status
+    ):
+        """The guard must not be conditional on being the first hop.
+
+        The test above scripts the bad response as the FIRST one, which leaves
+        both `if not location and current_url == url` and
+        `... and current_method == "POST"` green across the whole suite -- and
+        with them the original defect reachable one hop in, where
+        urljoin(current, "") is still current and is_safe_url still says yes.
+        The method axis matters for the same reason: on 301/302/303 the walk has
+        already downgraded to GET by the time it reaches this hop.
+        """
+
+        def handler(request, index):
+            if index == 0:
+                return httpx.Response(
+                    status, headers={"location": "https://second.example.com/hook"}
+                )
+            return httpx.Response(status, headers=location_headers)
+
+        seen, outcome = self._post(monkeypatch, handler)
+
+        assert isinstance(outcome, _MalformedRedirect)
+        assert len(seen) == 2, "the second hop must be refused, not re-requested"
+        expected_method = "GET" if status in (301, 302, 303) else "POST"
+        assert [m for m, _ in seen] == ["POST", expected_method]
 
     def test_a_present_location_is_still_followed(self, monkeypatch):
         """The empty-Location guard must not refuse a redirect that has one.

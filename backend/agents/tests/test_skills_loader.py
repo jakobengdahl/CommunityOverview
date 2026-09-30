@@ -691,16 +691,28 @@ class TestFetchTextTerminalBodyCap:
         )
 
     @pytest.mark.asyncio
-    async def test_a_body_that_advertises_nothing_is_cut_off_at_the_cap(self):
+    @pytest.mark.parametrize("chunk_size", [1, 7, 500], ids=["tiny", "odd", "block"])
+    async def test_a_body_that_advertises_nothing_is_cut_off_at_the_cap(
+        self, chunk_size
+    ):
         """No Content-Length at all: the running total is the only bound.
 
         The chunk counter is the assertion that matters. A cap applied after
         the body was fully read would raise the same ValueError and satisfy a
         test that only checked for the exception.
+
+        Chunk size is varied because the accounting error is PER CHUNK. With a
+        single 500-byte fixture, `total += len(chunk) - 1` drifts by only ~5
+        bytes and fits inside the one-chunk slack below; at one byte per chunk
+        that same edit makes `total` stop growing altogether, so the
+        incremental cap never fires and the body is caught only afterwards by
+        the post-decode check -- exactly the weakness this read removed. The
+        bound is expressed in terms of chunk_size so it stays tight at every
+        size rather than loosening to fit the largest.
         """
         max_bytes = 2000
-        chunk = b"x" * 500
-        chunks = 40
+        chunk = b"x" * chunk_size
+        chunks = (max_bytes * 2) // chunk_size
         pulled = []
 
         class _Stream(loader_module.httpx.AsyncByteStream):
@@ -1082,6 +1094,29 @@ class TestFetchTextRedirects:
                 await self._loader()._fetch_text("https://api.github.com/start")
 
         assert len(seen) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("headers", [{}, {"location": ""}], ids=["absent", "empty"])
+    async def test_a_missing_location_is_refused_on_a_later_hop_too(self, headers):
+        """The guard must not be conditional on being the first hop.
+
+        The test above scripts the bad response first, which leaves
+        `if not location and current_url == url` green across the whole suite
+        -- and with it the spin-to-the-cap defect one hop in, where
+        urljoin(current, "") is still current.
+        """
+        handler, seen = _recording_handler(
+            [
+                _redirect_to("https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"),
+                loader_module.httpx.Response(302, headers=headers, text="not a skill"),
+            ]
+        )
+
+        with _mock_http(handler), _public_dns():
+            with pytest.raises(ValueError, match="Location"):
+                await self._loader()._fetch_text("https://api.github.com/start")
+
+        assert len(seen) == 2, "the second hop must be refused, not re-requested"
 
     @pytest.mark.asyncio
     async def test_an_ordinary_response_still_returns_its_body_in_one_request(self):

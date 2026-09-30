@@ -1508,6 +1508,31 @@ class TestConnectHttpInfoQuery:
         assert MCPLoader([integration])._connect_http(integration) == []
         assert len(seen) == 1
 
+    @pytest.mark.parametrize("headers", [{}, {"location": ""}], ids=["absent", "empty"])
+    def test_info_endpoint_a_missing_location_is_refused_on_a_later_hop_too(
+        self, monkeypatch, public_dns, headers
+    ):
+        """The guard must not be conditional on being the first hop.
+
+        Every other no-Location test scripts the bad response as the FIRST one,
+        so `if not location and current_url == info_url` passes the whole
+        suite -- and leaves the original defect reachable one hop in, where
+        urljoin(current, "") is still current and is_safe_url still says yes.
+        """
+        seen = _install_transport(
+            monkeypatch,
+            lambda request, index: (
+                _redirect("http://second.example.com/info")
+                if index == 0
+                else httpx.Response(302, headers=headers)
+            ),
+        )
+        integration = self._integration()
+
+        assert MCPLoader([integration])._connect_http(integration) == []
+        assert len(seen) == 2, "the second hop must be refused, not re-requested"
+        assert seen[1] == "http://second.example.com/info"
+
     @pytest.mark.parametrize("status_code", REDIRECT_STATUSES)
     def test_info_endpoint_redirect_bodies_are_never_pulled_off_the_wire(
         self, monkeypatch, public_dns, status_code
@@ -1910,6 +1935,30 @@ class TestFetchToolSSRFGuard:
 
         assert result == {"error": "Redirect without a Location header"}
         assert len(seen) == 1
+
+    @pytest.mark.parametrize("headers", [{}, {"location": ""}], ids=["absent", "empty"])
+    def test_a_missing_location_is_refused_on_a_later_hop_too(
+        self, monkeypatch, public_dns, headers
+    ):
+        """The guard must not be conditional on being the first hop.
+
+        Scripting the bad response first in every other test leaves
+        `if not location and current_url == url` green, and with it the
+        original spin-to-the-cap defect one hop in.
+        """
+        seen = _install_transport(
+            monkeypatch,
+            lambda request, index: (
+                _redirect("http://second.example.com/page")
+                if index == 0
+                else httpx.Response(302, headers=headers)
+            ),
+        )
+
+        result = self._fetch()
+
+        assert result == {"error": "Redirect without a Location header"}
+        assert len(seen) == 2, "the second hop must be refused, not re-requested"
 
     @pytest.mark.parametrize("status_code", [404, 500])
     def test_a_terminal_error_status_is_an_error_not_content(
