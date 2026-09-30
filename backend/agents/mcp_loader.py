@@ -22,6 +22,43 @@ from backend.core.events.delivery import MAX_REDIRECTS, is_safe_url
 
 logger = logging.getLogger(__name__)
 
+# Ingest caps for the two redirect walkers below. Neither had one: both read
+# the terminal body whole before anything could reject it, so a server that
+# advertises no Content-Length (or advertises less than it sends) decided how
+# much memory this process spent. The walk itself is bounded by MAX_REDIRECTS
+# and streams every hop, so these bound the only body that is still read.
+#
+# The two numbers differ because the bodies do:
+# - The info endpoint returns a JSON document listing a server's endpoints and
+#   tools. 1 MiB is far above any real one, and a truncated JSON cannot be
+#   parsed anyway, so exceeding this is an error rather than a truncation.
+# - The fetch tool returns a web page to an agent, and already truncates to
+#   the caller's max_length. 10 MiB bounds the read while leaving any
+#   reasonable max_length satisfiable; a larger max_length cannot be served in
+#   full, and the truncation marker says so.
+MAX_INFO_BODY_BYTES = 1024 * 1024
+MAX_FETCH_BODY_BYTES = 10 * 1024 * 1024
+
+
+def _read_capped(response, max_bytes: int) -> tuple[bytes, bool]:
+    """Read a streamed response body incrementally, stopping past *max_bytes*.
+
+    Returns the bytes read and whether the body was still going when the cap
+    was passed. At most ``max_bytes`` bytes are returned and never more than
+    one chunk beyond that is held, so the caller's memory does not depend on
+    what the server chooses to send. Mirrors the running-total pattern in
+    ``core/image_ingest.py``, which is the walker that already capped as it
+    read.
+    """
+    chunks: List[bytes] = []
+    total = 0
+    for chunk in response.iter_bytes():
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > max_bytes:
+            return b"".join(chunks)[:max_bytes], True
+    return b"".join(chunks), False
+
 
 def _summarize_args(args: Dict[str, Any], max_len: int = 200) -> str:
     """Summarize tool arguments for logging (truncate long values)."""
@@ -194,8 +231,14 @@ class MCPLoader:
                             current_url = next_url
                             continue
                         if response.status_code == 200:
-                            response.read()
-                            info = response.json()
+                            raw, over_cap = _read_capped(response, MAX_INFO_BODY_BYTES)
+                            if over_cap:
+                                raise ValueError(
+                                    "Info endpoint body exceeds "
+                                    f"{MAX_INFO_BODY_BYTES} bytes from "
+                                    f"{current_url}"
+                                )
+                            info = json.loads(raw)
                             # Our graph MCP includes tools in the info endpoint
                             if "endpoints" in info:
                                 # We know our graph MCP tools
@@ -843,13 +886,22 @@ class MCPLoader:
                                 continue
 
                             response.raise_for_status()
-                            response.read()
+                            raw, over_cap = _read_capped(response, MAX_FETCH_BODY_BYTES)
 
-                            # Simple HTML to text conversion
-                            content = response.text
+                            # Simple HTML to text conversion. Decoded the way
+                            # response.text would have, now that the body is
+                            # read by the cap rather than buffered whole.
+                            content = raw.decode(
+                                response.encoding or "utf-8", errors="replace"
+                            )
                             max_length = input_args.get("max_length", 10000)
                             if len(content) > max_length:
                                 content = content[:max_length] + "... (truncated)"
+                            elif over_cap:
+                                # Stopped at the ingest cap below max_length:
+                                # say so rather than passing a silently short
+                                # page off as the whole document.
+                                content += "... (truncated)"
 
                             return {
                                 "url": url,

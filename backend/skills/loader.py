@@ -621,11 +621,12 @@ class SkillsLoader:
         advertised-length check runs before the final body is read. Without
         that the size guard bounded only the last response, while the walk
         could still pull ``MAX_REDIRECTS`` full-size bodies through memory on
-        the way there. It does not make the fetch incrementally bounded: a
-        terminal response with no Content-Length, or one that advertises less
-        than it sends, is still buffered whole below before the byte cap
-        rejects it. ``core/image_ingest.py`` is the walker that caps as it
-        reads.
+        the way there. The terminal body is read incrementally against the
+        same cap, so a response with no Content-Length, or one advertising
+        less than it sends, is refused as soon as it passes
+        ``max_skill_content_bytes`` rather than after it has all arrived. The
+        advertised-length check is kept ahead of it because it refuses an
+        honest oversized body without reading any of it.
         Caches the raw text so Stage 2 (full-skill load) can re-parse from
         cache without making a second HTTP request.
 
@@ -711,8 +712,33 @@ class SkillsLoader:
                                 f"Content from {url} exceeds max size "
                                 f"({max_bytes} bytes)"
                             )
-                    await response.aread()
-                    content = response.text
+                    # Accumulated with a running total so the cap is
+                    # enforced as the body arrives. The previous read pulled
+                    # the whole body in first and only then measured it, which
+                    # left the advertised length as the only thing standing
+                    # between a hostile server and this process's memory.
+                    chunks = []
+                    total = 0
+                    async for chunk in response.aiter_bytes():
+                        total += len(chunk)
+                        if total > max_bytes:
+                            raise ValueError(
+                                f"Content from {url} exceeds max size "
+                                f"({max_bytes} bytes)"
+                            )
+                        chunks.append(chunk)
+                    # Decoded exactly as response.text would have: httpx's
+                    # TextDecoder is an incremental codec with
+                    # errors="replace", which for a complete body is the same
+                    # as decoding it in one pass.
+                    content = b"".join(chunks).decode(
+                        response.encoding or "utf-8", errors="replace"
+                    )
+                    # The running total counts bytes as RECEIVED, which for a
+                    # non-utf-8 charset is not the same number as the decoded
+                    # text re-encoded. This is the cap this function has always
+                    # applied, kept so the incremental bound above only ever
+                    # refuses MORE than before, never less.
                     if len(content.encode()) > max_bytes:
                         raise ValueError(
                             f"Content from {url} exceeds max size ({max_bytes} bytes)"
