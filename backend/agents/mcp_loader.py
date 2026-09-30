@@ -230,16 +230,21 @@ class MCPLoader:
             # to httpx, as this did before, let one 302 from that server pull
             # the request to any internal address with nothing checked at all.
             #
-            # This is the one walker of the five that does not address-check
-            # its initial URL, and the only one that differs from the rest on
-            # purpose. (The comment here used to say "three sibling walkers",
-            # which undercounted the family and read inconsistently against
-            # delivery.py's "four sibling walkers".) _execute_fetch_tool below DOES check its
-            # initial URL, because that URL comes from the agent rather than
-            # from config; the skills loader checks its own, because a skill
-            # URL is meant to name a public host and it has a trusted_domains
-            # allowlist to match. Here the initial address is the operator's
-            # own choice, and refusing it would break the default install.
+            # This is the one of the five hop-validating paths whose INITIAL
+            # url is never address-checked, and the only one that differs from
+            # the rest on purpose. The other four all check theirs, though not
+            # all in the same place: image_ingest, the skills loader and
+            # _execute_fetch_tool below each call is_safe_url at the top of the
+            # walker, while the webhook path checks it in _deliver before
+            # calling _post_with_redirect_ssrf_check -- so reading that walker
+            # alone makes it look unchecked, and it is not.
+            #
+            # _execute_fetch_tool checks its initial URL because that URL comes
+            # from the agent rather than from config; the skills loader checks
+            # its own, because a skill URL is meant to name a public host and
+            # it has a trusted_domains allowlist to match. Here the initial
+            # address is the operator's own choice, and refusing it would break
+            # the default install.
 
             with httpx.Client(timeout=5, follow_redirects=False) as client:
                 current_url = info_url
