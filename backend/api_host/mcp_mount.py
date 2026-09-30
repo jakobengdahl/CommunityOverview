@@ -142,11 +142,14 @@ class MCPBrowserHandler:
             await self.sse_app(scope, receive, send)
             return
 
-        # Starlette leaves scope["path"] as the full request path and records the
-        # mount prefix in scope["root_path"], so the path relative to this mount
-        # has to be derived — comparing scope["path"] against "/" would never
-        # match and every Streamable HTTP request would fall through to the
-        # legacy SSE app, which answers 404 for them.
+        # Starlette redirects /mcp -> /mcp/ before a mounted sub-app sees the
+        # request. Some remote MCP clients do not tolerate redirects on POST
+        # initialize, so api_host rewrites exact /mcp requests to /mcp/ before
+        # routing reaches this handler. Starlette leaves scope["path"] as the full
+        # request path and records the mount prefix in scope["root_path"], so the
+        # path relative to this mount still has to be derived here — comparing
+        # scope["path"] against "/" would never match and every Streamable HTTP
+        # request would fall through to the legacy SSE app, which answers 404.
         path = _mount_relative_path(scope)
         method = scope.get("method", "GET")
         is_root = path == "/"
@@ -213,6 +216,24 @@ class MCPBrowserHandler:
         await self.sse_app(scope, receive, send)
 
 
+def _install_mcp_no_redirect_rewrite(app: FastAPI) -> None:
+    """Rewrite exact /mcp requests to /mcp/ before Starlette redirects them.
+
+    Starlette's mounted apps canonicalise bare mount hits with a 307 redirect.
+    Remote MCP clients such as Claude may reject redirects on the JSON-RPC
+    initialize POST, so keep /mcp as the public canonical endpoint and route it
+    internally to the mounted app's slash form.
+    """
+
+    @app.middleware("http")
+    async def mcp_no_redirect_rewrite(request, call_next):
+        scope = request.scope
+        if scope.get("path") == "/mcp":
+            scope["path"] = "/mcp/"
+            scope["raw_path"] = b"/mcp/"
+        return await call_next(request)
+
+
 def mount_mcp(app: FastAPI, mcp, tools_map) -> None:
     """Mount the MCP HTTP endpoints at /mcp.
 
@@ -220,6 +241,8 @@ def mount_mcp(app: FastAPI, mcp, tools_map) -> None:
       1. Legacy SSE  (GET /mcp/sse + POST /mcp/messages) – for older clients
       2. Streamable HTTP (POST /mcp) – for ChatGPT, Claude, and MCP spec ≥2025-03-26
     """
+    _install_mcp_no_redirect_rewrite(app)
+
     mcp_sse_app = bind_request_authorization_to_asgi_app(mcp.sse_app())
 
     # FastMCP mounts its Streamable HTTP handler at settings.streamable_http_path
