@@ -971,6 +971,10 @@ class TestWebhookRedirectHops:
 
         assert isinstance(outcome, _MalformedRedirect)
         assert len(seen) == 2, "the second hop must be refused, not re-requested"
+        assert [url for _, url in seen] == [
+            "http://start.example.com/hook",
+            "https://second.example.com/hook",
+        ]
         expected_method = "GET" if status in (301, 302, 303) else "POST"
         assert [m for m, _ in seen] == ["POST", expected_method]
 
@@ -979,11 +983,13 @@ class TestWebhookRedirectHops:
 
         A guard written as `if not response.headers.get("location")` on a
         header dict rather than on the joined value is one edit away from
-        refusing everything. Six sibling tests in this class already catch
-        that -- the hop-revalidation, relative-Location, both cap tests, and
-        the two GET-hop header tests all drive a chain to completion, so a
-        walk that refused every redirect fails 16 cases across those six
-        functions, 17 counting this test's own. It is kept as the direct,
+        refusing everything. Seven sibling tests in this class already catch
+        that: the hop-revalidation, relative-Location, both cap tests and the
+        two GET-hop header tests all drive a chain to completion (16 cases
+        between them), and the later-hop no-Location test needs its first hop
+        followed to reach the second (10 more). So a walk that refused every
+        redirect fails 26 cases across those seven, 27 counting this test's
+        own. It is kept as the direct,
         single-purpose statement of the positive case: those six fail for
         reasons of their own, and a reader asking "is a present Location
         still followed?" should not have to infer it from a cap test.

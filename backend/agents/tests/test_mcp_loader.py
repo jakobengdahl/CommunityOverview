@@ -737,10 +737,9 @@ class TestReadCapped:
     invalid JSON), while dropping the LAST fails 38 cases across 20 functions
     -- 20 of those cases in TestFetchToolSSRFGuard -- because almost every
     other fixture is a single chunk, where dropping "the last" drops the whole
-    body. So the wide
-    failure count comes from bodies that are not chunked at all, not from any
-    assertion that the bytes were reassembled. This class pins the join
-    directly instead.
+    body. So the wide failure count comes from bodies that are not chunked at
+    all, not from any assertion that the bytes were reassembled. This class
+    pins the join directly instead.
     """
 
     class _Stream:
@@ -1172,9 +1171,11 @@ class TestConnectHttpInfoQuery:
         Not the sole guard against either mutation it names, and the earlier
         claim that it was ("every other hop test in this class asserts a
         refusal") was simply false. Measured with this test deselected:
-        dropping the `continue` fails 61 cases across four sibling functions
-        (hop-revalidation, relative-Location, shared-cap, redirect-bodies),
-        all of which drive a chain to completion; narrowing `is_redirect` to
+        dropping the `continue` fails 63 cases across five sibling functions --
+        hop-revalidation 36, shared-cap 15, redirect-bodies 9, later-hop
+        no-Location 2, relative-Location 1. Four of those drive a chain to
+        completion; the fifth is refused at its second hop, which is enough to
+        notice a walk that never reaches one. Narrowing `is_redirect` to
         `has_redirect_location` fails 4 --
         test_info_endpoint_redirect_bodies_are_never_pulled_off_the_wire on
         exactly the 300/304/305/399 parameters, which it has because
@@ -1960,6 +1961,7 @@ class TestFetchToolSSRFGuard:
 
         assert result == {"error": "Redirect without a Location header"}
         assert len(seen) == 2, "the second hop must be refused, not re-requested"
+        assert seen[1] == "http://second.example.com/page"
 
     @pytest.mark.parametrize("status_code", [404, 500])
     def test_a_terminal_error_status_is_an_error_not_content(

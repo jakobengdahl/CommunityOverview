@@ -230,8 +230,11 @@ class MCPLoader:
             # to httpx, as this did before, let one 302 from that server pull
             # the request to any internal address with nothing checked at all.
             #
-            # This is the one place the three sibling walkers differ from each
-            # other on purpose. _execute_fetch_tool below DOES check its
+            # This is the one walker of the five that does not address-check
+            # its initial URL, and the only one that differs from the rest on
+            # purpose. (The comment here used to say "three sibling walkers",
+            # which undercounted the family and read inconsistently against
+            # delivery.py's "four sibling walkers".) _execute_fetch_tool below DOES check its
             # initial URL, because that URL comes from the agent rather than
             # from config; the skills loader checks its own, because a skill
             # URL is meant to name a public host and it has a trusted_domains

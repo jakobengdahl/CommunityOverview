@@ -1118,6 +1118,7 @@ class TestFetchTextRedirects:
                 await self._loader()._fetch_text("https://api.github.com/start")
 
         assert len(seen) == 2, "the second hop must be refused, not re-requested"
+        assert str(seen[1].url) == "https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"
 
     @pytest.mark.asyncio
     async def test_an_ordinary_response_still_returns_its_body_in_one_request(self):
