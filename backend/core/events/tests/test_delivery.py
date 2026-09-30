@@ -943,9 +943,14 @@ class TestWebhookRedirectHops:
 
         A guard written as `if not response.headers.get("location")` on a
         header dict rather than on the joined value is one edit away from
-        refusing everything, and every other test in this class would still
-        pass if the walk simply stopped following redirects -- they assert
-        refusals.
+        refusing everything. Six sibling tests in this class already catch
+        that -- the hop-revalidation, relative-Location, both cap tests, and
+        the two GET-hop header tests all drive a chain to completion, so a
+        walk that refused every redirect fails 17 parametrised cases across
+        this class with or without this test. It is kept as the direct,
+        single-purpose statement of the positive case: those six fail for
+        reasons of their own, and a reader asking "is a present Location
+        still followed?" should not have to infer it from a cap test.
         """
 
         def handler(request, index):

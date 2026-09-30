@@ -890,7 +890,9 @@ class MCPLoader:
                             if response.is_redirect:
                                 location = str(response.headers.get("location", ""))
                                 if not location:
-                                    # urljoin("", current) is current, so an empty
+                                    # urljoin(current, "") is current -- the
+                                    # arguments in that order, which is what the
+                                    # line below evaluates -- so an empty
                                     # Location used to re-request the same URL
                                     # until the cap ran out. Refuse it after one
                                     # request, as the skills loader does.

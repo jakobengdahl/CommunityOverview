@@ -4,6 +4,7 @@ Tests for MCP loader and tool namespacing.
 
 import ast
 import json
+import logging
 import urllib.parse
 from pathlib import Path
 from unittest.mock import patch
@@ -724,11 +725,15 @@ NON_HTTP_HOP_TARGETS = ["ftp://example.com/x", "gopher://example.com/1"]
 class TestReadCapped:
     """Direct unit tests for the shared capped reader.
 
-    The two integration tests that exercise it only ever send a body MUCH
-    larger than the cap, and both derive their fixtures from the constants, so
-    they are indifferent to the boundary, to how many bytes come back, and to
-    whether the chunks were joined at all. Those are the three things a reader
-    can get wrong while still looking like it stopped early.
+    The integration tests reach it only through a call site, which decides
+    what is observable. Their oversize fixtures are derived from the cap
+    constants and assert an upper bound on bytes pulled, so they cannot see
+    the boundary (a body of exactly the cap) or how many bytes came back at
+    all -- returning b"" on the over-cap path satisfied every one of them.
+    A broken join they do partly catch: since the within-cap info fixture
+    became multi-chunk it fails on invalid JSON. That is one call site,
+    one body shape, and by accident of the payload rather than by assertion,
+    so the join is pinned here directly as well.
     """
 
     class _Stream:
@@ -778,9 +783,14 @@ class TestReadCapped:
         assert raw == b"y" * 100
 
     def test_a_within_cap_body_is_joined_across_every_chunk(self):
-        """Pins the join. Every other fixture sends the body as ONE chunk, so
-        returning just the first chunk -- or dropping the last -- was
-        indistinguishable from correct."""
+        """Pins the join directly, on the reader rather than through a caller.
+
+        The within-cap info fixture also catches both halves of this, but only
+        because a truncated JSON document fails to parse: it is one call site,
+        one payload shape, and nothing there asserts that the bytes were
+        reassembled. A non-JSON caller -- which the fetch tool is -- would not
+        notice either mutation.
+        """
         chunks = [b"a" * 10, b"b" * 10, b"c" * 10, b"d" * 5]
         stream = self._Stream(chunks)
 
@@ -1199,6 +1209,41 @@ class TestConnectHttpInfoQuery:
         assert sum(pulled) <= mcp_loader.MAX_INFO_BODY_BYTES + len(chunk)
         assert sum(pulled) < chunks * len(chunk), "the whole body was read"
 
+    def test_an_over_cap_info_body_is_refused_even_when_it_would_still_parse(
+        self, monkeypatch, public_dns, caplog
+    ):
+        """The cap refusal must do the refusing, not json.loads by accident.
+
+        The oversize test above sends b"x" * N, which is not JSON at all, so
+        with the `if over_cap` refusal removed the parser raises anyway and the
+        loader still degrades to []. That makes the refusal dead: it cannot be
+        told apart from absent.
+
+        json.loads ignores trailing whitespace, so a complete document padded
+        past the cap parses fine once truncated at it. Without the refusal the
+        loader would accept an over-cap, TRUNCATED info document and act on it.
+        The log assertion closes the other half: the reason must name the cap
+        rather than a JSON syntax error.
+        """
+        padded = json.dumps({"endpoints": ["/mcp"]}).encode() + b" " * (
+            mcp_loader.MAX_INFO_BODY_BYTES + 1024
+        )
+        # Sanity-check the fixture itself: truncating at the cap must still be
+        # parseable, or this test would pass for the reason it exists to reject.
+        assert json.loads(padded[: mcp_loader.MAX_INFO_BODY_BYTES])["endpoints"]
+
+        _install_transport(
+            monkeypatch,
+            lambda request, index: httpx.Response(200, content=padded),
+        )
+        integration = self._integration()
+
+        with caplog.at_level(logging.WARNING):
+            assert MCPLoader([integration])._connect_http(integration) == []
+
+        assert "exceeds" in caplog.text
+        assert str(mcp_loader.MAX_INFO_BODY_BYTES) in caplog.text
+
     def test_info_endpoint_body_within_the_cap_is_parsed_unchanged(
         self, monkeypatch, public_dns
     ):
@@ -1428,7 +1473,7 @@ class TestConnectHttpInfoQuery:
     def test_info_endpoint_redirect_without_a_location_is_refused(
         self, monkeypatch, public_dns, headers, status_code
     ):
-        """urljoin("", current) is current, so an empty Location used to
+        """urljoin(current, "") is current, so an empty Location used to
         re-request the same URL until the cap ran out."""
         seen = _install_transport(
             monkeypatch,
@@ -1947,6 +1992,34 @@ class TestFetchToolSSRFGuard:
         assert result["content"].endswith("... (truncated)")
         assert sum(pulled) <= mcp_loader.MAX_FETCH_BODY_BYTES + len(chunk)
         assert sum(pulled) < chunks * len(chunk), "the whole body was read"
+
+    def test_a_page_between_the_two_caps_is_returned_whole(
+        self, monkeypatch, public_dns
+    ):
+        """Pins WHICH cap this call site passes, not just the caps' values.
+
+        TestBodyCapConstants pins both constants by value, and the oversize
+        test derives its fixture from MAX_FETCH_BODY_BYTES and asserts only an
+        UPPER bound on bytes pulled -- which a tighter cap satisfies strictly.
+        So handing this call site MAX_INFO_BODY_BYTES instead cut every page in
+        the band between the two caps down to a tenth, stamped it truncated,
+        and passed the whole suite. Every other within-cap body here is about a
+        kilobyte, three orders of magnitude below either cap.
+
+        This body sits above the info cap and far below the fetch one, so only
+        the correct constant returns it whole.
+        """
+        size = mcp_loader.MAX_INFO_BODY_BYTES + 64 * 1024
+        assert size < mcp_loader.MAX_FETCH_BODY_BYTES
+        body = "p" * size
+        _install_transport(
+            monkeypatch, lambda request, index: httpx.Response(200, text=body)
+        )
+
+        result = self._fetch(max_length=size * 2)
+
+        assert result["content"] == body
+        assert "truncated" not in result["content"]
 
     def test_a_body_within_the_cap_is_returned_whole(self, monkeypatch, public_dns):
         """The cap must not truncate or mark an ordinary page.

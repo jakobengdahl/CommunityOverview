@@ -878,7 +878,9 @@ class TestFetchTextTerminalBodyCap:
 
         response.text decoded through the charset in Content-Type; the capped
         read has to do the same or a latin-1 skill file comes back mojibake.
-        Every other body test here is ASCII, where the two agree.
+        The size and join tests in this class are all ASCII, where a
+        hardcoded utf-8 and the declared charset agree; this is the test that
+        separates them.
         """
         text = "# café"
         handler, _seen = _recording_handler(
