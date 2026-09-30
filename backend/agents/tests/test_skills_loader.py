@@ -835,10 +835,11 @@ class TestFetchTextTerminalBodyCap:
         """Pins the join, and it is the only test here that does.
 
         Measured: returning only the first chunk fails this test and nothing
-        else, because every other within-cap fixture in this file is a single
-        chunk. Dropping the LAST chunk instead fails 14 other tests, but that
-        says nothing about joining -- with a single-chunk body chunks[:-1] is
-        empty, so those failures are about an empty document, not a
+        else -- one case in the whole file -- because every other within-cap
+        fixture here is a single chunk. Dropping the LAST chunk instead fails
+        22 other cases across 14 test functions (23 counting this one), but
+        that says nothing about joining: with a single-chunk body chunks[:-1]
+        is empty, so those failures are about an empty document, not a
         misassembled one.
         """
         parts = [b"# skill\n", b"aaaa", b"bbbb", b"cccc"]

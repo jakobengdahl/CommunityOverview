@@ -733,10 +733,11 @@ class TestReadCapped:
 
     A broken join they do catch, but asymmetrically, and only by accident of
     the payloads. Measured with this class deselected: returning only the
-    FIRST chunk fails exactly one test (the within-cap info fixture, on
-    invalid JSON), while dropping the LAST fails 38 -- 20 of them in
-    TestFetchToolSSRFGuard -- because almost every other fixture is a single
-    chunk, where dropping "the last" drops the whole body. So the wide
+    FIRST chunk fails exactly one case (the within-cap info fixture, on
+    invalid JSON), while dropping the LAST fails 38 cases across 20 functions
+    -- 20 of those cases in TestFetchToolSSRFGuard -- because almost every
+    other fixture is a single chunk, where dropping "the last" drops the whole
+    body. So the wide
     failure count comes from bodies that are not chunked at all, not from any
     assertion that the bytes were reassembled. This class pins the join
     directly instead.
@@ -794,7 +795,7 @@ class TestReadCapped:
         Returning only the first chunk is invisible everywhere else except the
         within-cap info fixture, and there only because a truncated JSON
         document fails to parse -- nothing asserts the bytes were reassembled.
-        Dropping the last chunk is caught widely (38 tests, 20 of them in the
+        Dropping the last chunk is caught widely (38 cases, 20 of them in the
         fetch class) but for a reason that says nothing about joining: those
         fixtures are single-chunk, so chunks[:-1] is empty. Multi-chunk
         within-cap bodies exist only here and in the info fixture.
