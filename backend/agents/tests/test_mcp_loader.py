@@ -3,6 +3,7 @@ Tests for MCP loader and tool namespacing.
 """
 
 import ast
+import json
 import urllib.parse
 from pathlib import Path
 from unittest.mock import patch
@@ -583,6 +584,21 @@ class _StubHttpxModule:
     def Client(self, **kwargs):
         return httpx.Client(transport=self._transport, **kwargs)
 
+    def get(self, *args, **kwargs):
+        """Fail loudly rather than leaving an unbound call to look like a product error.
+
+        _execute_search_tool calls httpx.get, which this stub does not route
+        through the mock transport. No test reaches it today, but that tool
+        wraps everything in a broad `except`, so an AttributeError from a
+        missing stub attribute would come back as a plausible-looking
+        {"error": ...} dict and the test would read as a product failure
+        rather than a harness gap.
+        """
+        raise NotImplementedError(
+            "httpx.get is not routed through this stub's transport; add it to "
+            "_StubHttpxModule before testing a walker that calls it"
+        )
+
 
 def _install_transport(monkeypatch, handler, client_kwargs=None):
     """Bind `handler` as mcp_loader's transport and record what it requested.
@@ -636,7 +652,11 @@ def public_dns(monkeypatch):
 # conditional on the status is a one-word edit -- and a suite whose safety
 # tests all script 302 cannot see it. The cap tests already vary this; these
 # are the tests that assert a hop is REFUSED, which matters more.
-REDIRECT_STATUSES = [301, 302, 303, 307, 308]
+# 300/304/305/399 are included because `is_redirect` is status-only over the
+# whole 3xx range: each of them reaches the hop guard, and a 300 may carry a
+# Location legitimately. Pinning only the five conventional ones left a quarter
+# of the range the guard actually spans unexercised.
+REDIRECT_STATUSES = [300, 301, 302, 303, 304, 305, 307, 308, 399]
 
 # The context a hop is judged IN, as opposed to the target being judged.
 # INTERNAL_TARGETS and REDIRECT_STATUSES vary what the guard looks at; these
@@ -689,6 +709,16 @@ INTERNAL_TARGETS = [
 # the "never requested" assertion off this rather than off a literal IPv4
 # string keeps it honest for the IPv6 and userinfo forms.
 INTERNAL_HOSTS = {"169.254.169.254", "::1", "fc00::1"}
+
+# is_safe_url's verdict has two halves -- scheme and address -- and every entry
+# in INTERNAL_TARGETS is http or https, so the HOP axis exercised only the
+# address half. A guard rebuilt as is_safe_url("https://" + netloc), which
+# keeps the host check and discards the scheme, survives that whole set. The
+# host here resolves (under the public_dns fixture) precisely so the refusal
+# has to come from the scheme: file:// and javascript: have an empty netloc, so
+# both the real guard and that mutant refuse them, which is why the
+# initial-URL scheme tests do not transfer to this axis.
+NON_HTTP_HOP_TARGETS = ["ftp://example.com/x", "gopher://example.com/1"]
 
 
 class TestConnectHttpInfoQuery:
@@ -967,6 +997,116 @@ class TestConnectHttpInfoQuery:
         assert len(client_kwargs) == 1
         assert client_kwargs[0]["timeout"] == 5
         assert client_kwargs[0]["follow_redirects"] is False
+
+        # A subset assertion admits anything it does not name, so the keys that
+        # would quietly undo the guard are asserted ABSENT rather than merely
+        # unmentioned: verify=False drops certificate checking, proxy routes the
+        # request somewhere else entirely, and trust_env picks a proxy up from
+        # the environment.
+        for forbidden in ("verify", "proxy", "proxies", "trust_env"):
+            assert forbidden not in client_kwargs[0]
+
+    @pytest.mark.parametrize("hop_target", NON_HTTP_HOP_TARGETS)
+    @pytest.mark.parametrize("status_code", REDIRECT_STATUSES)
+    def test_info_endpoint_a_non_http_hop_is_refused_and_never_requested(
+        self, monkeypatch, public_dns, status_code, hop_target
+    ):
+        """Pins the SCHEME half of is_safe_url's verdict on the hop axis.
+
+        The host resolves publicly here, so the address half of the guard is
+        satisfied and only the scheme can refuse this. That distinguishes the
+        real guard from one rebuilt as is_safe_url("https://" + netloc), which
+        the whole of INTERNAL_TARGETS cannot tell apart from correct.
+        """
+        seen = _install_transport(
+            monkeypatch,
+            lambda request, index: _redirect(hop_target, status_code),
+        )
+        integration = self._integration()
+
+        assert MCPLoader([integration])._connect_http(integration) == []
+        assert len(seen) == 1, "the non-http hop must never be requested"
+        assert seen[0] == "http://example.com/info"
+
+    @pytest.mark.parametrize("status_code", REDIRECT_STATUSES)
+    def test_info_endpoint_follows_a_hop_on_every_redirect_status(
+        self, monkeypatch, public_dns, status_code
+    ):
+        """The walk must FOLLOW a safe Location, not just refuse an unsafe one.
+
+        Every other hop test in this class asserts a refusal, so a walk that
+        had stopped following redirects altogether -- `is_redirect` narrowed to
+        `has_redirect_location`, or the `continue` dropped -- would pass all of
+        them. This is the positive control across the whole 3xx range the
+        guard spans, including the statuses a narrower predicate would drop.
+        """
+        seen = _install_transport(
+            monkeypatch,
+            lambda request, index: (
+                _redirect("http://second.example.com/info", status_code)
+                if index == 0
+                else httpx.Response(200, json={"endpoints": ["/mcp"]})
+            ),
+        )
+        integration = self._integration()
+
+        MCPLoader([integration])._connect_http(integration)
+
+        assert seen == [
+            "http://example.com/info",
+            "http://second.example.com/info",
+        ]
+
+    def test_info_endpoint_body_over_the_cap_is_refused_and_read_stops(
+        self, monkeypatch, public_dns
+    ):
+        """An oversized info body must not be accumulated whole to be rejected.
+
+        Nothing bounded this read before: the body was pulled in entirely and
+        then parsed, so a server advertising no length decided how much memory
+        discovery spent. The chunk counter is the point of the test -- a cap
+        applied after the read would still pass an assertion about the
+        returned tools.
+        """
+        pulled = []
+        chunk = b"x" * 64 * 1024
+        chunks = (mcp_loader.MAX_INFO_BODY_BYTES // len(chunk)) * 4
+
+        class _Stream(httpx.SyncByteStream):
+            def __iter__(self):
+                for _ in range(chunks):
+                    pulled.append(len(chunk))
+                    yield chunk
+
+        _install_transport(
+            monkeypatch,
+            lambda request, index: httpx.Response(200, stream=_Stream()),
+        )
+        integration = self._integration()
+
+        assert MCPLoader([integration])._connect_http(integration) == []
+        assert sum(pulled) <= mcp_loader.MAX_INFO_BODY_BYTES + len(chunk)
+        assert sum(pulled) < chunks * len(chunk), "the whole body was read"
+
+    def test_info_endpoint_body_within_the_cap_is_parsed_unchanged(
+        self, monkeypatch, public_dns
+    ):
+        """The cap must not change what a normal info document discovers.
+
+        A cap that refused everything, or a reader that dropped its last
+        chunk, would still satisfy the oversize test above.
+        """
+        payload = json.dumps({"endpoints": ["/mcp"], "pad": "y" * 5000}).encode()
+        _install_transport(
+            monkeypatch,
+            lambda request, index: httpx.Response(200, content=payload),
+        )
+        integration = self._integration(url="http://example.com/mcp")
+        loader = MCPLoader([integration])
+
+        tools = loader._connect_http(integration)
+
+        assert tools == loader._get_graph_mcp_tools(integration)
 
     @pytest.mark.parametrize("start", START_CONTEXTS)
     @pytest.mark.parametrize("internal", INTERNAL_TARGETS)
@@ -1617,6 +1757,14 @@ class TestFetchToolSSRFGuard:
         assert client_kwargs[0]["timeout"] == 30
         assert client_kwargs[0]["follow_redirects"] is False
 
+        # A subset assertion admits anything it does not name, so the keys that
+        # would quietly undo the guard are asserted ABSENT rather than merely
+        # unmentioned: verify=False drops certificate checking, proxy routes the
+        # request somewhere else entirely, and trust_env picks a proxy up from
+        # the environment.
+        for forbidden in ("verify", "proxy", "proxies", "trust_env"):
+            assert forbidden not in client_kwargs[0]
+
     def test_body_over_max_length_is_truncated(self, monkeypatch, public_dns):
         """The size cap on the returned content still applies after the rewrite."""
         _install_transport(
@@ -1626,6 +1774,95 @@ class TestFetchToolSSRFGuard:
         result = self._fetch(max_length=10)
 
         assert result["content"] == "x" * 10 + "... (truncated)"
+
+    @pytest.mark.parametrize("hop_target", NON_HTTP_HOP_TARGETS)
+    @pytest.mark.parametrize("status_code", REDIRECT_STATUSES)
+    def test_a_non_http_hop_is_refused_and_never_requested(
+        self, monkeypatch, public_dns, status_code, hop_target
+    ):
+        """Pins the SCHEME half of is_safe_url's verdict on the hop axis.
+
+        The host resolves publicly, so only the scheme can refuse this -- the
+        same gap the sibling walker's test closes, and the reason a guard
+        rebuilt as is_safe_url("https://" + netloc) survived the whole of
+        INTERNAL_TARGETS.
+        """
+        seen = _install_transport(
+            monkeypatch,
+            lambda request, index: _redirect(hop_target, status_code),
+        )
+
+        result = self._fetch()
+
+        assert result == {"error": "Redirected to unsafe URL"}
+        assert len(seen) == 1, "the non-http hop must never be requested"
+
+    def test_body_over_the_ingest_cap_stops_reading_and_marks_truncation(
+        self, monkeypatch, public_dns
+    ):
+        """The page is bounded as it arrives, not truncated after it all lands.
+
+        max_length truncated a body that had already been read in full, so a
+        server advertising no length decided how much memory this tool spent.
+        The chunk counter is the assertion that matters; the marker is there so
+        a caller is not handed a short page as if it were the whole document.
+        """
+        pulled = []
+        chunk = b"x" * 256 * 1024
+        chunks = (mcp_loader.MAX_FETCH_BODY_BYTES // len(chunk)) * 2
+
+        class _Stream(httpx.SyncByteStream):
+            def __iter__(self):
+                for _ in range(chunks):
+                    pulled.append(len(chunk))
+                    yield chunk
+
+        _install_transport(
+            monkeypatch,
+            lambda request, index: httpx.Response(200, stream=_Stream()),
+        )
+
+        result = self._fetch(max_length=mcp_loader.MAX_FETCH_BODY_BYTES * 4)
+
+        assert result["content"].endswith("... (truncated)")
+        assert sum(pulled) <= mcp_loader.MAX_FETCH_BODY_BYTES + len(chunk)
+        assert sum(pulled) < chunks * len(chunk), "the whole body was read"
+
+    def test_a_body_within_the_cap_is_returned_whole(self, monkeypatch, public_dns):
+        """The cap must not truncate or mark an ordinary page.
+
+        A reader that dropped its final chunk, or one that flagged every
+        response truncated, would still satisfy the oversize test above.
+        """
+        body = "y" * 1000
+        _install_transport(
+            monkeypatch, lambda request, index: httpx.Response(200, text=body)
+        )
+
+        result = self._fetch(max_length=10_000)
+
+        assert result["content"] == body
+
+    def test_a_declared_charset_is_decoded_the_way_response_text_would(
+        self, monkeypatch, public_dns
+    ):
+        """Reading the body by hand must not quietly become a utf-8 assumption.
+
+        response.text decoded through the charset in Content-Type; the capped
+        read has to do the same or a latin-1 page comes back mojibake. Every
+        other body test here is pure ASCII, where the two agree.
+        """
+        text = "café"
+        _install_transport(
+            monkeypatch,
+            lambda request, index: httpx.Response(
+                200,
+                content=text.encode("latin-1"),
+                headers={"content-type": "text/html; charset=latin-1"},
+            ),
+        )
+
+        assert self._fetch(max_length=10_000)["content"] == text
 
     @pytest.mark.parametrize("status_code", REDIRECT_STATUSES)
     def test_redirect_bodies_are_never_pulled_off_the_wire(
@@ -1717,22 +1954,31 @@ class TestRedirectCapIsShared:
         mcp_loader imports the cap for its fetch tool, so a SECOND walker in
         the same file could write range(10) and the import test above would
         still pass -- the module imports the name and assigns it nowhere, and
-        a literal 10 satisfies the count assertions today. Every range() in
-        these four modules is a redirect walk, so requiring the argument to be
-        a bare name closes that per-call-site hole.
+        a literal 10 satisfies the count assertions today. Requiring the
+        argument to be a bare name closes that per-call-site hole.
+
+        Scoped to the `for` statements that iterate a range(), rather than
+        every range() call anywhere in the module. As a whole-module ban it
+        was sound only while every range() in these files happened to be a
+        redirect walk: the first unrelated `for i in range(3)` would fail it
+        with a message about redirect walks, and the cheapest way to make that
+        failure go away is to weaken or delete the test -- which is how the
+        per-call-site protection gets lost. A helper that reads a chunk
+        counter is not a redirect walk and is not this test's business.
         """
         tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
 
-        ranges = [
-            node
+        walk_ranges = [
+            node.iter
             for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "range"
+            if isinstance(node, (ast.For, ast.AsyncFor))
+            and isinstance(node.iter, ast.Call)
+            and isinstance(node.iter.func, ast.Name)
+            and node.iter.func.id == "range"
         ]
 
-        assert ranges, "expected at least one redirect walk in this module"
-        for node in ranges:
+        assert walk_ranges, "expected at least one redirect walk in this module"
+        for node in walk_ranges:
             assert len(node.args) == 1
             assert isinstance(node.args[0], ast.Name), ast.dump(node)
             assert node.args[0].id == "MAX_REDIRECTS"
