@@ -730,10 +730,16 @@ class TestReadCapped:
     constants and assert an upper bound on bytes pulled, so they cannot see
     the boundary (a body of exactly the cap) or how many bytes came back at
     all -- returning b"" on the over-cap path satisfied every one of them.
-    A broken join they do partly catch: since the within-cap info fixture
-    became multi-chunk it fails on invalid JSON. That is one call site,
-    one body shape, and by accident of the payload rather than by assertion,
-    so the join is pinned here directly as well.
+
+    A broken join they do catch, but asymmetrically, and only by accident of
+    the payloads. Measured with this class deselected: returning only the
+    FIRST chunk fails exactly one test (the within-cap info fixture, on
+    invalid JSON), while dropping the LAST fails 38 -- 20 of them in
+    TestFetchToolSSRFGuard -- because almost every other fixture is a single
+    chunk, where dropping "the last" drops the whole body. So the wide
+    failure count comes from bodies that are not chunked at all, not from any
+    assertion that the bytes were reassembled. This class pins the join
+    directly instead.
     """
 
     class _Stream:
@@ -785,11 +791,13 @@ class TestReadCapped:
     def test_a_within_cap_body_is_joined_across_every_chunk(self):
         """Pins the join directly, on the reader rather than through a caller.
 
-        The within-cap info fixture also catches both halves of this, but only
-        because a truncated JSON document fails to parse: it is one call site,
-        one payload shape, and nothing there asserts that the bytes were
-        reassembled. A non-JSON caller -- which the fetch tool is -- would not
-        notice either mutation.
+        Returning only the first chunk is invisible everywhere else except the
+        within-cap info fixture, and there only because a truncated JSON
+        document fails to parse -- nothing asserts the bytes were reassembled.
+        Dropping the last chunk is caught widely (38 tests, 20 of them in the
+        fetch class) but for a reason that says nothing about joining: those
+        fixtures are single-chunk, so chunks[:-1] is empty. Multi-chunk
+        within-cap bodies exist only here and in the info fixture.
         """
         chunks = [b"a" * 10, b"b" * 10, b"c" * 10, b"d" * 5]
         stream = self._Stream(chunks)
@@ -826,9 +834,14 @@ class TestBodyCapConstants:
     """The two caps are asserted by value because every test that uses them
     derives its fixture from them, and so cannot notice the numbers changing.
 
-    Swapping the two survives the whole suite otherwise: the info reader would
-    admit ten times the memory its own rationale argues for, and a page the
-    fetch tool is meant to return whole would come back truncated.
+    Swapping them is now also caught by
+    test_a_page_between_the_two_caps_is_returned_whole, which fails at its own
+    precondition (it asserts the fetch cap is the larger of the two) -- that
+    test was added in the same commit as this class and is the reason the
+    earlier wording here, "survives the whole suite otherwise", is no longer
+    true. What this class adds is the VALUES: without it both constants could
+    move together, keeping their ordering and that precondition intact, and
+    nothing would notice.
     """
 
     def test_the_info_cap_is_one_mebibyte(self):
@@ -1155,11 +1168,22 @@ class TestConnectHttpInfoQuery:
     ):
         """The walk must FOLLOW a safe Location, not just refuse an unsafe one.
 
-        Every other hop test in this class asserts a refusal, so a walk that
-        had stopped following redirects altogether -- `is_redirect` narrowed to
-        `has_redirect_location`, or the `continue` dropped -- would pass all of
-        them. This is the positive control across the whole 3xx range the
-        guard spans, including the statuses a narrower predicate would drop.
+        Not the sole guard against either mutation it names, and the earlier
+        claim that it was ("every other hop test in this class asserts a
+        refusal") was simply false. Measured with this test deselected:
+        dropping the `continue` fails 61 cases across four sibling functions
+        (hop-revalidation, relative-Location, shared-cap, redirect-bodies),
+        all of which drive a chain to completion; narrowing `is_redirect` to
+        `has_redirect_location` fails 4 --
+        test_info_endpoint_redirect_bodies_are_never_pulled_off_the_wire on
+        exactly the 300/304/305/399 parameters, which it has because
+        REDIRECT_STATUSES was widened to the full 3xx range.
+
+        What this test adds is the assertion, not the axis: the siblings check
+        that no body was pulled, or that a refusal happened. This one asserts
+        the hop was actually FOLLOWED -- the two-URL chain in order -- across
+        every redirect status. A walk that reached the second URL by some other
+        route, or in the wrong order, is only visible here.
         """
         seen = _install_transport(
             monkeypatch,
@@ -2019,7 +2043,6 @@ class TestFetchToolSSRFGuard:
         result = self._fetch(max_length=size * 2)
 
         assert result["content"] == body
-        assert "truncated" not in result["content"]
 
     def test_a_body_within_the_cap_is_returned_whole(self, monkeypatch, public_dns):
         """The cap must not truncate or mark an ordinary page.
@@ -2042,8 +2065,11 @@ class TestFetchToolSSRFGuard:
         """Reading the body by hand must not quietly become a utf-8 assumption.
 
         response.text decoded through the charset in Content-Type; the capped
-        read has to do the same or a latin-1 page comes back mojibake. Every
-        other body test here is pure ASCII, where the two agree.
+        read has to do the same or a latin-1 page comes back mojibake. The
+        undecodable-byte test below is the only other non-ASCII body in this
+        class, and it declares utf-8, so a hardcoded utf-8 agrees with it --
+        this is the only test here that can tell the two apart. Measured:
+        hardcoding utf-8 fails this test alone.
         """
         text = "café"
         _install_transport(

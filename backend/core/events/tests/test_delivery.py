@@ -946,8 +946,8 @@ class TestWebhookRedirectHops:
         refusing everything. Six sibling tests in this class already catch
         that -- the hop-revalidation, relative-Location, both cap tests, and
         the two GET-hop header tests all drive a chain to completion, so a
-        walk that refused every redirect fails 17 parametrised cases across
-        this class with or without this test. It is kept as the direct,
+        walk that refused every redirect fails 16 cases across those six
+        functions, 17 counting this test's own. It is kept as the direct,
         single-purpose statement of the positive case: those six fail for
         reasons of their own, and a reader asking "is a present Location
         still followed?" should not have to infer it from a cap test.

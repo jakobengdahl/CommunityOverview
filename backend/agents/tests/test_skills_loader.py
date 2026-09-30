@@ -820,10 +820,15 @@ class TestFetchTextTerminalBodyCap:
 
     @pytest.mark.asyncio
     async def test_a_within_cap_body_is_joined_across_every_chunk(self):
-        """Pins the join. Every other within-cap fixture here sends the body as
-        one chunk, so returning only the first chunk was indistinguishable from
-        correct; the multi-chunk fixtures are all over-cap and assert only wire
-        volume."""
+        """Pins the join, and it is the only test here that does.
+
+        Measured: returning only the first chunk fails this test and nothing
+        else, because every other within-cap fixture in this file is a single
+        chunk. Dropping the LAST chunk instead fails 14 other tests, but that
+        says nothing about joining -- with a single-chunk body chunks[:-1] is
+        empty, so those failures are about an empty document, not a
+        misassembled one.
+        """
         parts = [b"# skill\n", b"aaaa", b"bbbb", b"cccc"]
 
         class _Stream(loader_module.httpx.AsyncByteStream):
@@ -878,9 +883,11 @@ class TestFetchTextTerminalBodyCap:
 
         response.text decoded through the charset in Content-Type; the capped
         read has to do the same or a latin-1 skill file comes back mojibake.
-        The size and join tests in this class are all ASCII, where a
-        hardcoded utf-8 and the declared charset agree; this is the test that
-        separates them.
+        One size test above is also latin-1 --
+        test_a_body_within_the_cap_whose_utf8_form_is_not_is_refused -- but it
+        cannot separate the two codecs, because its body exceeds the cap under
+        either decoding and it asserts only the refusal. Measured: hardcoding
+        utf-8 fails this test alone.
         """
         text = "# café"
         handler, _seen = _recording_handler(

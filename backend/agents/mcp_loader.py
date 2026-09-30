@@ -34,8 +34,11 @@ logger = logging.getLogger(__name__)
 #
 # The two numbers differ because the bodies do:
 # - The info endpoint returns a JSON document listing a server's endpoints and
-#   tools. 1 MiB is far above any real one, and a truncated JSON cannot be
-#   parsed anyway, so exceeding this is an error rather than a truncation.
+#   tools. 1 MiB is far above any real one. Exceeding it is an ERROR rather
+#   than a truncation precisely because a truncated JSON document CAN still
+#   parse: json.loads ignores trailing whitespace, and a cut landing exactly at
+#   the document's end parses too, so truncating here would mean acting on a
+#   partial tool list that looked complete.
 # - The fetch tool returns a web page to an agent, and already truncates to
 #   the caller's max_length. 10 MiB bounds the read while leaving any
 #   reasonable max_length satisfiable; a larger max_length cannot be served in
@@ -54,6 +57,14 @@ def _read_capped(response, max_bytes: int) -> tuple[bytes, bool]:
     which is the whole point. It is not ``max_bytes`` flat: joining allocates
     a second copy and slicing a third, so budget on the multiple rather than
     on the cap.
+
+    The overshoot past the cap is one decoded chunk, and that chunk is bounded
+    by httpx, not here: ``ZlibDecompressor`` drains a compressed body in
+    ``MAX_DECODE_CHUNK_SIZE`` (1 MiB) pieces, so a gzip bomb cannot arrive as
+    one enormous chunk. Measured: a 200 MiB bomb weighing 204 KB on the wire
+    yields 1 MiB chunks. That is a property of the HTTP library rather than of
+    this loop, so a move to a client without that hardening would need
+    ``iter_bytes(chunk_size=...)`` here to keep the bound.
 
     Unlike the running-total reads in ``core/image_ingest.py`` and
     ``skills/loader.py``, this appends each chunk BEFORE testing the total.
