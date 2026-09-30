@@ -916,10 +916,12 @@ class TestWebhookRedirectHops:
         """urljoin(current, "") is current, so this used to re-POST the same URL.
 
         The walk then ran to MAX_REDIRECTS and reported a redirect loop, which
-        names the wrong problem and sends the body nine more times than the
-        server asked for. The four sibling walkers each refuse after one
-        request; this asserts both halves of that -- the refusal, and that
-        nothing was retried to reach it.
+        names the wrong problem and spends nine more requests on a server that
+        gave it nowhere to go. For 307/308 those repeats each carry the webhook
+        body again; for 301/302/303 the method downgrades to GET after the
+        first, so they are bodiless. Either way the four sibling walkers refuse
+        after one request, and this asserts both halves of that -- the refusal,
+        and that nothing was retried to reach it.
 
         The status axis is varied because the guard sits inside
         `if response.is_redirect:`, which spans the whole 3xx range: a guard

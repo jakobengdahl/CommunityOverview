@@ -784,6 +784,95 @@ class TestFetchTextTerminalBodyCap:
         assert text == body
 
     @pytest.mark.asyncio
+    async def test_a_body_within_the_cap_whose_utf8_form_is_not_is_refused(self):
+        """The one case the RETAINED post-decode check exists for.
+
+        The running total counts bytes as RECEIVED. A latin-1 body of exactly
+        max_bytes high bytes passes it (and passes the advertised-length check,
+        which sees the same number), decodes to max_bytes characters, and
+        re-encodes to twice the cap. Before this PR that was refused; only the
+        retained `len(content.encode())` check still refuses it.
+
+        Without this test that check is dead: deleting it outright leaves the
+        whole file green, because every other oversize body here exceeds the
+        cap in RECEIVED bytes too and trips the incremental total first. That
+        would make the comment justifying it a claim no test can distinguish
+        from false.
+        """
+        max_bytes = 10
+        handler, seen = _recording_handler(
+            [
+                loader_module.httpx.Response(
+                    200,
+                    content="é".encode("latin-1") * max_bytes,
+                    headers={"content-type": "text/markdown; charset=latin-1"},
+                )
+            ]
+        )
+
+        with _mock_http(handler), _public_dns():
+            with pytest.raises(ValueError, match="exceeds max size"):
+                await self._loader(max_bytes)._fetch_text(
+                    "https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"
+                )
+
+        assert len(seen) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_within_cap_body_is_joined_across_every_chunk(self):
+        """Pins the join. Every other within-cap fixture here sends the body as
+        one chunk, so returning only the first chunk was indistinguishable from
+        correct; the multi-chunk fixtures are all over-cap and assert only wire
+        volume."""
+        parts = [b"# skill\n", b"aaaa", b"bbbb", b"cccc"]
+
+        class _Stream(loader_module.httpx.AsyncByteStream):
+            async def __aiter__(self):
+                for part in parts:
+                    yield part
+
+        handler, _seen = _recording_handler(
+            [loader_module.httpx.Response(200, stream=_Stream())]
+        )
+
+        with _mock_http(handler), _public_dns():
+            text = await self._loader(2000)._fetch_text(
+                "https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"
+            )
+
+        assert text == b"".join(parts).decode()
+
+    @pytest.mark.asyncio
+    async def test_an_undecodable_byte_is_replaced_the_way_response_text_would(self):
+        """Pins the error POLICY, not just the codec.
+
+        response.text decodes with errors="replace". "strict" would make this
+        fetch raise where it used to yield U+FFFD, and "ignore" would drop the
+        byte silently; the charset test below decodes cleanly and sees neither.
+        Asserted against httpx's own answer so the two cannot drift.
+        """
+        body = b"# a\xffb"
+        expected = loader_module.httpx.Response(
+            200, content=body, headers={"content-type": "text/markdown; charset=utf-8"}
+        ).text
+        handler, _seen = _recording_handler(
+            [
+                loader_module.httpx.Response(
+                    200,
+                    content=body,
+                    headers={"content-type": "text/markdown; charset=utf-8"},
+                )
+            ]
+        )
+
+        with _mock_http(handler), _public_dns():
+            text = await self._loader()._fetch_text(
+                "https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"
+            )
+
+        assert text == expected == "# a\ufffdb"
+
+    @pytest.mark.asyncio
     async def test_a_declared_charset_is_decoded_the_way_response_text_would(self):
         """Reading the body by hand must not become a utf-8 assumption.
 

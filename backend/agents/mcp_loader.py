@@ -23,10 +23,14 @@ from backend.core.events.delivery import MAX_REDIRECTS, is_safe_url
 logger = logging.getLogger(__name__)
 
 # Ingest caps for the two redirect walkers below. Neither had one: both read
-# the terminal body whole before anything could reject it, so a server that
-# advertises no Content-Length (or advertises less than it sends) decided how
-# much memory this process spent. The walk itself is bounded by MAX_REDIRECTS
-# and streams every hop, so these bound the only body that is still read.
+# the terminal body whole before anything could reject it, so EVERY server
+# decided how much memory this process spent -- including one honestly
+# advertising 500 MiB, because no advertised length was ever consulted here.
+# That is the difference from skills/loader.py, which checks Content-Length
+# ahead of its incremental read and keeps doing so; these two walkers have no
+# such pre-check and rely on the incremental cap alone. The walk itself is
+# bounded by MAX_REDIRECTS and streams every hop, so these bound the only body
+# that is still read.
 #
 # The two numbers differ because the bodies do:
 # - The info endpoint returns a JSON document listing a server's endpoints and
@@ -43,21 +47,35 @@ MAX_FETCH_BODY_BYTES = 10 * 1024 * 1024
 def _read_capped(response, max_bytes: int) -> tuple[bytes, bool]:
     """Read a streamed response body incrementally, stopping past *max_bytes*.
 
-    Returns the bytes read and whether the body was still going when the cap
-    was passed. At most ``max_bytes`` bytes are returned and never more than
-    one chunk beyond that is held, so the caller's memory does not depend on
-    what the server chooses to send. Mirrors the running-total pattern in
-    ``core/image_ingest.py``, which is the walker that already capped as it
-    read.
+    Returns at most ``max_bytes`` bytes, and whether the body was still going
+    when the cap was passed. Peak memory is a small constant multiple of
+    ``max_bytes`` -- the accumulated chunks, plus the joined copy, plus the
+    slice -- and crucially does NOT depend on what the server chooses to send,
+    which is the whole point. It is not ``max_bytes`` flat: joining allocates
+    a second copy and slicing a third, so budget on the multiple rather than
+    on the cap.
+
+    Unlike the running-total reads in ``core/image_ingest.py`` and
+    ``skills/loader.py``, this appends each chunk BEFORE testing the total.
+    Those two only ever refuse, so they can drop the chunk that crosses the
+    cap; this one has a truncating caller that needs the bytes inside that
+    chunk, so it must keep it. That is the one respect in which it does not
+    mirror them.
     """
     chunks: List[bytes] = []
     total = 0
+    over_cap = False
     for chunk in response.iter_bytes():
         chunks.append(chunk)
         total += len(chunk)
         if total > max_bytes:
-            return b"".join(chunks)[:max_bytes], True
-    return b"".join(chunks), False
+            over_cap = True
+            break
+    raw = b"".join(chunks)
+    # Drop the per-chunk references before slicing, so the chunks and the
+    # slice are not both alive alongside the join.
+    chunks.clear()
+    return (raw[:max_bytes], True) if over_cap else (raw, False)
 
 
 def _summarize_args(args: Dict[str, Any], max_len: int = 200) -> str:

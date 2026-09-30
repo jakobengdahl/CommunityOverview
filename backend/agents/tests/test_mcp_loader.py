@@ -721,6 +721,117 @@ INTERNAL_HOSTS = {"169.254.169.254", "::1", "fc00::1"}
 NON_HTTP_HOP_TARGETS = ["ftp://example.com/x", "gopher://example.com/1"]
 
 
+class TestReadCapped:
+    """Direct unit tests for the shared capped reader.
+
+    The two integration tests that exercise it only ever send a body MUCH
+    larger than the cap, and both derive their fixtures from the constants, so
+    they are indifferent to the boundary, to how many bytes come back, and to
+    whether the chunks were joined at all. Those are the three things a reader
+    can get wrong while still looking like it stopped early.
+    """
+
+    class _Stream:
+        """Minimal stand-in: _read_capped only calls response.iter_bytes()."""
+
+        def __init__(self, chunks):
+            self._chunks = chunks
+            self.pulled = 0
+
+        def iter_bytes(self):
+            for chunk in self._chunks:
+                self.pulled += len(chunk)
+                yield chunk
+
+    @pytest.mark.parametrize(
+        ("size", "expect_over_cap"),
+        [(99, False), (100, False), (101, True), (500, True)],
+    )
+    def test_the_boundary_belongs_to_the_accepted_side(self, size, expect_over_cap):
+        """`>=` instead of `>` would report a body of exactly the cap as over it.
+
+        At the two call sites that means refusing an info document of exactly
+        MAX_INFO_BODY_BYTES, and stamping a truncation marker on a page of
+        exactly MAX_FETCH_BODY_BYTES. The equivalent boundary in
+        skills/loader.py is pinned; this is the one that was not.
+        """
+        stream = self._Stream([b"x" * size])
+
+        raw, over_cap = mcp_loader._read_capped(stream, 100)
+
+        assert over_cap is expect_over_cap
+        assert raw == b"x" * min(size, 100)
+
+    def test_an_over_cap_read_returns_exactly_the_cap(self):
+        """Pins the LENGTH, not just the flag.
+
+        A reader that returned b"" with over_cap=True satisfied every existing
+        assertion: the fetch tool's test checks the truncation marker and the
+        chunk counter, and neither notices that the page itself was discarded.
+        """
+        stream = self._Stream([b"y" * 40] * 10)
+
+        raw, over_cap = mcp_loader._read_capped(stream, 100)
+
+        assert over_cap is True
+        assert len(raw) == 100
+        assert raw == b"y" * 100
+
+    def test_a_within_cap_body_is_joined_across_every_chunk(self):
+        """Pins the join. Every other fixture sends the body as ONE chunk, so
+        returning just the first chunk -- or dropping the last -- was
+        indistinguishable from correct."""
+        chunks = [b"a" * 10, b"b" * 10, b"c" * 10, b"d" * 5]
+        stream = self._Stream(chunks)
+
+        raw, over_cap = mcp_loader._read_capped(stream, 100)
+
+        assert over_cap is False
+        assert raw == b"".join(chunks)
+        assert len(raw) == 35
+
+    def test_reading_stops_at_the_crossing_chunk(self):
+        """The cap must bound what comes OFF THE WIRE, not just what is returned.
+
+        A reader that drained the stream and then sliced would satisfy the
+        length assertions above while still letting the server decide the
+        memory.
+        """
+        stream = self._Stream([b"z" * 30] * 100)
+
+        raw, over_cap = mcp_loader._read_capped(stream, 100)
+
+        assert over_cap is True
+        assert len(raw) == 100
+        # Four chunks of 30 reach 120, which is the first total past 100.
+        assert stream.pulled == 120
+
+    def test_an_empty_body_is_not_over_the_cap(self):
+        stream = self._Stream([])
+
+        assert mcp_loader._read_capped(stream, 100) == (b"", False)
+
+
+class TestBodyCapConstants:
+    """The two caps are asserted by value because every test that uses them
+    derives its fixture from them, and so cannot notice the numbers changing.
+
+    Swapping the two survives the whole suite otherwise: the info reader would
+    admit ten times the memory its own rationale argues for, and a page the
+    fetch tool is meant to return whole would come back truncated.
+    """
+
+    def test_the_info_cap_is_one_mebibyte(self):
+        assert mcp_loader.MAX_INFO_BODY_BYTES == 1024 * 1024
+
+    def test_the_fetch_cap_is_ten_mebibytes(self):
+        assert mcp_loader.MAX_FETCH_BODY_BYTES == 10 * 1024 * 1024
+
+    def test_a_web_page_is_allowed_more_than_an_info_document(self):
+        """The ordering is the part the rationale actually rests on."""
+        assert mcp_loader.MAX_FETCH_BODY_BYTES > mcp_loader.MAX_INFO_BODY_BYTES
+
+
 class TestConnectHttpInfoQuery:
     """Tests for the HTTP info-endpoint tool-discovery path."""
 
@@ -1093,13 +1204,22 @@ class TestConnectHttpInfoQuery:
     ):
         """The cap must not change what a normal info document discovers.
 
-        A cap that refused everything, or a reader that dropped its last
-        chunk, would still satisfy the oversize test above.
+        Served across SEVERAL chunks on purpose: a reader that returned only
+        the first chunk, or dropped the last, yields invalid JSON here and is
+        caught. With a single-chunk body -- as this test first had it -- both
+        of those were indistinguishable from correct, and the oversize test
+        above cannot see them either.
         """
         payload = json.dumps({"endpoints": ["/mcp"], "pad": "y" * 5000}).encode()
+
+        class _ChunkedStream(httpx.SyncByteStream):
+            def __iter__(self):
+                for start in range(0, len(payload), 512):
+                    yield payload[start : start + 512]
+
         _install_transport(
             monkeypatch,
-            lambda request, index: httpx.Response(200, content=payload),
+            lambda request, index: httpx.Response(200, stream=_ChunkedStream()),
         )
         integration = self._integration(url="http://example.com/mcp")
         loader = MCPLoader([integration])
@@ -1864,6 +1984,33 @@ class TestFetchToolSSRFGuard:
 
         assert self._fetch(max_length=10_000)["content"] == text
 
+    def test_an_undecodable_byte_is_replaced_the_way_response_text_would(
+        self, monkeypatch, public_dns
+    ):
+        """Pins the error POLICY, not just the codec.
+
+        response.text decodes with errors="replace". Switching the manual
+        decode to "strict" turns one bad byte into
+        {"error": "Fetch failed: ...codec can't decode..."} -- swallowed by the
+        surrounding except and returned as a plausible product error -- and
+        "ignore" drops the byte silently. The charset test above cannot see
+        either, because its body decodes cleanly. Asserted against httpx's own
+        answer rather than a hardcoded string, so the two cannot drift.
+        """
+        body = b"a\xffb"
+        expected = httpx.Response(
+            200, content=body, headers={"content-type": "text/html; charset=utf-8"}
+        ).text
+        _install_transport(
+            monkeypatch,
+            lambda request, index: httpx.Response(
+                200, content=body, headers={"content-type": "text/html; charset=utf-8"}
+            ),
+        )
+
+        assert self._fetch(max_length=10_000)["content"] == expected
+        assert expected == "a\ufffdb"
+
     @pytest.mark.parametrize("status_code", REDIRECT_STATUSES)
     def test_redirect_bodies_are_never_pulled_off_the_wire(
         self, monkeypatch, public_dns, status_code
@@ -1957,14 +2104,25 @@ class TestRedirectCapIsShared:
         a literal 10 satisfies the count assertions today. Requiring the
         argument to be a bare name closes that per-call-site hole.
 
-        Scoped to the `for` statements that iterate a range(), rather than
-        every range() call anywhere in the module. As a whole-module ban it
-        was sound only while every range() in these files happened to be a
-        redirect walk: the first unrelated `for i in range(3)` would fail it
-        with a message about redirect walks, and the cheapest way to make that
-        failure go away is to weaken or delete the test -- which is how the
-        per-call-site protection gets lost. A helper that reads a chunk
-        counter is not a redirect walk and is not this test's business.
+        Scoped to the `for`/`async for` statements that iterate a range(),
+        rather than every range() call anywhere in the module. What that buys
+        is narrow and worth stating exactly, because the obvious reading is
+        wrong: a plain `for i in range(3)` STILL fails here, deliberately.
+        It is a loop over a literal, and the assertion below cannot exempt it
+        without also exempting a walk written `range(10)` -- which is the one
+        thing this test exists to catch. What the narrowing does exempt is a
+        range() that is not a loop's iterable at all: `list(range(3))`,
+        `sum(range(3))`, `random.choice(range(3))`. Under the old
+        whole-module ban each of those failed with a message about redirect
+        walks, and the cheapest way to silence that is to weaken or delete
+        the test, which is how the per-call-site protection gets lost.
+
+        Known cost of the narrowing: one level of indirection now slips past
+        where the whole-module ban caught it -- `hops = range(10)` then
+        `for _ in hops`, or `for _ in reversed(range(10))`. A `while` counter
+        was never covered either way. Both are contrived next to the thing
+        being prevented, which is a second walker in an already-importing
+        module quietly writing the number.
         """
         tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
 

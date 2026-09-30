@@ -442,9 +442,11 @@ class DeliveryWorker:
                 location = str(response.headers.get("location", ""))
                 if not location:
                     # urljoin(current, "") returns current, so an absent or
-                    # empty Location used to re-POST this same URL until the
-                    # cap ran out and reported a redirect loop. Refuse after
-                    # one request, as the four sibling walkers do.
+                    # empty Location used to re-request this same URL until
+                    # the cap ran out and reported a redirect loop -- as a
+                    # POST for 307/308, and as a bodiless GET for 301/302/303,
+                    # which downgrade the method below. Refuse after one
+                    # request, as the four sibling walkers do.
                     raise _MalformedRedirect(
                         f"Redirect without a Location header from {current_url}"
                     )
