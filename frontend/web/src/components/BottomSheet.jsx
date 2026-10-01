@@ -238,6 +238,7 @@ function BottomSheet({
               className="bottom-sheet-close"
               onClick={onClose}
               aria-label={resolvedCloseLabel}
+              title={resolvedCloseLabel}
             >
               &times;
             </button>

@@ -302,7 +302,12 @@ function MetamodelExplorerDialog({ schema, stats, onClose }) {
           <span id="mme-dialog-title" className="mme-title">
             {t('metamodel.title')}
           </span>
-          <button className="mme-close" onClick={onClose} aria-label={t('metamodel.close')}>
+          <button
+            className="mme-close"
+            onClick={onClose}
+            aria-label={t('metamodel.close')}
+            title={t('metamodel.close')}
+          >
             <XLg size={14} />
           </button>
         </div>
@@ -458,13 +463,25 @@ function MetamodelExplorerDialog({ schema, stats, onClose }) {
               )}
 
               <div className="mme-zoom-controls">
-                <button onClick={() => zoomBy(0.2)} aria-label={t('metamodel.zoom_in')}>
+                <button
+                  onClick={() => zoomBy(0.2)}
+                  aria-label={t('metamodel.zoom_in')}
+                  title={t('metamodel.zoom_in')}
+                >
                   <ZoomIn size={14} />
                 </button>
-                <button onClick={() => zoomBy(-0.2)} aria-label={t('metamodel.zoom_out')}>
+                <button
+                  onClick={() => zoomBy(-0.2)}
+                  aria-label={t('metamodel.zoom_out')}
+                  title={t('metamodel.zoom_out')}
+                >
                   <ZoomOut size={14} />
                 </button>
-                <button onClick={resetView} aria-label={t('metamodel.reset_view')}>
+                <button
+                  onClick={resetView}
+                  aria-label={t('metamodel.reset_view')}
+                  title={t('metamodel.reset_view')}
+                >
                   <ArrowCounterclockwise size={14} />
                 </button>
               </div>
