@@ -1487,7 +1487,9 @@ class ChatProcessor:
                     tool_result = {"error": str(e)}
                 except Exception:
                     logger.exception(f"Tool execution error ({tool_name})")
-                    tool_result = {"error": "An internal error occurred during tool execution."}
+                    tool_result = {
+                        "error": "An internal error occurred during tool execution."
+                    }
             else:
                 tool_result = {"error": f"Tool {tool_name} not found"}
 

@@ -22,6 +22,8 @@ from backend.ui.document_processor import DocumentProcessor
 
 
 logger = logging.getLogger(__name__)
+
+
 class DocumentService:
     """
     Service for handling document uploads and text extraction.
@@ -161,9 +163,7 @@ class DocumentService:
                 "filename": self._display_filename(filename),
             }
 
-    async def process_upload(
-        self, file_content: bytes, filename: str
-    ) -> Dict[str, Any]:
+    async def process_upload(self, file_content: bytes, filename: str) -> Dict[str, Any]:
         """
         Save and extract text from an uploaded file.
 
