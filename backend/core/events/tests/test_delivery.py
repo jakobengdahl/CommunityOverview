@@ -24,6 +24,7 @@ from backend.core.events.delivery import (
     MAX_REDIRECTS,
     DeliveryWorker,
     DeliveryItem,
+    _MalformedRedirect,
     _SSRFRedirectBlocked,
     is_safe_url,
 )
@@ -453,6 +454,56 @@ class TestDeliveryWorker:
 
     @patch("backend.core.events.delivery.socket.getaddrinfo")
     @patch("backend.core.events.delivery.httpx.Client")
+    def test_redirect_without_a_location_is_dropped_without_retry(
+        self, mock_client_cls, mock_getaddrinfo
+    ):
+        """A malformed redirect reaches the same terminal outcome as an SSRF block.
+
+        The walker-level test above pins the refusal; this pins what the
+        operator sees. A refusal raised through the generic handler instead
+        would be retried to max_attempts and reported as a transient failure,
+        which is wrong -- a server that answers 3xx with no Location answers
+        the same way next time.
+        """
+        mock_getaddrinfo.return_value = [(None, None, None, None, ("93.184.216.34", 0))]
+
+        redirect_response = Mock()
+        redirect_response.is_redirect = True
+        redirect_response.status_code = 302
+        redirect_response.headers = {}
+
+        mock_client = Mock()
+        mock_client.__enter__ = Mock(return_value=mock_client)
+        mock_client.__exit__ = Mock(return_value=None)
+        mock_client.post.return_value = redirect_response
+        mock_client_cls.return_value = mock_client
+
+        results = []
+        worker = DeliveryWorker(
+            max_attempts=3,
+            backoff_times=[0.05, 0.05, 0.05],
+            on_result=lambda r: results.append(r),
+        )
+        worker.start()
+
+        try:
+            event = create_test_event()
+            worker.enqueue(event, "http://example.com/hook")
+
+            _wait_for(lambda: len(results) >= 1)
+
+            assert len(results) == 1
+            assert results[0].status == DeliveryStatus.DROPPED
+            assert mock_client.post.call_count == 1
+            # The reason reaches the operator, not just the status: emptying the
+            # exception message leaves "Redirect refused: ... ." with no stated
+            # cause, and every other assertion here still passes.
+            assert "Location" in results[0].error_message
+        finally:
+            worker.stop(wait=True)
+
+    @patch("backend.core.events.delivery.socket.getaddrinfo")
+    @patch("backend.core.events.delivery.httpx.Client")
     def test_safe_redirect_is_followed(self, mock_client_cls, mock_getaddrinfo):
         """A redirect to a safe public URL must be followed normally."""
         # Both the original and redirect target resolve to public IPs
@@ -856,6 +907,108 @@ class TestWebhookRedirectHops:
 
     def test_redirect_cap_is_ten(self):
         assert MAX_REDIRECTS == 10
+
+    @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+    @pytest.mark.parametrize(
+        "location_headers",
+        [{}, {"location": ""}],
+        ids=["absent", "empty"],
+    )
+    def test_a_redirect_without_a_location_is_refused_after_one_request(
+        self, monkeypatch, location_headers, status
+    ):
+        """urljoin(current, "") is current, so this used to re-POST the same URL.
+
+        The walk then ran to MAX_REDIRECTS and reported a redirect loop, which
+        names the wrong problem and spends nine more requests on a server that
+        gave it nowhere to go. For 307/308 those repeats each carry the webhook
+        body again; for 301/302/303 the method downgrades to GET after the
+        first, so they are bodiless. Either way the four sibling walkers refuse
+        after one request, and this asserts both halves of that -- the refusal,
+        and that nothing was retried to reach it.
+
+        The status axis is varied because the guard sits inside
+        `if response.is_redirect:`, which spans the whole 3xx range: a guard
+        made conditional on the status would otherwise hide behind a suite
+        that only scripts 302.
+        """
+        seen, outcome = self._post(
+            monkeypatch,
+            lambda request, index: httpx.Response(status, headers=location_headers),
+        )
+
+        assert isinstance(outcome, _MalformedRedirect)
+        assert not isinstance(outcome, httpx.TooManyRedirects)
+        assert len(seen) == 1, "the same URL must not be requested again"
+        assert [method for method, _ in seen] == ["POST"]
+
+    @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+    @pytest.mark.parametrize(
+        "location_headers", [{}, {"location": ""}], ids=["absent", "empty"]
+    )
+    def test_a_missing_location_is_refused_on_a_later_hop_too(
+        self, monkeypatch, location_headers, status
+    ):
+        """The guard must not be conditional on being the first hop.
+
+        The test above scripts the bad response as the FIRST one, which leaves
+        both `if not location and current_url == url` and
+        `... and current_method == "POST"` green across the whole suite -- and
+        with them the original defect reachable one hop in, where
+        urljoin(current, "") is still current and is_safe_url still says yes.
+        The method axis matters for the same reason: on 301/302/303 the walk has
+        already downgraded to GET by the time it reaches this hop.
+        """
+
+        def handler(request, index):
+            if index == 0:
+                return httpx.Response(
+                    status, headers={"location": "https://second.example.com/hook"}
+                )
+            return httpx.Response(status, headers=location_headers)
+
+        seen, outcome = self._post(monkeypatch, handler)
+
+        assert isinstance(outcome, _MalformedRedirect)
+        assert len(seen) == 2, "the second hop must be refused, not re-requested"
+        assert [url for _, url in seen] == [
+            "http://start.example.com/hook",
+            "https://second.example.com/hook",
+        ]
+        expected_method = "GET" if status in (301, 302, 303) else "POST"
+        assert [m for m, _ in seen] == ["POST", expected_method]
+
+    def test_a_present_location_is_still_followed(self, monkeypatch):
+        """The empty-Location guard must not refuse a redirect that has one.
+
+        A guard written as `if not response.headers.get("location")` on a
+        header dict rather than on the joined value is one edit away from
+        refusing everything. Seven sibling tests in this class already catch
+        that: the hop-revalidation, relative-Location, both cap tests and the
+        two GET-hop header tests all drive a chain to completion (16 cases
+        between them), and the later-hop no-Location test needs its first hop
+        followed to reach the second (10 more). So a walk that refused every
+        redirect fails 26 cases across those seven, 27 counting this test's
+        own. It is kept as the direct,
+        single-purpose statement of the positive case: those six fail for
+        reasons of their own, and a reader asking "is a present Location
+        still followed?" should not have to infer it from a cap test.
+        """
+
+        def handler(request, index):
+            if index == 0:
+                return httpx.Response(
+                    307, headers={"location": "https://second.example.com/hook"}
+                )
+            return httpx.Response(200)
+
+        seen, outcome = self._post(monkeypatch, handler)
+
+        assert outcome.status_code == 200
+        assert [url for _, url in seen] == [
+            "http://start.example.com/hook",
+            "https://second.example.com/hook",
+        ]
 
     @pytest.mark.parametrize("status", [307, 308])
     @pytest.mark.parametrize(

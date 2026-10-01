@@ -141,6 +141,16 @@ class _SSRFRedirectBlocked(Exception):
     """Raised when a redirect target fails the SSRF check."""
 
 
+class _MalformedRedirect(Exception):
+    """Raised when a 3xx carries no Location header to follow.
+
+    Separate from _SSRFRedirectBlocked because the reason differs -- nothing
+    was refused on address grounds -- but both share the same outcome: the
+    delivery is dropped rather than retried, because neither improves on a
+    second attempt.
+    """
+
+
 class DeliveryItem:
     """An item in the delivery queue."""
 
@@ -328,10 +338,11 @@ class DeliveryWorker:
                 )
                 return
 
-        except _SSRFRedirectBlocked as e:
+        except (_SSRFRedirectBlocked, _MalformedRedirect) as e:
             error_message = str(e)
             logger.error(
-                f"SSRF blocked (redirect): event {event.event_id} to {webhook_url}. {error_message}"
+                f"Redirect refused: event {event.event_id} to {webhook_url}. "
+                f"{error_message}"
             )
             if self._on_result:
                 result = DeliveryResult(
@@ -429,6 +440,16 @@ class DeliveryWorker:
                 if not response.is_redirect:
                     return response
                 location = str(response.headers.get("location", ""))
+                if not location:
+                    # urljoin(current, "") returns current, so an absent or
+                    # empty Location used to re-request this same URL until
+                    # the cap ran out and reported a redirect loop -- as a
+                    # POST for 307/308, and as a bodiless GET for 301/302/303,
+                    # which downgrade the method below. Refuse after one
+                    # request, as the four sibling walkers do.
+                    raise _MalformedRedirect(
+                        f"Redirect without a Location header from {current_url}"
+                    )
                 next_url = urllib.parse.urljoin(current_url, location)
                 if not is_safe_url(next_url):
                     raise _SSRFRedirectBlocked(
