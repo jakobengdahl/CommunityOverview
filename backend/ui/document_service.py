@@ -15,8 +15,8 @@ import logging
 
 import os
 import tempfile
-from typing import Optional, Dict, Any
 from pathlib import Path, PurePosixPath
+from typing import Any, Dict, Optional
 
 from backend.ui.document_processor import DocumentProcessor
 
@@ -74,7 +74,10 @@ class DocumentService:
         if path.suffix.lower() not in self.SUPPORTED_EXTENSIONS:
             return {
                 "success": False,
-                "error": f"Unsupported file format: {path.suffix}. Supported: {', '.join(self.SUPPORTED_EXTENSIONS)}",
+                "error": (
+                    f"Unsupported file format: {path.suffix}. "
+                    f"Supported: {', '.join(self.SUPPORTED_EXTENSIONS)}"
+                ),
                 "filename": path.name,
             }
 
@@ -124,7 +127,10 @@ class DocumentService:
         if ext not in self.SUPPORTED_EXTENSIONS:
             return {
                 "success": False,
-                "error": f"Unsupported file format: {ext}. Supported: {', '.join(self.SUPPORTED_EXTENSIONS)}",
+                "error": (
+                    f"Unsupported file format: {ext}. "
+                    f"Supported: {', '.join(self.SUPPORTED_EXTENSIONS)}"
+                ),
                 "filename": self._display_filename(filename),
             }
 
@@ -163,7 +169,9 @@ class DocumentService:
                 "filename": self._display_filename(filename),
             }
 
-    async def process_upload(self, file_content: bytes, filename: str) -> Dict[str, Any]:
+    async def process_upload(
+        self, file_content: bytes, filename: str
+    ) -> Dict[str, Any]:
         """
         Save and extract text from an uploaded file.
 
