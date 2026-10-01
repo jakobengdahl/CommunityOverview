@@ -22,6 +22,72 @@ from backend.core.events.delivery import MAX_REDIRECTS, is_safe_url
 
 logger = logging.getLogger(__name__)
 
+# Ingest caps for the two redirect walkers below. Neither had one: both read
+# the terminal body whole before anything could reject it, so EVERY server
+# decided how much memory this process spent -- including one honestly
+# advertising 500 MiB, because no advertised length was ever consulted here.
+# That is the difference from skills/loader.py, which checks Content-Length
+# ahead of its incremental read and keeps doing so; these two walkers have no
+# such pre-check and rely on the incremental cap alone. The walk itself is
+# bounded by MAX_REDIRECTS and streams every hop, so these bound the only body
+# that is still read.
+#
+# The two numbers differ because the bodies do:
+# - The info endpoint returns a JSON document listing a server's endpoints and
+#   tools. 1 MiB is far above any real one. Exceeding it is an ERROR rather
+#   than a truncation precisely because a truncated JSON document CAN still
+#   parse: json.loads ignores trailing whitespace, and a cut landing exactly at
+#   the document's end parses too, so truncating here would mean acting on a
+#   partial tool list that looked complete.
+# - The fetch tool returns a web page to an agent, and already truncates to
+#   the caller's max_length. 10 MiB bounds the read while leaving any
+#   reasonable max_length satisfiable; a larger max_length cannot be served in
+#   full, and the truncation marker says so.
+MAX_INFO_BODY_BYTES = 1024 * 1024
+MAX_FETCH_BODY_BYTES = 10 * 1024 * 1024
+
+
+def _read_capped(response, max_bytes: int) -> tuple[bytes, bool]:
+    """Read a streamed response body incrementally, stopping past *max_bytes*.
+
+    Returns at most ``max_bytes`` bytes, and whether the body was still going
+    when the cap was passed. Peak memory is a small constant multiple of
+    ``max_bytes`` -- the accumulated chunks, plus the joined copy, plus the
+    slice -- and crucially does NOT depend on what the server chooses to send,
+    which is the whole point. It is not ``max_bytes`` flat: joining allocates
+    a second copy and slicing a third, so budget on the multiple rather than
+    on the cap.
+
+    The overshoot past the cap is one decoded chunk, and that chunk is bounded
+    by httpx, not here: ``ZlibDecompressor`` drains a compressed body in
+    ``MAX_DECODE_CHUNK_SIZE`` (1 MiB) pieces, so a gzip bomb cannot arrive as
+    one enormous chunk. Measured: a 200 MiB bomb weighing 204 KB on the wire
+    yields 1 MiB chunks. That is a property of the HTTP library rather than of
+    this loop, so a move to a client without that hardening would need
+    ``iter_bytes(chunk_size=...)`` here to keep the bound.
+
+    Unlike the running-total reads in ``core/image_ingest.py`` and
+    ``skills/loader.py``, this appends each chunk BEFORE testing the total.
+    Those two only ever refuse, so they can drop the chunk that crosses the
+    cap; this one has a truncating caller that needs the bytes inside that
+    chunk, so it must keep it. That is the one respect in which it does not
+    mirror them.
+    """
+    chunks: List[bytes] = []
+    total = 0
+    over_cap = False
+    for chunk in response.iter_bytes():
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > max_bytes:
+            over_cap = True
+            break
+    raw = b"".join(chunks)
+    # Drop the per-chunk references before slicing, so the chunks and the
+    # slice are not both alive alongside the join.
+    chunks.clear()
+    return (raw[:max_bytes], True) if over_cap else (raw, False)
+
 
 def _summarize_args(args: Dict[str, Any], max_len: int = 200) -> str:
     """Summarize tool arguments for logging (truncate long values)."""
@@ -164,13 +230,21 @@ class MCPLoader:
             # to httpx, as this did before, let one 302 from that server pull
             # the request to any internal address with nothing checked at all.
             #
-            # This is the one place the three sibling walkers differ from each
-            # other on purpose. _execute_fetch_tool below DOES check its
-            # initial URL, because that URL comes from the agent rather than
-            # from config; the skills loader checks its own, because a skill
-            # URL is meant to name a public host and it has a trusted_domains
-            # allowlist to match. Here the initial address is the operator's
-            # own choice, and refusing it would break the default install.
+            # This is the one of the five hop-validating paths whose INITIAL
+            # url is never address-checked, and the only one that differs from
+            # the rest on purpose. The other four all check theirs, though not
+            # all in the same place: image_ingest, the skills loader and
+            # _execute_fetch_tool below each call is_safe_url at the top of the
+            # walker, while the webhook path checks it in _deliver before
+            # calling _post_with_redirect_ssrf_check -- so reading that walker
+            # alone makes it look unchecked, and it is not.
+            #
+            # _execute_fetch_tool checks its initial URL because that URL comes
+            # from the agent rather than from config; the skills loader checks
+            # its own, because a skill URL is meant to name a public host and
+            # it has a trusted_domains allowlist to match. Here the initial
+            # address is the operator's own choice, and refusing it would break
+            # the default install.
 
             with httpx.Client(timeout=5, follow_redirects=False) as client:
                 current_url = info_url
@@ -194,8 +268,14 @@ class MCPLoader:
                             current_url = next_url
                             continue
                         if response.status_code == 200:
-                            response.read()
-                            info = response.json()
+                            raw, over_cap = _read_capped(response, MAX_INFO_BODY_BYTES)
+                            if over_cap:
+                                raise ValueError(
+                                    "Info endpoint body exceeds "
+                                    f"{MAX_INFO_BODY_BYTES} bytes from "
+                                    f"{current_url}"
+                                )
+                            info = json.loads(raw)
                             # Our graph MCP includes tools in the info endpoint
                             if "endpoints" in info:
                                 # We know our graph MCP tools
@@ -829,7 +909,9 @@ class MCPLoader:
                             if response.is_redirect:
                                 location = str(response.headers.get("location", ""))
                                 if not location:
-                                    # urljoin("", current) is current, so an empty
+                                    # urljoin(current, "") is current -- the
+                                    # arguments in that order, which is what the
+                                    # line below evaluates -- so an empty
                                     # Location used to re-request the same URL
                                     # until the cap ran out. Refuse it after one
                                     # request, as the skills loader does.
@@ -843,13 +925,22 @@ class MCPLoader:
                                 continue
 
                             response.raise_for_status()
-                            response.read()
+                            raw, over_cap = _read_capped(response, MAX_FETCH_BODY_BYTES)
 
-                            # Simple HTML to text conversion
-                            content = response.text
+                            # Simple HTML to text conversion. Decoded the way
+                            # response.text would have, now that the body is
+                            # read by the cap rather than buffered whole.
+                            content = raw.decode(
+                                response.encoding or "utf-8", errors="replace"
+                            )
                             max_length = input_args.get("max_length", 10000)
                             if len(content) > max_length:
                                 content = content[:max_length] + "... (truncated)"
+                            elif over_cap:
+                                # Stopped at the ingest cap below max_length:
+                                # say so rather than passing a silently short
+                                # page off as the whole document.
+                                content += "... (truncated)"
 
                             return {
                                 "url": url,
