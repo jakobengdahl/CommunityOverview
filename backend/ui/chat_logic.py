@@ -1317,11 +1317,12 @@ class ChatProcessor:
             }
 
         except Exception as e:
-            logger.error(f"Error in process_message: {e}")
-            error_msg = str(e)
+            logger.exception("Error in process_message")
+            raw_error = str(e)
+            error_msg = "An internal error occurred while processing your message."
 
             # Provide user-friendly message for rate limits
-            if "rate_limit" in error_msg.lower() or "429" in error_msg:
+            if "rate_limit" in raw_error.lower() or "429" in raw_error:
                 error_msg = (
                     "API rate limit reached. This happens when many nodes are processed simultaneously. "
                     "Try again in ~60 seconds, or request fewer nodes at a time (5-10)."
@@ -1482,8 +1483,13 @@ class ChatProcessor:
                     }
 
                     tool_result = func(**valid_args)
-                except Exception as e:
+                except ValueError as e:
                     tool_result = {"error": str(e)}
+                except Exception:
+                    logger.exception(f"Tool execution error ({tool_name})")
+                    tool_result = {
+                        "error": "An internal error occurred during tool execution."
+                    }
             else:
                 tool_result = {"error": f"Tool {tool_name} not found"}
 
