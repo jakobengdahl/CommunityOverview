@@ -11,6 +11,7 @@ import ast
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -28,6 +29,7 @@ from backend.core.events.models import (
     EventType,
 )
 from backend.core.storage_events import emit_event
+from backend.core.vector_store import VectorStore
 from backend.federation.config import load_federation_config
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -37,8 +39,10 @@ CONVERTED_MODULES = (
     "backend/core/embedding_sidecar.py",
     "backend/core/events/dispatcher.py",
     "backend/core/postgres_backend.py",
+    "backend/core/storage.py",
     "backend/core/storage_backends.py",
     "backend/core/storage_events.py",
+    "backend/core/vector_store.py",
     "backend/federation/config.py",
 )
 
@@ -278,7 +282,25 @@ def _writes_to_stdout(call, aliases):
     )
 
 
-def _collect(scope, inherited, found, escaped):
+# The stream objects themselves. A reference to one, not only a write through
+# it, is how a handler or a basicConfig(stream=...) sends records to stdout.
+_STDOUT_STREAMS = {"sys.stdout", "sys.__stdout__"}
+
+
+def _refers_to_stdout(node, aliases):
+    if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+        return False
+    if not isinstance(node, (ast.Name, ast.Attribute)):
+        return False
+    return bool(_expansions(_dotted(node), aliases) & _STDOUT_STREAMS)
+
+
+def _collect(scope, inherited, found, escaped, hit=None):
+    hit = hit or (
+        lambda node, aliases: (
+            isinstance(node, ast.Call) and _writes_to_stdout(node, aliases)
+        )
+    )
     nodes = _own_nodes(scope)
     aliases = _scope_aliases(scope, nodes, inherited)
     # A name declared global or nonlocal binds in an enclosing scope, which
@@ -292,13 +314,13 @@ def _collect(scope, inherited, found, escaped):
     # telling the two apart is the kind of precision the fail-closed rule
     # above gives up.
     for node in nodes:
-        if isinstance(node, ast.Call) and _writes_to_stdout(node, aliases):
+        if hit(node, aliases):
             found.append(node.lineno)
         if isinstance(node, _SCOPES):
-            _collect(node, aliases, found, escaped)
+            _collect(node, aliases, found, escaped, hit)
 
 
-def _stdout_calls(source):
+def _stdout_calls(source, hit=None):
     """Walked until no global or nonlocal binding adds a route, each pass
     seeding the module scope with what the last one found escaping. A
     nonlocal's routes land at module level too, so they count in every scope
@@ -308,9 +330,15 @@ def _stdout_calls(source):
     while True:
         before = {name: set(routes) for name, routes in escaped.items()}
         found = []
-        _collect(tree, before, found, escaped)
+        _collect(tree, before, found, escaped, hit)
         if escaped == before:
             return sorted(found)
+
+
+def _stdout_references(source):
+    """Lines that name the stdout stream at all, through any alias the guard
+    above follows."""
+    return sorted(set(_stdout_calls(source, _refers_to_stdout)))
 
 
 @pytest.mark.parametrize(
@@ -404,6 +432,29 @@ def test_the_guard_catches_each_way_of_writing_to_stdout(source):
     assert _stdout_calls(source) == [source.count("\n") + 1]
 
 
+@pytest.mark.parametrize("links", [10, 60])
+def test_the_guard_expands_a_chain_of_route_modules_in_linear_steps(monkeypatch, links):
+    """A return to expanding every route-module suffix fails here by name,
+    at a bounded number of steps, rather than only through the suite-wide
+    timeout once the exponential expansion has run for five minutes."""
+    budget = 4 * (links + 1)
+    steps = 0
+    expand = _expansions
+
+    def counted(*args, **kwargs):
+        nonlocal steps
+        steps += 1
+        assert steps <= budget, f"over {budget} expansion steps for {links} links"
+        return expand(*args, **kwargs)
+
+    monkeypatch.setattr(sys.modules[__name__], "_expansions", counted)
+    assert _stdout_calls("import os\nx" + ".os" * links + ".write(1, b'x')") == [2]
+    # One step per link at least, or the count read nothing: a guard that
+    # stopped recursing through the patched name would pass the bound above
+    # without being measured by it.
+    assert steps >= links + 1, f"{steps} expansion steps for {links} links"
+
+
 @pytest.mark.parametrize(
     "source",
     [
@@ -444,6 +495,45 @@ def test_the_guard_ignores_logger_calls_and_other_streams(source):
 def test_converted_module_has_no_print_call(module):
     calls = _stdout_calls((REPO_ROOT / module).read_text(encoding="utf-8"))
     assert not calls, f"{module} writes to stdout at line(s) {calls}; use its logger"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import logging, sys\nlogger.addHandler(logging.StreamHandler(sys.stdout))",
+        "import logging, sys\nlogging.basicConfig(stream=sys.stdout)",
+        "import logging, sys\nlogging.StreamHandler(sys.__stdout__)",
+        "from sys import stdout\nlogging.StreamHandler(stdout)",
+        "import sys as s\nlogging.StreamHandler(s.stdout)",
+        "import sys\nh = sys\nlogging.StreamHandler(h.stdout)",
+        "import os\nlogging.StreamHandler(os.sys.stdout)",
+        "from sys import *\nlogging.StreamHandler(stdout)",
+        "import sys\ndef f():\n    logging.StreamHandler(sys.stdout)",
+    ],
+)
+def test_the_guard_catches_a_handler_on_stdout(source):
+    assert _stdout_references(source) == [source.count("\n") + 1]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import logging\nlogging.StreamHandler()",
+        "import logging, sys\nlogging.StreamHandler(sys.stderr)",
+        "import logging, sys\nlogging.basicConfig(stream=sys.stderr)",
+        "stdout = open('f', 'w')\nlogging.StreamHandler(stdout)",
+    ],
+)
+def test_the_guard_ignores_handlers_on_other_streams(source):
+    assert _stdout_references(source) == []
+
+
+@pytest.mark.parametrize("module", CONVERTED_MODULES)
+def test_converted_module_does_not_name_stdout(module):
+    """A handler on stdout sends every record there as well as through the
+    root logger, which no print() check sees."""
+    refs = _stdout_references((REPO_ROOT / module).read_text(encoding="utf-8"))
+    assert not refs, f"{module} names stdout at line(s) {refs}; use its logger"
 
 
 class TestStorageEvents:
@@ -688,3 +778,35 @@ def test_a_replaced_corrupt_sidecar_is_a_warning(tmp_path, caplog, capsys):
         f"{path} was not a readable sidecar" in m and f"moved it to {spoiled}" in m
         for m in warnings
     ), warnings
+
+
+class TestVectorStore:
+    LOGGER = "backend.core.vector_store"
+
+    def test_dropping_mismatched_vectors_is_a_warning(self, caplog, capsys):
+        caplog.set_level(logging.DEBUG, logger=self.LOGGER)
+
+        VectorStore().load_vectors(
+            {"a": [1.0, 0.0], "b": [0.0, 1.0], "c": [1.0, 0.0, 0.0]}
+        )
+
+        warnings = _logged(caplog, capsys, self.LOGGER, logging.WARNING)
+        assert any("dropped 1 embedding(s)" in m for m in warnings), warnings
+
+    def test_a_changed_model_width_is_a_warning(self, caplog, capsys):
+        store = VectorStore()
+        store.load_vectors({"a": [1.0, 0.0]})
+        caplog.set_level(logging.DEBUG, logger=self.LOGGER)
+
+        store._absorb({"b": [1.0, 0.0, 0.0]})
+
+        warnings = _logged(caplog, capsys, self.LOGGER, logging.WARNING)
+        assert any("dimension changed from 2 to 3" in m for m in warnings), warnings
+
+    def test_a_rebuilt_index_is_info(self, caplog, capsys):
+        caplog.set_level(logging.DEBUG, logger=self.LOGGER)
+
+        VectorStore().rebuild_index([])
+
+        info = _logged(caplog, capsys, self.LOGGER, logging.INFO)
+        assert any("index rebuilt with 0 embeddings" in m for m in info), info

@@ -337,9 +337,10 @@ E2E tests include:
 - `mobile-smoke.spec.js` - Phone-viewport smoke tests (see below)
 
 The e2e graph file starts empty, so the desktop specs seed the nodes they need
-through `POST /api/nodes` (helpers in `tests/e2e/helpers.js`). Only
-`mobile-smoke.spec.js` runs in CI (the non-required `mobile-e2e` job); the three
-desktop specs run locally only, under the `chromium` project. Tests marked
+through `POST /api/nodes` (helpers in `tests/e2e/helpers.js`). In CI,
+`mobile-smoke.spec.js` runs in the non-required `mobile-e2e` job and the desktop
+specs (every spec the `chromium` project selects) run in the non-required
+`desktop-e2e` job. Tests marked
 `test.fixme` pin a known product defect and name the tracking item.
 
 Playwright starts the backend and the vite dev server itself (the `webServer`
@@ -422,7 +423,7 @@ kept separate so a failure points at the layer that broke:
   pinned dependencies.
 
 Two lint jobs (`Python lint (ruff)` and `Frontend lint (eslint + prettier)`) run
-alongside them, and one further job is **non-required**:
+alongside them, and two further jobs are **non-required**:
 
 - **Mobile e2e (non-required)** — `mobile-smoke.spec.js` on the `mobile-iphone`
   and `mobile-pixel` projects. It carries no gate job, is not part of branch
@@ -430,6 +431,10 @@ alongside them, and one further job is **non-required**:
   reported without blocking a merge or a release. Like the test jobs it is
   gated on `detect-changes`, so a docs-only PR skips it. On failure the run
   uploads the Playwright HTML report as the `mobile-e2e-report` artifact.
+- **Desktop e2e (non-required)** — every spec the `chromium` project selects
+  (`smoke.spec.js`, `chat.spec.js`, `shared-session.spec.js`), on the same
+  non-required terms and the same `detect-changes`/draft gating as Mobile e2e.
+  On failure it uploads the `desktop-e2e-report` artifact.
 
 The Docker build/publish job runs only on `preview`/`prod` pushes (and version
 tags) and depends on the three test jobs. `main` is the integration branch:
@@ -793,7 +798,7 @@ node content is rehydrated from the graph on load via `?resolve=true`.
 | GET | `/api/sessions/{id}` | Get a session (meta + state + presence roster); `?resolve=true` also returns rehydrated nodes/edges |
 | PATCH | `/api/sessions/{id}` | Rename a session (`{name, client_id?}`). get-or-create: materialises the session server-side if it only existed client-side. Routed through the op protocol as a `session_renamed` state op, so the rename is sequenced and visible to `since_seq` catch-up, not just a full snapshot — design §8.2 R7/R8 |
 | DELETE | `/api/sessions/{id}` | Delete a session (`?client_id=` names the deleter in the broadcast) |
-| POST | `/api/sessions/{id}/ops` | Apply an ordered op batch (`{client_id, base_seq, ops}` → `{applied, seq}`); server-ordered LWW, monotonic `seq`. Bounded per batch by op count (≤ 500) **and** body size (≤ 256 KB → `413` — an op carrying a validated embedded image is budgeted separately instead, per "Image annotation tool" below), plus the session's cumulative image/document totals checked after each batch, plus a per-client token bucket (200 burst, 100 ops/s refill → `429`) — design §3.9. An op that would update/delete an annotation another client currently holds a live **edit lease** on is rejected whole-batch (`409`, `LeaseConflict`) rather than silently overriding it — this is the browser write path; the synchronous MCP write path checks the same lease at its own mutation boundary too (`task-mcp-annotation-human-edit-guard`), surfaced there as `lease_conflict` rather than an HTTP status — see docs/ANNOTATION_CONTRACT.md's "Operation timing and leases" section. The batch also handles `edit_lease_acquired`/`edit_lease_released` themselves (task-annotation-exclusive-edit-leases): first-actual-editor-wins, unlike the advisory `selection_claimed`/`selection_released` presence pair — see "Edit leases vs. selection claims" below |
+| POST | `/api/sessions/{id}/ops` | Apply an ordered op batch (`{client_id, base_seq, ops}` → `{applied, seq}`); server-ordered LWW, monotonic `seq`. Bounded per batch by op count (≤ 500) **and** body size (≤ 256 KB → `413` — an op carrying a validated embedded image is budgeted separately instead, per "Image annotation tool" below), plus the session's cumulative image/document totals checked after each batch, plus a per-client token bucket (200 burst, 100 ops/s refill → `429`; a batch of more ops than the full burst can never be admitted however long the client waits, so it is refused as `413` without drawing from the bucket; the browser client chunks its queue at that burst so it never sends one) — design §3.9. An op that would update/delete an annotation another client currently holds a live **edit lease** on is rejected whole-batch (`409`, `LeaseConflict`) rather than silently overriding it — this is the browser write path; the synchronous MCP write path checks the same lease at its own mutation boundary too (`task-mcp-annotation-human-edit-guard`), surfaced there as `lease_conflict` rather than an HTTP status — see docs/ANNOTATION_CONTRACT.md's "Operation timing and leases" section. The batch also handles `edit_lease_acquired`/`edit_lease_released` themselves (task-annotation-exclusive-edit-leases): first-actual-editor-wins, unlike the advisory `selection_claimed`/`selection_released` presence pair — see "Edit leases vs. selection claims" below |
 | POST | `/api/sessions/{id}/annotations/image` | Human GUI clipboard-paste / file-upload image ingest (`{client_id, x, y, image_data\|image_url, ...}` → `{annotation, revision}`). Runs the same `image_ingest.py` validate/optimize/embed pipeline and `SessionManager.upsert_image_annotation` budgets as the MCP `create_image_annotation` tool — see "Image annotation tool" below. Body is checked against a pre-parse `Content-Length` cap (2× `DEFAULT_MAX_SOURCE_IMAGE_BYTES` → `413`) before it is buffered, the same reasoning as `POST .../ops` above; `image_ingest.py`'s own checks apply the tight per-image bound once the body is decoded. The response is informational only: the annotation is attributed to a dedicated `human-image-ingest` client id (not the caller's `client_id`) so the pasting browser's own SSE subscription receives and applies the embedded result instead of the echo being dropped as a self-authored op. Replacing an existing image annotation another client holds a live edit lease on is rejected the same way (`409`), checked against the posting browser's real `client_id` before the marker substitution above applies. That pre-check only catches a lease that already existed before the (awaited) fetch/optimize step; the authoritative check inside `SessionManager.upsert_image_annotation` itself catches one acquired by another client during that step too, surfaced as the same `409`/`LeaseConflict` — see docs/ANNOTATION_CONTRACT.md's "Operation timing and leases" section. Because that marker is the same string for every human upload, the `429` token bucket here is keyed on the request source (the spoof-resistant key `GET /api/sessions/{id}` already throttles on) rather than on the marker or on the caller-supplied `client_id` — the former would put every user on the server in one bucket, the latter is a browser-held value a caller could rotate to mint fresh budgets. It is a bucket of its own, not the `/ops` one, so the two keyspaces cannot collide. This depends on `TRUSTED_PROXY_HOPS` being set to match the deployment: left at `0` behind a reverse proxy, every request resolves to the proxy's own address and the per-user separation collapses back into one bucket — the same caveat docs/MULTI_USER_SESSIONS_DESIGN.md records for the lookup throttle |
 | GET | `/api/sessions/{id}/stream` | SSE fan-out: presence, applied ops, selection claims, edit leases, and broadcast MCP commands (`{"type": "command", ...}` — every connected client applies these, not just one browser). Query `client_id`, `name`, `since_seq` (op catch-up or full-snapshot fallback). A slow consumer whose queue overflows is sent a fresh full snapshot rather than diverging. EventSource-opened, so it bypasses Basic Auth (protected by the unguessable session id — design §3.9) |
 | GET | `/api/sessions/{id}/activity` | Recent per-session annotation/canvas activity, newest first (`?actor=`, `?limit=` up to 500) — `backend/core/session_activity.py`, persisted with the session, bounded to 500 records / 7 days. Covers the `UNDOABLE_OPS` kinds (annotation create/update/delete, node move, layout apply, node show/hide); other state ops (nodes_added/removed, edges_*, group/session renames) are out of scope for this log |
@@ -1056,11 +1061,15 @@ arrange" three deterministic calls.
 A repeated id counts once: the tool deduplicates `node_ids` before checking the
 500-id cap, the 256 KiB byte cap and the tool's rate budget. That budget is per
 tool, not per client — every MCP client on the instance draws from the same one —
-and it is charged one unit per distinct id that resolves, not per id sent: ids reported
-in `skipped` are not charged, and a call that returns `no_resolvable_nodes`
-draws nothing. Both caps are
+and it is charged one unit per distinct id sent (at least one), before any id is
+resolved: resolving costs a node lookup per id, so ids reported in `skipped` are
+charged too, and so is a call that returns `no_resolvable_nodes`. A call with
+more distinct ids than the full budget (200 at default settings) could never be
+admitted by waiting, so it returns `too_large` rather than the retryable
+`rate_limited`, and draws nothing. Both caps are
 checked before any id is resolved and return `too_large`, with a `message` that
-names which cap was hit. An unknown session is reported as not found before any
+names which cap was hit; a call refused there, or before it (invalid or unknown
+session, not authorized, empty `node_ids`), draws nothing. An unknown session is reported as not found before any
 id is resolved, so it is never masked by `no_resolvable_nodes`. That error is
 returned when the session exists but none of the ids resolve, and it lists them
 in `skipped`.
@@ -1108,10 +1117,13 @@ computed from `assumed_node_size` (`{width, height}` from the read tool) plus a
 gap — offset by the full node size, not half, to leave a visible gutter. Read the
 layout first to get `assumed_node_size` and the current `revision`, then pass that
 `revision` as `expected_revision` on the write. A single write is capped at 500
-moves / 256 KiB (`too_large` beyond that) and additionally draws from the tool's
+moves / 256 KiB (`too_large` beyond that), and a write that passes those caps and
+fits the full budget draws from the tool's
 rate budget (per tool, shared by every MCP client on the instance) sized to the
 number of moves, so a very large arrange can hit
-`rate_limited` first — either way, split it across successive writes and thread the
+`rate_limited` first, and one with more moves than the full budget (200 at
+default settings) returns `too_large` and draws nothing, since waiting would never
+admit it — either way, split it across successive writes and thread the
 returned `revision` into the next `expected_revision`.
 
 - **Horizontal (left-to-right) DAG.** Rank each node by its longest path from a
@@ -1230,8 +1242,8 @@ convention for the same fields; `locked` defaults to `False`.
 `delete_annotation` / `reorder_annotation` / `set_annotation_lock` /
 `duplicate_annotation` extend MCP annotation access to the rest of the v1
 model: `text`, `label`, `line` (`arrow` accepted as a legacy alias),
-`shape`, `icon`, `vote_dot`, `freehand` — plus `image`, for everything except
-creating one (see the image annotation tool below). They share the
+`shape`, `icon`, `vote_dot`, `freehand`, `heatmap` — plus `image`, for everything
+except creating one (see the image annotation tool below). They share the
 sticky-note tools' session/revision contract — model-space coordinates,
 `revision` / `expected_revision` optimistic concurrency, `revision_conflict`
 on a stale write, `lease_conflict` on a live human edit lease — over the same
@@ -1239,6 +1251,17 @@ annotation document. `create_group_annotation`/`update_group_members`/
 `delete_group_annotation` and `create_image_annotation` (below) share it too;
 all thirteen MCP tools that can mutate an existing annotation check the same
 lease at the actual mutation boundary and never acquire one themselves.
+
+A `heatmap` is a soft red heat-map circle whose only payload field is
+`content.intensity`, an integer 0–10 (0 invisible, 10 strongest red).
+`create_annotation`/`update_annotation` return `invalid_content` for anything
+else — a float, a bool, a string, or a value outside the range. A fresh create
+with no intensity stores the default 5; an upsert-replace that omits it keeps
+the stored value. With no `w`/`h` the circle is 160 across, and with only one
+of them the other matches it. The circle is drawn with diameter `min(w, h)`
+centred in its box. Like `shape`, a heat-map circle defaults to `z = -1`,
+behind graph nodes. The full rendering rules are in docs/ANNOTATION_CONTRACT.md
+under "Heat-map circles".
 
 `note` keeps its own dedicated tool set above and `group` (node-membership
 boxes) keeps its own below ("Group annotation tools"); neither is exposed
@@ -1383,6 +1406,20 @@ decoded bytes, downscale to a longest side of 2560px if needed, re-encode as
 WebP), and stores the result as an embedded data URI in `content.image.url` —
 never the original remote link — so the annotation keeps rendering after the
 source disappears. Only PNG, JPEG and WebP are accepted.
+
+Inline `image_data` is smaller over MCP than over REST. Both MCP transports
+(`POST /mcp` and `POST /mcp/messages/`) sit behind the mcp SDK's
+`RequestBodyLimitMiddleware`, which answers `413` to any request body over
+4 MiB — by declared `Content-Length` or, for a chunked upload, by counted
+bytes — before the JSON-RPC message is parsed. `backend/requirements.txt`
+pins `mcp>=1.29.1` because that is the first release that guards both
+transports; there is no other body-size guard in front of `/mcp`. Base64
+inflates bytes by 4/3, so the largest source image that fits inline in one
+tool call is roughly 3 MiB, against the 20 MiB
+(`DEFAULT_MAX_SOURCE_IMAGE_BYTES`) the REST endpoint
+`POST /api/sessions/{id}/annotations/image` accepts. `image_url` is not
+affected: the server fetches that image itself, subject only to the ingest
+limits.
 
 Because one embedded image is far bigger than the small generic op-batch cap
 the other annotation writes share, `create_image_annotation` does not apply

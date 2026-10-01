@@ -205,8 +205,13 @@ delete without confirmation) draws nothing.
 The budget is per tool, not per client: every MCP client on the instance shares
 it, so one agent's writes can spend another's.
 
-Results mirror the REST endpoints' existing status semantics (400/404/429/503)
-so the two surfaces stay consistent.
+Where the REST session endpoints (`/api/sessions`) have a comparable condition,
+it carries the matching status: an invalid id is 400, an unknown session 404, a
+spent rate budget 429 and the session cap 503. The mapping is not one-to-one.
+REST `DELETE` takes no confirmation, has no rate limit and waits for an in-flight
+write instead of reporting `busy`, and REST rename also waits rather than
+reporting `busy`; the open-core REST session endpoints have no access-denied
+status of their own.
 
 ## 9. Versioning & change policy
 

@@ -4,7 +4,9 @@
 
 # MCP Core
 # FastMCP is imported from mcp.server.fastmcp; mcp 2.x renamed that API.
-mcp>=1.0.0,<2
+# 1.29.1 is the first release whose SSE and Streamable HTTP transports reject
+# request bodies over 4 MiB with 413 before parsing; /mcp has no other guard.
+mcp>=1.29.1,<2
 fastmcp>=0.1.0
 pydantic>=2.0.0
 networkx>=3.0

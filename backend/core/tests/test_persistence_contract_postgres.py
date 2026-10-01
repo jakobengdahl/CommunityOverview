@@ -257,6 +257,15 @@ def backends():
 _BACKEND_LOGGER = "backend.core.postgres_backend"
 
 
+class _Emitted(logging.Handler):
+    def __init__(self):
+        super().__init__(level=logging.WARNING)
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+
 @pytest.fixture
 def reported(caplog, capsys, backends):
     """What the backend reported since the previous call, one message per line.
@@ -285,15 +294,34 @@ def reported(caplog, capsys, backends):
         ]
         assert not louder, f"reported above WARNING: {louder}"
 
-    # A cursor rather than caplog.clear(): on a pytest whose clear() rebinds
-    # the record list instead of emptying it, the list the teardown check
-    # reads detaches at the first clear, and nothing after it is looked at.
-    seen = 0
+    # The records already taken, by identity, rather than caplog.clear(): on
+    # a pytest whose clear() rebinds the record list instead of emptying it,
+    # the list the teardown check reads detaches at the first clear. And a
+    # test that clears caplog itself would otherwise shift new records under
+    # a cursor, so a check that nothing was reported passed over them unread.
+    taken = []
+    # A clear before the first read leaves nothing taken to compare against,
+    # so the backend's records are also counted on a handler of the
+    # fixture's own, which no clear reaches. Setup's records are caplog's
+    # setup list, not the one read here.
+    emitted = _Emitted()
+    backend_logger = logging.getLogger(_BACKEND_LOGGER)
+    backend_logger.addHandler(emitted)
 
     def take() -> str:
-        nonlocal seen
-        fresh = caplog.records[seen:]
-        seen += len(fresh)
+        records = caplog.records
+        assert records[: len(taken)] == taken, (
+            "caplog was cleared under the reported fixture; read reports "
+            "through it instead"
+        )
+        fresh = records[len(taken) :]
+        held = {id(record) for record in records}
+        held.update(id(record) for record in caplog.get_records("setup"))
+        assert all(id(record) in held for record in emitted.records), (
+            "caplog was cleared under the reported fixture; read reports "
+            "through it instead"
+        )
+        taken.extend(fresh)
         messages = [
             record.getMessage()
             for record in fresh
@@ -305,11 +333,43 @@ def reported(caplog, capsys, backends):
         assert not leaked, f"a report went to stdout: {leaked}"
         return "\n".join(messages)
 
-    yield take
+    try:
+        yield take
+    finally:
+        backend_logger.removeHandler(emitted)
     for backend in backends:
         backend.close()
     backends.clear()
     assert_nothing_louder(caplog.get_records("call") + caplog.get_records("teardown"))
+
+
+@pytest.mark.parametrize("after_clear", [1, 3])
+def test_the_reported_fixture_refuses_a_caplog_cleared_under_it(
+    caplog, reported, after_clear
+):
+    """A clear behind the fixture's back fails the next read, whether fewer or
+    more records have arrived since than it had already taken: a cursor would
+    skip those new records, and a check that nothing was reported pass."""
+    backend_log = logging.getLogger(_BACKEND_LOGGER)
+    backend_log.warning("first")
+    backend_log.warning("second")
+    assert reported() == "first\nsecond"
+    caplog.clear()
+    for n in range(after_clear):
+        backend_log.warning("after the clear %d", n)
+    with pytest.raises(AssertionError, match="caplog was cleared"):
+        reported()
+
+
+def test_the_reported_fixture_refuses_a_caplog_cleared_before_its_first_read(
+    caplog, reported
+):
+    """With nothing taken yet there is nothing to compare the records
+    against, so the record the clear dropped would go unread."""
+    logging.getLogger(_BACKEND_LOGGER).warning("before the clear")
+    caplog.clear()
+    with pytest.raises(AssertionError, match="caplog was cleared"):
+        reported()
 
 
 def _statements_issued(action, into=None):
@@ -4179,6 +4239,89 @@ class TestPostgresMigrationBuildsTheDocumentedSchema:
         assert checked > 0, "graph_metadata lost its CHECK (only_row) constraint"
 
 
+def _race_to_claim_an_unclaimed_store(schema, backends, call, names):
+    """Run `call` on one instance per name against a store with an unclaimed
+    metadata row, both queued on the claim at once; return a
+    (graph name, "owns" or the exception) pair per instance.
+
+    A third connection holds the row so both instances are provably past
+    their read and queued on the write before either may proceed; without
+    that the race is a timing accident, and a test of it passes by luck.
+    Threads are named "a" and "b", not after the graph, so two instances of
+    one name stay two racers.
+    """
+    racers = {
+        thread_name: PostgresGraphPersistenceBackend(
+            DSN, schema=schema, graph_name=graph_name
+        )
+        for thread_name, graph_name in zip(("a", "b"), names)
+    }
+    backends.extend(racers.values())
+    # Migrated while there is no metadata row, so neither has claimed or
+    # checked anything yet.
+    for backend in racers.values():
+        assert not backend.exists()
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        conn.execute(
+            f'INSERT INTO "{schema}".graph_metadata (doc) VALUES (%s)',
+            (psycopg.types.json.Jsonb({"version": "1.0"}),),
+        )
+
+    outcomes = {}
+    pids = {}
+    real_execute = psycopg.Connection.execute
+
+    def spy(conn, query, *args, **kwargs):
+        name = threading.current_thread().name
+        if name in racers:
+            pids.setdefault(name, conn.info.backend_pid)
+        return real_execute(conn, query, *args, **kwargs)
+
+    def run(backend):
+        name = threading.current_thread().name
+        try:
+            getattr(backend, call)()
+            outcomes[name] = "owns"
+        except Exception as exc:
+            outcomes[name] = f"{type(exc).__name__}: {exc}"
+
+    with psycopg.connect(DSN) as holder:
+        holder.execute(f'SELECT 1 FROM "{schema}".graph_metadata FOR UPDATE')
+        psycopg.Connection.execute = spy
+        try:
+            threads = [
+                threading.Thread(target=run, args=(backend,), name=name)
+                for name, backend in racers.items()
+            ]
+            for thread in threads:
+                thread.start()
+            # Blocked on anything is enough: the first queues on the
+            # holder, and the second on the first's place in that queue.
+            deadline = time.monotonic() + 30
+            with psycopg.connect(DSN, autocommit=True) as watcher:
+                while True:
+                    blocked = [
+                        pid
+                        for pid in pids.values()
+                        if watcher.execute(
+                            "SELECT pg_blocking_pids(%s)", (pid,)
+                        ).fetchone()[0]
+                    ]
+                    if len(blocked) == 2:
+                        break
+                    assert time.monotonic() < deadline, (
+                        f"both instances never queued on the claim: {pids}"
+                    )
+                    time.sleep(0.02)
+        finally:
+            psycopg.Connection.execute = real_execute
+        holder.commit()
+    for thread in threads:
+        thread.join(30)
+        assert not thread.is_alive()
+    return [(racers[name]._graph_name, outcomes[name]) for name in racers]
+
+
 class TestPostgresStoreIdentity:
     def test_the_tables_existing_is_not_a_graph_existing(self, schema, backends):
         """`exists()` must answer for the graph, not for the migration.
@@ -4293,6 +4436,145 @@ class TestPostgresStoreIdentity:
         with pytest.raises(GraphIdentityCollision):
             second.upsert_node(node_payload("b"))
         assert [n["id"] for n in first.load_graph_data()["nodes"]] == ["a"]
+
+    @pytest.mark.parametrize("call", ["exists", "load_graph_data"])
+    def test_two_instances_claiming_an_unclaimed_store_at_once_cannot_both_own_it(
+        self, schema, backends, call
+    ):
+        """The claim is a read then a write, and both can read "unclaimed".
+
+        A store saved before identities existed has a metadata row with no
+        claim. Two differently named instances booting on it together each
+        read that, each decide to claim, and under READ COMMITTED (`exists`)
+        the second UPDATE - having waited on the first's row lock -
+        overwrote the first's claim. Both returned believing they owned the
+        schema, which is the one outcome GraphIdentityCollision exists to
+        prevent. Under REPEATABLE READ (`load_graph_data`) the loser already
+        failed on serialization; that case guards the path, not the fix.
+
+        A third connection holds the row so both instances are provably past
+        their read and queued on the write before either may proceed; without
+        that the race is a timing accident, and a test of it passes by luck.
+        """
+        outcomes = dict(
+            _race_to_claim_an_unclaimed_store(
+                schema, backends, call, ("first", "second")
+            )
+        )
+        owners = sorted(name for name, outcome in outcomes.items() if outcome == "owns")
+        assert len(owners) == 1, f"both instances claimed the schema: {outcomes}"
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            stored = conn.execute(
+                f'SELECT doc FROM "{schema}".graph_metadata'
+            ).fetchone()[0]
+        assert stored.get("_postgres_graph_identity") == owners[0], (
+            f"the store names {stored!r} but {owners[0]!r} believes it owns it"
+        )
+        assert stored.get("version") == "1.0", (
+            f"claiming the store dropped the rest of its metadata: {stored!r}"
+        )
+        loser = "second" if owners[0] == "first" else "first"
+        expected = {
+            "exists": "GraphIdentityCollision",
+            "load_graph_data": "SerializationFailure",
+        }[call]
+        assert outcomes[loser].startswith(expected), outcomes
+
+    def test_two_instances_of_one_graph_claiming_at_once_both_own_it(
+        self, schema, backends
+    ):
+        """The loser of the claim must judge the winner's claim, not its own
+        stale read.
+
+        Its UPDATE matched nothing because someone else claimed first; only a
+        re-read can say whether that someone was the same graph. Comparing
+        the "unclaimed" it read before queueing instead refuses an instance
+        its own store. Only `exists` races here: under REPEATABLE READ the
+        loser fails on serialization whatever the names.
+        """
+        outcomes = _race_to_claim_an_unclaimed_store(
+            schema, backends, "exists", ("first", "first")
+        )
+
+        assert [outcome for _, outcome in outcomes] == ["owns", "owns"], outcomes
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            stored = conn.execute(
+                f'SELECT doc FROM "{schema}".graph_metadata'
+            ).fetchone()[0]
+        assert stored.get("_postgres_graph_identity") == "first", stored
+        assert stored.get("version") == "1.0", stored
+
+    def test_a_claim_whose_row_is_deleted_under_it_owns_nothing(self, schema, backends):
+        """A re-read that finds no row is no claim, and must not be
+        remembered as one.
+
+        The row is deleted while the claim is queued on it, so the UPDATE
+        matches nothing and the re-read finds nothing. Marking the check done
+        there would let this instance skip it for good - and write into the
+        store the next graph claims.
+        """
+        backend = PostgresGraphPersistenceBackend(
+            DSN, schema=schema, graph_name="first"
+        )
+        backends.append(backend)
+        assert not backend.exists()
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                f'INSERT INTO "{schema}".graph_metadata (doc) VALUES (%s)',
+                (psycopg.types.json.Jsonb({"version": "1.0"}),),
+            )
+
+        outcome = {}
+        pids = []
+        real_execute = psycopg.Connection.execute
+
+        def spy(conn, query, *args, **kwargs):
+            if threading.current_thread().name == "claimant" and not pids:
+                pids.append(conn.info.backend_pid)
+            return real_execute(conn, query, *args, **kwargs)
+
+        def run():
+            try:
+                outcome["exists"] = backend.exists()
+            except Exception as exc:
+                outcome["error"] = f"{type(exc).__name__}: {exc}"
+
+        with psycopg.connect(DSN) as holder:
+            holder.execute(f'SELECT 1 FROM "{schema}".graph_metadata FOR UPDATE')
+            psycopg.Connection.execute = spy
+            try:
+                thread = threading.Thread(target=run, name="claimant")
+                thread.start()
+                deadline = time.monotonic() + 30
+                with psycopg.connect(DSN, autocommit=True) as watcher:
+                    while not (
+                        pids
+                        and watcher.execute(
+                            "SELECT pg_blocking_pids(%s)", (pids[0],)
+                        ).fetchone()[0]
+                    ):
+                        assert time.monotonic() < deadline, (
+                            "the instance never queued on the claim"
+                        )
+                        time.sleep(0.02)
+            finally:
+                psycopg.Connection.execute = real_execute
+            holder.execute(f'DELETE FROM "{schema}".graph_metadata')
+            holder.commit()
+        thread.join(30)
+        assert not thread.is_alive()
+
+        assert outcome == {"exists": False}, outcome
+        assert backend._graph_identity_checked is False, (
+            "a claim that found no row was remembered as checked"
+        )
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                f'INSERT INTO "{schema}".graph_metadata (doc) VALUES (%s)',
+                (psycopg.types.json.Jsonb({"_postgres_graph_identity": "other"}),),
+            )
+        with pytest.raises(GraphIdentityCollision):
+            backend.exists()
 
 
 class _Collector:

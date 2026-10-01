@@ -52,6 +52,7 @@ describe('annotation type matrix (cross-language fixture) — JS model', () => {
         'vote_dot',
         'image',
         'freehand',
+        'heatmap',
       ])
     );
     expect(types.filter((t) => t === 'shape')).toHaveLength(2);

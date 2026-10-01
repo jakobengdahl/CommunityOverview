@@ -121,7 +121,9 @@ class AppConfig:
     )
 
     # Server configuration
-    host: str = field(default_factory=lambda: os.getenv("HOST", "0.0.0.0"))
+    # Container default, matching the Dockerfile; HOST overrides it. The socket
+    # is bound by the uvicorn CLI, not by this field.
+    host: str = field(default_factory=lambda: os.getenv("HOST", "0.0.0.0"))  # nosec B104
     port: int = field(default_factory=lambda: int(os.getenv("PORT", "8000")))
 
     # API configuration

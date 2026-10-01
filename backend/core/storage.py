@@ -18,6 +18,7 @@ Event System:
 """
 
 import importlib.util
+import logging
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import List, Dict, Optional, Any, TYPE_CHECKING, Callable, Tuple
@@ -53,6 +54,8 @@ from . import storage_events
 
 # Event system imports
 from .events.models import EventType, EntityKind, EventContext
+
+logger = logging.getLogger(__name__)
 
 # The origin stamped on events that report a change another writer made, so a
 # subscriber reacting by writing can tell them from its own instance's work.
@@ -169,8 +172,8 @@ class _BootGate:
                     # that also met an unreadable store loses exactly what
                     # this gate exists to keep, and nothing else would show
                     # it. Every comparable degradation in this file warns.
-                    print(
-                        f"Warning: more than {_BOOT_BUFFER_LIMIT} external "
+                    logger.warning(
+                        f"more than {_BOOT_BUFFER_LIMIT} external "
                         "changes arrived while loading; dropping them for a "
                         "whole-graph reload"
                     )
@@ -300,6 +303,11 @@ class GraphStorage:
         # Thread lock for in-memory data structure protection
         # RLock allows same thread to acquire lock multiple times (reentrant)
         self._lock = threading.RLock()
+        # Set, under _lock, once this instance is being torn down. A backend
+        # promises not to call the listener after stop returns, but nothing
+        # here can make it keep that promise; this is what stops a late
+        # report from refreshing a model nobody owns any more.
+        self._shut_down = False
 
         # Executor for background I/O operations (saving to disk)
         # Using max_workers=1 to ensure sequential writes
@@ -329,7 +337,6 @@ class GraphStorage:
         # The VectorStore owns the vectors in memory; GraphStorage persists them
         # through the embedding sidecar (see _load_embeddings / _serialize_nodes).
         self.vector_store = VectorStore()
-        self.vector_store.preload_model()  # Start loading embedding model in background
 
         self.graph = (
             nx.MultiDiGraph()
@@ -384,6 +391,9 @@ class GraphStorage:
             if boot_gate is not None:
                 boot_gate.open()
             self._maybe_backfill_missing_embeddings_async()
+            # Last, so no failure path is left holding a thread already
+            # running: a model load cannot be cancelled once it has begun.
+            self.vector_store.preload_model()
         except BaseException:
             # The replay is inside the guard, not after it. A raise out of
             # `open()` leaves the rest of the buffer undelivered AND the gate
@@ -396,8 +406,17 @@ class GraphStorage:
             # Failing construction is the honest outcome: an instance that
             # could not apply what it was told while loading would otherwise
             # serve a graph with silent gaps in it.
-            if boot_gate is not None:
-                self._persistence_backend.stop_change_notification()
+            #
+            # The listener stops first: it is the one that can still call
+            # into this half-built object. The writer goes whatever that
+            # does, or its thread outlives an instance nothing can reach.
+            with self._lock:
+                self._shut_down = True
+            try:
+                if boot_gate is not None:
+                    self._persistence_backend.stop_change_notification()
+            finally:
+                self._io_executor.shutdown(wait=False)
             raise
 
     def _mark_writer_thread(self) -> None:
@@ -442,8 +461,8 @@ class GraphStorage:
         # The migration script rejects the same shape outright for the same
         # reason: the second write silently destroys the first.
         if path.resolve() == self.json_path.resolve():
-            print(
-                f"Warning: EMBEDDINGS_FILE names the graph file itself "
+            logger.warning(
+                f"EMBEDDINGS_FILE names the graph file itself "
                 f"({path}); using {derived} instead"
             )
             return FileEmbeddingSidecar(derived, owns_path=True)
@@ -562,7 +581,7 @@ class GraphStorage:
         )
 
         self._events_enabled = True
-        print(f"Event system initialized with max_attempts={max_attempts}")
+        logger.info(f"Event system initialized with max_attempts={max_attempts}")
 
     def set_agent_delivery_callback(
         self,
@@ -583,12 +602,16 @@ class GraphStorage:
 
     def shutdown_events(self) -> None:
         """Shutdown the event system and I/O executor gracefully."""
-        # First, so nothing arrives to refresh a model that is being torn down.
+        # First, so nothing arrives to refresh a model that is being torn down:
+        # the flag refuses a report the backend makes after this point, and
+        # taking _lock to set it waits out a refresh already under way.
+        with self._lock:
+            self._shut_down = True
         if self._backend_capabilities.change_notification:
             try:
                 self._persistence_backend.stop_change_notification()
             except Exception as exc:
-                print(f"Warning: stopping change notification failed: {exc}")
+                logger.warning(f"stopping change notification failed: {exc}")
 
         if self._delivery_worker:
             self._delivery_worker.stop(wait=True)
@@ -620,8 +643,8 @@ class GraphStorage:
         # is replayed on the next start - but an operator reading "clean
         # shutdown means graph.json is complete" must be told when it is not.
         if checkpoint is not None and checkpoint.exception() is not None:
-            print(
-                f"Warning: graph checkpoint at shutdown failed: {checkpoint.exception()}"
+            logger.warning(
+                f"graph checkpoint at shutdown failed: {checkpoint.exception()}"
             )
 
     def _save_now(self) -> None:
@@ -639,7 +662,7 @@ class GraphStorage:
         except Exception as exc:
             # _do_save_to_disk has re-raised the flag; it stays raised, which
             # is the honest state - the journal still holds what it can.
-            print(f"Warning: graph write at shutdown failed: {exc}")
+            logger.warning(f"graph write at shutdown failed: {exc}")
 
     def _emit_event(
         self,
@@ -727,12 +750,12 @@ class GraphStorage:
         with self._lock:
             if not self._persistence_backend.exists():
                 if not bootstrap_if_missing:
-                    print(
-                        f"Warning: cannot refresh from {self._persistence_destination()}: it is "
+                    logger.warning(
+                        f"cannot refresh from {self._persistence_destination()}: it is "
                         f"not there. Serving the graph in memory unchanged."
                     )
                     return
-                print(
+                logger.info(
                     f"No graph data found in {self._persistence_destination()}, "
                     f"creating new empty graph"
                 )
@@ -803,8 +826,8 @@ class GraphStorage:
                         absent = (
                             edge.source if edge.source not in nodes else edge.target
                         )
-                        print(
-                            f"Warning: ignoring stored edge {edge.id}: "
+                        logger.warning(
+                            f"ignoring stored edge {edge.id}: "
                             f"endpoint {absent} is not present"
                         )
                         continue
@@ -829,8 +852,8 @@ class GraphStorage:
                 try:
                     self._generation = int(raw_generation)
                 except (TypeError, ValueError):
-                    print(
-                        f"Warning: ignoring non-integer graph_generation "
+                    logger.warning(
+                        f"ignoring non-integer graph_generation "
                         f"{raw_generation!r} in metadata; defaulting to 0"
                     )
                     self._generation = 0
@@ -876,13 +899,13 @@ class GraphStorage:
 
                 self._load_embeddings()
 
-                print(
+                logger.info(
                     f"Loaded {len(self.nodes)} nodes and {len(self.edges)} edges from "
                     f"{self._persistence_destination()}"
                 )
 
             except Exception as e:
-                print(f"Error loading graph: {e}")
+                logger.error(f"Error loading graph: {e}")
                 raise
 
     def save(self) -> "Future[None]":
@@ -1090,17 +1113,31 @@ class GraphStorage:
         here. What happens next is the caller's: `add_nodes` generates over
         the whole batch afterwards, so generation wins there, while a refresh
         generates only where the store supplied nothing.
+
+        The vectors come off the nodes only after the index export and load
+        have returned: until then the node is their only copy, so a raise
+        there must leave them where they were for the caller to retry or
+        settle. A vector the index refuses for its width is still cleared.
         """
-        self._adopt_vectors(self._take_inline_vectors(nodes))
+        nodes = list(nodes)
+        self._adopt_vectors(
+            {
+                node.id: node.embedding
+                for node in nodes
+                if node.embedding is not None and len(node.embedding) > 0
+            }
+        )
+        self._take_inline_vectors(nodes)
 
     def _adopt_vectors(
         self, supplied: Dict[str, Any], anchor: Optional[int] = None
     ) -> None:
-        """Move vectors already taken off their nodes into the index.
+        """Move supplied vectors, keyed by node id, into the index.
 
-        Separate from _adopt_supplied_vectors because the refresh takes a
+        Works on a dict rather than on nodes because the refresh takes a
         vector off its node when the operation is applied - so the event it
         emits does not carry it - and adopts it only when the batch ends.
+        _adopt_supplied_vectors passes vectors still on their nodes.
 
         `anchor` is the width to judge the supplied vectors against, for a
         caller that has already emptied the index of what would otherwise
@@ -1117,8 +1154,8 @@ class GraphStorage:
         )
         accepted = matching_dimension(supplied, dimension)
         if len(accepted) != len(supplied):
-            print(
-                f"Warning: ignored {len(supplied) - len(accepted)} supplied "
+            logger.warning(
+                f"ignored {len(supplied) - len(accepted)} supplied "
                 f"embedding(s) whose dimension is not {dimension}"
             )
         if accepted:
@@ -1177,7 +1214,7 @@ class GraphStorage:
             except EmbeddingSidecarError as exc:
                 # Vectors are derived data: a damaged sidecar costs semantic
                 # search until they are regenerated, never a failed load.
-                print(f"Warning: ignoring unreadable embedding sidecar: {exc}")
+                logger.warning(f"ignoring unreadable embedding sidecar: {exc}")
 
         migrated = {
             node_id: vector
@@ -1212,8 +1249,8 @@ class GraphStorage:
         vectors = matching_dimension(merged, dimension)
         dropped = len(merged) - len(vectors)
         if dropped:
-            print(
-                f"Warning: dropped {dropped} embedding(s) whose dimension did not "
+            logger.warning(
+                f"dropped {dropped} embedding(s) whose dimension did not "
                 f"match the rest; they will be regenerated on next update"
             )
 
@@ -1231,7 +1268,7 @@ class GraphStorage:
         else:
             self._persisted_vector_revision = self.vector_store.revision
 
-        print(f"Loaded {len(vectors)} embeddings for {len(self.nodes)} nodes")
+        logger.info(f"Loaded {len(vectors)} embeddings for {len(self.nodes)} nodes")
 
     def _missing_embedding_node_ids(self) -> List[str]:
         """Ids of nodes the vector index carries no vector for."""
@@ -1275,7 +1312,7 @@ class GraphStorage:
             try:
                 self.vector_store.update_nodes_embeddings(missing_nodes)
             except Exception as embed_error:
-                print(f"Warning: could not backfill missing embeddings: {embed_error}")
+                logger.warning(f"could not backfill missing embeddings: {embed_error}")
                 return 0
             self.save()
             return len(missing_nodes)
@@ -1295,8 +1332,8 @@ class GraphStorage:
             embedded, total = self.embedding_coverage()
             if embedded == total:
                 return
-            print(
-                f"Warning: {total - embedded} of {total} node(s) have no "
+            logger.warning(
+                f"{total - embedded} of {total} node(s) have no "
                 f"embedding; semantic search will skip them until backfilled"
             )
             if importlib.util.find_spec("sentence_transformers") is None:
@@ -1306,15 +1343,17 @@ class GraphStorage:
                 try:
                     count = self.backfill_missing_embeddings()
                     if count:
-                        print(f"Backfilled {count} missing embedding(s) at startup.")
+                        logger.info(
+                            f"Backfilled {count} missing embedding(s) at startup."
+                        )
                 except Exception as exc:
-                    print(f"Warning: background embedding backfill failed: {exc}")
+                    logger.warning(f"background embedding backfill failed: {exc}")
 
             threading.Thread(
                 target=_run, name="embedding-backfill", daemon=True
             ).start()
         except Exception as exc:
-            print(f"Warning: could not start embedding backfill: {exc}")
+            logger.warning(f"could not start embedding backfill: {exc}")
 
     def _persist_vectors(self, vectors: Dict[str, Any], vector_revision: int) -> bool:
         """Write the vector matrix to the sidecar. Returns whether it landed.
@@ -1327,7 +1366,7 @@ class GraphStorage:
             self._embedding_sidecar.save(vectors)
         except Exception as e:
             self._snapshotted_vector_revision = None
-            print(f"Warning: could not save embedding sidecar: {e}")
+            logger.warning(f"could not save embedding sidecar: {e}")
             return False
         self._persisted_vector_revision = vector_revision
         # The sidecar is now these vectors' durable home, so graph.json stops
@@ -1359,7 +1398,7 @@ class GraphStorage:
 
         try:
             self._persistence_backend.save_graph_data(data)
-            print(
+            logger.info(
                 f"Saved {node_count} nodes and {edge_count} edges to "
                 f"{self._persistence_destination()}"
             )
@@ -1372,7 +1411,7 @@ class GraphStorage:
             # committing to.
             raise
         except Exception as e:
-            print(f"Error saving graph to disk: {e}")
+            logger.error(f"Error saving graph to disk: {e}")
             # The backend's image may now lack what memory has, exactly as
             # after a failed entity write: the next write is the whole graph
             # again, until one lands. Before the entity path existed every
@@ -1466,7 +1505,7 @@ class GraphStorage:
             # reported as having landed.
             raise
         except Exception as e:
-            print(f"Error applying {len(operations)} entity operation(s): {e}")
+            logger.error(f"Error applying {len(operations)} entity operation(s): {e}")
             # The mutation is in memory and nowhere else now, and the backend's
             # own image lacks it - a later checkpoint would write that image
             # and truncate the journal, and the mutation would be gone at the
@@ -1527,7 +1566,9 @@ class GraphStorage:
         thread of its own, when the store changed behind this instance's
         back. Which threads count as its own is the backend's obligation and
         is stated on ChangeNotifyingBackend; only one violation of it is
-        visible from here, and that one is refused below.
+        visible from here, and that one is refused below. A report that
+        arrives once shutdown_events() has begun - or once construction has
+        failed - is dropped without refreshing anything.
         Nothing here is persisted: the change is already in the store, and
         writing it back would fight the writer that made it.
 
@@ -1562,6 +1603,12 @@ class GraphStorage:
             )
 
         with self._lock:
+            # A report after shutdown has nothing to refresh: the model is
+            # being torn down, and the drain below would find the queue gone
+            # and go ahead anyway. Refused quietly, not raised - the only
+            # thread to raise into is the backend's.
+            if self._shut_down:
+                return
             if not self._settle_before_refresh():
                 return
             # Read AFTER the settle, never before. A backend that gathers the
@@ -1576,8 +1623,8 @@ class GraphStorage:
                 try:
                     change = change.with_content()
                 except Exception as exc:
-                    print(
-                        f"Warning: could not read the content of an external "
+                    logger.warning(
+                        f"could not read the content of an external "
                         f"change ({exc}); reloading the graph instead"
                     )
                     self._reload_from_store()
@@ -1633,8 +1680,8 @@ class GraphStorage:
                 # into whatever backend thread called us, where the writing
                 # instance would read it as its own write having failed.
                 # Resync instead, and keep it to ourselves.
-                print(
-                    f"Warning: could not apply an external change ({failure}); "
+                logger.warning(
+                    f"could not apply an external change ({failure}); "
                     f"reloading the graph instead"
                 )
                 self._reload_from_store()
@@ -1706,7 +1753,7 @@ class GraphStorage:
                 self.vector_store.update_nodes_embeddings(nodes)
                 return True
             except Exception as embed_error:
-                print(f"Warning: Could not update embeddings: {embed_error}")
+                logger.warning(f"could not update embeddings: {embed_error}")
                 return False
 
         missing = [
@@ -1764,8 +1811,8 @@ class GraphStorage:
         # change being reported. So neither: stay put and say so. The next
         # write, flush or shutdown heals the flag, and the next report brings
         # this instance forward.
-        print(
-            "Warning: not refreshing the graph: a local write failed and "
+        logger.warning(
+            "not refreshing the graph: a local write failed and "
             "is still only in memory. This instance stays behind the "
             "store until that write has been re-issued."
         )
@@ -1794,8 +1841,8 @@ class GraphStorage:
             # the instance that made the write would read it as its own write
             # having failed. What is in memory is behind, not wrong: whatever
             # a half-applied batch already applied is real store state.
-            print(
-                f"Warning: could not reload the graph ({exc}); the graph in "
+            logger.warning(
+                f"could not reload the graph ({exc}); the graph in "
                 f"memory is unchanged and behind the store until the next "
                 f"change is reported"
             )
@@ -1898,8 +1945,8 @@ class GraphStorage:
             # the clock does not order the commits, so when the write that
             # committed last carries the earlier stamp this keeps the two
             # instances apart permanently rather than resolving anything.
-            print(
-                f"Warning: ignoring an external change to node {node.id}: this "
+            logger.warning(
+                f"ignoring an external change to node {node.id}: this "
                 f"instance holds a newer version of it"
             )
             return
@@ -2019,9 +2066,8 @@ class GraphStorage:
             # data, which every read path walking the graph would then trip
             # over. Report it and leave the edge out of both structures.
             absent = edge.source if edge.source not in self.nodes else edge.target
-            print(
-                f"Warning: ignoring external edge {edge.id}: "
-                f"endpoint {absent} is not present"
+            logger.warning(
+                f"ignoring external edge {edge.id}: endpoint {absent} is not present"
             )
             return
 
@@ -2223,7 +2269,7 @@ class GraphStorage:
             except Exception as exc:
                 # A store that cannot answer is not a failed request. The walk
                 # is still here and still right; the store is the optimisation.
-                print(f"Warning: store traversal failed, walking instead: {exc}")
+                logger.warning(f"store traversal failed, walking instead: {exc}")
             else:
                 # Membership was decided by the store, at the store's moment;
                 # the payloads are resolved here, at ours. Between the two the
@@ -2257,14 +2303,7 @@ class GraphStorage:
                 # `self.nodes[nid]` turns a traversal into a KeyError out of
                 # the API. One dict lookup per id, its result carried forward,
                 # makes the check and the use the same observation.
-                #
-                # Not copied from the walk - the walk has the same window.
-                # `storage_search.get_related_nodes` resolves with
-                # `if nid in nodes` and then indexes, which is the same
-                # check-then-use; that guard is there for the dangling-endpoint
-                # rule, not for a concurrent delete, and feeding it a dict that
-                # loses the key between the two raises KeyError exactly as this
-                # path used to. That is pre-existing and left alone here.
+                # `storage_search.get_related_nodes` resolves the same way.
                 nodes = []
                 for nid in found["node_ids"]:
                     node = self.nodes.get(nid)
@@ -2385,13 +2424,48 @@ class GraphStorage:
                 except Exception as persist_error:
                     # The failure being handled may be the persist itself
                     # (executor shut down); the caller still gets its result.
-                    print(f"Warning: could not persist what was added: {persist_error}")
+                    logger.warning(f"could not persist what was added: {persist_error}")
+
+            nodes_to_embed: List[Node] = []
+            generation_attempted = False
+
+            def generate_landed_vectors() -> None:
+                # Once per call: an exit after the attempt - a rejected edge -
+                # must not encode the batch a second time.
+                nonlocal generation_attempted
+                if generation_attempted or not nodes_to_embed:
+                    return
+                generation_attempted = True
+                try:
+                    self.vector_store.update_nodes_embeddings(nodes_to_embed)
+                except Exception as embed_error:
+                    # Embedding generation is optional - log but don't fail
+                    logger.warning(f"could not generate embeddings: {embed_error}")
+
+            def settle_landed_vectors() -> None:
+                # A node that landed stays, and every later event about it -
+                # an update's `before`, an external upsert's - is built from
+                # the object, with no by-name filter for `embedding`. So on a
+                # failure exit too the vector goes to the index or nowhere,
+                # never stays on the node.
+                try:
+                    self._adopt_supplied_vectors(nodes_to_embed)
+                except Exception as adopt_error:
+                    logger.warning(
+                        f"could not adopt supplied embeddings: {adopt_error}"
+                    )
+                for landed in nodes_to_embed:
+                    landed.embedding = None
+                # A landed node stays and is persisted, so it is generated for
+                # as on success; otherwise semantic search misses it until the
+                # next startup backfill.
+                generate_landed_vectors()
 
             try:
                 # Add nodes
-                nodes_to_embed = []
                 for node in nodes:
                     if node.id in self.nodes:
+                        settle_landed_vectors()
                         persist_landed()
                         return AddNodesResult(
                             added_node_ids=[],
@@ -2416,13 +2490,7 @@ class GraphStorage:
                 # below still wins when the ML stack is available, as before.
                 self._adopt_supplied_vectors(nodes_to_embed)
 
-                # Generate embeddings for new nodes (non-blocking)
-                if nodes_to_embed:
-                    try:
-                        self.vector_store.update_nodes_embeddings(nodes_to_embed)
-                    except Exception as embed_error:
-                        # Embedding generation is optional - log but don't fail
-                        print(f"Warning: Could not generate embeddings: {embed_error}")
+                generate_landed_vectors()
 
                 # Persisted before the edges so that, as before, a rejected
                 # edge leaves the nodes it was meant to join in place.
@@ -2539,6 +2607,7 @@ class GraphStorage:
                 )
 
             except Exception as e:
+                settle_landed_vectors()
                 persist_landed()
                 return AddNodesResult(
                     added_node_ids=[],
@@ -2880,7 +2949,7 @@ class GraphStorage:
                 try:
                     self.vector_store.update_node_embedding(node)
                 except Exception as embed_error:
-                    print(f"Warning: Could not update embedding: {embed_error}")
+                    logger.warning(f"could not update embedding: {embed_error}")
 
             self._persist([EntityOperation.upsert_node(self._serialize_node(node))])
 

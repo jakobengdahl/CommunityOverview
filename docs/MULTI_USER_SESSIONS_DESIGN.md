@@ -274,7 +274,9 @@ transition and removed in the final step.
 
 - Body caps per op batch (`_DEFAULT_MAX_OP_BATCH_BYTES`, 256 KB → `413`), max ops
   per batch (`_DEFAULT_MAX_OPS_PER_BATCH`, 500), max annotations per session, max
-  ops/second per client (token bucket) with `429` + client backoff.
+  ops/second per client (token bucket) with `429` + client backoff. A batch
+  costing more than the bucket's full burst is refused as `413`, not `429`: no
+  backoff could ever admit it.
   - **Image/session/document budgets, coordinated with the flat cap
     (fixed).** The flat cap above and `image_ingest.py`'s image-specific
     budgets (2 MB/image, 20 MB/session, 25 MB/document) used to be two
@@ -661,9 +663,9 @@ steps 6–8.
 >   broadcast, reconnect catch-up) in CI; a Playwright multi-context spec
 >   (`frontend/web/tests/e2e/shared-session.spec.js`) exercises presence, add/move
 >   fan-out, annotation create, the delete warning, reconnect catch-up and a late
->   join through the real UI + SSE transport (run locally, outside the core pytest
->   CI). A joining client's first stream event is a snapshot the client does not
->   apply; the client compares its seq with the seq the initial session GET
+>   join through the real UI + SSE transport (in the non-required `desktop-e2e` CI
+>   job, outside the required pytest path). A joining client's first stream
+>   event is a snapshot the client does not apply; the client compares its seq with the seq the initial session GET
 >   returned (0 when the GET found no session yet, since the stream creates it),
 >   and resyncs from the server when the snapshot is newer. Without
 >   that, ops that land between the load and the stream subscribe would be lost.

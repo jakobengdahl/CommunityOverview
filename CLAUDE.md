@@ -234,7 +234,7 @@ format tooling note under Code Style. Reproduce what CI validates locally:
 ```bash
 pytest backend/ -q          # backend-tests job (base/ML-free install)
 npm run test:unit           # frontend-tests job (all workspaces)
-pytest services/mcp_oauth_gateway/test_oauth_flow.py -q   # gateway-tests job
+(cd services/mcp_oauth_gateway && pytest test_oauth_flow.py test_upstream_auth.py test_lockfiles.py -q)   # gateway-tests job
 ```
 
 `python-lint` and `frontend-lint` are branch-protection required checks (see
@@ -412,6 +412,13 @@ Agent(   # 2. mutation — its survivors are residue, not blockers
 
             Guarantees this change must hold: <G1…Gn, one line each>.
 
+            Edit ONLY the executable half of the diff — the module, script
+            or config the PR changes. Never edit prose (documentation,
+            CLAUDE.md, any normative text): the correctness reviewer already
+            judges that, so a mutation only buys a second opinion on it.
+            Never edit the tests or fixtures either: mutating the artifact
+            you then ask the suite about is a question with no referent.
+
             A mutation counts ONLY if it violates a named guarantee. Harness
             identity (can the code tell it is under test) is out of scope.
             Label each survivor test-durability or unfalsifiable, and say
@@ -461,9 +468,26 @@ block, so each stands in for production code, **each under its own condition**:
   than into this loop.
 
 **The mutation reviewer works on the executable half only** — the module, script
-or config — never on prose or on the tests themselves, because no suite covers
-those and every such mutation would survive by construction. For the same reason
-the 10× backstop counts only that half as the production diff.
+or config — never on prose or on the tests themselves. Prose, the tests and
+`config` are each in or out for their own reason, and "no suite covers it" is not
+one of them: a few `CLAUDE.md`
+sentences are pinned by `backend/tests/test_ci_gate_semantics.py` and
+`backend/tests/test_ci_e2e_jobs.py`, so mutating one goes red and still proves
+nothing about the change.
+
+- **Prose is out** because the correctness reviewer already judges it, under the
+  Text bullet above. A mutation buys a second opinion on the same question.
+- **The tests are out** because mutating the artifact you then ask the suite
+  about is a question with no referent — the same reason a PR that changes no
+  executable code gets no mutation reviewer at all.
+- **`config` is in** because it is what actually runs, and the suites exist to
+  catch a break in it: `backend/tests/test_security_scan_workflow.py` executes
+  the Security Scan step bodies, and
+  `services/mcp_oauth_gateway/test_lockfiles.py` runs the audit workflow's
+  scripts and pins the locks. A survivor there is a real gap in a real check.
+
+For the same reason the 10× backstop counts only the executable half as the
+production diff.
 
 Address every finding labelled `production-defect`. Then run another round
 (briefing both reviewers on what changed between rounds).
@@ -476,7 +500,10 @@ than the change. Only `production-defect` blocks: log **both** other classes —
 every surviving `test-durability` and `unfalsifiable` finding — as **one**
 `small-fix`-tagged Task node in the Corp planning graph, one node for the whole
 residue, attached in the same write per item 3 of MCP-first planning, and merge.
-A "meaningful gap" in the tests is a `test-durability`
+If the planning MCP is unreachable, that does not hold the merge and it does not
+license dropping the residue: record it in the PR body under its own heading and
+flag it to the owner so it can be captured in the graph later, as step 5b does
+for a pre-existing issue. A "meaningful gap" in the tests is a `test-durability`
 finding and goes to that node, not into this loop. A round that comes back with
 its findings unlabelled is not a completed round — ask the reviewers for the
 labels rather than guessing them — but it counts toward the ten-round backstop
@@ -505,6 +532,15 @@ threshold. Check the backstops only when the round just read left a
 
 Tripping one does not mean the loop was wrong; it means the cost should be
 visible while it is being paid.
+
+**This is not the only copy of these figures.** The orchestration guidance that
+drives these sessions restates them and points back here. So changing a threshold
+is a two-place edit: change it there in the same turn, or the two disagree about
+when a loop must stop and each side can cite a rule for carrying on. If that
+guidance is not reachable from the session — it lives outside this repo, so
+usually it is not — do not change the figures here alone: say so and flag it to
+the owner, as step 5b does for anything else that has to be recorded elsewhere.
+Nothing mechanical keeps the copies in step, which is why this says so out loud.
 
 **Review the fixes, not just the original change.** A round that only fixes what
 the previous round found is not reviewed. Fixes are written under time pressure
@@ -607,8 +643,10 @@ Merge only when **all** of the following are true:
 - [ ] CI is green on the PR (not red, not pending)
 - [ ] Review loop has reached its termination criterion (last round raised no
       `production-defect`; **both** residue classes — test-durability and
-      unfalsifiable — logged as one follow-up node), and the LAST round reviewed
-      the fixes rather than only the original change
+      unfalsifiable — logged as one follow-up node, or recorded in the PR body
+      and flagged to the owner where the planning MCP is unreachable, per step
+      8), and the LAST round reviewed the fixes rather than only the original
+      change
 - [ ] Documentation affected by the change is updated in the same PR (see the
       Documentation section for which files map to which changes)
 - [ ] No debug artifacts in the diff (`print`, `pdb`, hardcoded credentials)

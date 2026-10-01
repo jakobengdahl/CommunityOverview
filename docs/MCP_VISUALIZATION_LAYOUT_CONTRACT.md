@@ -187,17 +187,23 @@ apply_visualization_layout(
 - **All-or-nothing rollback.** If persistence fails, in-memory state, `seq`,
   `updated_at` and the op ring buffer are rolled back to their pre-call values;
   the caller sees an error and the session is unchanged.
-- **Maximum batch size.** A single write is bounded by **two** independent caps,
-  either of which triggers a `too_large` error (§11):
-  - at most **500** node moves (`_DEFAULT_MAX_OPS_PER_BATCH`), and
+- **Maximum batch size.** A single write is bounded by **three** independent
+  limits, any of which triggers a `too_large` error (§11):
+  - at most **500** node moves (`_DEFAULT_MAX_OPS_PER_BATCH`),
   - at most **256 KiB** of serialized move payload
-    (`_DEFAULT_MAX_OP_BATCH_BYTES`).
-  An agent laying out a session larger than the node cap must split the work into
+    (`_DEFAULT_MAX_OP_BATCH_BYTES`), and
+  - no more moves than the tool's full rate budget holds (**200** at default
+    settings, `_DEFAULT_BUCKET_CAPACITY`; see Rate limiting below).
+  So at default settings the largest write that can be admitted is 200 moves.
+  An agent laying out a session larger than that must split the work into
   successive writes, threading the returned `revision` into the next call's
   `expected_revision`.
 - **Rate limiting.** Writes consume from this tool's token bucket, sized to the
   number of moves. The bucket is per tool, not per client: every MCP client on
-  the instance draws from the same one. Exhaustion yields a `rate_limited` error (§11). Layout writes
+  the instance draws from the same one. Exhaustion yields a `rate_limited` error (§11); a
+  write with more moves than the full bucket holds (200 at default settings,
+  `_DEFAULT_BUCKET_CAPACITY`) could never be admitted, so it yields `too_large`
+  instead and draws nothing. Layout writes
   are expected to be infrequent (agent-driven), so this bounds abuse without
   affecting normal use.
 - **Serialization against realtime edits.** The synchronous layout write must not
@@ -325,7 +331,7 @@ machine-readable `error` and, where useful, a `message` and extra fields:
 | Stale `expected_revision` | `revision_conflict` | `expected_revision`, `current_revision` |
 | Realtime batch mid-flight holds the lock | `busy` | retry guidance |
 | Token bucket exhausted | `rate_limited` | |
-| Over the node or byte cap | `too_large` | split guidance |
+| Over the node or byte cap, or more moves than the full token bucket | `too_large` | split guidance |
 
 A `revision_conflict`, `busy` or `rate_limited` is **retryable**; a validation
 error or `too_large` requires the agent to change the request.
@@ -373,6 +379,13 @@ differ between the open core and the hosted layer.
   itself part of the defect: a field named for nodes that hands back edge ids
   breaks the caller that reads it as its name reads. Widening a field, or
   renaming one, is breaking and needs a new version.
+- Reporting a write with more moves than the full rate budget (§6) as
+  `too_large` instead of `rate_limited` is likewise a **correction, not a
+  version bump**. The two batch caps did not change, and neither did what is
+  admitted: a bucket that holds 200 tokens never admitted a larger write, so the
+  effective limit was always the smaller of the two. Only the classification
+  changed. A `rate_limited` that no amount of waiting could clear contradicted
+  §11's promise that `rate_limited` is retryable.
 - The requirement node `req-mcp-layout-contract` and the decision
   `dec-visualization-layout-contract` in the Corp planning graph govern this
   document; status and evidence live there, not here.

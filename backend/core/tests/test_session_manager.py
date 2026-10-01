@@ -187,6 +187,38 @@ class TestApplyOps:
                 s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["c"]}]
             )
 
+    async def test_a_batch_costing_more_than_the_whole_bucket_is_too_large_and_charges_nothing(
+        self,
+    ):
+        mgr = _manager(bucket_capacity=2, bucket_refill_per_sec=0)
+        # A roomier MCP bucket, so a check reading the wrong bucket would pass.
+        mgr._mcp_bucket = _TokenBucket(10.0, 0.0)
+        s = mgr.create_session()
+        three = [{"op": "nodes_added", "node_ids": [n]} for n in ("a", "b", "c")]
+
+        with pytest.raises(OpBatchTooLarge):
+            await mgr.apply_ops(s.id, "c1", 0, three)
+        await mgr.apply_ops(s.id, "c1", 0, three[:2])
+        with pytest.raises(RateLimited):
+            await mgr.apply_ops(s.id, "c1", 0, three[2:])
+        assert s.state["node_refs"] == ["a", "b"]
+
+    async def test_at_default_settings_a_batch_over_the_burst_is_too_large_not_rate_limited(
+        self,
+    ):
+        """The bucket holds 200 while the op-count cap is 500, so a 201-500 op
+        batch passes both caps but could never be admitted by backing off."""
+        mgr = _manager(bucket_refill_per_sec=0)
+        s = mgr.create_session()
+        assert mgr._bucket.capacity == 200 < mgr.max_ops_per_batch
+        ops = [{"op": "nodes_added", "node_ids": [f"n{i}"]} for i in range(201)]
+
+        with pytest.raises(OpBatchTooLarge):
+            await mgr.apply_ops(s.id, "c1", 0, ops)
+        res = await mgr.apply_ops(s.id, "c1", 0, ops[:200])
+
+        assert res["seq"] == 200
+
     async def test_lookup_rate_limit_throttles_per_key(self):
         """Session-id lookups are throttled per source and refill over time."""
         mgr = _manager(lookup_bucket_capacity=2, lookup_refill_per_sec=0)
@@ -3037,6 +3069,8 @@ class _AdmittingRecordingBucket:
     """Admits every consume and records ``(key, amount)``, so a test can pin
     which key a write charged and how many times."""
 
+    capacity = float("inf")
+
     def __init__(self):
         self.calls = []
 
@@ -3141,6 +3175,7 @@ class TestRenameDeleteSyncCharges:
         assert deleted == []
         assert published == []
         assert mgr.get_session(s.id) is s
+        assert bad_id not in mgr._locks
 
     async def test_delete_of_a_missing_valid_id_charges_exactly_once(self):
         mgr = _manager()
@@ -3178,6 +3213,40 @@ class TestRenameDeleteSyncCharges:
 
         assert bucket.calls == [("mcp-agent", 1.0)]
         assert mgr.get_session(s.id) is s
+
+    async def test_delete_broadcasts_only_after_the_session_is_gone(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        stored_at_publish = []
+        mgr.bus.publish = lambda session_id, event: stored_at_publish.append(
+            mgr.store.get(session_id)
+        )
+
+        assert mgr.delete_session_sync(s.id, deleted_by="mcp-agent")
+
+        assert stored_at_publish == [None]
+
+    @pytest.mark.parametrize("write", ["rename", "delete"])
+    async def test_an_empty_rate_limit_label_is_refused_and_charges_nothing(
+        self, write
+    ):
+        mgr = _manager()
+        s = mgr.create_session(name="Before")
+        bucket = _recording_mcp_bucket(mgr)
+
+        with pytest.raises(OpError):
+            if write == "rename":
+                mgr.rename_session_sync(
+                    s.id, "After", client_id="mcp-agent", rate_limit_label=""
+                )
+            else:
+                mgr.delete_session_sync(
+                    s.id, deleted_by="mcp-agent", rate_limit_label=""
+                )
+
+        assert bucket.calls == []
+        assert mgr.get_session(s.id) is s
+        assert s.name == "Before"
 
 
 class TestDeleteRenameLocking:
@@ -3299,6 +3368,35 @@ class TestApplyLayout:
         assert len(events) == 1
         assert events[0]["op"]["op"] == "layout_applied"
         assert events[0]["seq"] == 1
+
+    async def test_more_moves_than_the_bucket_capacity_is_too_large_and_charges_nothing(
+        self,
+    ):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr._mcp_bucket = _TokenBucket(2.0, 0.0)
+        three = {n: {"x": 1, "y": 1} for n in ("a", "b", "c")}
+        two = {n: {"x": 1, "y": 1} for n in ("a", "b")}
+
+        with pytest.raises(OpBatchTooLarge):
+            mgr.apply_layout(s.id, "mcp-agent", positions=three)
+        assert mgr.apply_layout(s.id, "mcp-agent", positions=two)["moved"] == 2
+        with pytest.raises(RateLimited):
+            mgr.apply_layout(s.id, "mcp-agent", positions={"a": {"x": 2, "y": 2}})
+
+    @pytest.mark.parametrize(
+        "caps", [{"max_ops_per_batch": 2}, {"max_op_batch_bytes": 32}]
+    )
+    async def test_a_write_over_a_batch_cap_is_too_large_before_any_charge(self, caps):
+        mgr = _manager(**caps)
+        s = mgr.create_session()
+        bucket = _recording_mcp_bucket(mgr)
+        moves = {n: {"x": 1, "y": 1} for n in ("a", "b", "c")}
+
+        with pytest.raises(OpBatchTooLarge):
+            mgr.apply_layout(s.id, "mcp-agent", positions=moves)
+
+        assert bucket.calls == []
 
     async def test_deltas_resolve_against_current_positions(self):
         mgr = _manager()
@@ -3602,6 +3700,119 @@ class TestAddNodeRefs:
         with pytest.raises(RateLimited):
             mgr.apply_layout(s.id, "mcp-agent", positions={"a": {"x": 1, "y": 2}})
 
+    async def test_a_precharged_write_is_not_charged_again(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        bucket = _recording_mcp_bucket(mgr)
+
+        res = mgr.add_node_refs(
+            s.id,
+            "mcp-agent",
+            ["a", "b"],
+            rate_limit_label="add_nodes_to_session",
+            precharged=True,
+        )
+
+        assert res["added"] == ["a", "b"]
+        assert bucket.calls == []
+
+    async def test_an_uncharged_write_charges_one_token_per_id(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        bucket = _recording_mcp_bucket(mgr)
+
+        mgr.add_node_refs(
+            s.id, "mcp-agent", ["a", "b"], rate_limit_label="add_nodes_to_session"
+        )
+
+        assert bucket.calls == [("mcp-agent:add_nodes_to_session", 2)]
+
+    async def test_an_uncharged_write_charges_a_repeated_id_every_time(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        bucket = _recording_mcp_bucket(mgr)
+
+        mgr.add_node_refs(
+            s.id, "mcp-agent", ["a", "a"], rate_limit_label="add_nodes_to_session"
+        )
+
+        assert bucket.calls == [("mcp-agent:add_nodes_to_session", 2)]
+
+    @pytest.mark.parametrize(
+        "caps", [{"max_ops_per_batch": 2}, {"max_op_batch_bytes": 12}]
+    )
+    async def test_an_uncharged_write_over_a_batch_cap_is_too_large_before_any_charge(
+        self, caps
+    ):
+        mgr = _manager(**caps)
+        s = mgr.create_session()
+        bucket = _recording_mcp_bucket(mgr)
+
+        with pytest.raises(OpBatchTooLarge):
+            mgr.add_node_refs(s.id, "mcp-agent", ["a", "b", "c"])
+
+        assert bucket.calls == []
+
+    async def test_an_uncharged_write_above_the_bucket_capacity_is_too_large(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr._mcp_bucket = _TokenBucket(2.0, 0.0)
+
+        with pytest.raises(OpBatchTooLarge):
+            mgr.add_node_refs(s.id, "mcp-agent", ["a", "b", "c"])
+        mgr.add_node_refs(s.id, "mcp-agent", ["a", "b"])
+
+        assert mgr.get_session(s.id).state["node_refs"] == ["a", "b"]
+
+
+class TestConsumeMcpRateBudget:
+    async def test_charges_the_amount_under_the_labelled_key(self):
+        mgr = _manager()
+        bucket = _recording_mcp_bucket(mgr)
+
+        mgr.consume_mcp_rate_budget("mcp-agent", 3, rate_limit_label="tool")
+
+        assert bucket.calls == [("mcp-agent:tool", 3)]
+
+    async def test_a_spent_budget_raises(self):
+        mgr = _manager()
+        mgr._mcp_bucket = _TokenBucket(2.0, 0.0)
+
+        mgr.consume_mcp_rate_budget("mcp-agent", 2, rate_limit_label="tool")
+        with pytest.raises(RateLimited):
+            mgr.consume_mcp_rate_budget("mcp-agent", 1, rate_limit_label="tool")
+
+    async def test_an_amount_above_the_bucket_capacity_is_too_large_and_charges_nothing(
+        self,
+    ):
+        mgr = _manager()
+        mgr._mcp_bucket = _TokenBucket(2.0, 0.0)
+
+        with pytest.raises(OpBatchTooLarge):
+            mgr.consume_mcp_rate_budget("mcp-agent", 3, rate_limit_label="tool")
+        mgr.consume_mcp_rate_budget("mcp-agent", 2, rate_limit_label="tool")
+        with pytest.raises(RateLimited):
+            mgr.consume_mcp_rate_budget("mcp-agent", 1, rate_limit_label="tool")
+
+    async def test_an_empty_label_is_refused_and_charges_nothing(self):
+        mgr = _manager()
+        bucket = _recording_mcp_bucket(mgr)
+
+        with pytest.raises(OpError):
+            mgr.consume_mcp_rate_budget("mcp-agent", 1, rate_limit_label="")
+
+        assert bucket.calls == []
+
+    @pytest.mark.parametrize("client_id", ["", None])
+    async def test_a_missing_client_id_is_refused_and_charges_nothing(self, client_id):
+        mgr = _manager()
+        bucket = _recording_mcp_bucket(mgr)
+
+        with pytest.raises(OpError):
+            mgr.consume_mcp_rate_budget(client_id, 1, rate_limit_label="tool")
+
+        assert bucket.calls == []
+
 
 def _seed_annotations(mgr, sid):
     for ann_id in ("note-1", "note-2"):
@@ -3615,6 +3826,9 @@ _MCP_BUCKET_WRITES = {
     ),
     "add_node_refs": lambda mgr, sid, i, label: mgr.add_node_refs(
         sid, "mcp-agent", [f"n{i}"], rate_limit_label=label
+    ),
+    "consume_mcp_rate_budget": lambda mgr, sid, i, label: mgr.consume_mcp_rate_budget(
+        "mcp-agent", 1, rate_limit_label=label
     ),
     "upsert_annotation": lambda mgr, sid, i, label: mgr.upsert_annotation(
         sid, "mcp-agent", {"id": f"new-{i}", "type": "note"}, rate_limit_label=label

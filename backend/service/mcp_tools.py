@@ -56,6 +56,8 @@ from backend.core.session_annotations import (
     ALL_ANNOTATION_TYPES,
     ATTACHABLE_ANNOTATION_TYPES,
     GENERIC_ANNOTATION_TYPES,
+    HEATMAP_DEFAULT_INTENSITY,
+    HEATMAP_TYPE,
     IMAGE_TYPE,
     annotation_type_of,
     build_annotation,
@@ -1058,6 +1060,11 @@ def register_mcp_tools(
                 "success": False,
                 "error": _INVALID_SESSION_ID_ERROR,
             }
+        # Gated before any session lookup so a denied caller learns nothing
+        # about whether the session exists or has a live canvas.
+        denied = _authorize_session(GRAPH_ACTION_MUTATE, "clear_visualization")
+        if denied:
+            return denied
         stored, clients, push_target = _session_facts(visualization_session_id)
         if not push_target and clients <= 0:
             # Keep the contract's not-found error for an id that names no
@@ -1152,6 +1159,11 @@ def register_mcp_tools(
                 "success": False,
                 "error": _INVALID_SESSION_ID_ERROR,
             }
+        denied = _authorize_session(
+            GRAPH_ACTION_MUTATE, "create_session_auto_add_agent"
+        )
+        if denied:
+            return denied
         try:
             rule = auto_add_registry.add_rule(
                 visualization_session_id,
@@ -1186,6 +1198,9 @@ def register_mcp_tools(
                 "success": False,
                 "error": _INVALID_SESSION_ID_ERROR,
             }
+        denied = _authorize_session(GRAPH_ACTION_READ, "list_session_auto_add_agents")
+        if denied:
+            return denied
         agents = [
             r.to_dict() for r in auto_add_registry.list_rules(visualization_session_id)
         ]
@@ -1213,6 +1228,11 @@ def register_mcp_tools(
                 "success": False,
                 "error": _INVALID_SESSION_ID_ERROR,
             }
+        denied = _authorize_session(
+            GRAPH_ACTION_MUTATE, "remove_session_auto_add_agent"
+        )
+        if denied:
+            return denied
         removed = auto_add_registry.remove_rule(visualization_session_id, agent_id)
         if not removed:
             return {
@@ -1270,10 +1290,7 @@ def register_mcp_tools(
             }
         # Same read gate as get_visualization_session_state: this tool reports a
         # session's existence and node count, so a hook that narrows reads must
-        # be asked here too. (Not every tool in this family is gated yet:
-        # clear_visualization and the three session auto-add agent tools still
-        # are not. This closes the one that discloses stored session state
-        # without asking.)
+        # be asked here too.
         denied = _authorize_session(
             GRAPH_ACTION_READ, "connect_to_visualization_session"
         )
@@ -1569,9 +1586,12 @@ def register_mcp_tools(
         ``x``/``y`` = node top-left), exactly as ``get_visualization_layout``
         reports them. Only the nodes you name move; a write is a partial update of
         the position map, not a replacement. A batch is capped at 500 moves and
-        256 KiB of payload (``too_large`` above that), and each write also draws
-        from this tool's rate budget, sized to the number of moves — so a single
-        very large arrange may return ``rate_limited`` before the hard cap. The
+        256 KiB of payload (``too_large`` above that), and each write that
+        passes those caps and fits the full budget draws from this tool's rate
+        budget, sized to the number of moves — so a single very large arrange may return ``rate_limited``
+        before the hard cap, and one with more moves than the full budget (200
+        at default settings) returns ``too_large`` and draws nothing, since
+        waiting would never admit it. The
         budget is per tool, not per client: every MCP client on the instance
         draws from the same one. Either
         way, split a large session across successive writes, threading the
@@ -1711,12 +1731,14 @@ def register_mcp_tools(
         nothing new on the canvas.
 
         A batch is capped at 500 distinct ids and 256 KiB of ids, and each call
-        also draws from this tool's rate budget, sized to the number of distinct
-        ids that resolve — ids reported in ``skipped`` are not charged, and a
-        call that returns ``no_resolvable_nodes`` draws nothing — so a batch
-        well below the hard caps can still return ``rate_limited``. The budget
-        is per tool, not per client: every MCP client on the instance draws
-        from the same one. A repeated
+        that passes those caps and fits the full budget also draws from this
+        tool's rate budget, one unit per distinct id sent (at least one), before
+        any id is resolved — ids reported in ``skipped`` are charged too, and so
+        is a call that returns ``no_resolvable_nodes`` — so a batch well below
+        the hard caps can still return ``rate_limited``. One with more distinct
+        ids than the full budget (200 at default settings) returns ``too_large``
+        and draws nothing, since waiting would never admit it. The budget is per tool, not per client: every
+        MCP client on the instance draws from the same one. A repeated
         id counts once against all three. Split
         large sets across successive calls, threading the returned ``revision``
         into the next ``expected_revision``.
@@ -1834,6 +1856,31 @@ def register_mcp_tools(
                 ),
             }
 
+        # Charged before the resolve, which costs one node lookup per id, so a
+        # call where no id resolves is not free.
+        try:
+            session_manager.consume_mcp_rate_budget(
+                _MCP_SESSION_CLIENT_ID,
+                max(1, len(unique_ids)),
+                rate_limit_label="add_nodes_to_session",
+            )
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many session writes; slow down and retry.",
+            }
+        except OpBatchTooLarge:
+            return {
+                "success": False,
+                "error": "too_large",
+                "message": (
+                    f"More node ids than this tool's rate budget admits in one "
+                    f"call (at most {session_manager.mcp_rate_budget_capacity:g}); "
+                    "split into batches."
+                ),
+            }
+
         # Resolve through the projection under the *mutate* decision, not a read
         # one: a hook may narrow the two to different graph scopes, and this call
         # writes the ids into server-owned session state. Filtering by what the
@@ -1881,6 +1928,7 @@ def register_mcp_tools(
                 resolvable,
                 expected_revision=expected_revision,
                 rate_limit_label="add_nodes_to_session",
+                precharged=True,
             )
         except RevisionConflict as exc:
             return {
@@ -1898,12 +1946,6 @@ def register_mcp_tools(
                 "success": False,
                 "error": "busy",
                 "message": "Another change is being applied to this session; retry.",
-            }
-        except RateLimited:
-            return {
-                "success": False,
-                "error": "rate_limited",
-                "message": "Too many session writes; slow down and retry.",
             }
         except OpBatchTooLarge:
             return {
@@ -2765,7 +2807,7 @@ def register_mcp_tools(
     # ==================== Generic Annotations ====================
     #
     # These tools extend note-only MCP annotation access to the rest of the
-    # v1 model: text, label, line/arrow, shape, icon, vote_dot, image.
+    # v1 model: text, label, line/arrow, shape, icon, vote_dot, image, heatmap.
     # `note` keeps its dedicated tool set above (list_sticky_notes / ...);
     # `group` (node-membership boxes) keeps its own dedicated tool set below
     # (create_group_annotation / update_group_members) — folding it into a
@@ -2917,7 +2959,7 @@ def register_mcp_tools(
 
         Covers every v1 annotation type except `note`, `group` and `image`:
         `text`, `label`, `line` (`arrow` accepted as an alias),
-        `shape`, `icon`, `vote_dot`, `freehand`. Use `create_sticky_note` for notes,
+        `shape`, `icon`, `vote_dot`, `freehand`, `heatmap`. Use `create_sticky_note` for notes,
         `create_group_annotation` for groups, and `create_image_annotation`
         for images (an image's pixel content must be ingested server-side, so
         it cannot be created from a bare envelope here). An image annotation
@@ -2940,6 +2982,13 @@ def register_mcp_tools(
           - icon: {"icon": "flag"}
           - vote_dot: a plain coloured dot — no type-specific content field of
             its own; use `style.color` to set its colour, same as `icon`
+          - heatmap: {"intensity": 7} — a soft red heat-map circle; intensity
+            is an integer 0-10 (0 invisible, 10 strongest red) and defaults to
+            5 on a fresh create. The circle's diameter is min(w, h) (w/h
+            default to 160; give one and the other matches it). Overlapping
+            circles blend into one field, so the result does not depend on
+            their z order among themselves; like `shape` it starts at z -1,
+            behind graph nodes.
 
         `locked=True` combined with an attached/anchored binding (an
         attachable type's `attachment`, or a `line`'s `start`/`end`
@@ -2975,22 +3024,24 @@ def register_mcp_tools(
 
         Args:
             session_id: The session ID shown in the browser header (e.g. "8244-1742")
-            type: One of text/label/line/shape/icon/vote_dot/freehand
+            type: One of text/label/line/shape/icon/vote_dot/freehand/heatmap
                 ("arrow" accepted as an alias for "line"; "image" is
                 rejected — use create_image_annotation).
             x: Model-space x of the annotation's anchor/top-left corner.
             y: Model-space y of the annotation's anchor/top-left corner.
-            w: Optional width in model-space px (no type-specific default;
-                shape usually needs one, line/icon usually don't).
-            h: Optional height in model-space px.
+            w: Optional width in model-space px. No default for most types
+                (shape usually needs one, line/icon usually don't); a
+                `heatmap` defaults to 160, and given only one of w/h the
+                other matches it.
+            h: Optional height in model-space px (same heatmap rule as w).
             rotation: Optional rotation in degrees.
             content: Optional type-specific payload fields (see above).
             style: Optional style dict (color/opacity; for
                 text/shape also fontSize/font/textAlign, and for shape also
                 fill/border — see above).
             z: Optional layer order (higher draws on top). Defaults to 0 for
-                every type except `shape`, which defaults to -1 so a freshly
-                created shape starts one layer behind the rest — the
+                every type except `shape` and `heatmap`, which default to -1
+                so a freshly created one starts one layer behind the rest — the
                 semantic default described in docs/ANNOTATION_CONTRACT.md's
                 "Layer order" section. Applies only when creating (or
                 upsert-replacing without resending `z`); pass an explicit
@@ -3073,6 +3124,17 @@ def register_mcp_tools(
                                 "first or use a new annotation_id."
                             ),
                         }
+        # A fresh heat-map circle gets its default intensity stored, so a
+        # later `list_annotations` reports the level the canvas draws. Only
+        # on a fresh create: an upsert-replace that omits it keeps the stored
+        # intensity under the store's shallow merge.
+        if (
+            normalized_type == HEATMAP_TYPE
+            and existing_annotation is None
+            and (content is None or isinstance(content, dict))
+            and "intensity" not in (content or {})
+        ):
+            content = {**(content or {}), "intensity": HEATMAP_DEFAULT_INTENSITY}
         try:
             annotation = build_annotation(
                 type=normalized_type,
@@ -3219,6 +3281,11 @@ def register_mcp_tools(
         declared content-type; the image is downscaled to a longest side of
         2560px if needed and re-encoded as WebP, preserving PNG/WebP
         transparency.
+
+        The MCP transport refuses request bodies over 4 MiB, so inline
+        `image_data` fits a source image of roughly 3 MiB at most once
+        base64-encoded; pass `image_url` for a larger image (still subject to
+        the ingest limits).
 
         This is a separate tool from `create_annotation` because an embedded
         image is orders of magnitude larger than the generic op-batch cap

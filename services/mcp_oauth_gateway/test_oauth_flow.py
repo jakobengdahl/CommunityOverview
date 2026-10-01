@@ -8,7 +8,11 @@ import asyncio
 import hashlib
 import base64
 import importlib
+import json
+import logging
 import os
+import re
+import subprocess
 import sys
 import time
 import unittest
@@ -39,6 +43,17 @@ def _make_pkce_pair():
     digest = hashlib.sha256(verifier.encode("ascii")).digest()
     challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
     return verifier, challenge
+
+
+# RFC 7636 §4.1 unreserved characters, the full code_verifier alphabet.
+_UNRESERVED = (
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+)
+
+# Non-ASCII characters a Unicode-aware pattern (re.I case folding, \d, \w)
+# would accept as unreserved: KELVIN SIGN, LONG S, I WITH DOT ABOVE,
+# DOTLESS I, ARABIC-INDIC DIGIT ONE, FULLWIDTH A.
+_UNICODE_LOOKALIKES = ("\u212a", "\u017f", "\u0130", "\u0131", "\u0661", "\uff21")
 
 
 # RSA keypair used to sign fake Google ID tokens in tests. The gateway verifies
@@ -153,8 +168,11 @@ class TestStreamableHttpTransport(unittest.TestCase):
             captured["url"] = url
             return MagicMock()
 
+        import httpx2 as httpx
+        from starlette.datastructures import QueryParams
+
         upstream_resp = MagicMock()
-        upstream_resp.headers = {"content-type": "application/json"}
+        upstream_resp.headers = httpx.Headers({"content-type": "application/json"})
         upstream_resp.status_code = 200
         upstream_resp.aread = AsyncMock(return_value=b"{}")
         upstream_resp.aclose = AsyncMock()
@@ -164,7 +182,7 @@ class TestStreamableHttpTransport(unittest.TestCase):
                               new=AsyncMock(return_value=upstream_resp)):
                 request = MagicMock()
                 request.method = "POST"
-                request.query_params = {}
+                request.query_params = QueryParams("")
                 request.headers = {}
                 request.body = AsyncMock(return_value=b"{}")
                 asyncio.run(proxy_module.proxy_streamable_http(request))
@@ -338,6 +356,458 @@ class TestTokenEndpointRedirectUri(unittest.TestCase):
         assert "access_token" in resp.json()
 
 
+class TestTokenEndpointMalformedBody(unittest.TestCase):
+    """POST /token answers an unparseable body with invalid_request, not a 500."""
+
+    def _assert_invalid_request(self, resp):
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["error"] == "invalid_request"
+
+    def test_malformed_json_is_invalid_request(self):
+        resp = client.post(
+            "/token",
+            content=b'{"grant_type": "authorization_code",',
+            headers={"Content-Type": "application/json"},
+        )
+        self._assert_invalid_request(resp)
+
+    def test_non_utf8_json_body_is_invalid_request(self):
+        resp = client.post(
+            "/token",
+            content=b"\xff\xfe{",
+            headers={"Content-Type": "application/json"},
+        )
+        self._assert_invalid_request(resp)
+
+    def test_deeply_nested_json_is_invalid_request(self):
+        for payload in (b"[" * 100000 + b"]" * 100000,
+                        b'{"code": ' + b"[" * 100000 + b"]" * 100000 + b"}"):
+            resp = client.post(
+                "/token", content=payload, headers={"Content-Type": "application/json"},
+            )
+            self._assert_invalid_request(resp)
+
+    def test_non_object_json_is_invalid_request(self):
+        for payload in (b"[1, 2]", b'"authorization_code"', b"42", b"null"):
+            resp = client.post(
+                "/token", content=payload, headers={"Content-Type": "application/json"},
+            )
+            self._assert_invalid_request(resp)
+
+    def test_non_string_field_is_invalid_request(self):
+        verifier, challenge = _make_pkce_pair()
+        redirect = "https://chatgpt.com/callback"
+        code = auth.issue_auth_code(
+            email="alice@example.com", code_challenge=challenge, redirect_uri=redirect,
+        )
+        body = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "code_verifier": verifier,
+            "redirect_uri": redirect,
+        }
+        for field, bad in (("code", [code]), ("code_verifier", {"v": 1}),
+                           ("redirect_uri", 7), ("grant_type", ["authorization_code"])):
+            resp = client.post("/token", json={**body, field: bad})
+            self._assert_invalid_request(resp)
+        # The code was never consumed by the rejected requests.
+        assert client.post("/token", json=body).status_code == 200
+
+    def _issue(self):
+        verifier, challenge = _make_pkce_pair()
+        redirect = "https://chatgpt.com/callback"
+        code = auth.issue_auth_code(
+            email="alice@example.com", code_challenge=challenge, redirect_uri=redirect,
+        )
+        return {
+            "grant_type": "authorization_code",
+            "code": code,
+            "code_verifier": verifier,
+            "redirect_uri": redirect,
+        }
+
+    def test_code_verifier_outside_rfc7636_is_invalid_request(self):
+        body = self._issue()
+        valid = body["code_verifier"]
+        bad_verifiers = (
+            "\u00e9" * 43,           # non-ASCII: used to raise UnicodeEncodeError -> 500
+            valid + "\u00e9",
+            "a" * 42,                 # one below the minimum length
+            "a" * 129,                # one above the maximum length
+            valid + " ",
+            valid + "\n",
+            valid + "+",
+            valid[:-1] + "/",
+        )
+        for bad in bad_verifiers:
+            for send in (lambda b: client.post("/token", json=b),
+                         lambda b: client.post("/token", data=b)):
+                resp = send({**body, "code_verifier": bad})
+                self._assert_invalid_request(resp)
+        assert client.post("/token", data=body).status_code == 200
+
+    def _assert_rejected_without_consuming_code(self, bad):
+        # A fresh code per probe: a validation step that ran after the code was
+        # consumed would still answer 400, and only the follow-up exchange shows it.
+        for send in (lambda b: client.post("/token", json=b),
+                     lambda b: client.post("/token", data=b)):
+            body = self._issue()
+            resp = send({**body, "code_verifier": bad})
+            assert resp.status_code == 400, (repr(bad), resp.text)
+            assert resp.json()["error"] == "invalid_request", (repr(bad), resp.text)
+            assert send(body).status_code == 200, repr(bad)
+
+    def test_every_ascii_char_outside_unreserved_is_invalid_request(self):
+        valid = self._issue()["code_verifier"]
+        for c in map(chr, range(128)):
+            if c in _UNRESERVED:
+                continue
+            with self.subTest(char=repr(c)):
+                self._assert_rejected_without_consuming_code(valid[:20] + c + valid[21:])
+
+    def test_unicode_lookalikes_of_unreserved_chars_are_invalid_request(self):
+        for c in _UNICODE_LOOKALIKES:
+            with self.subTest(char=repr(c)):
+                self._assert_rejected_without_consuming_code(c * 43)
+
+    def test_verifier_with_every_unreserved_char_is_accepted(self):
+        verifier = _UNRESERVED
+        assert len(verifier) == 66
+        for encoding in ("data", "json"):
+            code = auth.issue_auth_code(
+                "alice@example.com", auth.compute_s256_challenge(verifier), "https://app/cb",
+            )
+            resp = client.post("/token", **{encoding: {
+                "grant_type": "authorization_code", "code": code,
+                "code_verifier": verifier, "redirect_uri": "https://app/cb",
+            }})
+            assert resp.status_code == 200, (encoding, resp.text)
+
+    def test_code_verifier_length_bounds_are_inclusive(self):
+        for length in (43, 128):
+            verifier = ("aZ09-._~" * 16)[:length]
+            code = auth.issue_auth_code(
+                "alice@example.com", auth.compute_s256_challenge(verifier), "https://app/cb",
+            )
+            resp = client.post("/token", data={
+                "grant_type": "authorization_code", "code": code,
+                "code_verifier": verifier, "redirect_uri": "https://app/cb",
+            })
+            assert resp.status_code == 200, (length, resp.text)
+
+    def test_multipart_file_part_is_invalid_request(self):
+        body = self._issue()
+        for field in ("grant_type", "code", "code_verifier", "redirect_uri"):
+            data = {k: v for k, v in body.items() if k != field}
+            resp = client.post(
+                "/token", data=data,
+                files={field: ("f.txt", body[field].encode(), "text/plain")},
+            )
+            self._assert_invalid_request(resp)
+        assert client.post("/token", data=body).status_code == 200
+
+
+class TestProxyResponsePassthrough(unittest.TestCase):
+    """Buffered POST proxies relay upstream headers and query params faithfully."""
+
+    def _upstream_response(self):
+        import gzip
+
+        import httpx2 as httpx
+
+        return httpx.Response(
+            200,
+            headers=[
+                ("content-type", "application/json"),
+                ("content-encoding", "gzip"),
+                ("set-cookie", "a=1; Path=/"),
+                ("set-cookie", "b=2; Path=/"),
+                ("mcp-session-id", "sess-1"),
+            ],
+            content=gzip.compress(b'{"ok": true}'),
+        )
+
+    def _post_through_gateway(self, path):
+        import proxy as proxy_module
+
+        upstream_post = AsyncMock(return_value=self._upstream_response())
+        with patch.object(proxy_module._client, "post", new=upstream_post):
+            resp = client.post(
+                path + "?session_id=s1&tag=x&tag=y",
+                headers={"Authorization": "Bearer static-test-api-key"},
+                content=b"{}",
+            )
+        return resp, upstream_post
+
+    def test_decoded_body_is_not_labelled_gzip_and_repeats_survive(self):
+        for path in ("/messages", "/mcp/messages/", "/mcp/sse/messages"):
+            resp, upstream_post = self._post_through_gateway(path)
+            assert resp.status_code == 200, path
+            assert "content-encoding" not in resp.headers, path
+            assert resp.json() == {"ok": True}, path
+            assert resp.headers.get_list("set-cookie") == ["a=1; Path=/", "b=2; Path=/"], path
+            assert resp.headers["mcp-session-id"] == "sess-1", path
+            params = list(upstream_post.await_args.kwargs["params"])
+            assert params == [("session_id", "s1"), ("tag", "x"), ("tag", "y")], path
+
+    def test_client_accept_encoding_is_not_forwarded(self):
+        """Only httpx's own Accept-Encoding may reach the upstream: a coding it
+        cannot decode would otherwise arrive still encoded but unlabelled."""
+        import proxy as proxy_module
+
+        upstream_post = AsyncMock(return_value=self._upstream_response())
+        with patch.object(proxy_module._client, "post", new=upstream_post):
+            resp = client.post(
+                "/messages",
+                headers={"Authorization": "Bearer static-test-api-key",
+                         "Accept-Encoding": "br, zstd"},
+                content=b"{}",
+            )
+        assert resp.status_code == 200
+        sent = {k.lower() for k in upstream_post.await_args.kwargs["headers"]}
+        assert "accept-encoding" not in sent
+
+    def test_response_filter_drops_framing_headers(self):
+        import httpx2 as httpx
+
+        import proxy as proxy_module
+
+        headers = httpx.Headers([
+            ("Transfer-Encoding", "chunked"), ("Connection", "keep-alive"),
+            ("Content-Length", "3"), ("x-kept", "1"),
+        ])
+        filtered = proxy_module._response_headers(headers)
+        assert {k.lower() for k in filtered} == {"x-kept"}
+
+    def test_response_filter_keeps_every_repeated_header(self):
+        import httpx2 as httpx
+
+        import proxy as proxy_module
+
+        headers = httpx.Headers([
+            ("Set-Cookie", "a=1"), ("set-cookie", "b=2"), ("Content-Encoding", "br"),
+        ])
+        filtered = proxy_module._response_headers(headers)
+        assert filtered.getlist("set-cookie") == ["a=1", "b=2"]
+        assert "content-encoding" not in filtered
+
+    def test_streaming_proxies_forward_repeated_query_params(self):
+        import proxy as proxy_module
+
+        captured = []
+
+        def fake_build_request(method, url, **kwargs):
+            captured.append(list(kwargs["params"]))
+            return MagicMock()
+
+        import httpx2 as httpx
+
+        upstream_resp = MagicMock()
+        upstream_resp.headers = httpx.Headers({"content-type": "application/json"})
+        upstream_resp.status_code = 200
+        upstream_resp.aread = AsyncMock(return_value=b"{}")
+        upstream_resp.aclose = AsyncMock()
+        with patch.object(proxy_module._client, "build_request", side_effect=fake_build_request):
+            with patch.object(proxy_module._client, "send",
+                              new=AsyncMock(return_value=upstream_resp)):
+                resp = client.post(
+                    "/mcp?tag=x&tag=y",
+                    headers={"Authorization": "Bearer static-test-api-key"},
+                    json={},
+                )
+        assert resp.status_code == 200
+        assert captured == [[("tag", "x"), ("tag", "y")]]
+
+        seen = {}
+
+        class FakeStream:
+            status_code = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def aiter_bytes(self):
+                yield b"event: endpoint\ndata: /messages/?session_id=1\n\n"
+
+        def fake_stream(method, url, **kwargs):
+            seen["params"] = list(kwargs["params"])
+            return FakeStream()
+
+        with patch.object(proxy_module._client, "stream", side_effect=fake_stream):
+            resp = client.get(
+                "/sse?tag=x&tag=y",
+                headers={"Authorization": "Bearer static-test-api-key"},
+            )
+        assert resp.status_code == 200
+        assert seen["params"] == [("tag", "x"), ("tag", "y")]
+
+
+# The only application routes a client may call without a gateway credential.
+_PUBLIC_PATHS = frozenset({
+    "/register", "/authorize", "/callback", "/token",
+    "/.well-known/oauth-protected-resource", "/.well-known/oauth-authorization-server",
+})
+
+
+def _proxied_routes():
+    """Every (method, path) the app serves other than the public OAuth endpoints.
+
+    Enumerating by exclusion means a newly added route is treated as proxied,
+    and so must require auth, however it reaches the upstream.
+    """
+    from fastapi.routing import APIRoute
+
+    found = []
+    for route in app.routes:
+        if not isinstance(route, APIRoute) or route.path in _PUBLIC_PATHS:
+            continue
+        path = route.path.replace("{subpath:path}", "messages")
+        for method in sorted(route.methods - {"HEAD"}):
+            found.append((method, path))
+    return found
+
+
+class TestEveryProxiedRouteRequiresAuth(unittest.TestCase):
+    """No proxied route reaches the upstream without a valid gateway credential."""
+
+    def test_route_enumeration_is_not_vacuous(self):
+        routes = set(_proxied_routes())
+        expected = {
+            ("POST", "/mcp"), ("GET", "/mcp"), ("DELETE", "/mcp"),
+            ("GET", "/sse"), ("GET", "/mcp/sse"), ("POST", "/mcp/sse"),
+            ("GET", "/mcp/sse/messages"), ("POST", "/mcp/sse/messages"),
+            ("POST", "/messages"), ("POST", "/messages/"), ("POST", "/mcp/messages/"),
+        }
+        assert expected <= routes, expected - routes
+        from fastapi.routing import APIRoute
+
+        served = {r.path for r in app.routes if isinstance(r, APIRoute)}
+        assert _PUBLIC_PATHS <= served, _PUBLIC_PATHS - served
+
+    def test_unauthenticated_requests_never_reach_the_proxy(self):
+        credentials = {
+            "no header": {},
+            "non-Bearer scheme with the static key": {"Authorization": "Basic static-test-api-key"},
+            "lower-case scheme with the static key": {"Authorization": "bearer static-test-api-key"},
+            "garbage bearer": {"Authorization": "Bearer not-a-token"},
+        }
+        proxies = ("proxy_sse", "proxy_post", "proxy_post_mcp", "proxy_streamable_http")
+        for method, path in _proxied_routes():
+            for label, headers in credentials.items():
+                mocks = {name: AsyncMock() for name in proxies}
+                with patch.multiple("proxy", **mocks):
+                    resp = client.request(method, path, headers=headers)
+                assert resp.status_code == 401, (method, path, label, resp.status_code)
+                for mock in mocks.values():
+                    mock.assert_not_awaited()
+
+    def test_extract_bearer_token_rejects_other_schemes(self):
+        import main
+
+        for header in ("Basic static-test-api-key", "Token static-test-api-key",
+                       "bearer static-test-api-key", "static-test-api-key"):
+            request = MagicMock()
+            request.headers = {"Authorization": header}
+            assert main._extract_bearer_token(request) is None, header
+
+
+class TestEveryProxiedRoutePassthrough(unittest.TestCase):
+    """Each proxied route forwards query params in order and drops Accept-Encoding."""
+
+    QUERY = "z=1&a=2&z=3&m=4"
+    PARAMS = [("z", "1"), ("a", "2"), ("z", "3"), ("m", "4")]
+
+    def _fake_upstream(self, captured):
+        import httpx2 as httpx
+
+        import proxy as proxy_module
+
+        def record(kwargs):
+            captured.append((list(kwargs["params"]), {k.lower() for k in kwargs["headers"]}))
+
+        async def fake_post(url, **kwargs):
+            record(kwargs)
+            return httpx.Response(200, json={})
+
+        def fake_build_request(method, url, **kwargs):
+            record(kwargs)
+            return MagicMock()
+
+        async def fake_send(request, stream=False):
+            return httpx.Response(200, json={})
+
+        class FakeStream:
+            status_code = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def aiter_bytes(self):
+                yield b"data: x\n\n"
+
+        def fake_stream(method, url, **kwargs):
+            record(kwargs)
+            return FakeStream()
+
+        return patch.multiple(
+            proxy_module._client, post=fake_post, build_request=fake_build_request,
+            send=fake_send, stream=fake_stream,
+        )
+
+    def test_params_and_accept_encoding_on_every_route(self):
+        routes = _proxied_routes()
+        assert routes
+        for method, path in routes:
+            captured = []
+            with self._fake_upstream(captured):
+                resp = client.request(
+                    method, f"{path}?{self.QUERY}",
+                    headers={"Authorization": "Bearer static-test-api-key",
+                             "Accept-Encoding": "br, zstd"},
+                    content=b"{}" if method == "POST" else None,
+                )
+            assert resp.status_code == 200, (method, path, resp.status_code)
+            assert len(captured) == 1, (method, path)
+            params, headers = captured[0]
+            assert params == self.PARAMS, (method, path, params)
+            assert "accept-encoding" not in headers, (method, path)
+
+
+class TestStreamableHttpRepeatedCookies(unittest.TestCase):
+    """POST /mcp relays every Set-Cookie on both the JSON and the SSE branch."""
+
+    def test_repeated_set_cookie_survives_both_branches(self):
+        import httpx2 as httpx
+
+        import proxy as proxy_module
+
+        for content_type, body in (("application/json", b"{}"),
+                                   ("text/event-stream", b"data: x\n\n")):
+            upstream = httpx.Response(200, headers=[
+                ("content-type", content_type),
+                ("set-cookie", "a=1; Path=/"),
+                ("set-cookie", "b=2; Path=/"),
+            ], content=body)
+            with patch.object(proxy_module._client, "build_request", return_value=MagicMock()):
+                with patch.object(proxy_module._client, "send",
+                                  new=AsyncMock(return_value=upstream)):
+                    resp = client.post(
+                        "/mcp", headers={"Authorization": "Bearer static-test-api-key"},
+                        json={},
+                    )
+            assert resp.status_code == 200, content_type
+            assert resp.headers.get_list("set-cookie") == ["a=1; Path=/", "b=2; Path=/"], (
+                content_type
+            )
+            assert resp.content == body, content_type
+
+
 class TestAuthModuleRedirectUri(unittest.TestCase):
     """Unit tests for auth.exchange_code_for_token redirect_uri check."""
 
@@ -364,6 +834,42 @@ class TestAuthModuleRedirectUri(unittest.TestCase):
 
         token = auth.exchange_code_for_token(code, verifier, "")
         assert token is None
+
+
+class TestPkceVerifierValidation(unittest.TestCase):
+    """verify_pkce rejects a non-RFC-7636 verifier instead of raising."""
+
+    def test_non_ascii_verifier_is_rejected_without_raising(self):
+        verifier, challenge = _make_pkce_pair()
+        assert auth.verify_pkce(verifier, challenge) is True
+        assert auth.verify_pkce("\u00e9" * 43, challenge) is False
+
+    def test_exchange_with_non_ascii_verifier_returns_none_and_keeps_code(self):
+        verifier, challenge = _make_pkce_pair()
+        code = auth.issue_auth_code("alice@example.com", challenge, "https://app/cb")
+        assert auth.exchange_code_for_token(code, verifier + "\u00e9", "https://app/cb") is None
+        assert auth.exchange_code_for_token(code, verifier, "https://app/cb") is not None
+
+    def test_ascii_verifier_outside_rfc7636_is_rejected_even_when_challenge_matches(self):
+        # The challenge is computed from the bad verifier itself, so only the
+        # syntax guard in verify_pkce can reject it.
+        base = "a" * 43
+        for bad in ("a" * 42, "a" * 129, base[:-1] + "+", base[:-1] + "=", base[:-1] + "%"):
+            with self.subTest(verifier=bad):
+                challenge = auth.compute_s256_challenge(bad)
+                assert auth.verify_pkce(bad, challenge) is False
+                code = auth.issue_auth_code("alice@example.com", challenge, "https://app/cb")
+                assert auth.exchange_code_for_token(code, bad, "https://app/cb") is None
+                assert not auth._code_store[code].used
+
+    def test_unicode_lookalike_verifier_is_rejected_without_raising(self):
+        _, challenge = _make_pkce_pair()
+        for c in _UNICODE_LOOKALIKES:
+            with self.subTest(char=repr(c)):
+                assert auth.verify_pkce(c * 43, challenge) is False
+                code = auth.issue_auth_code("alice@example.com", challenge, "https://app/cb")
+                assert auth.exchange_code_for_token(code, c * 43, "https://app/cb") is None
+                assert not auth._code_store[code].used
 
 
 class TestGatewayJwt(unittest.TestCase):
@@ -487,6 +993,238 @@ class TestGatewayJwt(unittest.TestCase):
                 )
         assert good == "alice@example.com"
         assert bad is None
+
+
+class TestShortSigningKeyWarning(unittest.TestCase):
+    """GW_JWT_SIGNING_KEY below 32 bytes is warned about at startup, never refused."""
+
+    # Distinctive so any leak of the value (or a slice of it) is easy to spot.
+    SHORT_KEY = "plumvox-quiltbex-zyg"
+
+    # Attributes logging sets on every record; anything else came from extra=.
+    # taskName is only standard from 3.12 on, where makeLogRecord already sets it.
+    _STANDARD_RECORD_ATTRS = frozenset(vars(logging.makeLogRecord({}))) | {
+        "message",
+        "asctime",
+    }
+
+    def _warnings_for(self, key):
+        """Return the WARNING records, after leak-checking every record at every level."""
+        import main
+
+        with self.assertLogs("main", level="DEBUG") as cm:
+            main.logger.debug("sentinel")
+            main._warn_if_short_signing_key(key)
+        records = cm.records[1:]
+        for record in records:
+            self._assert_record_does_not_leak(record, key)
+        return [r for r in records if r.levelname == "WARNING"]
+
+    def _assert_record_does_not_leak(self, record, key):
+        # Where the code under test chooses the content: the message and any extras.
+        chosen = [record.getMessage(), str(record.msg), repr(record.args)]
+        chosen += [
+            repr(value)
+            for name, value in vars(record).items()
+            if name not in self._STANDARD_RECORD_ATTRS
+        ]
+        # Logging-owned string fields (path, thread name, ...) may hold digits but never the key.
+        owned = [
+            value
+            for name, value in vars(record).items()
+            if name in self._STANDARD_RECORD_ATTRS and isinstance(value, str)
+        ]
+        for text in chosen + owned:
+            self._assert_key_absent(text, key)
+        # The only numbers allowed are the recommended minimum (32 bytes / 256 bits).
+        for text in chosen:
+            assert set(re.findall(r"\d+", text)) <= {"32", "256"}, text
+
+    # Starts the gateway, then exits 3 if startup replaced the configured key.
+    _STARTUP_SCRIPT = (
+        "import os, sys, config, main\n"
+        "sys.exit(0 if config.GW_JWT_SIGNING_KEY == os.environ['GW_JWT_SIGNING_KEY'] else 3)\n"
+    )
+
+    # Issues and verifies one token through the production path, so PyJWT's own
+    # short-key warning fires. Importing main first is what installs the filter.
+    _TOKEN_SCRIPT = (
+        "import main\n"
+        "import auth\n"
+        "import base64, hashlib, sys\n"
+        "verifier = 'test-verifier-that-is-long-enough-for-pkce-requirements'\n"
+        "digest = hashlib.sha256(verifier.encode('ascii')).digest()\n"
+        "challenge = base64.urlsafe_b64encode(digest).rstrip(b'=').decode('ascii')\n"
+        "code = auth.issue_auth_code('alice@example.com', challenge, 'https://app/cb')\n"
+        "token = auth.exchange_code_for_token(code, verifier, 'https://app/cb')\n"
+        "sys.exit(0 if token and auth.validate_token(token) else 4)\n"
+    )
+    # The same round-trip without main.py, so no filter is installed. It is the
+    # control for the test above: it proves the library warning does fire here,
+    # and that the assertions are about the filter rather than about a warning
+    # that a PyJWT upgrade has quietly stopped emitting.
+    _TOKEN_CONTROL_SCRIPT = _TOKEN_SCRIPT.replace("import main\n", "", 1)
+
+    def _start_gateway(self, key, script=None):
+        env = dict(os.environ, GW_JWT_SIGNING_KEY=key)
+        result = subprocess.run(
+            [sys.executable, "-c", script or self._STARTUP_SCRIPT],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            env=env,
+            capture_output=True,
+            timeout=60,
+        )
+        # Strict locale decoding would turn a raw-byte leak of a non-UTF-8 key into a
+        # UnicodeDecodeError (or, under latin-1, into other characters that pass). UTF-8 with
+        # surrogateescape maps an undecodable byte back to its lone surrogate under any
+        # locale, so a raw-byte leak reappears as the key.
+        return subprocess.CompletedProcess(
+            result.args,
+            result.returncode,
+            result.stdout.decode("utf-8", "surrogateescape"),
+            result.stderr.decode("utf-8", "surrogateescape"),
+        )
+
+    # The log format leads with asctime (`%Y-%m-%d %H:%M:%S,%f`), whose clock
+    # fields can equal a key length by coincidence - a run at 14:20:03 puts a
+    # bare `20` in every line. Strip it, so the digit check below reads only what
+    # the gateway CHOSE to say.
+    _LOG_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}\s*")
+
+    def _chosen_text(self, output):
+        return "\n".join(
+            self._LOG_PREFIX.sub("", line) for line in output.splitlines()
+        )
+
+    def _assert_key_absent(self, text, key):
+        assert key not in text
+        for i in range(len(key) - 3):
+            assert key[i : i + 4] not in text, f"part of the key leaked: {key[i:i + 4]!r}"
+        assert hashlib.sha256(key.encode("utf-8", "surrogateescape")).hexdigest()[:8] not in text
+        # repr()/%r escape lone surrogates and ascii() also escapes non-ASCII, so a leak may
+        # appear only in escaped form.
+        for escaped in {repr(key)[1:-1], ascii(key)[1:-1]} - {key}:
+            assert escaped not in text, f"escaped key leaked: {escaped!r}"
+            for i in range(len(escaped) - 3):
+                assert escaped[i : i + 4] not in text, (
+                    f"part of the escaped key leaked: {escaped[i:i + 4]!r}"
+                )
+
+    def test_short_key_logs_warning_without_the_value(self):
+        records = self._warnings_for(self.SHORT_KEY)
+        assert len(records) == 1
+        message = records[0].getMessage()
+        assert "GW_JWT_SIGNING_KEY" in message
+        assert "32 bytes" in message
+        self._assert_key_absent(message, self.SHORT_KEY)
+        # The only numbers allowed are the recommended minimum (32 bytes / 256 bits).
+        assert set(re.findall(r"\d+", message)) <= {"32", "256"}, message
+        assert records[0].args == (32,)
+
+    def test_boundary_is_32_bytes(self):
+        assert len(self._warnings_for("k" * 31)) == 1
+        assert self._warnings_for("k" * 32) == []
+        assert self._warnings_for("k" * 64) == []
+
+    def test_surrounding_whitespace_counts_toward_the_length(self):
+        # The key is used verbatim, so padding is part of its length.
+        assert self._warnings_for(" " + "k" * 30 + " ") == []
+
+    def test_length_is_measured_in_utf8_bytes(self):
+        # 16 characters but 32 bytes: long enough.
+        assert self._warnings_for("\u00e9" * 16) == []
+        # 16 characters, 31 bytes: too short.
+        assert len(self._warnings_for("\u00e9" * 15 + "a")) == 1
+
+    def test_non_utf8_key_warns_instead_of_raising(self):
+        # A non-UTF-8 env value arrives as lone surrogates (surrogateescape).
+        assert len(self._warnings_for("abc\udcff")) == 1
+        assert self._warnings_for("k" * 31 + "\udcff") == []
+
+    def test_gateway_starts_with_a_non_utf8_key(self):
+        result = self._start_gateway("abc\udcff")
+        assert result.returncode == 0, result.stderr
+        assert result.stderr.count("GW_JWT_SIGNING_KEY") == 1, result.stderr
+        self._assert_key_absent(result.stdout + result.stderr, "abc\udcff")
+
+    def test_gateway_startup_warns_on_short_key_and_still_starts(self):
+        result = self._start_gateway(self.SHORT_KEY)
+        assert result.returncode == 0, result.stderr
+        output = result.stdout + result.stderr
+        warning_lines = [
+            line for line in output.splitlines()
+            if "WARNING" in line and "GW_JWT_SIGNING_KEY" in line
+        ]
+        assert len(warning_lines) == 1, output
+        self._assert_key_absent(output, self.SHORT_KEY)
+
+    def test_gateway_startup_is_quiet_with_a_32_byte_key(self):
+        result = self._start_gateway("test-jwt-key-at-least-32-chars!!")
+        assert result.returncode == 0, result.stderr
+        output = result.stdout + result.stderr
+        assert "GW_JWT_SIGNING_KEY" not in output
+        assert "WARNING" not in output, output
+
+    def test_issuing_a_token_with_a_short_key_never_prints_its_length(self):
+        # The startup warning omits the length; PyJWT's own InsecureKeyLengthWarning
+        # states it outright on each encode and decode, so without the filter in
+        # main.py the first token undoes that. Run the real issue/verify path.
+        result = self._start_gateway(self.SHORT_KEY, script=self._TOKEN_SCRIPT)
+        assert result.returncode == 0, result.stderr
+        output = result.stdout + result.stderr
+        assert "InsecureKeyLengthWarning" not in output, output
+        assert "bytes long" not in output, output
+        length = len(self.SHORT_KEY.encode("utf-8", "surrogateescape"))
+        assert f"{length} bytes" not in output, output
+        # The NUMBER, not just PyJWT's phrasing for it: the guarantee is that the
+        # length never reaches the logs, so an `INFO  signing key: 20 octets` line
+        # has to fail here too. SHORT_KEY is 20 bytes, and the only numbers the
+        # legitimate warning carries are 32 and 256, so this cannot collide with
+        # it - a SHORT_KEY of length 32 or 256 would make the check vacuous.
+        assert length not in (32, 256), "SHORT_KEY length collides with the warning"
+        chosen = self._chosen_text(output)
+        assert not re.search(rf"\b{length}\b", chosen), chosen
+        self._assert_key_absent(output, self.SHORT_KEY)
+        # The gateway's own warning is still the one and only report.
+        warning_lines = [
+            line
+            for line in output.splitlines()
+            if "WARNING" in line and "GW_JWT_SIGNING_KEY" in line
+        ]
+        assert len(warning_lines) == 1, output
+
+    def test_the_library_would_otherwise_print_the_key_length(self):
+        result = self._start_gateway(self.SHORT_KEY, script=self._TOKEN_CONTROL_SCRIPT)
+        assert result.returncode == 0, result.stderr
+        output = result.stdout + result.stderr
+        assert "InsecureKeyLengthWarning" in output, output
+        length = len(self.SHORT_KEY.encode("utf-8", "surrogateescape"))
+        assert f"{length} bytes long" in output, output
+
+    def test_a_long_enough_key_issues_a_token_with_no_warning_at_all(self):
+        result = self._start_gateway(
+            "test-jwt-key-at-least-32-chars!!", script=self._TOKEN_SCRIPT
+        )
+        assert result.returncode == 0, result.stderr
+        output = result.stdout + result.stderr
+        assert "GW_JWT_SIGNING_KEY" not in output
+        assert "WARNING" not in output, output
+
+    def test_short_key_still_signs_and_verifies_tokens(self):
+        with patch.object(config, "GW_JWT_SIGNING_KEY", self.SHORT_KEY):
+            verifier, challenge = _make_pkce_pair()
+            code = auth.issue_auth_code("alice@example.com", challenge, "https://app/cb")
+            token = auth.exchange_code_for_token(code, verifier, "https://app/cb")
+            assert token is not None
+            claims = auth.validate_token(token)
+            assert claims is not None
+            assert claims["sub"] == "alice@example.com"
+        # The short key itself signed it: it verifies under that key and no other.
+        decoded = jwt.decode(
+            token, self.SHORT_KEY, algorithms=["HS256"], audience=config.PUBLIC_BASE_URL
+        )
+        assert decoded["sub"] == "alice@example.com"
+        assert auth.validate_token(token) is None
 
 
 class TestCorsConfiguration(unittest.TestCase):
@@ -630,6 +1368,48 @@ class TestDcrStoreBounds(unittest.TestCase):
             assert resp.status_code == 201
         assert len(main.dcr_clients) <= main.MAX_DCR_CLIENTS
         main.dcr_clients.clear()
+
+
+class TestRegisterContentType(unittest.TestCase):
+    """RFC 7591 registration requests must declare application/json.
+
+    FastAPI's strict_content_type default (on since the dependency bump) rejects a
+    body without the header; pinning it here makes a change in that default visible.
+    """
+
+    def setUp(self):
+        import main
+
+        main.dcr_clients.clear()
+        main._register_buckets.clear()
+
+    def test_json_content_type_registers(self):
+        resp = client.post(
+            "/register",
+            content=json.dumps({"redirect_uris": ["https://a/cb"]}),
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 201
+
+    def test_body_without_content_type_is_rejected(self):
+        resp = client.post("/register", content=json.dumps({"redirect_uris": ["https://a/cb"]}))
+        assert resp.status_code == 422
+
+    def test_json_content_type_with_charset_registers(self):
+        resp = client.post(
+            "/register",
+            content=json.dumps({"redirect_uris": ["https://a/cb"]}),
+            headers={"Content-Type": "application/json; charset=utf-8"},
+        )
+        assert resp.status_code == 201
+
+    def test_non_json_content_type_is_rejected(self):
+        resp = client.post(
+            "/register",
+            content=json.dumps({"redirect_uris": ["https://a/cb"]}),
+            headers={"Content-Type": "text/plain"},
+        )
+        assert resp.status_code == 422
 
 
 class TestRegisterRateLimit(unittest.TestCase):

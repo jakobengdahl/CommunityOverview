@@ -25,7 +25,9 @@ import os
 import time
 import urllib.parse
 import uuid
+import warnings
 
+import jwt.warnings
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -40,6 +42,37 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# RFC 7518 §3.2: an HS256 key must be at least as long as the 256-bit hash output.
+MIN_JWT_SIGNING_KEY_BYTES = 32
+
+
+def _warn_if_short_signing_key(key: str) -> None:
+    """Log a warning when the JWT signing key is below the HS256 recommendation.
+
+    Warning only: a short key is still used as-is. The message never includes
+    the key, any part of it, or its exact length.
+    """
+    # surrogateescape: a non-UTF-8 env value must not crash startup here.
+    if len(key.encode("utf-8", "surrogateescape")) < MIN_JWT_SIGNING_KEY_BYTES:
+        logger.warning(
+            "GW_JWT_SIGNING_KEY is shorter than the recommended minimum of %d bytes "
+            "(256 bits) for HS256. Rotate it to a longer random secret.",
+            MIN_JWT_SIGNING_KEY_BYTES,
+        )
+
+
+_warn_if_short_signing_key(config.GW_JWT_SIGNING_KEY)
+
+# PyJWT raises InsecureKeyLengthWarning on every encode and decode with an HMAC
+# key below the same 32 bytes, and its message states the key's EXACT length. The
+# warning above reports the condition without that length on purpose, so leaving
+# the library's version enabled would publish it anyway on the first token
+# issued. Silencing it changes nothing else: it carries no enforcement, and the
+# short key is used as-is either way, warned about once at startup.
+warnings.filterwarnings(
+    "ignore", category=jwt.warnings.InsecureKeyLengthWarning
+)
 
 app = FastAPI(title="MCP OAuth Gateway", version="1.0.0")
 
@@ -393,6 +426,14 @@ async def callback(
 # Token endpoint
 # ---------------------------------------------------------------------------
 
+def _invalid_request(description: str) -> JSONResponse:
+    """RFC 6749 §5.2 error response for a token request that cannot be parsed."""
+    return JSONResponse(
+        {"error": "invalid_request", "error_description": description},
+        status_code=400,
+    )
+
+
 @app.post("/token")
 async def token(request: Request) -> JSONResponse:
     """Exchange an authorization code + PKCE verifier for a gateway JWT.
@@ -402,11 +443,22 @@ async def token(request: Request) -> JSONResponse:
     content_type = request.headers.get("content-type", "")
 
     if "application/json" in content_type:
-        body = await request.json()
+        try:
+            body = await request.json()
+        except (ValueError, RecursionError):
+            return _invalid_request("request body is not valid JSON")
+        if not isinstance(body, dict):
+            return _invalid_request("request body must be a JSON object")
     else:
         # Default: form-encoded
         form = await request.form()
         body = dict(form)
+
+    # A JSON body can carry any type; a non-string code would reach the
+    # code-store lookup as an unhashable key and surface as a 500.
+    fields = ("grant_type", "code", "code_verifier", "redirect_uri")
+    if any(not isinstance(body.get(f, ""), str) for f in fields):
+        return _invalid_request("grant_type, code, code_verifier and redirect_uri must be strings")
 
     grant_type = body.get("grant_type", "")
     code = body.get("code", "")
@@ -419,6 +471,8 @@ async def token(request: Request) -> JSONResponse:
         raise HTTPException(status_code=400, detail="code is required")
     if not code_verifier:
         raise HTTPException(status_code=400, detail="code_verifier is required")
+    if not auth.is_valid_code_verifier(code_verifier):
+        return _invalid_request("code_verifier must be 43-128 characters of [A-Za-z0-9-._~]")
     if not redirect_uri:
         raise HTTPException(status_code=400, detail="redirect_uri is required")
 
@@ -590,4 +644,5 @@ if __name__ == "__main__":
     import uvicorn
 
     port = int(os.environ.get("PORT", 8080))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    # Mirrors the Dockerfile CMD; every proxied route still requires a gateway token.
+    uvicorn.run(app, host="0.0.0.0", port=port)  # nosec B104

@@ -266,7 +266,8 @@ class SqliteProposalStore:
             clauses.append(f"status IN ({placeholders})")
             params.extend(s.value for s in statuses)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        sql = f"SELECT * FROM proposals {where} ORDER BY created_at DESC"
+        # WHERE holds only fixed column clauses and "?" placeholders; values are bound.
+        sql = f"SELECT * FROM proposals {where} ORDER BY created_at DESC"  # nosec B608
         if limit is not None:
             sql += " LIMIT ?"
             params.append(limit)

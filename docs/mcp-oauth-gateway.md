@@ -71,7 +71,7 @@ The change takes effect within a few seconds (no redeployment needed).
 |---|---|---|
 | `GOOGLE_OAUTH_CLIENT_ID` | Yes | OAuth 2.0 Client ID from GCP Console |
 | `GOOGLE_OAUTH_CLIENT_SECRET` | Yes | Injected from Secret Manager |
-| `GW_JWT_SIGNING_KEY` | Yes | Random secret used to sign gateway JWTs (Secret Manager) |
+| `GW_JWT_SIGNING_KEY` | Yes | Random secret used to sign gateway JWTs (Secret Manager). Use at least 32 bytes (256 bits, the HS256 recommendation); a shorter key still works but the gateway logs a warning at startup. |
 | `TEST_USERS` | Yes | Comma-separated allowed emails, e.g. `a@gmail.com,b@scb.se` |
 | `UPSTREAM_MCP_BASE_URL` | Yes | URL of the CommunityOverview instance, e.g. `https://communityoverview-esam-prod-xxx.run.app` |
 | `PUBLIC_BASE_URL` | Yes | Public URL of this gateway, e.g. `https://mcp.esam.communityoverview.example.com` |

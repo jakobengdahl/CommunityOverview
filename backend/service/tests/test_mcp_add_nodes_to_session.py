@@ -95,12 +95,23 @@ class _UnhashingDict(dict):
 
 
 class _RecordingBucket:
+    capacity = float("inf")
+
     def __init__(self):
         self.consumed = []
+        self.keys = []
 
     def consume(self, key, amount):
         self.consumed.append(amount)
+        self.keys.append(key)
         return True
+
+
+def _record_every_bucket(manager):
+    buckets = {attr: _RecordingBucket() for attr in bucket_attrs(manager)}
+    for attr, bucket in buckets.items():
+        setattr(manager, attr, bucket)
+    return buckets
 
 
 class _NoStringForm(Exception):
@@ -602,12 +613,15 @@ class TestAddNodesToSession:
         assert result["skipped"][0] is first
         assert result["skipped"][1] is second
 
-    def test_only_resolvable_ids_draw_from_the_rate_budget(self, tools):
+    def test_every_distinct_id_the_caps_count_draws_from_the_rate_budget_once(
+        self, tools
+    ):
+        """Skipped ids are charged too (they cost a lookup each); ids with no
+        canonical JSON count against no cap and are not resolved, so they are
+        not. The charge is taken once, not again by the write."""
         tools_map, manager = tools
         sid = _session(manager)
-        buckets = {attr: _RecordingBucket() for attr in bucket_attrs(manager)}
-        for attr, bucket in buckets.items():
-            setattr(manager, attr, bucket)
+        buckets = _record_every_bucket(manager)
         cyclic = []
         cyclic.append(cyclic)
 
@@ -619,8 +633,187 @@ class TestAddNodesToSession:
         assert result["success"] is True
         assert result["added"] == ["alpha", "beta"]
         assert {attr: bucket.consumed for attr, bucket in buckets.items()} == {
-            attr: [2] if attr == "_mcp_bucket" else [] for attr in buckets
+            attr: [3] if attr == "_mcp_bucket" else [] for attr in buckets
         }
+        assert buckets["_mcp_bucket"].keys == ["mcp-agent:add_nodes_to_session"]
+
+    def test_a_no_resolvable_nodes_call_draws_from_the_rate_budget(self, tools):
+        tools_map, manager = tools
+        sid = _session(manager)
+        manager._mcp_bucket = _TokenBucket(2.0, 0.0)
+
+        refused = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=["ghost", "phantom", "ghost"]
+        )
+        spent = tools_map["add_nodes_to_session"](session_id=sid, node_ids=["alpha"])
+
+        assert refused["error"] == "no_resolvable_nodes"
+        assert spent["success"] is False
+        assert spent["error"] == "rate_limited"
+        assert manager.get_session(sid).state["node_refs"] == []
+
+    def test_only_unencodable_ids_still_draw_one_unit(self, tools):
+        tools_map, manager = tools
+        sid = _session(manager)
+        buckets = _record_every_bucket(manager)
+        cyclic = []
+        cyclic.append(cyclic)
+
+        result = tools_map["add_nodes_to_session"](session_id=sid, node_ids=[cyclic])
+
+        assert result["error"] == "no_resolvable_nodes"
+        assert buckets["_mcp_bucket"].consumed == [1]
+
+    def test_a_spent_budget_is_refused_before_any_id_is_resolved(self, tmp_path):
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        service = GraphService(storage)
+        tools_map, manager = _wire(storage, service)
+        tools_map["add_nodes"](
+            nodes=[{"id": "alpha", "type": "Initiative", "name": "Alpha"}], edges=[]
+        )
+        sid = _session(manager)
+        manager._mcp_bucket = _TokenBucket(1.0, 0.0)
+        assert manager._mcp_bucket.consume("mcp-agent:add_nodes_to_session", 1.0)
+        resolved_with = []
+        original = service.resolve_session_node_semantics
+
+        def spy(node_ids, **kwargs):
+            resolved_with.append(list(node_ids))
+            return original(node_ids, **kwargs)
+
+        service.resolve_session_node_semantics = spy
+
+        result = tools_map["add_nodes_to_session"](session_id=sid, node_ids=["alpha"])
+
+        assert result == {
+            "success": False,
+            "error": "rate_limited",
+            "message": "Too many session writes; slow down and retry.",
+        }
+        assert resolved_with == []
+        assert manager.get_session(sid).state["node_refs"] == []
+
+    def test_a_call_refused_before_the_resolve_draws_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        service = GraphService(storage)
+        tools_map, manager = _wire(
+            storage, service, max_ops_per_batch=1, max_op_batch_bytes=20
+        )
+        sid = _session(manager)
+        buckets = _record_every_bucket(manager)
+        add = tools_map["add_nodes_to_session"]
+
+        invalid = add(session_id="not-a-session", node_ids=["alpha"])
+        unknown = add(session_id="1234-5678-9012-3456", node_ids=["alpha"])
+        empty = add(session_id=sid, node_ids=[])
+        not_a_list = add(session_id=sid, node_ids="alpha")
+        too_many = add(session_id=sid, node_ids=["alpha", "beta"])
+        too_many_bytes = add(session_id=sid, node_ids=["x" * 30])
+        monkeypatch.setenv(AUTHORIZATION_MODE_ENV, "read-only")
+        denied = add(session_id=sid, node_ids=["alpha"])
+
+        assert invalid["success"] is False
+        assert "Invalid session ID" in invalid["error"]
+        assert "not found" in unknown["error"]
+        assert (
+            empty["error"]
+            == not_a_list["error"]
+            == ("'node_ids' must be a non-empty list")
+        )
+        assert too_many["error"] == "too_large"
+        assert too_many_bytes["error"] == "too_large"
+        assert "size cap" in too_many_bytes["message"]
+        assert denied.get("error_code") == "access_denied"
+        assert all(bucket.consumed == [] for bucket in buckets.values())
+
+    def test_a_call_costing_more_than_the_whole_budget_is_too_large_not_rate_limited(
+        self, tmp_path
+    ):
+        """At default settings the budget holds 200 while the id cap is 500, so
+        201-500 distinct ids could never be admitted however long the caller
+        waited: that is a request to change, not a retryable rate limit. It is
+        refused before the resolve and draws nothing, so a call at the full
+        budget still goes through afterwards."""
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        service = GraphService(storage)
+        tools_map, manager = _wire(storage, service, bucket_refill_per_sec=0.0)
+        tools_map["add_nodes"](
+            nodes=[
+                {"id": f"n{i}", "type": "Actor", "name": f"N{i}"} for i in range(201)
+            ],
+            edges=[],
+        )
+        sid = _session(manager)
+        capacity = manager.mcp_rate_budget_capacity
+        assert capacity == 200 < manager.max_ops_per_batch
+        resolved_with = []
+        original = service.resolve_session_node_semantics
+
+        def spy(node_ids, **kwargs):
+            resolved_with.append(list(node_ids))
+            return original(node_ids, **kwargs)
+
+        service.resolve_session_node_semantics = spy
+        ids = [f"n{i}" for i in range(201)]
+
+        over = tools_map["add_nodes_to_session"](session_id=sid, node_ids=ids)
+        at_capacity = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=ids[:200]
+        )
+
+        assert over["success"] is False
+        assert over["error"] == "too_large"
+        assert "rate budget" in over["message"]
+        assert "200" in over["message"]
+        assert at_capacity["success"] is True
+        assert at_capacity["added"] == ids[:200]
+        assert resolved_with == [ids[:200]]
+
+    def test_the_too_large_message_names_the_mcp_budget_not_the_ops_budget(self, tools):
+        tools_map, manager = tools
+        sid = _session(manager)
+        manager._mcp_bucket = _TokenBucket(2.0, 0.0)
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=["alpha", "beta", "gamma"]
+        )
+
+        assert manager.mcp_rate_budget_capacity == 2
+        assert result["error"] == "too_large"
+        assert "at most 2)" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_a_busy_session_is_charged_exactly_once(self, tools):
+        tools_map, manager = tools
+        sid = _session(manager)
+        buckets = _record_every_bucket(manager)
+        lock = manager._lock(sid)
+        await lock.acquire()
+        try:
+            result = tools_map["add_nodes_to_session"](
+                session_id=sid, node_ids=["alpha", "ghost"]
+            )
+        finally:
+            lock.release()
+
+        assert result["error"] == "busy"
+        assert buckets["_mcp_bucket"].consumed == [2]
+        assert manager.get_session(sid).state["node_refs"] == []
+
+    def test_a_revision_conflict_is_charged_exactly_once(self, tools):
+        tools_map, manager = tools
+        sid = _session(manager)
+        tools_map["add_nodes_to_session"](session_id=sid, node_ids=["alpha"])
+        buckets = _record_every_bucket(manager)
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=["beta", "ghost"], expected_revision=0
+        )
+
+        assert result["error"] == "revision_conflict"
+        assert buckets["_mcp_bucket"].consumed == [2]
 
     def test_an_id_with_no_canonical_json_counts_against_no_cap_and_is_not_resolved(
         self, tmp_path
@@ -797,6 +990,8 @@ class TestAddNodesToSession:
 
         distinct = 400
         node_ids = [CountingId(f"id-{i}") for i in range(distinct)] * 2
+        # Exactly the distinct count: the repeats must not be charged either.
+        manager._mcp_bucket = _TokenBucket(float(distinct), 0.0)
 
         result = tools_map["add_nodes_to_session"](session_id=sid, node_ids=node_ids)
 

@@ -11,6 +11,7 @@ Responsibilities:
 import base64
 import hashlib
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -76,8 +77,18 @@ def compute_s256_challenge(verifier: str) -> str:
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
 
+# RFC 7636 §4.1: 43-128 characters from the unreserved set.
+_CODE_VERIFIER_RE = re.compile(r"[A-Za-z0-9\-._~]{43,128}")
+
+
+def is_valid_code_verifier(code_verifier: str) -> bool:
+    return _CODE_VERIFIER_RE.fullmatch(code_verifier) is not None
+
+
 def verify_pkce(code_verifier: str, stored_challenge: str) -> bool:
     """Return True when SHA256(code_verifier) matches the stored challenge."""
+    if not is_valid_code_verifier(code_verifier):
+        return False
     computed = compute_s256_challenge(code_verifier)
     return computed == stored_challenge
 

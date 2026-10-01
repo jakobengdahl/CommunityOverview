@@ -19,7 +19,6 @@ import {
   annotationsToOverlays,
   annotationDocumentToLegacyMetadata,
   legacyMetadataToAnnotationDocument,
-  savedViewMetadataToCanvasMetadata,
 } from './utils/sessionAnnotations';
 import { serverStateToMirror, useSharedSession } from './hooks/useSharedSession';
 import { DEFAULT_REQUEST_TIMEOUT_MS as SYNC_REQUEST_TIMEOUT_MS } from './services/sessionSyncClient';
@@ -30,15 +29,32 @@ import { useFullscreenCanvas } from './hooks/useFullscreenCanvas';
 import FullscreenExitButton from './components/FullscreenExitButton';
 import { decideClearAction } from './utils/clearBoard';
 import { dropIntoFreshSession, receiveRemoteSessionDeleted } from './utils/sessionLifecycle';
-import { applyEdgeUpdate, confirmNodeDelete } from './utils/sessionScopedGraphEdits';
+import {
+  agentCreateToCanvas,
+  agentUpdateEntries,
+  applyEdgeUpdate,
+  confirmNodeDelete,
+  connectNodes,
+  createDialogNode,
+  createdNodesToCanvas,
+  deleteEdgeEverywhere,
+  expandNode,
+  loadSavedViewNode,
+  openAgentEditor,
+  persistNewNodes,
+  persistNodeUpdates,
+  setEdgeType,
+} from './utils/sessionScopedGraphEdits';
 import { createAnnotationChangeScheduler } from './utils/annotationChangeScheduler';
 import { createSelfEchoDedup } from './utils/selfEchoDedup';
 import { applyIngestedImageOptimistically } from './utils/imageIngestApply';
 import { shouldPersistSnapshot } from './utils/sessionSnapshotGuard';
 import './App.css';
 
-// Ceiling on how long resyncFromServer's api.getSession() call may stay
-// in flight before its reentrancy guard self-heals. api.js's fetch carries
+// Ceiling on how long one resyncFromServer call may stay in flight before its
+// reentrancy guard self-heals. The call spans up to RESYNC_MAX_FETCHES
+// api.getSession() requests plus the replay's node fetches, and the timer
+// covers all of them together, not each request. api.js's fetch carries
 // no timeout (unlike SessionSyncClient's own outbound ops POST, which bounds
 // itself against exactly this: "SSE deployments commonly sit behind Cloud
 // Run / an ingress that can hold a half-open request open indefinitely" —
@@ -274,9 +290,13 @@ function App() {
   // the sync baseline as if it had synced successfully, and gets replayed
   // onto the canvas — silently undoing the very rejection the "change not
   // saved" notice just reported. The reentrancy guard suppresses onDropped's
-  // *own* resync call while one is already in flight, so the in-flight call
-  // is the only thing that will ever act on this — it reads and clears this
-  // set for itself right before finalising which ops to fold/replay.
+  // *own* resync call while one is already in flight for the same sync
+  // client and its guard timer has not fired, so that in-flight call is the
+  // only thing that will ever act on this — it reads and clears this set for
+  // itself right before finalising which ops to fold/replay. A resync for a
+  // newer client, or one started after the guard timer fired, is not
+  // suppressed: it supersedes the older call by token, which stops at its
+  // next checkpoint, so whichever call reads this set next is the newer one.
   const recentlyDroppedOpsRef = useRef(new Set());
   // MCP tool-result push application (external AI agent commands → canvas) and
   // the legacy SSE push stream. The op-stream `command` events are wired below
@@ -672,7 +692,8 @@ function App() {
         // that flushes and gets fully confirmed *during* that request).
         const pendingOpsBefore = capturePendingOps();
         // Stream ops keep arriving while the GET is in flight, and each one
-        // is applied to the canvas and advances the client's appliedSeq. A
+        // is applied to the canvas and advances the client's appliedSeq (so
+        // does this client's own echo, which is not re-applied). A
         // payload whose seq is below that predates them, and the wholesale
         // reload below would wipe them for good (the stream never resends
         // them), so fetch again instead. Bounded: under a steady op stream
@@ -1114,60 +1135,15 @@ function App() {
     async (nodeId, nodeData) => {
       // If it's a SavedView, load it directly
       if (nodeData.type === 'SavedView' || nodeData.nodeType === 'SavedView') {
-        try {
-          const nodeIds = nodeData.metadata?.node_ids || [];
-          const positions = nodeData.metadata?.positions || {};
-          const savedEdges = nodeData.metadata?.edges || [];
-          const savedViewAnnotations = savedViewMetadataToCanvasMetadata(nodeData.metadata || {});
-          if (nodeIds.length > 0) {
-            clearVisualization();
-            const details = await Promise.all(
-              nodeIds.map((id) => api.getNodeDetails(id).catch(() => null))
-            );
-            const loadedNodes = details
-              .filter((d) => d?.success)
-              .map((d) => {
-                const n = d.node;
-                if (positions[n.id]) {
-                  return { ...n, _savedPosition: positions[n.id] };
-                }
-                return n;
-              });
-            if (loadedNodes.length > 0) {
-              let edgesToLoad = savedEdges.length > 0 ? savedEdges : [];
-              if (edgesToLoad.length === 0) {
-                const loadedIds = new Set(loadedNodes.map((n) => n.id));
-                const savedEdgeIds = new Set(nodeData.metadata?.edge_ids || []);
-                for (const d of details) {
-                  if (d?.edges) {
-                    const relevant = d.edges.filter(
-                      (e) =>
-                        loadedIds.has(e.source) &&
-                        loadedIds.has(e.target) &&
-                        (savedEdgeIds.size === 0 || savedEdgeIds.has(e.id))
-                    );
-                    edgesToLoad.push(...relevant);
-                  }
-                }
-              }
-              const edgeMap = new Map(edgesToLoad.map((e) => [e.id, e]));
-              addNodesToVisualization(loadedNodes, Array.from(edgeMap.values()));
-              if (savedViewAnnotations.groups.length > 0) {
-                setPendingGroups({
-                  groups: savedViewAnnotations.groups,
-                  parentIds: savedViewAnnotations.parentIds,
-                });
-              }
-              if (savedViewAnnotations.annotations.length > 0) {
-                setPendingAnnotations(savedViewAnnotations.annotations);
-              }
-            }
-          }
-          showNotification('info', `Loaded saved view: ${nodeData.name || nodeData.label}`);
-        } catch (err) {
-          console.error('Error loading saved view:', err);
-          showNotification('error', 'Could not load saved view');
-        }
+        await loadSavedViewNode({
+          nodeData,
+          getNodeDetails: api.getNodeDetails,
+          clearVisualization,
+          addNodesToVisualization,
+          setPendingGroups,
+          setPendingAnnotations,
+          showNotification,
+        });
         return;
       }
 
@@ -1194,50 +1170,29 @@ function App() {
 
   // Callback: Expand node to show related nodes
   const handleExpand = useCallback(
-    async (nodeId, nodeData) => {
-      try {
-        const result = await api.getRelatedNodes(nodeId, { depth: 1 });
-        if (result.nodes && result.nodes.length > 0) {
-          const existingIds = new Set(nodes.map((n) => n.id));
-          const newCount = result.nodes.filter((n) => !existingIds.has(n.id)).length;
-          addNodesToVisualization(result.nodes, result.edges || []);
-          if (newCount > 0) {
-            showNotification('success', `Added ${newCount} new node${newCount !== 1 ? 's' : ''}`);
-          } else {
-            showNotification('info', 'All related nodes already in view');
-          }
-        } else {
-          showNotification('info', 'No related nodes found');
-        }
-      } catch (error) {
-        console.error('Error expanding node:', error);
-        showNotification('error', 'Could not expand node');
-      }
-    },
-    [nodes, addNodesToVisualization, showNotification]
+    (nodeId) =>
+      expandNode({
+        nodeId,
+        getRelatedNodes: api.getRelatedNodes,
+        addNodesToVisualization,
+        showNotification,
+      }),
+    [addNodesToVisualization, showNotification]
   );
 
   // Callback: Edit node
   const handleEdit = useCallback(
     async (nodeId, nodeData) => {
       if (nodeData.type === 'Agent') {
-        try {
-          let subscriptionNode = null;
-          const subId = nodeData.metadata?.subscription_id;
-
-          if (subId) {
-            const result = await api.getNodeDetails(subId);
-            if (result.success) {
-              subscriptionNode = result.node;
-            }
-          }
-
-          setEditingAgentData({ agent: nodeData, subscription: subscriptionNode });
-          setShowAgentDialog(true);
-        } catch (error) {
-          console.error('Error preparing agent editor:', error);
-          showNotification('error', 'Could not load agent details');
-        }
+        await openAgentEditor({
+          agent: nodeData,
+          getNodeDetails: api.getNodeDetails,
+          openEditor: (data) => {
+            setEditingAgentData(data);
+            setShowAgentDialog(true);
+          },
+          showNotification,
+        });
       } else if (nodeData.type === 'EventSubscription') {
         setEditingSubscriptionData(nodeData);
         setShowSubscriptionDialog(true);
@@ -1319,23 +1274,14 @@ function App() {
 
   // Callback: Delete edge (from backend and visualization)
   const handleDeleteEdge = useCallback(
-    async (edgeId) => {
-      try {
-        const result = await api.deleteEdge(edgeId);
-        if (!result?.success) {
-          throw new Error('Could not delete edge');
-        }
-        removeEdge(edgeId);
-        // Fan the deletion out to collaborators. Both endpoints already exist on
-        // their canvases, so nothing else prompts them to drop the edge (no node
-        // was removed); without this the edge lingers on their canvas until reload.
-        syncRef.current?.sendEdgesRemoved([edgeId]);
-        showNotification('success', 'Edge deleted');
-      } catch (error) {
-        console.error('Error deleting edge:', error);
-        showNotification('error', 'Could not delete edge');
-      }
-    },
+    (edgeId) =>
+      deleteEdgeEverywhere({
+        edgeId,
+        deleteEdge: api.deleteEdge,
+        removeEdge,
+        syncRef,
+        showNotification,
+      }),
     [removeEdge, showNotification, syncRef]
   );
 
@@ -1358,60 +1304,42 @@ function App() {
         editingEdge,
         updates,
         updateEdge: api.updateEdge,
-        nodes,
-        edges,
-        updateVisualization,
+        updateEdgeData,
         syncRef,
         setEditingEdge,
         showNotification,
       });
     },
-    [editingEdge, setEditingEdge, nodes, edges, updateVisualization, showNotification, syncRef]
+    [editingEdge, setEditingEdge, updateEdgeData, showNotification, syncRef]
   );
 
   // Callback: Change an edge's relationship type from the context menu.
   // Persists to the backend and updates the single edge in place so groups and
   // node positions are preserved.
   const handleSetEdgeType = useCallback(
-    async (edgeId, type) => {
-      try {
-        await api.updateEdge(edgeId, { type: type || null });
-        const nextType = type || 'RELATES_TO';
-        updateEdgeData(edgeId, { type: nextType });
-        // Fan the type change out to collaborators: both endpoints already exist
-        // on their canvases, so nothing else prompts them to re-render the edge;
-        // without this they keep showing the old type until reload.
-        syncRef.current?.sendEdgesUpdated([{ id: edgeId, type: nextType }]);
-        showNotification('success', 'Connection type updated');
-      } catch (error) {
-        console.error('Error updating edge type:', error);
-        showNotification('error', 'Could not update connection');
-      }
-    },
+    (edgeId, type) =>
+      setEdgeType({
+        edgeId,
+        type,
+        updateEdge: api.updateEdge,
+        updateEdgeData,
+        syncRef,
+        showNotification,
+      }),
     [updateEdgeData, showNotification, syncRef]
   );
 
   // Callback: Connect nodes (from drag-connect in canvas)
   const handleConnect = useCallback(
-    async (params) => {
-      try {
-        const result = await api.addEdge(params.source, params.target);
-        if (result.success && result.edge) {
-          addNodesToVisualization([], [result.edge]);
-          // Fan the new edge out to collaborators. Both endpoints already exist
-          // on their canvases, so nothing else prompts them to re-hydrate it
-          // (no node was added); without this the edge renders only locally.
-          syncRef.current?.sendEdgesAdded([result.edge]);
-        } else {
-          // The edge is only drawn once persisted, so a non-success response must
-          // surface an error rather than silently leaving nothing on the canvas.
-          showNotification('error', 'Could not create connection');
-        }
-      } catch (error) {
-        console.error('Error creating edge:', error);
-        showNotification('error', 'Could not create connection');
-      }
-    },
+    (params) =>
+      connectNodes({
+        source: params.source,
+        target: params.target,
+        addEdge: api.addEdge,
+        addNodesToVisualization,
+        syncRef,
+        showNotification,
+      }),
     [addNodesToVisualization, showNotification, syncRef]
   );
 
@@ -1852,19 +1780,23 @@ function App() {
     async (data) => {
       try {
         if (data.id && data.updates) {
-          await api.updateNode(data.id, data.updates);
-          const newNodes = nodes.map((n) => (n.id === data.id ? { ...n, ...data.updates } : n));
-          updateVisualization(newNodes, edges);
-          setEditingSubscriptionData(null);
+          await persistNodeUpdates({
+            entries: [{ id: data.id, updates: data.updates }],
+            updateNode: api.updateNode,
+            updateVisualization,
+            onApplied: () => setEditingSubscriptionData(null),
+          });
           showNotification(
             'success',
             t('notifications.subscription_updated', { name: data.updates.name })
           );
         } else {
-          const result = await api.addNodes([data], []);
-          if (result.added_node_ids?.length > 0) {
-            addNodesToVisualization([{ ...data, id: result.added_node_ids[0] }], []);
-          }
+          await persistNewNodes({
+            nodes: [data],
+            addNodes: api.addNodes,
+            addNodesToVisualization,
+            toCanvas: (result) => createdNodesToCanvas([data], result),
+          });
           showNotification('success', t('notifications.subscription_created', { name: data.name }));
         }
       } catch (error) {
@@ -1877,7 +1809,7 @@ function App() {
         );
       }
     },
-    [addNodesToVisualization, nodes, edges, updateVisualization, showNotification, t]
+    [addNodesToVisualization, updateVisualization, showNotification, t]
   );
 
   // Save agent nodes (create or update)
@@ -1886,44 +1818,23 @@ function App() {
       try {
         if (data.agentId) {
           // UPDATE
-          const { agentId, agentUpdates, subscriptionId, subscriptionUpdates } = data;
-
-          await api.updateNode(agentId, agentUpdates);
-          if (subscriptionId && subscriptionUpdates) {
-            await api.updateNode(subscriptionId, subscriptionUpdates);
-          }
-
-          const newNodes = nodes.map((n) => {
-            if (n.id === agentId) return { ...n, ...agentUpdates };
-            if (n.id === subscriptionId) return { ...n, ...subscriptionUpdates };
-            return n;
+          await persistNodeUpdates({
+            entries: agentUpdateEntries(data),
+            updateNode: api.updateNode,
+            updateVisualization,
           });
-          updateVisualization(newNodes, edges);
 
           showNotification('success', 'Agent updated');
         } else {
           // CREATE
           const { nodes: agentNodes, edges: agentEdges } = data;
-          const result = await api.addNodes(agentNodes, agentEdges);
-
-          if (result.added_node_ids && result.added_node_ids.length > 0) {
-            const nodesWithIds = agentNodes.map((node, index) => ({
-              ...node,
-              id: result.added_node_ids[index] || node.id,
-            }));
-            const edgesWithIds = agentEdges.map((edge, index) => ({
-              ...edge,
-              id: result.added_edge_ids?.[index] || edge.id,
-              source:
-                result.added_node_ids[agentNodes.findIndex((n) => n.type === 'Agent')] ||
-                edge.source,
-              target:
-                result.added_node_ids[
-                  agentNodes.findIndex((n) => n.type === 'EventSubscription')
-                ] || edge.target,
-            }));
-            addNodesToVisualization(nodesWithIds, edgesWithIds);
-          }
+          await persistNewNodes({
+            nodes: agentNodes,
+            edges: agentEdges,
+            addNodes: api.addNodes,
+            addNodesToVisualization,
+            toCanvas: (result) => agentCreateToCanvas(agentNodes, agentEdges, result),
+          });
 
           const agentNode = agentNodes.find((n) => n.type === 'Agent');
           showNotification('success', `Agent "${agentNode?.name || 'Agent'}" created`);
@@ -1933,7 +1844,7 @@ function App() {
         showNotification('error', 'Could not save agent');
       }
     },
-    [nodes, edges, addNodesToVisualization, updateVisualization, showNotification]
+    [addNodesToVisualization, updateVisualization, showNotification]
   );
 
   // Callback: Create node from toolbar
@@ -1949,26 +1860,37 @@ function App() {
     [schema]
   );
 
-  // Handle created node from CreateNodeDialog
-  const handleNodeCreated = useCallback(
+  // Touch has no drag-to-canvas step to choose a position, so a node
+  // created via a toolbar tap is centered in the viewport directly
+  // (reusing the existing focus/center-camera primitive) instead of
+  // landing wherever the layout defaults new nodes to. Desktop's
+  // click-to-create and drag-to-canvas paths are unchanged.
+  //
+  // Deferred like FloatingSearch's identical newly-added-node case
+  // (FloatingSearch.jsx): the canvas's own node state only picks up
+  // addNodesToVisualization's update on a later render, so focusing
+  // synchronously would target a node the canvas doesn't know about yet.
+  const focusCreatedNode = useCallback(
     (createdNode) => {
-      addNodesToVisualization([createdNode], []);
-      showNotification('success', `${createdNode.type} "${createdNode.name}" created`);
-      // Touch has no drag-to-canvas step to choose a position, so a node
-      // created via a toolbar tap is centered in the viewport directly
-      // (reusing the existing focus/center-camera primitive) instead of
-      // landing wherever the layout defaults new nodes to. Desktop's
-      // click-to-create and drag-to-canvas paths are unchanged.
-      //
-      // Deferred like FloatingSearch's identical newly-added-node case
-      // (FloatingSearch.jsx): the canvas's own node state only picks up
-      // addNodesToVisualization's update on a later render, so focusing
-      // synchronously would target a node the canvas doesn't know about yet.
       if (isCoarsePointer) {
         setTimeout(() => setFocusNodeId(createdNode.id), 100);
       }
     },
-    [addNodesToVisualization, showNotification, isCoarsePointer, setFocusNodeId]
+    [isCoarsePointer, setFocusNodeId]
+  );
+
+  // Create a node from CreateNodeDialog. API errors propagate so the dialog
+  // can show them.
+  const handleNodeCreated = useCallback(
+    (node) =>
+      createDialogNode({
+        node,
+        addNodes: api.addNodes,
+        addNodesToVisualization,
+        showNotification,
+        onDrawn: focusCreatedNode,
+      }),
+    [addNodesToVisualization, showNotification, focusCreatedNode]
   );
 
   // Callback: Save a skill node (create or update)
@@ -1977,16 +1899,19 @@ function App() {
       try {
         if ('id' in skillData) {
           const { id, updates } = skillData;
-          await api.updateNode(id, updates);
-          const newNodes = nodes.map((n) => (n.id === id ? { ...n, ...updates } : n));
-          updateVisualization(newNodes, edges);
+          await persistNodeUpdates({
+            entries: [{ id, updates }],
+            updateNode: api.updateNode,
+            updateVisualization,
+          });
           showNotification('success', 'Skill updated');
         } else {
-          const result = await api.addNodes([skillData], []);
-          if (result.added_node_ids?.length > 0) {
-            const nodeWithId = { ...skillData, id: result.added_node_ids[0] };
-            addNodesToVisualization([nodeWithId], []);
-          }
+          await persistNewNodes({
+            nodes: [skillData],
+            addNodes: api.addNodes,
+            addNodesToVisualization,
+            toCanvas: (result) => createdNodesToCanvas([skillData], result),
+          });
           showNotification('success', `${skillData.type} "${skillData.name}" created`);
         }
       } catch (error) {
@@ -1994,7 +1919,7 @@ function App() {
         showNotification('error', 'Could not save skill');
       }
     },
-    [nodes, edges, updateVisualization, addNodesToVisualization, showNotification]
+    [updateVisualization, addNodesToVisualization, showNotification]
   );
 
   const handleCreateAKC = useCallback(() => {
@@ -2007,16 +1932,19 @@ function App() {
       try {
         if (nodeData.id) {
           const { id, ...updates } = nodeData;
-          await api.updateNode(id, updates);
-          const newNodes = nodes.map((n) => (n.id === id ? { ...n, ...updates } : n));
-          updateVisualization(newNodes, edges);
+          await persistNodeUpdates({
+            entries: [{ id, updates }],
+            updateNode: api.updateNode,
+            updateVisualization,
+          });
           showNotification('success', 'Knowledge collection updated');
         } else {
-          const result = await api.addNodes([nodeData], []);
-          if (result.added_node_ids && result.added_node_ids.length > 0) {
-            const withId = { ...nodeData, id: result.added_node_ids[0] };
-            addNodesToVisualization([withId], []);
-          }
+          await persistNewNodes({
+            nodes: [nodeData],
+            addNodes: api.addNodes,
+            addNodesToVisualization,
+            toCanvas: (result) => createdNodesToCanvas([nodeData], result),
+          });
           showNotification('success', `Collection "${nodeData.name}" created`);
         }
       } catch (error) {
@@ -2024,7 +1952,7 @@ function App() {
         showNotification('error', 'Could not save knowledge collection');
       }
     },
-    [nodes, edges, addNodesToVisualization, updateVisualization, showNotification]
+    [addNodesToVisualization, updateVisualization, showNotification]
   );
 
   // Callback: Context menu action triggered from schema-defined callback items
@@ -2412,17 +2340,19 @@ function App() {
   const handleNodeUpdate = useCallback(
     async (nodeId, updates) => {
       try {
-        await api.updateNode(nodeId, updates);
-        const newNodes = nodes.map((n) => (n.id === nodeId ? { ...n, ...updates } : n));
-        updateVisualization(newNodes, edges);
-        closeEditingNode();
+        await persistNodeUpdates({
+          entries: [{ id: nodeId, updates }],
+          updateNode: api.updateNode,
+          updateVisualization,
+          onApplied: closeEditingNode,
+        });
         showNotification('success', 'Node updated');
       } catch (error) {
         console.error('Error updating node:', error);
         showNotification('error', 'Could not update node');
       }
     },
-    [nodes, edges, updateVisualization, closeEditingNode, showNotification]
+    [updateVisualization, closeEditingNode, showNotification]
   );
 
   // Modal dialog open/close (and edit-target) state, bundled for AppDialogs
@@ -2725,6 +2655,8 @@ function App() {
             ariaKindShape: t('context_menu.aria_kind_shape'),
             ariaKindIcon: t('context_menu.aria_kind_icon'),
             ariaKindVoteDot: t('context_menu.aria_kind_vote_dot'),
+            ariaKindHeatmap: t('context_menu.aria_kind_heatmap'),
+            heatmapIntensity: t('context_menu.heatmap_intensity'),
             ariaKindImage: t('context_menu.aria_kind_image'),
             ariaKindArrow: t('context_menu.aria_kind_arrow'),
             ariaKindFreehand: t('context_menu.aria_kind_freehand'),
@@ -2759,6 +2691,7 @@ function App() {
             iconPickerOpen: t('annotation_toolbox.icon_picker_open'),
             iconPicker: t('annotation_toolbox.icon_picker'),
             voteDot: t('annotation_toolbox.vote_dot'),
+            heatmap: t('annotation_toolbox.heatmap'),
             image: t('annotation_toolbox.image'),
             freehand: t('annotation_toolbox.freehand'),
             noteHint: t('annotation_toolbox.note_hint'),
@@ -2772,6 +2705,7 @@ function App() {
             shapeProcessArrowHint: t('annotation_toolbox.shape_process_arrow_hint'),
             iconHint: t('annotation_toolbox.icon_hint'),
             voteDotHint: t('annotation_toolbox.vote_dot_hint'),
+            heatmapHint: t('annotation_toolbox.heatmap_hint'),
             imageHint: t('annotation_toolbox.image_hint'),
             freehandHint: t('annotation_toolbox.freehand_hint'),
             select: t('annotation_toolbox.select'),

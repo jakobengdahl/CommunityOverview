@@ -2,8 +2,10 @@
 # CI Pipeline – Test, Build, and Publish Docker Images
 # =============================================================================
 # This workflow:
-#   1. Runs tests on every push and pull request
-#   2. Builds and publishes both application images to GHCR on branch pushes
+#   1. Runs tests on pushes to main, preview and prod (and v* tags) and on
+#      pull requests targeting those branches
+#   2. Builds and publishes both application images to GHCR on pushes to
+#      preview and prod and on v* tags only; a push to main runs no build
 #   3. Emits artifact metadata that the infra repo consumes for deployment
 #
 # Responsibilities of this repo:
@@ -23,8 +25,15 @@
 # Tags applied (see "Extract metadata" steps for full logic):
 #   sha-<commit>          immutable, used as the canonical artifact reference
 #   dev                   floating tag, latest successful build from preview branch
-#   latest                floating tag, latest successful build from prod branch
-#   v<semver>             applied only when a version tag is pushed
+#   latest                floating tag, moved by a successful build of the prod
+#                         branch AND by a non-pre-release semver v* tag push,
+#                         whichever ran last: no `flavor:` is set, so
+#                         metadata-action's default `latest=auto` adds it to
+#                         such tag pushes on top of the explicit prod rule
+#   <major>.<minor>.<patch>, <major>.<minor>
+#                         applied only when a version tag is pushed; the
+#                         leading `v` is stripped (v1.2.3 -> 1.2.3 and 1.2),
+#                         and a pre-release tag gets the full version only
 #
 # Cost control (see detect-changes + the *-tests gate jobs below):
 #   - The heavy test jobs run only when service code actually changed and the
@@ -380,7 +389,42 @@ jobs:
         run: pip install -r services/mcp_oauth_gateway/requirements-dev.txt
 
       - name: Run gateway tests
-        run: pytest test_oauth_flow.py -q
+        run: pytest test_oauth_flow.py test_upstream_auth.py test_lockfiles.py -q
+        working-directory: services/mcp_oauth_gateway
+
+      # The Docker image installs the runtime lock with --require-hashes, but
+      # images build only on deploy-branch pushes; install it the same way, on
+      # the image's Python version, so a bad hash or an unresolvable lock fails
+      # at PR time. pip hashes only the wheels it downloads, and several locked
+      # packages ship one wheel per CPython version, so the version must match.
+      - name: Read the image's Python version
+        id: image-python
+        # [[:space:]] follows the locale: the runner's C.UTF-8 counts U+2003 as
+        # space. C keeps it to ASCII, as test_lockfiles.py's parser does.
+        env:
+          LC_ALL: C
+        run: |
+          # The final stage is the one the image runs, so read its (last) FROM line.
+          version=$(awk 'tolower($1) == "from" { line = $0 } END { print line }' Dockerfile \
+            | sed -En 's/^[[:space:]]*[Ff][Rr][Oo][Mm][[:space:]]+(--platform=[^[:space:]]+[[:space:]]+)?([^[:space:]]*\/)?python:([0-9]+\.[0-9]+(\.[0-9]+)?).*/\3/p')
+          if [ -z "$version" ]; then
+            echo "::error::Could not read the Python version from the last FROM line in Dockerfile"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+        working-directory: services/mcp_oauth_gateway
+
+      - name: Set up the image's Python
+        id: runtime-python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ steps.image-python.outputs.version }}
+
+      - name: Verify the runtime lock installs with hashes
+        run: |
+          "${{ steps.runtime-python.outputs.python-path }}" -m venv "$RUNNER_TEMP/gw-runtime"
+          "$RUNNER_TEMP/gw-runtime/bin/pip" install --require-hashes -r requirements.txt
+          "$RUNNER_TEMP/gw-runtime/bin/pip" check
         working-directory: services/mcp_oauth_gateway
 
   # Gate carrying the required-check name "Gateway tests". Same semantics as the
@@ -489,6 +533,67 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: mobile-e2e-report
+          path: frontend/web/playwright-report/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Desktop e2e – the Playwright specs under the `chromium` project (desktop
+  # shell, chat panel with /ui/chat mocked via page.route, two-client shared
+  # session). Selected by project rather than by file so a new desktop spec is
+  # picked up without editing this job; the project's testIgnore keeps the
+  # mobile specs out. Before this job existed these specs ran nowhere and went
+  # stale against the UI unnoticed.
+  #
+  # NON-REQUIRED by design, on the same terms as mobile-e2e above: no gate job,
+  # absent from branch protection and from the build job's `needs`. A sibling
+  # rather than an extra step in mobile-e2e so a desktop failure neither hides
+  # nor is hidden by a mobile one, and each keeps its own report artifact.
+  # ---------------------------------------------------------------------------
+  desktop-e2e:
+    name: Desktop e2e (non-required)
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    timeout-minutes: 20
+    if: >-
+      needs.detect-changes.outputs.service_code == 'true' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install backend dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      # No `--with-deps`, for the reason given on mobile-e2e.
+      - name: Install Playwright browser
+        run: npx playwright install chromium
+        working-directory: frontend/web
+
+      - name: Run desktop e2e tests
+        run: npx playwright test --project=chromium
+        working-directory: frontend/web
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-e2e-report
           path: frontend/web/playwright-report/
           retention-days: 7
 

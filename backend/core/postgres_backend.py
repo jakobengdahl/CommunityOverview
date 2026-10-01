@@ -579,13 +579,35 @@ class PostgresGraphPersistenceBackend:
         metadata = dict(row[0] or {})
         claimed = metadata.get(GRAPH_IDENTITY_KEY)
         if claimed is None:
-            metadata[GRAPH_IDENTITY_KEY] = self._graph_name
-            conn.execute(
-                sql.SQL("UPDATE {} SET doc = %s").format(self._table("graph_metadata")),
-                (psycopg.types.json.Jsonb(metadata),),
-            )
-            self._graph_identity_checked = True
-            return
+            # Conditional, because the read above took no lock: another
+            # instance may have claimed since. Under READ COMMITTED an UPDATE
+            # that waited on its row lock re-checks the WHERE against the
+            # committed row, so the loser matches nothing and reads the
+            # winner's claim below rather than overwriting it. Under
+            # REPEATABLE READ it fails on serialization instead, which
+            # overwrites nothing either.
+            claimed = conn.execute(
+                sql.SQL(
+                    "UPDATE {} SET doc = doc || jsonb_build_object(%s::text, %s::text)"
+                    " WHERE doc ->> %s IS NULL RETURNING doc ->> %s"
+                ).format(self._table("graph_metadata")),
+                (
+                    GRAPH_IDENTITY_KEY,
+                    self._graph_name,
+                    GRAPH_IDENTITY_KEY,
+                    GRAPH_IDENTITY_KEY,
+                ),
+            ).fetchone()
+            if claimed is None:
+                claimed = conn.execute(
+                    sql.SQL("SELECT doc ->> %s FROM {} LIMIT 1").format(
+                        self._table("graph_metadata")
+                    ),
+                    (GRAPH_IDENTITY_KEY,),
+                ).fetchone()
+                if claimed is None:
+                    return
+            claimed = claimed[0]
         if claimed != self._graph_name:
             raise GraphIdentityCollision(
                 f"PostgreSQL schema {self.schema!r} is already claimed by "

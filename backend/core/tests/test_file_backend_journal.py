@@ -88,6 +88,15 @@ def backend(tmp):
 _BACKEND_LOGGER = "backend.core.storage_backends"
 
 
+class _Emitted(logging.Handler):
+    def __init__(self):
+        super().__init__(level=logging.WARNING)
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+
 @pytest.fixture
 def reported(caplog, capsys):
     """What the file backend reported since the previous call, one message per
@@ -106,15 +115,34 @@ def reported(caplog, capsys):
         ]
         assert not louder, f"reported above WARNING: {louder}"
 
-    # A cursor rather than caplog.clear(): on a pytest whose clear() rebinds
-    # the record list instead of emptying it, the list the teardown check
-    # reads detaches at the first clear, and nothing after it is looked at.
-    seen = 0
+    # The records already taken, by identity, rather than caplog.clear(): on
+    # a pytest whose clear() rebinds the record list instead of emptying it,
+    # the list the teardown check reads detaches at the first clear. And a
+    # test that clears caplog itself would otherwise shift new records under
+    # a cursor, so a check that nothing was reported passed over them unread.
+    taken = []
+    # A clear before the first read leaves nothing taken to compare against,
+    # so the backend's records are also counted on a handler of the
+    # fixture's own, which no clear reaches. Setup's records are caplog's
+    # setup list, not the one read here.
+    emitted = _Emitted()
+    backend_logger = logging.getLogger(_BACKEND_LOGGER)
+    backend_logger.addHandler(emitted)
 
     def take() -> str:
-        nonlocal seen
-        fresh = caplog.records[seen:]
-        seen += len(fresh)
+        records = caplog.records
+        assert records[: len(taken)] == taken, (
+            "caplog was cleared under the reported fixture; read reports "
+            "through it instead"
+        )
+        fresh = records[len(taken) :]
+        held = {id(record) for record in records}
+        held.update(id(record) for record in caplog.get_records("setup"))
+        assert all(id(record) in held for record in emitted.records), (
+            "caplog was cleared under the reported fixture; read reports "
+            "through it instead"
+        )
+        taken.extend(fresh)
         messages = [
             record.getMessage()
             for record in fresh
@@ -126,8 +154,40 @@ def reported(caplog, capsys):
         assert not leaked, f"a report went to stdout: {leaked}"
         return "\n".join(messages)
 
-    yield take
+    try:
+        yield take
+    finally:
+        backend_logger.removeHandler(emitted)
     assert_nothing_louder(caplog.get_records("call") + caplog.get_records("teardown"))
+
+
+@pytest.mark.parametrize("after_clear", [1, 3])
+def test_the_reported_fixture_refuses_a_caplog_cleared_under_it(
+    caplog, reported, after_clear
+):
+    """A clear behind the fixture's back fails the next read, whether fewer or
+    more records have arrived since than it had already taken: a cursor would
+    skip those new records, and a check that nothing was reported pass."""
+    backend_log = logging.getLogger(_BACKEND_LOGGER)
+    backend_log.warning("first")
+    backend_log.warning("second")
+    assert reported() == "first\nsecond"
+    caplog.clear()
+    for n in range(after_clear):
+        backend_log.warning("after the clear %d", n)
+    with pytest.raises(AssertionError, match="caplog was cleared"):
+        reported()
+
+
+def test_the_reported_fixture_refuses_a_caplog_cleared_before_its_first_read(
+    caplog, reported
+):
+    """With nothing taken yet there is nothing to compare the records
+    against, so the record the clear dropped would go unread."""
+    logging.getLogger(_BACKEND_LOGGER).warning("before the clear")
+    caplog.clear()
+    with pytest.raises(AssertionError, match="caplog was cleared"):
+        reported()
 
 
 def _assert_dropped_tail_reported(report: str, journal_path, *, parsed: bool):
@@ -535,7 +595,7 @@ class TestFailureReporting:
             storage.flush()
 
     def test_a_failed_checkpoint_at_shutdown_is_reported_not_swallowed(
-        self, tmp, monkeypatch, capsys
+        self, tmp, monkeypatch, storage_log
     ):
         storage = GraphStorage(json_path=str(tmp / "g.json"))
         storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="A")], [])
@@ -546,7 +606,9 @@ class TestFailureReporting:
 
         storage.shutdown_events()  # must not raise out of the shutdown hook
 
-        assert "checkpoint at shutdown failed" in capsys.readouterr().out
+        assert any(
+            "checkpoint at shutdown failed" in m for m in storage_log()[logging.WARNING]
+        )
         # The journal still holds the mutation for the next start.
         assert len(_lines(storage._persistence_backend.journal_path)) == 1
 
@@ -1861,7 +1923,7 @@ class TestResyncFlagLockDiscipline:
 
 class TestSaveNowFlagHandling:
     def test_save_now_keeps_the_flag_raised_until_it_actually_succeeds(
-        self, tmp, capsys
+        self, tmp, storage_log
     ):
         """_save_now is the last-resort synchronous write once the executor
         is gone. If its own write also fails, the flag it leaves must stay
@@ -1870,7 +1932,7 @@ class TestSaveNowFlagHandling:
 
         The first shutdown_events() call below drives _save_now() into a
         write that itself fails (the second `flaky_save` failure). This test
-        relies on _save_now's documented behavior of catching and printing
+        relies on _save_now's documented behavior of catching and logging
         that failure rather than re-raising it (storage.py, _save_now) - that
         is the only reason shutdown_events() returns normally here instead of
         propagating the OSError. Assert that explicitly, so a regression to
@@ -1910,11 +1972,14 @@ class TestSaveNowFlagHandling:
             storage.shutdown_events()
         except Exception as exc:  # pragma: no cover - regression guard
             pytest.fail(
-                "_save_now must catch and print its own failed write, not "
+                "_save_now must catch and log its own failed write, not "
                 f"let it escape shutdown_events(): {exc!r}"
             )
-        assert "graph write at shutdown failed" in capsys.readouterr().out, (
-            "_save_now's catch-and-print behavior did not fire as expected "
+        assert any(
+            "graph write at shutdown failed" in m
+            for m in storage_log()[logging.WARNING]
+        ), (
+            "_save_now's catch-and-log behavior did not fire as expected "
             "- this test depends on it to reach the assertions below"
         )
         assert failures == {"upsert": 0, "save": 0}, (

@@ -323,7 +323,9 @@ def create_app(
         # In production (Cloud Run) the Host header is the public URL, so
         # requests get a 421 "Invalid Host header". Authentication is handled
         # by the gateway / Cloud Run IAP, so this check is not needed.
-        host="0.0.0.0",
+        # FastMCP only reads this to decide DNS rebinding protection; the app
+        # is mounted into the host ASGI app, so no socket is bound here.
+        host="0.0.0.0",  # nosec B104
     )
     tools_map = register_mcp_tools(
         mcp,

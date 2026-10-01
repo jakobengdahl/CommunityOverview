@@ -425,3 +425,169 @@ class TestTheWorkerGateWiringItself:
             assert not (set(needs) & set(GATES)), (
                 f"{job_id} depends on a gate job: {needs}"
             )
+
+
+# ---------------------------------------------------------------------------
+# What a required check buys against a hand-edited lockfile.
+#
+# `npm ci` refuses a package-lock.json the manifests it was resolved from do not
+# satisfy — `Invalid: lock file's ws@7.5.10 does not satisfy ws@8.22.0` — and
+# that refusal is the ONLY thing in the required checks that notices such an
+# edit. `npm install` would instead resolve the tree afresh and rewrite the
+# lockfile to make it valid, so swapping one subcommand for the other is a
+# one-word edit that removes the gate and reports green. Nothing else in the
+# repo pins it, which is the same shape of hole as the permissive gate above.
+#
+# It is a narrow guarantee, and worth stating so it is not over-read: `npm ci`
+# sees a lockfile that contradicts a declared RANGE. A revert to an older
+# version still inside its range is valid by construction, and only a full
+# `npm audit` (dev included) sees that one — which the Security Scan workflow
+# runs, and `main`'s branch protection does not require.
+# ---------------------------------------------------------------------------
+# Every `npm` subcommand a required-check job may run. An ALLOWLIST, because the
+# other side cannot be enumerated: npm accepts `install`, `i`, `in`, `inst`,
+# `instal`, `isntall`, `add` and more for the same resolving install, and `ic` /
+# `clean-install` for `ci`. And not line-anchored, because the edit that actually
+# removes the gate is a chained one a reviewer would wave through -
+# `npm ci || npm install` installs from the lockfile, and on the lockfile `npm ci`
+# rejects it falls back to rewriting it.
+NPM_SUBCOMMANDS_ALLOWED = frozenset({"ci", "run"})
+NPM_CALL = re.compile(r"\bnpm\s+(\S+)")
+
+# The install step's whole run body, per required-check job. Pinned ENTIRE, not
+# just the subcommand, because every way of defeating the gate keeps a compliant
+# `npm ci` in the body and adds to it:
+#
+#   npm ci --no-audit --no-fund || true
+#   npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+#   npm ci --no-audit --no-fund || { n=npm; "$n" install --no-audit --no-fund; }
+#
+# The last defeats a subcommand scan outright - there is no whitespace after
+# `npm` in `n=npm;` - and unlike the others it leaves node_modules correct, so
+# the suite passes and the required check reports GREEN over a lockfile `npm ci`
+# had refused. `continue-on-error: true` on the step is the same hole again.
+NODE_INSTALL_BODIES = {
+    "frontend-tests-run": "npm ci --no-audit --no-fund",
+    "frontend-lint": (
+        "npm ci --no-audit --no-fund --workspace @community-graph/web "
+        "--workspace @community-graph/widget --include-workspace-root"
+    ),
+}
+
+
+def required_check_jobs(workflow):
+    """The jobs behind `main`'s required checks: each named job, plus its workers."""
+    named = {
+        job_id
+        for job_id, job in workflow["jobs"].items()
+        if job.get("name") in BRANCH_PROTECTION_CHECKS
+    }
+    workers = set()
+    for job_id in named:
+        needs = workflow["jobs"][job_id].get("needs") or []
+        workers.update([needs] if isinstance(needs, str) else needs)
+    return named | (workers - {"detect-changes"})
+
+
+class TestRequiredChecksInstallFromTheLockfile:
+    def test_the_job_set_is_discovered(self, workflow):
+        # The five required check names, plus the four workers their gates need.
+        assert required_check_jobs(workflow) == {
+            "backend-tests",
+            "backend-tests-run",
+            "frontend-tests",
+            "frontend-tests-run",
+            "gateway-tests",
+            "gateway-tests-run",
+            "python-lint",
+            "python-lint-run",
+            "frontend-lint",
+        }
+
+    def test_every_npm_call_is_an_allowed_subcommand(self, workflow):
+        calls = []
+        for job_id in sorted(required_check_jobs(workflow)):
+            for step in workflow["jobs"][job_id].get("steps", []):
+                for match in NPM_CALL.finditer(step.get("run", "")):
+                    subcommand = match.group(1)
+                    calls.append((job_id, subcommand))
+                    assert subcommand in NPM_SUBCOMMANDS_ALLOWED, (
+                        f"{job_id}:{step.get('name')} runs `npm {subcommand}`; a "
+                        "required check installs with `npm ci`, which refuses a "
+                        "lockfile its manifests do not satisfy — anything else "
+                        "either rewrites the lockfile instead and reports green, "
+                        f"or is not a required check's job. Allowed: "
+                        f"{sorted(NPM_SUBCOMMANDS_ALLOWED)}"
+                    )
+        # Not vacuous, and counted rather than just collected: an ADDED install
+        # cannot hide behind a compliant one in the same job.
+        assert sorted(calls) == [
+            ("frontend-lint", "ci"),
+            ("frontend-lint", "run"),
+            ("frontend-lint", "run"),
+            ("frontend-tests-run", "ci"),
+            ("frontend-tests-run", "run"),
+        ]
+
+    @pytest.mark.parametrize(
+        "body,subcommands",
+        [
+            ("npm ci --no-audit --no-fund", ["ci"]),
+            ("  npm  ci", ["ci"]),
+            ("npm install", ["install"]),
+            ("npm i", ["i"]),
+            ("npm add left-pad", ["add"]),
+            ("echo setting up\nnpm install\n", ["install"]),
+            # The chained fallback, which a line-anchored pattern read as `ci`.
+            ("npm ci --no-audit || npm install --no-audit", ["ci", "install"]),
+            ("cd frontend && npm install", ["install"]),
+            ("sudo npm install", ["install"]),
+            ("npm_config_x=1 npm install", ["install"]),
+            # npm's install aliases, which a subcommand denylist would miss.
+            ("npm isntall x", ["isntall"]),
+            ("npm in x", ["in"]),
+            ("npm ic", ["ic"]),
+            ("npm clean-install", ["clean-install"]),
+            ("npm run lint\nnpm ci", ["run", "ci"]),
+        ],
+    )
+    def test_every_npm_subcommand_in_a_body_is_read(self, body, subcommands):
+        assert [m.group(1) for m in NPM_CALL.finditer(body)] == subcommands
+
+    @pytest.mark.parametrize(
+        "subcommand",
+        ["install", "i", "add", "isntall", "ic", "clean-install", "update"],
+    )
+    def test_the_allowlist_admits_no_installing_subcommand(self, subcommand):
+        assert subcommand not in NPM_SUBCOMMANDS_ALLOWED
+
+    def test_each_install_step_body_is_pinned_whole_and_can_fail_the_job(
+        self, workflow
+    ):
+        installs = []
+        for job_id in sorted(required_check_jobs(workflow)):
+            # Job level too, and for every job behind a required check, not just
+            # the ones that install. A `continue-on-error` job REPORTS SUCCESS
+            # when its steps fail, so it neutralises the step-level assert below
+            # from one level up — on `frontend-lint` that turns the required
+            # check green over failed eslint; on a worker it turns the gate green,
+            # because the gate reads `needs.<worker>.result` and GitHub hands it
+            # `success` for a failed continue-on-error job.
+            assert not workflow["jobs"][job_id].get("continue-on-error", False), (
+                f"{job_id} is behind a required check and must fail closed; "
+                "do not set job-level continue-on-error"
+            )
+            for step in workflow["jobs"][job_id].get("steps", []):
+                body = step.get("run", "")
+                if not any(m.group(1) == "ci" for m in NPM_CALL.finditer(body)):
+                    continue
+                installs.append((job_id, body.strip()))
+                where = f"{job_id}:{step.get('name')}"
+                assert not step.get("continue-on-error", False), (
+                    f"{where} is continue-on-error, so the lockfile refusal "
+                    "cannot fail the job"
+                )
+                assert "if" not in step, f"{where} is conditional"
+        # A list, not a dict: a SECOND install step added to a job that already
+        # has a compliant one must fail here rather than overwrite it.
+        assert installs == sorted(NODE_INSTALL_BODIES.items())

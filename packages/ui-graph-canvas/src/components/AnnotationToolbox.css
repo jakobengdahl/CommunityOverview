@@ -235,6 +235,19 @@
     0 1px 3px rgba(0, 0, 0, 0.45);
 }
 
+/* The heat-map tool: a small version of the circle it places. */
+.annotation-toolbox-visual--heatmap {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: radial-gradient(
+    circle closest-side,
+    rgba(220, 38, 38, 0.85) 0%,
+    rgba(220, 38, 38, 0.45) 50%,
+    rgba(220, 38, 38, 0) 100%
+  );
+}
+
 .annotation-toolbox-visual--image {
   width: 25px;
   height: 20px;

@@ -14,11 +14,13 @@ import pytest
 
 from backend.agents.execution.contract import ExecutionStoreContractTests, T0, _job
 from backend.agents.execution.models import (
+    ExecutionKind,
     ExecutionState,
     RetryPolicy,
 )
-from backend.agents.execution.sqlite_store import SqliteExecutionStore
+from backend.agents.execution.sqlite_store import SqliteExecutionStore, _to_epoch
 from backend.agents.execution.store import ExecutionStore
+from backend.agents.tests._sql_recording import RecordingConn, only_statement
 
 
 class TestSqliteExecutionStore(ExecutionStoreContractTests):
@@ -120,3 +122,53 @@ def test_migration_is_idempotent_across_reopens(tmp_path):
         assert len(second.list_jobs()) == 1
     finally:
         second.close()
+
+
+def test_list_jobs_binds_every_filter_value(tmp_path):
+    # The f-string SQL carries "nosec B608": this pins that only fixed column
+    # clauses and "?" reach the text, and every caller value is a bound param.
+    store = SqliteExecutionStore(tmp_path / "execution.db")
+    try:
+        hostile = "a1' OR '1'='1"
+        recorder = RecordingConn(store._conn)
+        store._conn = recorder
+        store.list_jobs(
+            states=[ExecutionState.PENDING, ExecutionState.RUNNING],
+            agent_id=hostile,
+            kind=ExecutionKind.SCHEDULED,
+            limit=7331,
+        )
+        sql, params = only_statement(recorder, "SELECT * FROM execution_jobs")
+        assert params == ["pending", "running", hostile, "scheduled", 7331]
+        assert sql.count("?") == len(params)
+        assert "'" not in sql
+        assert "7331" not in sql
+        for value in ("pending", "running", "scheduled"):
+            assert value not in sql
+    finally:
+        store.close()
+
+
+def test_recover_stale_binds_every_job_id(tmp_path):
+    store = SqliteExecutionStore(tmp_path / "execution.db")
+    try:
+        jobs = [store.enqueue(_job(idempotency_key=f"k{i}")) for i in range(3)]
+        for _ in jobs:
+            store.claim_next("w1", now=T0, lease_seconds=60)
+        recorder = RecordingConn(store._conn)
+        store._conn = recorder
+        now = T0 + timedelta(seconds=90)
+        recovered = store.recover_stale(now=now)
+        assert len(recovered) == 3
+        sql, params = only_statement(recorder, "UPDATE execution_jobs")
+        now_ts = _to_epoch(now)
+        assert params[:3] == ["pending", now_ts, now_ts]
+        assert sorted(params[3:]) == sorted(j.id for j in jobs)
+        assert sql.count("?") == len(params)
+        assert "'" not in sql
+        assert "pending" not in sql
+        assert str(int(now_ts)) not in sql
+        for j in jobs:
+            assert j.id not in sql
+    finally:
+        store.close()
