@@ -592,8 +592,10 @@ def _recording_handler(responses):
 REDIRECT_STATUSES = [301, 302, 303, 307, 308]
 
 # The context a hop is judged IN, as opposed to the target being judged: this
-# walker's refusal tests otherwise always start on https and never pass
+# walker's refusal tests otherwise always REACH A HOP on https and never pass
 # headers, so a guard made conditional on either would not be noticed.
+# (One test does start on http -- an initial URL resolving inward -- but it
+# refuses before any hop, so it does not exercise this axis.)
 START_SCHEMES = ["http", "https"]
 
 
@@ -667,6 +669,257 @@ class TestFetchTextRedirectBodies:
         # The terminal read is asserted too, so a loader that streamed and
         # then read nothing could not pass by returning an empty body.
         assert reads == ["terminal"]
+
+
+class TestFetchTextTerminalBodyCap:
+    """The terminal body is bounded as it arrives, not measured afterwards.
+
+    The Content-Length pre-check refuses an honest oversized body without
+    reading it, but it is advice: a chunked response, or one advertising less
+    than it sends, was previously buffered in full and only then compared
+    against the cap. That made the server the one deciding how much memory a
+    skill fetch spent.
+    """
+
+    def _loader(self, max_bytes=2000):
+        return SkillsLoader(
+            SkillsConfig(
+                allow_external_skills=True,
+                trusted_domains=["raw.githubusercontent.com"],
+                max_skill_content_bytes=max_bytes,
+            )
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("chunk_size", [1, 7, 500], ids=["tiny", "odd", "block"])
+    async def test_a_body_that_advertises_nothing_is_cut_off_at_the_cap(
+        self, chunk_size
+    ):
+        """No Content-Length at all: the running total is the only bound.
+
+        The chunk counter is the assertion that matters. A cap applied after
+        the body was fully read would raise the same ValueError and satisfy a
+        test that only checked for the exception.
+
+        Chunk size is varied because the accounting error is PER CHUNK. With a
+        single 500-byte fixture, `total += len(chunk) - 1` drifts by only ~5
+        bytes and fits inside the one-chunk slack below; at one byte per chunk
+        that same edit makes `total` stop growing altogether, so the
+        incremental cap never fires and the body is caught only afterwards by
+        the post-decode check -- exactly the weakness this read removed. The
+        bound is expressed in terms of chunk_size so it stays tight at every
+        size rather than loosening to fit the largest.
+        """
+        max_bytes = 2000
+        chunk = b"x" * chunk_size
+        chunks = (max_bytes * 2) // chunk_size
+        pulled = []
+
+        class _Stream(loader_module.httpx.AsyncByteStream):
+            async def __aiter__(self):
+                for _ in range(chunks):
+                    pulled.append(len(chunk))
+                    yield chunk
+
+        handler, seen = _recording_handler(
+            [loader_module.httpx.Response(200, stream=_Stream())]
+        )
+
+        with _mock_http(handler), _public_dns():
+            with pytest.raises(ValueError, match="exceeds max size"):
+                await self._loader(max_bytes)._fetch_text(
+                    "https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"
+                )
+
+        assert len(seen) == 1
+        assert sum(pulled) <= max_bytes + len(chunk)
+        assert sum(pulled) < chunks * len(chunk), "the whole body was read"
+
+    @pytest.mark.asyncio
+    async def test_a_body_that_understates_its_length_is_still_refused(self):
+        """The advertised length is the server's claim, not a fact.
+
+        A loader that trusted Content-Length and dropped the running total
+        would serve this oversized body as though it were within the cap.
+        """
+        max_bytes = 2000
+        body = b"y" * (max_bytes * 3)
+        handler, seen = _recording_handler(
+            [
+                loader_module.httpx.Response(
+                    200, content=body, headers={"content-length": "10"}
+                )
+            ]
+        )
+
+        with _mock_http(handler), _public_dns():
+            with pytest.raises(ValueError, match="exceeds max size"):
+                await self._loader(max_bytes)._fetch_text(
+                    "https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"
+                )
+
+        assert len(seen) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_body_within_the_cap_is_returned_whole(self):
+        """The cap must not truncate or refuse an ordinary skill file.
+
+        A reader that dropped its final chunk, or one that refused everything,
+        would still satisfy both tests above.
+        """
+        body = "# skill\n" + ("z" * 1500)
+        handler, _seen = _recording_handler([_ok(body)])
+
+        with _mock_http(handler), _public_dns():
+            text = await self._loader(2000)._fetch_text(
+                "https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"
+            )
+
+        assert text == body
+
+    @pytest.mark.asyncio
+    async def test_a_body_exactly_at_the_cap_is_accepted(self):
+        """The boundary belongs to the accepted side.
+
+        `>=` instead of `>` in the running total would refuse a file of
+        exactly max_skill_content_bytes, which the cap is meant to allow.
+        """
+        max_bytes = 2000
+        body = "q" * max_bytes
+        handler, _seen = _recording_handler([_ok(body)])
+
+        with _mock_http(handler), _public_dns():
+            text = await self._loader(max_bytes)._fetch_text(
+                "https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"
+            )
+
+        assert text == body
+
+    @pytest.mark.asyncio
+    async def test_a_body_within_the_cap_whose_utf8_form_is_not_is_refused(self):
+        """The one case the RETAINED post-decode check exists for.
+
+        The running total counts bytes as RECEIVED. A latin-1 body of exactly
+        max_bytes high bytes passes it (and passes the advertised-length check,
+        which sees the same number), decodes to max_bytes characters, and
+        re-encodes to twice the cap. Before this PR that was refused; only the
+        retained `len(content.encode())` check still refuses it.
+
+        Without this test that check is dead: deleting it outright leaves the
+        whole file green, because every other oversize body here exceeds the
+        cap in RECEIVED bytes too and trips the incremental total first. That
+        would make the comment justifying it a claim no test can distinguish
+        from false.
+        """
+        max_bytes = 10
+        handler, seen = _recording_handler(
+            [
+                loader_module.httpx.Response(
+                    200,
+                    content="é".encode("latin-1") * max_bytes,
+                    headers={"content-type": "text/markdown; charset=latin-1"},
+                )
+            ]
+        )
+
+        with _mock_http(handler), _public_dns():
+            with pytest.raises(ValueError, match="exceeds max size"):
+                await self._loader(max_bytes)._fetch_text(
+                    "https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"
+                )
+
+        assert len(seen) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_within_cap_body_is_joined_across_every_chunk(self):
+        """Pins the join, and it is the only test here that does.
+
+        Measured: returning only the first chunk fails this test and nothing
+        else -- one case in the whole file -- because every other within-cap
+        fixture here is a single chunk. Dropping the LAST chunk instead fails
+        22 other cases across 14 test functions (23 counting this one), but
+        that says nothing about joining: with a single-chunk body chunks[:-1]
+        is empty, so those failures are about an empty document, not a
+        misassembled one.
+        """
+        parts = [b"# skill\n", b"aaaa", b"bbbb", b"cccc"]
+
+        class _Stream(loader_module.httpx.AsyncByteStream):
+            async def __aiter__(self):
+                for part in parts:
+                    yield part
+
+        handler, _seen = _recording_handler(
+            [loader_module.httpx.Response(200, stream=_Stream())]
+        )
+
+        with _mock_http(handler), _public_dns():
+            text = await self._loader(2000)._fetch_text(
+                "https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"
+            )
+
+        assert text == b"".join(parts).decode()
+
+    @pytest.mark.asyncio
+    async def test_an_undecodable_byte_is_replaced_the_way_response_text_would(self):
+        """Pins the error POLICY, not just the codec.
+
+        response.text decodes with errors="replace". "strict" would make this
+        fetch raise where it used to yield U+FFFD, and "ignore" would drop the
+        byte silently; the charset test below decodes cleanly and sees neither.
+        Asserted against httpx's own answer so the two cannot drift.
+        """
+        body = b"# a\xffb"
+        expected = loader_module.httpx.Response(
+            200, content=body, headers={"content-type": "text/markdown; charset=utf-8"}
+        ).text
+        handler, _seen = _recording_handler(
+            [
+                loader_module.httpx.Response(
+                    200,
+                    content=body,
+                    headers={"content-type": "text/markdown; charset=utf-8"},
+                )
+            ]
+        )
+
+        with _mock_http(handler), _public_dns():
+            text = await self._loader()._fetch_text(
+                "https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"
+            )
+
+        assert text == expected == "# a\ufffdb"
+
+    @pytest.mark.asyncio
+    async def test_a_declared_charset_is_decoded_the_way_response_text_would(self):
+        """Reading the body by hand must not become a utf-8 assumption.
+
+        response.text decoded through the charset in Content-Type; the capped
+        read has to do the same or a latin-1 skill file comes back mojibake.
+        One size test above is also latin-1 --
+        test_a_body_within_the_cap_whose_utf8_form_is_not_is_refused -- but it
+        cannot separate the two codecs, because its body exceeds the cap under
+        either decoding and it asserts only the refusal. Measured: hardcoding
+        utf-8 fails this test alone.
+        """
+        text = "# café"
+        handler, _seen = _recording_handler(
+            [
+                loader_module.httpx.Response(
+                    200,
+                    content=text.encode("latin-1"),
+                    headers={"content-type": "text/markdown; charset=latin-1"},
+                )
+            ]
+        )
+
+        with _mock_http(handler), _public_dns():
+            assert (
+                await self._loader()._fetch_text(
+                    "https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"
+                )
+                == text
+            )
 
 
 class TestFetchTextRedirects:
@@ -842,6 +1095,30 @@ class TestFetchTextRedirects:
                 await self._loader()._fetch_text("https://api.github.com/start")
 
         assert len(seen) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("headers", [{}, {"location": ""}], ids=["absent", "empty"])
+    async def test_a_missing_location_is_refused_on_a_later_hop_too(self, headers):
+        """The guard must not be conditional on being the first hop.
+
+        The test above scripts the bad response first, which leaves
+        `if not location and current_url == url` green across the whole suite
+        -- and with it the spin-to-the-cap defect one hop in, where
+        urljoin(current, "") is still current.
+        """
+        handler, seen = _recording_handler(
+            [
+                _redirect_to("https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"),
+                loader_module.httpx.Response(302, headers=headers, text="not a skill"),
+            ]
+        )
+
+        with _mock_http(handler), _public_dns():
+            with pytest.raises(ValueError, match="Location"):
+                await self._loader()._fetch_text("https://api.github.com/start")
+
+        assert len(seen) == 2, "the second hop must be refused, not re-requested"
+        assert str(seen[1].url) == "https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"
 
     @pytest.mark.asyncio
     async def test_an_ordinary_response_still_returns_its_body_in_one_request(self):
@@ -1077,7 +1354,14 @@ class TestFetchTextRedirects:
     @pytest.mark.asyncio
     async def test_a_relative_location_is_resolved_against_the_current_url(self):
         """Two hops, because with one the current URL and the starting URL are
-        the same and the test cannot tell which one was used."""
+        the same and the test cannot tell which one was used.
+
+        is_safe_url's arguments are recorded rather than discarded. Under an
+        always-true stub, a guard handed the RAW Location header instead of the
+        joined absolute URL was unobservable here -- and _validate_domain,
+        which does receive the joined URL, cannot tell the two apart either, so
+        nothing else in this file would have caught it.
+        """
         handler, seen = _recording_handler(
             [
                 _redirect_to("https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"),
@@ -1085,15 +1369,27 @@ class TestFetchTextRedirects:
                 _ok(),
             ]
         )
+        checked = []
+
+        def _recording_is_safe_url(url):
+            checked.append(url)
+            return True
 
         with (
             _mock_http(handler),
-            patch.object(loader_module, "is_safe_url", lambda _url: True),
+            patch.object(loader_module, "is_safe_url", _recording_is_safe_url),
         ):
             await self._loader()._fetch_text("https://api.github.com/a/b/SKILL.md")
 
         assert len(seen) == 3
         assert str(seen[2].url) == "https://raw.githubusercontent.com/moved/SKILL.md"
+        # The initial URL, then every hop as an ABSOLUTE url -- never the bare
+        # "/moved/SKILL.md" the second hop's Location header carried.
+        assert checked == [
+            "https://api.github.com/a/b/SKILL.md",
+            "https://raw.githubusercontent.com/o/r/HEAD/SKILL.md",
+            "https://raw.githubusercontent.com/moved/SKILL.md",
+        ]
 
     @pytest.mark.asyncio
     async def test_a_scheme_relative_location_cannot_leave_the_allowlist(self):
@@ -1611,6 +1907,57 @@ class TestFetchTextRemainingGuards:
             await loader._fetch_text(
                 "https://api.github.com/start", headers={"Accept": "application/json"}
             )
+
+        assert len(seen) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_cache_entry_past_its_ttl_is_refetched(self):
+        """Exercises the TTL expiry branch, which no test reached.
+
+        Removing the age check altogether kept the suite green: every other
+        cache test fetches twice in quick succession, where a cache that never
+        expires and one that expires correctly behave identically. A TTL of
+        zero makes the stored entry stale the moment it is written.
+        """
+        handler, seen = _recording_handler([_ok("# first"), _ok("# second")])
+        config = SkillsConfig(
+            allow_external_skills=True,
+            trusted_domains=["api.github.com"],
+            cache_ttl_seconds=0,
+        )
+
+        with (
+            _mock_http(handler),
+            patch.object(loader_module, "is_safe_url", lambda _url: True),
+        ):
+            loader = SkillsLoader(config)
+            first = await loader._fetch_text("https://api.github.com/start")
+            second = await loader._fetch_text("https://api.github.com/start")
+
+        assert [first, second] == ["# first", "# second"]
+        assert len(seen) == 2, "an expired entry must not be served from cache"
+
+    @pytest.mark.asyncio
+    async def test_a_cache_entry_within_its_ttl_is_not_refetched(self):
+        """The positive control for the branch above.
+
+        A loader that had stopped caching entirely would satisfy the expiry
+        test on its own.
+        """
+        handler, seen = _recording_handler([_ok("# once")])
+        config = SkillsConfig(
+            allow_external_skills=True,
+            trusted_domains=["api.github.com"],
+            cache_ttl_seconds=3600,
+        )
+
+        with (
+            _mock_http(handler),
+            patch.object(loader_module, "is_safe_url", lambda _url: True),
+        ):
+            loader = SkillsLoader(config)
+            await loader._fetch_text("https://api.github.com/start")
+            await loader._fetch_text("https://api.github.com/start")
 
         assert len(seen) == 1
 
