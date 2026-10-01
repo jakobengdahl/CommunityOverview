@@ -50,6 +50,17 @@ _UNFLAGGED_INTERNAL_NETWORKS = (
 
 def _is_safe_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Return True if the IP is publicly routable (not private/internal)."""
+    if isinstance(ip, ipaddress.IPv6Address):
+        # An IPv4-mapped address (::ffff:a.b.c.d) reaches the embedded IPv4
+        # host through a dual-stack socket, and the IPv6 flags on the wrapper
+        # differ between Python versions, so judge the embedded host alone.
+        if ip.ipv4_mapped is not None:
+            return _is_safe_ip(ip.ipv4_mapped)
+        # A 6to4 address (2002::/16) is relayed to its embedded IPv4 host.
+        # ipaddress currently flags all of 2002::/16 is_private, so this is
+        # defense in depth: the guard does not rest on that classification.
+        if ip.sixtofour is not None and not _is_safe_ip(ip.sixtofour):
+            return False
     if any(ip in network for network in _UNFLAGGED_INTERNAL_NETWORKS):
         return False
     return not (
@@ -109,16 +120,20 @@ def is_safe_url(url: str) -> bool:
         return False
 
 
-# The redirect cap for the four paths that walk redirects by hand and
+# The redirect cap for the five paths that walk redirects by hand and
 # re-validate every hop with is_safe_url: the webhook delivery below, the image
-# ingest in core/image_ingest.py, the agent fetch tool in agents/mcp_loader.py
-# and the skills loader in skills/loader.py. Each hop is re-validated before it
-# is requested, so the cap bounds that cost; they import this constant rather
-# than keeping their own copy, so the four cannot drift apart. The skills
-# loader additionally re-applies its own trusted_domains allowlist per hop,
-# which the other three have no equivalent of. Other outbound requests in the
-# backend do not use this cap: they either leave redirect handling to their
-# HTTP client, or follow no redirects at all.
+# ingest in core/image_ingest.py, BOTH walkers in agents/mcp_loader.py (the
+# agent fetch tool, and the MCP server info-endpoint discovery in
+# _connect_http) and the skills loader in skills/loader.py. Each hop is
+# re-validated before it is requested, so the cap bounds that cost; they import
+# this constant rather than keeping their own copy, so the five cannot drift
+# apart. The skills loader additionally re-applies its own trusted_domains
+# allowlist per hop, which the other four have no equivalent of. Other outbound
+# requests in the backend do not use this cap: they either leave redirect
+# handling to their HTTP client, or follow no redirects at all.
+#
+# This list is what an audit of "every hop-validating path" reads, so a new
+# walker is not added without being named here.
 MAX_REDIRECTS = 10
 
 

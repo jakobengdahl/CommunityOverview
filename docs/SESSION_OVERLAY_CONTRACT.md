@@ -868,14 +868,22 @@ The authorization context gains two optional fields:
 - **`session_id`:** the session concerned.
 
 A hook that wants to treat these differently from a direct write reads them.
-`target` keeps its existing meaning, the tool or route name.
+`target` keeps its existing meaning, the tool or route name. Where one operation
+is reachable over both transports, both ask with the *same* name — the MCP tool's
+— so a hook keyed on `target` gates the operation rather than the transport. The
+auto-add agent routes are the worked example: they ask as
+`create_session_auto_add_agent`, `list_session_auto_add_agents` and
+`remove_session_auto_add_agent`, matching their MCP twins. A route with no MCP
+twin uses its own handler name, as minting a trigger token does
+(`mint_pulse_trigger_token`).
 
 **Session routes.**
 
 - The session routes in `service/rest_api.py` call no hook today.
 - The ones that change a layer, set a write mode or merge must call it.
-- Two session routes the host serves, trigger-token and auto-add agents, already
-  do.
+- Two kinds of session route the host serves already do: minting a trigger
+  token asks as `mutate`, and the auto-add agent routes ask as `mutate` to create
+  or remove an agent and as `read` to list them.
 
 The core still has no accounts (D7). The actor recorded on entries and merge
 records is whatever the request resolved: an actor header, or failing that the

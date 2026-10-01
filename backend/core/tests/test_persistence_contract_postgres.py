@@ -257,6 +257,15 @@ def backends():
 _BACKEND_LOGGER = "backend.core.postgres_backend"
 
 
+class _Emitted(logging.Handler):
+    def __init__(self):
+        super().__init__(level=logging.WARNING)
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+
 @pytest.fixture
 def reported(caplog, capsys, backends):
     """What the backend reported since the previous call, one message per line.
@@ -285,15 +294,34 @@ def reported(caplog, capsys, backends):
         ]
         assert not louder, f"reported above WARNING: {louder}"
 
-    # A cursor rather than caplog.clear(): on a pytest whose clear() rebinds
-    # the record list instead of emptying it, the list the teardown check
-    # reads detaches at the first clear, and nothing after it is looked at.
-    seen = 0
+    # The records already taken, by identity, rather than caplog.clear(): on
+    # a pytest whose clear() rebinds the record list instead of emptying it,
+    # the list the teardown check reads detaches at the first clear. And a
+    # test that clears caplog itself would otherwise shift new records under
+    # a cursor, so a check that nothing was reported passed over them unread.
+    taken = []
+    # A clear before the first read leaves nothing taken to compare against,
+    # so the backend's records are also counted on a handler of the
+    # fixture's own, which no clear reaches. Setup's records are caplog's
+    # setup list, not the one read here.
+    emitted = _Emitted()
+    backend_logger = logging.getLogger(_BACKEND_LOGGER)
+    backend_logger.addHandler(emitted)
 
     def take() -> str:
-        nonlocal seen
-        fresh = caplog.records[seen:]
-        seen += len(fresh)
+        records = caplog.records
+        assert records[: len(taken)] == taken, (
+            "caplog was cleared under the reported fixture; read reports "
+            "through it instead"
+        )
+        fresh = records[len(taken) :]
+        held = {id(record) for record in records}
+        held.update(id(record) for record in caplog.get_records("setup"))
+        assert all(id(record) in held for record in emitted.records), (
+            "caplog was cleared under the reported fixture; read reports "
+            "through it instead"
+        )
+        taken.extend(fresh)
         messages = [
             record.getMessage()
             for record in fresh
@@ -305,11 +333,43 @@ def reported(caplog, capsys, backends):
         assert not leaked, f"a report went to stdout: {leaked}"
         return "\n".join(messages)
 
-    yield take
+    try:
+        yield take
+    finally:
+        backend_logger.removeHandler(emitted)
     for backend in backends:
         backend.close()
     backends.clear()
     assert_nothing_louder(caplog.get_records("call") + caplog.get_records("teardown"))
+
+
+@pytest.mark.parametrize("after_clear", [1, 3])
+def test_the_reported_fixture_refuses_a_caplog_cleared_under_it(
+    caplog, reported, after_clear
+):
+    """A clear behind the fixture's back fails the next read, whether fewer or
+    more records have arrived since than it had already taken: a cursor would
+    skip those new records, and a check that nothing was reported pass."""
+    backend_log = logging.getLogger(_BACKEND_LOGGER)
+    backend_log.warning("first")
+    backend_log.warning("second")
+    assert reported() == "first\nsecond"
+    caplog.clear()
+    for n in range(after_clear):
+        backend_log.warning("after the clear %d", n)
+    with pytest.raises(AssertionError, match="caplog was cleared"):
+        reported()
+
+
+def test_the_reported_fixture_refuses_a_caplog_cleared_before_its_first_read(
+    caplog, reported
+):
+    """With nothing taken yet there is nothing to compare the records
+    against, so the record the clear dropped would go unread."""
+    logging.getLogger(_BACKEND_LOGGER).warning("before the clear")
+    caplog.clear()
+    with pytest.raises(AssertionError, match="caplog was cleared"):
+        reported()
 
 
 def _statements_issued(action, into=None):

@@ -176,7 +176,9 @@ export function groupsToAnnotations(viewGroups, parentIds) {
 // (task-annotation-merge-frame-into-shape-rectangle) instead of `style.color`
 // — each independently a colour or `'transparent'`, the setting that
 // subsumes what the retired `frame` kind was.
-const GENERIC_OVERLAY_TYPES = new Set(['text', 'shape', 'icon', 'vote_dot', 'image']);
+// `heatmap` carries only its whole-number `intensity` beyond the envelope; its
+// colour and transparency are both derived from that level.
+const GENERIC_OVERLAY_TYPES = new Set(['text', 'shape', 'icon', 'vote_dot', 'image', 'heatmap']);
 
 function genericAnnotationToOverlay(a) {
   const overlay = {
@@ -247,6 +249,8 @@ function genericAnnotationToOverlay(a) {
   } else if (a.type === 'image') {
     overlay.image = a.image || {};
     overlay.alt = a.alt || '';
+  } else if (a.type === 'heatmap') {
+    overlay.intensity = a.intensity;
   }
   return overlay;
 }
@@ -301,6 +305,8 @@ function genericOverlayToAnnotation(o) {
   } else if (o.kind === 'image') {
     input.image = o.image || {};
     input.alt = o.alt || '';
+  } else if (o.kind === 'heatmap') {
+    input.intensity = o.intensity;
   }
   if (o.size) input.size = o.size;
   return createAnnotation(input);

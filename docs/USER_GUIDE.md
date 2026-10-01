@@ -272,7 +272,7 @@ A freshly created annotation (from the toolbox, the right-click "add" menu, or a
 drag-and-drop) is selected and focused immediately, so its Edit button is one Tab away
 without having to click or tap to find it first.
 
-For **Text**, **Shape**, **Icon**, **Vote dot** and **Image** annotations the property
+For **Text**, **Shape**, **Icon**, **Vote dot**, **Heat map** and **Image** annotations the property
 menu is a compact row of small icons rather than a tall list of labelled sections. Each
 icon is one property — colour, fill, border, text alignment, text size, font, shape,
 rotation, opacity, size, layer order — and shows what that property is currently set to,
@@ -289,7 +289,7 @@ on.
 Some kinds' menus offer a few more non-drag controls, useful with a keyboard or on a
 device with no fine pointer:
 
-- **Width/Height fields** — Note, Group, Shape and Image boxes (the kinds with a resize
+- **Width/Height fields** — Note, Group, Shape, Image and Heat map boxes (the kinds with a resize
   handle) also get a numeric width and height in their menu, with an **Apply** button, so
   resizing doesn't require dragging a corner handle precisely.
 - **Attach to…** — Label, Text and Icon annotations (the kinds that can snap onto a node
@@ -309,7 +309,7 @@ device with no fine pointer:
 
 A collapsible toolbox is also anchored to the bottom of the canvas. Click **Add
 annotation** to expand it, then pick a tool: **Select**, **Note**, **Text**, **Label**, a
-**Shape**, **Icon**, **Vote dot**, **Image**, **Freehand**, or **Eraser**. Each is a
+**Shape**, **Icon**, **Vote dot**, **Heat map**, **Image**, **Freehand**, or **Eraser**. Each is a
 single icon with no caption — hover one (or read its name with a screen reader) to see
 what it does. The toolbox is hidden while a focus view is active, since annotations are
 set aside during focus (see [9. On a phone](#9-on-a-phone) for how focus view works).
@@ -322,12 +322,29 @@ the way back to ordinary clicking, dragging and marquee-selection; pressing Esca
 same. You can still drag a tool straight from the toolbox onto the canvas to place a single
 object without arming anything.
 
-**Notes and shapes can be drawn to size.** Instead of pressing and releasing in one spot,
+**Notes, shapes and heat-map circles can be drawn to size.** Instead of pressing and releasing in one spot,
 press and drag: an outline follows the pointer showing the box you are about to get, and
 releasing creates it at that size. Dragging left from where you started mirrors the shape,
 and dragging upwards flips it — which is how a triangle or a process arrow is aimed without
 rotating it afterwards. The other kinds have a fixed or content-driven size, so a drag
 places them exactly like a press does.
+
+The **Heat map** tool places a soft red circle for marking where something is
+concentrated — activity, risk, attention. Each circle has an **intensity** from 0 to 10:
+0 is invisible and 10 is the strongest red. New circles start at 5, behind the graph's
+nodes, so the nodes stay readable and clickable on top of the heat. Circles fade out
+towards their edge, so where several overlap or sit close together they merge into one
+continuous heat field that gets redder the more of them cover a spot. The result is the
+same whichever circle is on top. To change the level, open the circle's Edit menu, choose
+**Intensity** (🔥) and pick a number from 0 to 10. While a circle is selected it shows
+its level as a number in the middle. A screen reader reads it as, for example, "Heat-map
+circle, intensity 7 of 10". A circle at intensity 0 draws nothing, but shows a faint
+dashed outline while you hover over it or have it selected, so you can still find and
+move it. Circles resize from their corner handles and stay round. When you draw one by
+dragging, it grows from where you pressed in the direction you drag. Circles have no
+colour, opacity or rotation settings: the intensity alone decides how they look.
+
+![A heat map built from overlapping circles](images/annotation-heatmap.png)
 
 The **Vote dot** entry is a slot like Shape and Icon, except the choice is the colour: the
 button shows the colour it will place, and its fold-out picker offers the full palette.
@@ -403,8 +420,9 @@ images all also have an **Opacity** row in their menu, offering four levels (30%
 hiding it entirely. Freehand strokes have had this since drawing shipped; every other
 kind gets it from the same row now too.
 
-Notes, labels, arrows, freehand strokes, text, shapes, icons, voting dots and
-images all have a **Layer** row in their right-click menu, just above Delete. **Bring to
+Notes, labels, arrows, freehand strokes, text, shapes, icons, voting dots,
+heat-map circles and images all have a **Layer** row in their right-click menu, just
+above Delete. **Bring to
 front** puts the annotation on top of the other annotations and **Send to back** puts it
 underneath, so you can pull a sticky note out from under a transparent-fill shape or tuck
 a shape behind a label. The buttons do nothing once an annotation is already alone at the
@@ -1049,8 +1067,8 @@ bottom navigation bar replaces the toolbar and the hamburger menu:
 | **Search** | Opens the graph search in a sheet that slides up from the bottom |
 | **Create** | Opens the node-type picker in the same bottom sheet, for adding a
 graph node (an Actor, Initiative, and so on) |
-| **Annotate** | Opens the annotation toolbox — notes, text, labels, frames,
-shapes, icons, vote dots, images and freehand drawing — in its own bottom
+| **Annotate** | Opens the annotation toolbox — notes, text, labels, shapes,
+icons, vote dots, heat maps, images and freehand drawing — in its own bottom
 sheet. Kept as a separate slot from **Create** on purpose: an annotation is a
 mark on the canvas, not a graph node, and the two creation flows stay visually
 and behaviorally distinct even though both live behind the same style of

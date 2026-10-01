@@ -77,7 +77,11 @@ import {
   NEARBY_ATTACH_OFFSET,
 } from '../utils/annotations';
 import { DEFAULT_ANNOTATION_ICON } from '../utils/annotationIcons';
-import { defaultAnnotationZ } from '../utils/annotationModel';
+import {
+  defaultAnnotationZ,
+  HEATMAP_DEFAULT_DIAMETER,
+  HEATMAP_DEFAULT_INTENSITY,
+} from '../utils/annotationModel';
 import {
   directNeighborIds,
   neighborStartPositions,
@@ -581,6 +585,8 @@ function GraphCanvasInner({
     ariaKindShape: 'shape',
     ariaKindIcon: 'icon',
     ariaKindVoteDot: 'Vote dot',
+    ariaKindHeatmap: 'Heat-map circle, intensity {level} of {max}',
+    heatmapIntensity: 'Intensity',
     ariaKindImage: 'Image',
     ariaKindArrow: 'Arrow',
     ariaKindFreehand: 'Freehand stroke',
@@ -1072,6 +1078,8 @@ function GraphCanvasInner({
         ariaKindShape: cml.ariaKindShape,
         ariaKindIcon: cml.ariaKindIcon,
         ariaKindVoteDot: cml.ariaKindVoteDot,
+        ariaKindHeatmap: cml.ariaKindHeatmap,
+        heatmapIntensity: cml.heatmapIntensity,
         ariaKindImage: cml.ariaKindImage,
         ariaKindArrow: cml.ariaKindArrow,
         ariaKindFreehand: cml.ariaKindFreehand,
@@ -1151,6 +1159,8 @@ function GraphCanvasInner({
       cml.ariaKindShape,
       cml.ariaKindIcon,
       cml.ariaKindVoteDot,
+      cml.ariaKindHeatmap,
+      cml.heatmapIntensity,
       cml.ariaKindImage,
       cml.ariaKindArrow,
       cml.ariaKindFreehand,
@@ -2155,6 +2165,32 @@ function GraphCanvasInner({
             color: options.color,
             size: { ...VOTE_DOT_INTRINSIC_SIZE },
           },
+        };
+      } else if (kind === 'heatmap') {
+        // A circle, so the box is square: a drag-to-draw sweep sizes it by
+        // its longer side, and a plain click gets the default diameter. The
+        // square keeps the PRESS point (`options.anchor`) as its corner and
+        // grows the way the hand moved: a leftward or upward sweep (the flip
+        // flags) puts the press point on the square's right or bottom edge.
+        const side = options.box
+          ? Math.max(MIN_ANNOTATION_SIZE, options.box.width, options.box.height)
+          : HEATMAP_DEFAULT_DIAMETER;
+        const origin = options.anchor
+          ? {
+              x: options.flipX ? options.anchor.x - side : options.anchor.x,
+              y: options.flipY ? options.anchor.y - side : options.anchor.y,
+            }
+          : position;
+        newNode = {
+          id,
+          type: 'heatmap',
+          position: origin,
+          data: { intensity: HEATMAP_DEFAULT_INTENSITY },
+          style: { width: side, height: side },
+          // Behind graph nodes by default, like `shape`: a heat field is a
+          // backdrop, and on top it would tint the nodes it covers and take
+          // their clicks.
+          zIndex: defaultAnnotationZ(kind),
         };
       } else {
         newNode = {
@@ -3673,7 +3709,7 @@ function GraphCanvasInner({
     // icon, a label and a text annotation have a fixed or content-driven size
     // (RESIZABLE_KINDS/SIZED_GENERIC_KINDS exclude them), so a drag would have
     // nothing to apply; those place at the press point and ignore the rest.
-    const SIZABLE = new Set(['shape', 'note']);
+    const SIZABLE = new Set(['shape', 'note', 'heatmap']);
     const MIN_DRAG_PX = 6;
     // Matches GenericAnnotationNode's own MIN_SIZE, so a drawn box can never
     // be smaller than the resizer would allow it to be dragged to.
@@ -3805,10 +3841,29 @@ function GraphCanvasInner({
       const placement = placementRef.current;
       const previewEl = placementPreviewRef.current;
       if (!placement || !previewEl) return;
-      const left = Math.min(placement.startX, event.clientX);
-      const top = Math.min(placement.startY, event.clientY);
-      const width = Math.abs(event.clientX - placement.startX);
-      const height = Math.abs(event.clientY - placement.startY);
+      let left = Math.min(placement.startX, event.clientX);
+      let top = Math.min(placement.startY, event.clientY);
+      let width = Math.abs(event.clientX - placement.startX);
+      let height = Math.abs(event.clientY - placement.startY);
+      // A heat-map circle is created as a square anchored at the press point
+      // (see createAnnotation), so the outline shows exactly that square — and
+      // uses the same thresholded direction test as the flip flags it gets.
+      const circle = placement.tool.kind === 'heatmap';
+      if (circle) {
+        // Floored at the same minimum createAnnotation applies, in screen px.
+        const side = Math.max(width, height, MIN_DRAWN_SIZE * getViewportRef.current().zoom);
+        left =
+          event.clientX - placement.startX < -MIN_DRAG_PX
+            ? placement.startX - side
+            : placement.startX;
+        top =
+          event.clientY - placement.startY < -MIN_DRAG_PX
+            ? placement.startY - side
+            : placement.startY;
+        width = side;
+        height = side;
+      }
+      previewEl.style.borderRadius = circle ? '50%' : '';
       const rect = wrapper.getBoundingClientRect();
       previewEl.style.display = 'block';
       previewEl.style.left = `${left - rect.left}px`;
@@ -3877,6 +3932,10 @@ function GraphCanvasInner({
         {
           ...tool.options,
           box,
+          // The press point in flow space. A heat-map circle is anchored on it
+          // directly: recovering it from `position` + the floored `box` is off
+          // by the floor whenever a flipped axis moved less than the minimum.
+          anchor: a,
           // Thresholded, not a raw sign test: a long downward drag with a
           // couple of pixels of leftward jitter would otherwise silently
           // mirror the shape and aim a process arrow the wrong way.
@@ -4870,6 +4929,7 @@ function GraphCanvasInner({
       shape: guard(GenericAnnotationNode, 'shape'),
       icon: guard(GenericAnnotationNode, 'icon'),
       vote_dot: guard(GenericAnnotationNode, 'vote_dot'),
+      heatmap: guard(GenericAnnotationNode, 'heatmap'),
       image: guard(GenericAnnotationNode, 'image'),
       freehand: guard(FreehandAnnotationNode, 'freehand'),
     };

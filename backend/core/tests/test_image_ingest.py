@@ -379,9 +379,24 @@ class TestFetchImageBytesRedirectHops:
 
         assert isinstance(outcome, image_ingest.ImageFetchError)
         assert "exceeded" in str(outcome)
-        # Counted against delivery.py's constant, the one all four redirect
+        # Counted against delivery.py's constant, the one all five redirect
         # walkers import, so a local copy that drifted would fail here.
         assert len(seen) == delivery.MAX_REDIRECTS
+
+    @pytest.mark.parametrize("headers", [{}, {"location": ""}], ids=["absent", "empty"])
+    def test_a_redirect_without_a_location_is_refused_not_spun_to_the_cap(
+        self, monkeypatch, headers
+    ):
+        """urljoin of an empty Location is the current URL, so it used to be
+        re-requested until the redirect cap ran out."""
+        seen, outcome = self._fetch(
+            monkeypatch,
+            lambda request, index: httpx.Response(302, headers=headers),
+        )
+
+        assert isinstance(outcome, image_ingest.ImageFetchError)
+        assert "Location" in str(outcome)
+        assert len(seen) == 1
 
 
 class TestDataUrlByteLength:

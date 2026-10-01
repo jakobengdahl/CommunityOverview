@@ -869,7 +869,13 @@ class SessionManager:
             raise OpBatchTooLarge()
         if not isinstance(client_id, str) or not client_id:
             raise OpError("'client_id' is required")
-        if not self._bucket.consume(client_id, max(1, len(ops))):
+        cost = max(1, len(ops))
+        # A batch costing more than the full bucket can never be admitted,
+        # however long the client backs off, so it is too large rather than a
+        # retryable rate limit — the same rule as ``_consume_mcp_budget``.
+        if cost > self._bucket.capacity:
+            raise OpBatchTooLarge()
+        if not self._bucket.consume(client_id, cost):
             raise RateLimited()
 
         if self.store.get(session_id) is None:

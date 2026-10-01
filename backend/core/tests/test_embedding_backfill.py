@@ -193,18 +193,70 @@ class TestStartupBackfillPass:
         )
         storage_log()
 
+        # Starts are recorded rather than threads counted before and after:
+        # every GraphStorage, this one included, runs a short-lived
+        # embedding-preload thread that can exit mid-call, and a census of
+        # the process's threads then differs although nothing was started.
+        # `unrelated` ends inside the call so that case is always exercised.
+        release = threading.Event()
+        unrelated = threading.Thread(target=release.wait, daemon=True)
+        unrelated.start()
+        probed = []
+
+        def _absent_and_unrelated_thread_exits(name):
+            probed.append(name)
+            release.set()
+            unrelated.join()
+            return None
+
         monkeypatch.setattr(
-            storage_module.importlib.util, "find_spec", lambda name: None
+            storage_module.importlib.util,
+            "find_spec",
+            _absent_and_unrelated_thread_exits,
         )
-        before = {t.ident for t in threading.enumerate()}
+        backfills_before = {
+            t for t in threading.enumerate() if t.name == "embedding-backfill"
+        }
+        caller = threading.current_thread()
+        started = []
+        backfills_started = []
+        real_start = threading.Thread.start
 
-        storage._maybe_backfill_missing_embeddings_async()
+        def _recording_start(thread):
+            if threading.current_thread() is caller:
+                started.append(thread.name)
+            if thread.name == "embedding-backfill":
+                backfills_started.append(thread)
+            return real_start(thread)
 
-        after = {t.ident for t in threading.enumerate()}
-        assert after == before
+        monkeypatch.setattr(threading.Thread, "start", _recording_start)
+
+        # The recorder stays in place until the io executor has drained, so
+        # a backfill started on the caller's behalf from another thread is
+        # recorded however quickly it finishes; a census of live threads
+        # would miss one that has already exited.
+        try:
+            storage._maybe_backfill_missing_embeddings_async()
+            storage.flush()
+        finally:
+            monkeypatch.setattr(threading.Thread, "start", real_start)
+            release.set()
+
+        # Recorded by the stub rather than read off the thread's liveness:
+        # the `finally` releases it too, so a skipped probe could still find
+        # it dead. The stub joins it, so the mid-call exit was exercised.
+        assert probed == ["sentence_transformers"]
+        assert not unrelated.is_alive()
+        assert started == []
+        assert backfills_started == []
+        # Compared with the threads before the call, so a lingering real
+        # backfill from an earlier test is not blamed on this one.
+        backfills_after = {
+            t for t in threading.enumerate() if t.name == "embedding-backfill"
+        }
+        assert backfills_after <= backfills_before
         assert any("have no" in m for m in storage_log()[logging.WARNING])
         assert not storage.vector_store.has_embedding("a")
-        storage.flush()
 
     def test_backfills_in_the_background_when_the_ml_stack_is_available(
         self, tmpdir_path, monkeypatch, storage_log
@@ -219,16 +271,17 @@ class TestStartupBackfillPass:
             storage_module.importlib.util, "find_spec", lambda name: object()
         )
 
+        before = set(threading.enumerate())
         storage._maybe_backfill_missing_embeddings_async()
 
-        # The backfill runs on a background thread; with the fake encoder it
-        # finishes almost immediately, so by the time this returns the
-        # thread may already be gone rather than still enumerable - poll
-        # coverage instead of trying to join a thread that could have
-        # already exited.
-        deadline = time.monotonic() + 5
-        while storage.embedding_coverage() != (1, 1) and time.monotonic() < deadline:
-            time.sleep(0.01)
+        # Joined, not polled on coverage: coverage is complete before the
+        # thread saves and logs "Backfilled", so a poll on it can read the
+        # log first. `start()` returns once the thread runs, so a backfill
+        # thread absent from this enumeration has already finished.
+        for thread in set(threading.enumerate()) - before:
+            if thread.name == "embedding-backfill":
+                thread.join(timeout=5)
+                assert not thread.is_alive(), "the backfill did not finish"
 
         assert storage.embedding_coverage() == (1, 1)
         assert any("Backfilled 1" in m for m in storage_log()[logging.INFO])
@@ -480,26 +533,28 @@ class TestStartupBackfillPass:
             storage_module.importlib.util, "find_spec", lambda name: object()
         )
 
-        before = {t.ident: t.name for t in threading.enumerate()}
+        # Thread objects, not idents: an ident is reused once its thread
+        # exits, so a thread that ended between the two enumerations could
+        # hand the new one an ident already in `before` and hide it.
+        before = set(threading.enumerate())
         storage._maybe_backfill_missing_embeddings_async()
-        after_call = {t.ident: t.name for t in threading.enumerate()}
+        after_call = set(threading.enumerate())
 
         # A synchronous implementation would still be running `.encode()`
         # (blocked on `release`) on THIS thread at this point, so no new
         # thread would exist yet.
-        new_threads = {
-            ident: name for ident, name in after_call.items() if ident not in before
-        }
+        new_threads = after_call - before
         assert new_threads, (
             "no new thread appeared after the call returned - the startup "
             "pass may be running synchronously on the caller's thread"
         )
-        assert "embedding-backfill" in new_threads.values()
+        backfill = [t for t in new_threads if t.name == "embedding-backfill"]
+        assert backfill
 
         release.set()
-        deadline = time.monotonic() + 5
-        while storage.embedding_coverage() != (1, 1) and time.monotonic() < deadline:
-            time.sleep(0.01)
+        for thread in backfill:
+            thread.join(timeout=5)
+            assert not thread.is_alive(), "the backfill did not finish"
         assert storage.embedding_coverage() == (1, 1)
         storage.flush()
 

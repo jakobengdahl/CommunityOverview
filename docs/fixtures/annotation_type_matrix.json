@@ -140,6 +140,15 @@
         "smoothing": 0.2,
         "strokeWidth": 3
       }
+    },
+    {
+      "id": "heatmap-1",
+      "type": "heatmap",
+      "x": 40,
+      "y": 50,
+      "w": 180,
+      "h": 180,
+      "fields": { "intensity": 7 }
     }
   ]
 }

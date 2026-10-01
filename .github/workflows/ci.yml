@@ -4,7 +4,8 @@
 # This workflow:
 #   1. Runs tests on pushes to main, preview and prod (and v* tags) and on
 #      pull requests targeting those branches
-#   2. Builds and publishes both application images to GHCR on branch pushes
+#   2. Builds and publishes both application images to GHCR on pushes to
+#      preview and prod and on v* tags only; a push to main runs no build
 #   3. Emits artifact metadata that the infra repo consumes for deployment
 #
 # Responsibilities of this repo:
@@ -24,8 +25,15 @@
 # Tags applied (see "Extract metadata" steps for full logic):
 #   sha-<commit>          immutable, used as the canonical artifact reference
 #   dev                   floating tag, latest successful build from preview branch
-#   latest                floating tag, latest successful build from prod branch
-#   v<semver>             applied only when a version tag is pushed
+#   latest                floating tag, moved by a successful build of the prod
+#                         branch AND by a non-pre-release semver v* tag push,
+#                         whichever ran last: no `flavor:` is set, so
+#                         metadata-action's default `latest=auto` adds it to
+#                         such tag pushes on top of the explicit prod rule
+#   <major>.<minor>.<patch>, <major>.<minor>
+#                         applied only when a version tag is pushed; the
+#                         leading `v` is stripped (v1.2.3 -> 1.2.3 and 1.2),
+#                         and a pre-release tag gets the full version only
 #
 # Cost control (see detect-changes + the *-tests gate jobs below):
 #   - The heavy test jobs run only when service code actually changed and the
@@ -391,10 +399,16 @@ jobs:
       # packages ship one wheel per CPython version, so the version must match.
       - name: Read the image's Python version
         id: image-python
+        # [[:space:]] follows the locale: the runner's C.UTF-8 counts U+2003 as
+        # space. C keeps it to ASCII, as test_lockfiles.py's parser does.
+        env:
+          LC_ALL: C
         run: |
-          version=$(sed -n 's/^FROM python:\([0-9][0-9.]*\).*/\1/p' Dockerfile | head -n 1)
+          # The final stage is the one the image runs, so read its (last) FROM line.
+          version=$(awk 'tolower($1) == "from" { line = $0 } END { print line }' Dockerfile \
+            | sed -En 's/^[[:space:]]*[Ff][Rr][Oo][Mm][[:space:]]+(--platform=[^[:space:]]+[[:space:]]+)?([^[:space:]]*\/)?python:([0-9]+\.[0-9]+(\.[0-9]+)?).*/\3/p')
           if [ -z "$version" ]; then
-            echo "::error::Could not read the Python version from the FROM line in Dockerfile"
+            echo "::error::Could not read the Python version from the last FROM line in Dockerfile"
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"

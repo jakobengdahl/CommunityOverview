@@ -473,6 +473,21 @@ describe('GenericAnnotationNode property editor', () => {
     expect(screen.getByLabelText('Rotate left 15°')).toBeInTheDocument();
   });
 
+  // Opacity is withheld from the heat map alone (its intensity is its
+  // transparency; see HeatmapAnnotation.test.jsx). Every other editable kind
+  // that renders here keeps the group.
+  it.each([
+    ['text', { text: 'x' }, (c) => c.querySelector('.kind-text')],
+    ['shape', { shape: 'rectangle' }, () => screen.getByTestId('shape-halo')],
+    ['icon', { icon: 'flag' }, () => screen.getByTitle('flag')],
+    ['vote_dot', {}, (c) => c.querySelector('.kind-vote_dot')],
+    ['image', { image: { url: 'x.png' } }, (c) => c.querySelector('.kind-image')],
+  ])('offers the opacity group for a %s', (type, data, target) => {
+    const { container } = render(<GenericAnnotationNode id="o1" type={type} data={data} />);
+    fireEvent.contextMenu(target(container));
+    expect(screen.getByRole('button', { name: 'Opacity' })).toBeInTheDocument();
+  });
+
   it('offers no rotation control for a vote_dot, whose every rotation looks the same', () => {
     const { container } = render(<GenericAnnotationNode id="v1" type="vote_dot" data={{}} />);
     fireEvent.contextMenu(container.querySelector('.kind-vote_dot'));

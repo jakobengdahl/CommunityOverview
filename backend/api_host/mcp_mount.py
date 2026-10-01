@@ -123,9 +123,7 @@ class MCPBrowserHandler:
     transport, and returns a helpful info payload for plain browser GETs.
     """
 
-    def __init__(
-        self, sse_app, streamable_app=None, tools_map=None, streamable_ready=None
-    ):
+    def __init__(self, sse_app, streamable_app, tools_map=None, streamable_ready=None):
         self.sse_app = sse_app
         self.streamable_app = streamable_app
         self.tools_map = tools_map or {}
@@ -135,7 +133,7 @@ class MCPBrowserHandler:
         self._streamable_ready = streamable_ready or (lambda: True)
 
     def _streamable(self):
-        if self.streamable_app is not None and self._streamable_ready():
+        if self._streamable_ready():
             return self.streamable_app
         return None
 
@@ -144,11 +142,14 @@ class MCPBrowserHandler:
             await self.sse_app(scope, receive, send)
             return
 
-        # Starlette leaves scope["path"] as the full request path and records the
-        # mount prefix in scope["root_path"], so the path relative to this mount
-        # has to be derived — comparing scope["path"] against "/" would never
-        # match and every Streamable HTTP request would fall through to the
-        # legacy SSE app, which answers 404 for them.
+        # Starlette redirects /mcp -> /mcp/ before a mounted sub-app sees the
+        # request. Some remote MCP clients do not tolerate redirects on POST
+        # initialize, so api_host rewrites exact /mcp requests to /mcp/ before
+        # routing reaches this handler. Starlette leaves scope["path"] as the full
+        # request path and records the mount prefix in scope["root_path"], so the
+        # path relative to this mount still has to be derived here — comparing
+        # scope["path"] against "/" would never match and every Streamable HTTP
+        # request would fall through to the legacy SSE app, which answers 404.
         path = _mount_relative_path(scope)
         method = scope.get("method", "GET")
         is_root = path == "/"
@@ -199,16 +200,12 @@ class MCPBrowserHandler:
                     "protocol": "MCP supports SSE and Streamable HTTP transports.",
                     "transports": {
                         "sse_legacy": "/mcp/sse",
-                        "streamable_http": "/mcp"
-                        if self.streamable_app
-                        else "not available",
+                        "streamable_http": "/mcp",
                     },
                     "streamable_http_endpoints": {
                         "POST /mcp": "send JSON-RPC message; respond inline or as SSE stream",
                         "GET /mcp": "open SSE stream for server-initiated messages (Accept: text/event-stream)",
-                    }
-                    if self.streamable_app
-                    else {},
+                    },
                     "documentation": "https://modelcontextprotocol.io/",
                     "available_tools": list(self.tools_map.keys()),
                 }
@@ -219,6 +216,24 @@ class MCPBrowserHandler:
         await self.sse_app(scope, receive, send)
 
 
+def _install_mcp_no_redirect_rewrite(app: FastAPI) -> None:
+    """Rewrite exact /mcp requests to /mcp/ before Starlette redirects them.
+
+    Starlette's mounted apps canonicalise bare mount hits with a 307 redirect.
+    Remote MCP clients such as Claude may reject redirects on the JSON-RPC
+    initialize POST, so keep /mcp as the public canonical endpoint and route it
+    internally to the mounted app's slash form.
+    """
+
+    @app.middleware("http")
+    async def mcp_no_redirect_rewrite(request, call_next):
+        scope = request.scope
+        if scope.get("path") == "/mcp":
+            scope["path"] = "/mcp/"
+            scope["raw_path"] = b"/mcp/"
+        return await call_next(request)
+
+
 def mount_mcp(app: FastAPI, mcp, tools_map) -> None:
     """Mount the MCP HTTP endpoints at /mcp.
 
@@ -226,31 +241,21 @@ def mount_mcp(app: FastAPI, mcp, tools_map) -> None:
       1. Legacy SSE  (GET /mcp/sse + POST /mcp/messages) – for older clients
       2. Streamable HTTP (POST /mcp) – for ChatGPT, Claude, and MCP spec ≥2025-03-26
     """
+    _install_mcp_no_redirect_rewrite(app)
+
     mcp_sse_app = bind_request_authorization_to_asgi_app(mcp.sse_app())
 
-    # Try to create Streamable HTTP app (requires mcp ≥ 1.8).
-    # If the installed version doesn't support it, fall back to SSE-only.
-    try:
-        # FastMCP mounts its Streamable HTTP handler at settings.streamable_http_path
-        # ("/mcp" by default). This whole app is itself mounted at /mcp, so the
-        # handler sees the already-stripped path "/" and the default would never
-        # match — every POST /mcp answered 404. Serve it from the mount root.
-        try:
-            mcp.settings.streamable_http_path = "/"
-        except (AttributeError, ValueError):
-            logger.warning(
-                "Could not set streamable_http_path; Streamable HTTP may not respond "
-                "on /mcp with this mcp version."
-            )
-        mcp_streamable_app = bind_request_authorization_to_asgi_app(
-            mcp.streamable_http_app()
-        )
-    except (AttributeError, TypeError):
-        mcp_streamable_app = None
+    # FastMCP mounts its Streamable HTTP handler at settings.streamable_http_path
+    # ("/mcp" by default). This whole app is itself mounted at /mcp, so the
+    # handler sees the already-stripped path "/" and the default would never
+    # match — every POST /mcp answered 404. Serve it from the mount root.
+    mcp.settings.streamable_http_path = "/"
+    mcp_streamable_app = bind_request_authorization_to_asgi_app(
+        mcp.streamable_http_app()
+    )
 
     streamable_state = {"started": False}
-    if mcp_streamable_app is not None:
-        _attach_streamable_session_lifecycle(app, mcp, streamable_state)
+    _attach_streamable_session_lifecycle(app, mcp, streamable_state)
 
     app.mount(
         "/mcp",

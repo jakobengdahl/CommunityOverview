@@ -183,6 +183,10 @@ def fetch_image_bytes(
                 with client.stream("GET", current_url) as response:
                     if response.is_redirect:
                         location = str(response.headers.get("location", ""))
+                        if not location:
+                            raise ImageFetchError(
+                                "image_url redirected without a Location header"
+                            )
                         next_url = urllib.parse.urljoin(current_url, location)
                         if not is_safe_url(next_url):
                             raise ImageFetchError(

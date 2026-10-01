@@ -73,7 +73,17 @@ EMBEDDED_IMAGE_URL_PREFIXES = ("data:image/webp;base64,",)
 # they are simply no longer resolved by `normalize_generic_type` below, the
 # same as any other unrecognised type.
 GENERIC_ANNOTATION_TYPES: FrozenSet[str] = frozenset(
-    {"text", "label", "line", "shape", "icon", "vote_dot", "image", "freehand"}
+    {
+        "text",
+        "label",
+        "line",
+        "shape",
+        "icon",
+        "vote_dot",
+        "image",
+        "freehand",
+        "heatmap",
+    }
 )
 ALL_ANNOTATION_TYPES: FrozenSet[str] = GENERIC_ANNOTATION_TYPES | {
     NOTE_TYPE,
@@ -110,6 +120,16 @@ _RESERVED_ANNOTATION_KEYS = {
     "field_versions",
 }
 
+# `heatmap` (docs/ANNOTATION_CONTRACT.md's "Heat-map circles"): a soft red
+# circle whose `content.intensity` is an integer 0-10, 0 invisible and 10 the
+# strongest red. Mirrors HEATMAP_* in
+# packages/ui-graph-canvas/src/utils/annotationModel.js.
+HEATMAP_TYPE = "heatmap"
+HEATMAP_MIN_INTENSITY = 0
+HEATMAP_MAX_INTENSITY = 10
+HEATMAP_DEFAULT_INTENSITY = 5
+HEATMAP_DEFAULT_DIAMETER = 160
+
 # The `content.shape` variants a `shape` annotation accepts
 # (docs/ANNOTATION_CONTRACT.md), mirroring
 # `packages/ui-graph-canvas/src/utils/annotationModel.js`'s `ANNOTATION_SHAPES`.
@@ -143,11 +163,15 @@ ATTACHABLE_ANNOTATION_TYPES: FrozenSet[str] = frozenset({"text", "label", "icon"
 # default z at creation", docs/ANNOTATION_CONTRACT.md's "Layer order").
 # Mirrors `DEFAULT_ANNOTATION_Z_BY_TYPE`/`defaultAnnotationZ` in
 # packages/ui-graph-canvas/src/utils/annotationModel.js exactly — see that
-# file's comment for the full reasoning (only `shape` moves, everything else
-# including `note`/`group`/`image` stays at 0) — so an MCP/REST-created
+# file's comment for the full reasoning (only `shape` and `heatmap` move,
+# everything else including `note`/`group`/`image` stays at 0) — so an MCP/REST-created
 # annotation and a GUI-created one of the same kind start on the same layer.
+# `heatmap` shares shape's backdrop layer (see annotationModel.js).
 SHAPE_DEFAULT_Z = -1
-DEFAULT_ANNOTATION_Z_BY_TYPE: Dict[str, float] = {"shape": SHAPE_DEFAULT_Z}
+DEFAULT_ANNOTATION_Z_BY_TYPE: Dict[str, float] = {
+    "shape": SHAPE_DEFAULT_Z,
+    HEATMAP_TYPE: SHAPE_DEFAULT_Z,
+}
 
 
 def default_annotation_z(annotation_type: Optional[str]) -> float:
@@ -223,7 +247,7 @@ def _validate_generic_content(
 
     Deliberately narrow: only the fields the v1 contract actually
     type-constrains are checked (`shape`, `icon`, `attachment`, a `line`'s
-    `start`/`end`) — everything else in `content` stays the free-form,
+    `start`/`end`, a `heatmap`'s `intensity`) — everything else in `content` stays the free-form,
     verbatim payload `build_annotation`'s docstring describes. A `shape` or
     `icon` name outside its documented set is *not* an error (see
     `ANNOTATION_SHAPES`'s docstring); only its type is checked, so a caller
@@ -241,6 +265,20 @@ def _validate_generic_content(
         icon = source["icon"]
         if not isinstance(icon, str) or not icon.strip():
             return "content.icon must be a non-empty string"
+    if ann_type == HEATMAP_TYPE and "intensity" in source:
+        intensity = source["intensity"]
+        # A float or a bool is refused rather than rounded: the canvas steps
+        # in whole levels, and an agent sending 7.5 or True has misread the
+        # contract, which a silent rounding would hide from it.
+        if (
+            not isinstance(intensity, int)
+            or isinstance(intensity, bool)
+            or not HEATMAP_MIN_INTENSITY <= intensity <= HEATMAP_MAX_INTENSITY
+        ):
+            return (
+                "content.intensity must be an integer from "
+                f"{HEATMAP_MIN_INTENSITY} to {HEATMAP_MAX_INTENSITY}"
+            )
     if ann_type in ATTACHABLE_ANNOTATION_TYPES and "attachment" in source:
         error = _attachment_error(source["attachment"], field="content.attachment")
         if error:
@@ -769,7 +807,21 @@ def build_annotation(
     (see ``normalize_generic_type``); this function does not itself validate
     it, matching ``build_note_annotation``'s division of labor with its
     callers.
+
+    A ``heatmap`` given no size gets a ``HEATMAP_DEFAULT_DIAMETER`` circle
+    (and one given only w or h a circle of that diameter), since a 0x0 box
+    draws nothing. Its intensity is not defaulted here: an upsert-replace
+    that omits ``content`` keeps the stored intensity under the store's
+    shallow merge, and a default written here would silently reset it. The
+    MCP tool fills the default for a fresh create instead.
     """
+    if type == HEATMAP_TYPE:
+        if w is None and h is None:
+            w = h = HEATMAP_DEFAULT_DIAMETER
+        elif w is None:
+            w = h
+        elif h is None:
+            h = w
     geometry = {
         "x": x,
         "y": y,

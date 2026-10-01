@@ -303,6 +303,11 @@ class GraphStorage:
         # Thread lock for in-memory data structure protection
         # RLock allows same thread to acquire lock multiple times (reentrant)
         self._lock = threading.RLock()
+        # Set, under _lock, once this instance is being torn down. A backend
+        # promises not to call the listener after stop returns, but nothing
+        # here can make it keep that promise; this is what stops a late
+        # report from refreshing a model nobody owns any more.
+        self._shut_down = False
 
         # Executor for background I/O operations (saving to disk)
         # Using max_workers=1 to ensure sequential writes
@@ -405,6 +410,8 @@ class GraphStorage:
             # The listener stops first: it is the one that can still call
             # into this half-built object. The writer goes whatever that
             # does, or its thread outlives an instance nothing can reach.
+            with self._lock:
+                self._shut_down = True
             try:
                 if boot_gate is not None:
                     self._persistence_backend.stop_change_notification()
@@ -595,7 +602,11 @@ class GraphStorage:
 
     def shutdown_events(self) -> None:
         """Shutdown the event system and I/O executor gracefully."""
-        # First, so nothing arrives to refresh a model that is being torn down.
+        # First, so nothing arrives to refresh a model that is being torn down:
+        # the flag refuses a report the backend makes after this point, and
+        # taking _lock to set it waits out a refresh already under way.
+        with self._lock:
+            self._shut_down = True
         if self._backend_capabilities.change_notification:
             try:
                 self._persistence_backend.stop_change_notification()
@@ -1102,17 +1113,31 @@ class GraphStorage:
         here. What happens next is the caller's: `add_nodes` generates over
         the whole batch afterwards, so generation wins there, while a refresh
         generates only where the store supplied nothing.
+
+        The vectors come off the nodes only after the index export and load
+        have returned: until then the node is their only copy, so a raise
+        there must leave them where they were for the caller to retry or
+        settle. A vector the index refuses for its width is still cleared.
         """
-        self._adopt_vectors(self._take_inline_vectors(nodes))
+        nodes = list(nodes)
+        self._adopt_vectors(
+            {
+                node.id: node.embedding
+                for node in nodes
+                if node.embedding is not None and len(node.embedding) > 0
+            }
+        )
+        self._take_inline_vectors(nodes)
 
     def _adopt_vectors(
         self, supplied: Dict[str, Any], anchor: Optional[int] = None
     ) -> None:
-        """Move vectors already taken off their nodes into the index.
+        """Move supplied vectors, keyed by node id, into the index.
 
-        Separate from _adopt_supplied_vectors because the refresh takes a
+        Works on a dict rather than on nodes because the refresh takes a
         vector off its node when the operation is applied - so the event it
         emits does not carry it - and adopts it only when the batch ends.
+        _adopt_supplied_vectors passes vectors still on their nodes.
 
         `anchor` is the width to judge the supplied vectors against, for a
         caller that has already emptied the index of what would otherwise
@@ -1541,7 +1566,9 @@ class GraphStorage:
         thread of its own, when the store changed behind this instance's
         back. Which threads count as its own is the backend's obligation and
         is stated on ChangeNotifyingBackend; only one violation of it is
-        visible from here, and that one is refused below.
+        visible from here, and that one is refused below. A report that
+        arrives once shutdown_events() has begun - or once construction has
+        failed - is dropped without refreshing anything.
         Nothing here is persisted: the change is already in the store, and
         writing it back would fight the writer that made it.
 
@@ -1576,6 +1603,12 @@ class GraphStorage:
             )
 
         with self._lock:
+            # A report after shutdown has nothing to refresh: the model is
+            # being torn down, and the drain below would find the queue gone
+            # and go ahead anyway. Refused quietly, not raised - the only
+            # thread to raise into is the backend's.
+            if self._shut_down:
+                return
             if not self._settle_before_refresh():
                 return
             # Read AFTER the settle, never before. A backend that gathers the
@@ -2393,11 +2426,46 @@ class GraphStorage:
                     # (executor shut down); the caller still gets its result.
                     logger.warning(f"could not persist what was added: {persist_error}")
 
+            nodes_to_embed: List[Node] = []
+            generation_attempted = False
+
+            def generate_landed_vectors() -> None:
+                # Once per call: an exit after the attempt - a rejected edge -
+                # must not encode the batch a second time.
+                nonlocal generation_attempted
+                if generation_attempted or not nodes_to_embed:
+                    return
+                generation_attempted = True
+                try:
+                    self.vector_store.update_nodes_embeddings(nodes_to_embed)
+                except Exception as embed_error:
+                    # Embedding generation is optional - log but don't fail
+                    logger.warning(f"could not generate embeddings: {embed_error}")
+
+            def settle_landed_vectors() -> None:
+                # A node that landed stays, and every later event about it -
+                # an update's `before`, an external upsert's - is built from
+                # the object, with no by-name filter for `embedding`. So on a
+                # failure exit too the vector goes to the index or nowhere,
+                # never stays on the node.
+                try:
+                    self._adopt_supplied_vectors(nodes_to_embed)
+                except Exception as adopt_error:
+                    logger.warning(
+                        f"could not adopt supplied embeddings: {adopt_error}"
+                    )
+                for landed in nodes_to_embed:
+                    landed.embedding = None
+                # A landed node stays and is persisted, so it is generated for
+                # as on success; otherwise semantic search misses it until the
+                # next startup backfill.
+                generate_landed_vectors()
+
             try:
                 # Add nodes
-                nodes_to_embed = []
                 for node in nodes:
                     if node.id in self.nodes:
+                        settle_landed_vectors()
                         persist_landed()
                         return AddNodesResult(
                             added_node_ids=[],
@@ -2422,13 +2490,7 @@ class GraphStorage:
                 # below still wins when the ML stack is available, as before.
                 self._adopt_supplied_vectors(nodes_to_embed)
 
-                # Generate embeddings for new nodes (non-blocking)
-                if nodes_to_embed:
-                    try:
-                        self.vector_store.update_nodes_embeddings(nodes_to_embed)
-                    except Exception as embed_error:
-                        # Embedding generation is optional - log but don't fail
-                        logger.warning(f"could not generate embeddings: {embed_error}")
+                generate_landed_vectors()
 
                 # Persisted before the edges so that, as before, a rejected
                 # edge leaves the nodes it was meant to join in place.
@@ -2545,6 +2607,7 @@ class GraphStorage:
                 )
 
             except Exception as e:
+                settle_landed_vectors()
                 persist_landed()
                 return AddNodesResult(
                     added_node_ids=[],
