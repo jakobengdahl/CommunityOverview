@@ -7,6 +7,7 @@ Defines settings for agents, MCP integrations, and global agent system configura
 import os
 import json
 import logging
+import tempfile
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, TYPE_CHECKING
 from enum import Enum
@@ -153,7 +154,7 @@ class AgentSchedule:
 #: pass through unredacted.
 REDACTED_ENV_VALUE = "***"
 
-AGENT_WORKSPACE_ENV_VAR = "AGENT_WORKSPACE_DIR"
+AGENTS_WORKSPACE_ENV_VAR = "AGENTS_WORKSPACE_DIR"
 
 
 def agent_workspace_dir() -> str:
@@ -166,14 +167,35 @@ def agent_workspace_dir() -> str:
     shared system temp directory: a predictable path there can be pre-created by
     any other local user - as a directory they own, or as a symlink - and
     whoever wins that race chooses where the agent reads and writes. Set
-    AGENT_WORKSPACE_DIR to place the workspace somewhere explicit.
+    AGENTS_WORKSPACE_DIR to place the workspace somewhere explicit; a location
+    other local users can write to re-opens that race, which is why the FS
+    executor additionally refuses a root it does not own (see
+    MCPLoader._execute_fs_tool).
+
+    The return value is always absolute. `expanduser` yields no usable home
+    under a uid with neither HOME nor a passwd entry - a hardened container run
+    as an arbitrary uid - where it returns the literal "~"; joining onto that
+    would hand back a cwd-relative path and scatter the workspace wherever the
+    process happens to be. Such a deployment falls back to a per-uid directory
+    under the system temp dir, computed rather than written as a literal.
     """
-    configured = os.environ.get(AGENT_WORKSPACE_ENV_VAR)
+    configured = os.environ.get(AGENTS_WORKSPACE_ENV_VAR)
     if configured:
         return os.path.abspath(os.path.expanduser(configured))
+
+    home = os.path.expanduser("~")
+    if os.path.isabs(home) and home != os.sep:
+        return os.path.join(home, ".communityoverview", "agent-workspace")
+
     return os.path.join(
-        os.path.expanduser("~"), ".communityoverview", "agent-workspace"
+        tempfile.gettempdir(), f"communityoverview-agent-workspace-{_euid_tag()}"
     )
+
+
+def _euid_tag() -> str:
+    """A per-user component for the no-home fallback path."""
+    getuid = getattr(os, "geteuid", None)
+    return str(getuid()) if getuid is not None else "nouid"
 
 
 class MCPTransport(str, Enum):

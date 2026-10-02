@@ -6,7 +6,7 @@ import os
 from unittest.mock import patch
 
 from backend.agents.config import (
-    AGENT_WORKSPACE_ENV_VAR,
+    AGENTS_WORKSPACE_ENV_VAR,
     MCPIntegration,
     AgentConfig,
     AgentsSettings,
@@ -252,7 +252,7 @@ class TestAgentWorkspaceDir:
         """Overriding the setting moves the server's root with it."""
         with patch.dict(
             os.environ,
-            {"AGENTS_ENABLED": "true", AGENT_WORKSPACE_ENV_VAR: "/srv/workspace"},
+            {"AGENTS_ENABLED": "true", AGENTS_WORKSPACE_ENV_VAR: "/srv/workspace"},
             clear=True,
         ):
             integrations = AgentsSettings._get_default_integrations()
@@ -261,31 +261,66 @@ class TestAgentWorkspaceDir:
 
     def test_override_is_honoured_and_expanded(self):
         with patch.dict(
-            os.environ, {AGENT_WORKSPACE_ENV_VAR: "/srv/agent-ws"}, clear=True
+            os.environ, {AGENTS_WORKSPACE_ENV_VAR: "/srv/agent-ws"}, clear=True
         ):
             assert agent_workspace_dir() == "/srv/agent-ws"
-        with patch.dict(os.environ, {AGENT_WORKSPACE_ENV_VAR: "~/ws"}, clear=True):
+        with patch.dict(os.environ, {AGENTS_WORKSPACE_ENV_VAR: "~/ws"}, clear=True):
             assert agent_workspace_dir() == os.path.join(os.path.expanduser("~"), "ws")
 
     def test_override_is_absolute(self):
         """A relative override would resolve against the process cwd."""
-        with patch.dict(os.environ, {AGENT_WORKSPACE_ENV_VAR: "ws"}, clear=True):
+        with patch.dict(os.environ, {AGENTS_WORKSPACE_ENV_VAR: "ws"}, clear=True):
             assert os.path.isabs(agent_workspace_dir())
 
-    def test_default_is_not_a_fixed_path_in_the_shared_temp_dir(self):
-        """B108: a predictable path in world-writable /tmp can be pre-created
-        (or pre-created as a symlink) by any other local user, who then
-        controls where the agent reads and writes."""
-        with patch.dict(os.environ, {}, clear=True):
+    def test_default_is_per_user_not_merely_outside_the_shared_temp_dir(self):
+        """B108: a predictable path any other local user can pre-create - as a
+        directory or a symlink - lets them choose where the agent reads and
+        writes. Excluding /tmp is not enough: /opt/agent-workspace is just as
+        shared. The default has to be specific to this user."""
+        with patch.dict(os.environ, {"HOME": "/home/someone"}, clear=True):
             default = agent_workspace_dir()
         assert os.path.isabs(default)
-        for shared in ("/tmp/", "/var/tmp/", "/dev/shm/"):
-            assert not default.startswith(shared), (
-                f"default workspace {default!r} sits in shared {shared}"
+        assert default.startswith("/home/someone" + os.sep), (
+            f"default workspace {default!r} is not under this user's home"
+        )
+
+    def test_default_is_absolute_without_a_usable_home(self):
+        """A uid with neither HOME nor a passwd entry gets "~" from expanduser.
+
+        Joining onto that yields a cwd-relative path, so the workspace would
+        land wherever the process happened to be started and move if it
+        chdir'd. Reachable in a container run as an arbitrary uid.
+        """
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("os.path.expanduser", return_value="~"):
+                default = agent_workspace_dir()
+        assert os.path.isabs(default), f"{default!r} is not absolute"
+
+    def test_default_is_not_the_filesystem_root_when_home_is_empty(self):
+        """HOME="" makes expanduser return "/", which would put the workspace
+        directly under the filesystem root."""
+        with patch.dict(os.environ, {"HOME": ""}, clear=True):
+            default = agent_workspace_dir()
+        assert os.path.isabs(default)
+        assert os.path.dirname(default.rstrip(os.sep)) != ""
+        assert not default.startswith(os.sep + ".communityoverview"), (
+            f"default workspace {default!r} sits at the filesystem root"
+        )
+
+    def test_no_home_fallback_is_specific_to_this_user(self):
+        """The fallback lives in the shared temp dir, so it must not be a path
+        another user's process would pick too."""
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("os.path.expanduser", return_value="~"):
+                default = agent_workspace_dir()
+        geteuid = getattr(os, "geteuid", None)
+        if geteuid is not None:
+            assert str(geteuid()) in os.path.basename(default), (
+                f"fallback {default!r} carries no per-user component"
             )
 
     def test_blank_override_falls_back_to_the_default(self):
-        with patch.dict(os.environ, {AGENT_WORKSPACE_ENV_VAR: ""}, clear=True):
+        with patch.dict(os.environ, {AGENTS_WORKSPACE_ENV_VAR: ""}, clear=True):
             fallback = agent_workspace_dir()
         with patch.dict(os.environ, {}, clear=True):
             assert fallback == agent_workspace_dir()
