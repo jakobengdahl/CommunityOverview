@@ -375,6 +375,14 @@ rather than starting a second line. Without pressure data (a mouse, a finger, or
 pressure-less pen) the stroke draws at a constant width instead. Right-click a finished
 stroke for its own colour, stroke-width, smoothing and opacity controls.
 
+To choose those options *before* drawing, click the small arrow on the **Freehand** button
+(or right-click the button) and pick a colour, stroke width, smoothing level and opacity;
+the choice applies to the strokes you draw next and is remembered in your browser. Higher
+smoothing averages out hand tremor, so 100% draws a clearly smoother line than 0%, which
+keeps every sampled point as drawn. On a pressure-sensitive stylus a light touch draws a
+fine line and a hard press a much thicker one (roughly twenty times thicker); a medium
+press draws at the chosen width, which is also what a mouse produces.
+
 **Image** annotations can be added three ways: pick **Image** in the toolbox to choose a
 file (PNG, JPEG or WebP); paste an image from your clipboard anywhere on the canvas
 (Ctrl/Cmd+V); or drag an image file in from your desktop and drop it. Either way the image

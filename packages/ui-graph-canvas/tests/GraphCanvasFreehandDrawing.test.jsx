@@ -5,7 +5,7 @@
 // device pressure), the constant-width fallback for pressure-less input, and
 // the concurrent-touch-input guidance (item 4).
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, cleanup, act } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, act, within } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';
 
 const store = vi.hoisted(() => ({ handlers: {} }));
@@ -404,5 +404,64 @@ describe('GraphCanvas freehand drawing mode', () => {
     });
 
     expect(findCreatedFreehandNode()).toBeUndefined();
+  });
+});
+
+describe('GraphCanvas freehand pre-draw options', () => {
+  beforeEach(() => {
+    store.nodes = [];
+    store.handlers = {};
+    window.localStorage.removeItem('communityoverview:annotation-toolbox:freehand-options');
+  });
+  afterEach(() => cleanup());
+
+  it('draws the next stroke with the options chosen in the pen fold-out', () => {
+    const { container } = render(
+      <GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /choose pen options/i }));
+    const panel = screen.getByRole('group', { name: /^pen options$/i });
+    fireEvent.click(within(panel).getByRole('button', { name: '#4ADE80' }));
+    fireEvent.click(within(panel).getByRole('button', { name: '8' }));
+    const smoothingRow = within(panel).getByText('Smoothing').parentElement;
+    fireEvent.click(within(smoothingRow).getByRole('button', { name: '100%' }));
+    const opacityRow = within(panel).getByText('Opacity').parentElement;
+    fireEvent.click(within(opacityRow).getByRole('button', { name: '50%' }));
+
+    const rf = container.querySelector('[data-testid="react-flow"]');
+    act(() => {
+      rf.dispatchEvent(pointerEvent('pointerdown', { clientX: 10, clientY: 10 }));
+      rf.dispatchEvent(pointerEvent('pointermove', { clientX: 20, clientY: 10 }));
+      rf.dispatchEvent(pointerEvent('pointerup', { clientX: 30, clientY: 10 }));
+    });
+
+    const node = findCreatedFreehandNode();
+    expect(node.data.color).toBe('#4ADE80');
+    expect(node.data.strokeWidth).toBe(8);
+    expect(node.data.smoothing).toBe(1);
+    expect(node.data.opacity).toBe(0.5);
+  });
+
+  it('previews the in-progress stroke in the chosen colour and width', () => {
+    const { container } = render(
+      <GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /choose pen options/i }));
+    const panel = screen.getByRole('group', { name: /^pen options$/i });
+    fireEvent.click(within(panel).getByRole('button', { name: '#F472B6' }));
+    fireEvent.click(within(panel).getByRole('button', { name: '5' }));
+
+    const rf = container.querySelector('[data-testid="react-flow"]');
+    act(() => {
+      rf.dispatchEvent(pointerEvent('pointerdown', { clientX: 10, clientY: 10 }));
+      rf.dispatchEvent(pointerEvent('pointermove', { clientX: 40, clientY: 25 }));
+    });
+    const preview = container.querySelector(
+      '[data-testid="freehand-preview-overlay"] path[stroke]'
+    );
+    expect(preview.getAttribute('stroke')).toBe('#F472B6');
+    expect(preview.getAttribute('stroke-width')).toBe('5');
   });
 });

@@ -58,3 +58,51 @@
 .tool-slot-picker-item-label {
   white-space: nowrap;
 }
+
+/* Pen options fold-out (children of ToolSlotPicker): one labelled row of
+   choices per stroke property. */
+.tool-slot-picker--options {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  max-width: 260px;
+}
+
+.freehand-options-title {
+  color: #cbd5e1;
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+
+.freehand-options-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.freehand-options-choice {
+  min-width: 36px;
+  min-height: 28px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  border: 1px solid #57534e;
+  background: #292524;
+  color: #e7e5e4;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.freehand-options-choice:hover,
+.freehand-options-choice:focus-visible {
+  border-color: #fbbf24;
+}
+
+.freehand-options-choice--current {
+  border-color: #fbbf24;
+  background: #57431a;
+  box-shadow: inset 0 0 0 1px #fbbf24;
+}
+
+.freehand-options-swatch {
+  min-width: 28px;
+  padding: 0;
+}

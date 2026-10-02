@@ -26,7 +26,8 @@ import GenericAnnotationNode, {
 } from './GenericAnnotationNode';
 import AnnotationErrorBoundary from './AnnotationErrorBoundary';
 import AnnotationToolbox from './AnnotationToolbox';
-import FreehandAnnotationNode, { DEFAULT_FREEHAND_COLOR } from './FreehandAnnotationNode';
+import FreehandAnnotationNode from './FreehandAnnotationNode';
+import { DEFAULT_FREEHAND_OPTIONS } from '../utils/freehandOptions';
 import { AnnotationContext } from './AnnotationContext';
 import SimpleFloatingEdge from './SimpleFloatingEdge';
 import {
@@ -100,14 +101,11 @@ const COMPACT_FIT_PADDING = 0.05;
 const FOCUS_CENTER = { x: 0, y: 0 };
 const FOCUS_MIN_RADIUS = 260;
 const FOCUS_RADIUS_PER_NEIGHBOUR = 55;
-// Defaults for a freehand stroke drawn via the toolbox's drawing mode; all
-// four are editable afterwards through FreehandAnnotationNode's right-click
-// property editor (docs/ANNOTATION_CONTRACT.md's freehand row). The colour is
-// imported rather than restated: this file used to hold its own copy, and
-// because a GUI-drawn stroke is always written WITH an explicit colour, that
-// copy — not the node's fallback — was the value every drawn stroke actually
-// got. Two constants for one default is what let the invisible near-white
-// survive a fix aimed at the fallback.
+// A drawn freehand stroke takes its colour/width/smoothing/opacity from the
+// options chosen in the toolbox's pen fold-out (defaults in
+// utils/freehandOptions.js), and all four stay editable afterwards through
+// FreehandAnnotationNode's right-click property editor
+// (docs/ANNOTATION_CONTRACT.md's freehand row).
 // A stylus's inverted tip. Chromium reports it as its own pointer type; other
 // stacks report a normal `pen` and flag the eraser in the button bits (button
 // 5 / buttons bit 0x20, per the Pointer Events spec). Shared by the erase
@@ -132,9 +130,6 @@ const MIN_ANNOTATION_SIZE = 40;
 // measured rect so a large shape cannot black out the rest of the stroke.
 const ERASE_BLOCK_MAX_PX = 96;
 
-const DEFAULT_FREEHAND_STROKE_WIDTH = 2;
-const DEFAULT_FREEHAND_SMOOTHING = 0.3;
-const DEFAULT_FREEHAND_OPACITY = 1;
 // A stroke shorter than this many sampled points is a stray tap, not a
 // deliberate drawing gesture — mirrors createFreehandStrokeCapture's own
 // `minPoints` default, made explicit here since GraphCanvas passes it in.
@@ -636,6 +631,12 @@ function GraphCanvasInner({
     eraser: 'Eraser',
     voteDotPickerOpen: 'Choose a vote dot colour',
     voteDotPicker: 'Vote dot colours',
+    freehandPickerOpen: 'Choose pen options',
+    freehandPicker: 'Pen options',
+    freehandColor: cml.freehandColor,
+    freehandWidth: cml.freehandWidth,
+    freehandSmoothing: cml.freehandSmoothing,
+    freehandOpacity: cml.freehandOpacity,
     ...annotationToolboxLabels,
   };
 
@@ -848,6 +849,14 @@ function GraphCanvasInner({
   const freehandCaptureRef = useRef(null);
   const freehandPrimaryPointerIdRef = useRef(null);
   const freehandPreviewPathRef = useRef(null);
+  // The pen's stroke options, chosen BEFORE drawing in the toolbox's pen
+  // fold-out (AnnotationToolbox's onFreehandOptionsChange). A ref because the
+  // pointer effect and the commit callback read it at stroke time and must not
+  // re-subscribe when the user changes an option.
+  const freehandOptionsRef = useRef(DEFAULT_FREEHAND_OPTIONS);
+  const handleFreehandOptionsChange = useCallback((options) => {
+    freehandOptionsRef.current = options;
+  }, []);
   const freehandModelPointsRef = useRef([]);
   const commitFreehandStrokeRef = useRef(null);
   if (!freehandCaptureRef.current) {
@@ -2424,6 +2433,7 @@ function GraphCanvasInner({
         return point;
       });
       const hasRealPressure = points.some((p) => Number.isFinite(p.pressure));
+      const options = freehandOptionsRef.current;
       const id = `freehand-${Date.now()}`;
       const newNode = {
         id,
@@ -2431,10 +2441,10 @@ function GraphCanvasInner({
         position: { x: anchor.x, y: anchor.y },
         data: {
           points: relativePoints,
-          color: DEFAULT_FREEHAND_COLOR,
-          strokeWidth: DEFAULT_FREEHAND_STROKE_WIDTH,
-          smoothing: DEFAULT_FREEHAND_SMOOTHING,
-          opacity: DEFAULT_FREEHAND_OPACITY,
+          color: options.color,
+          strokeWidth: options.strokeWidth,
+          smoothing: options.smoothing,
+          opacity: options.opacity,
           pointerType: pointerType || undefined,
           pressureSource: hasRealPressure ? 'device' : undefined,
         },
@@ -3357,9 +3367,11 @@ function GraphCanvasInner({
       });
 
       const ns = 'http://www.w3.org/2000/svg';
+      const options = freehandOptionsRef.current;
+      groupEl.setAttribute('opacity', String(options.opacity));
       const paint = (el, d, width) => {
         el.setAttribute('d', d);
-        el.setAttribute('stroke', DEFAULT_FREEHAND_COLOR);
+        el.setAttribute('stroke', options.color);
         el.setAttribute('stroke-width', String(width));
         el.setAttribute('fill', 'none');
         el.setAttribute('stroke-linecap', 'round');
@@ -3369,7 +3381,7 @@ function GraphCanvasInner({
       if (!hasPressureData(screenPoints)) {
         // Zoom scales the on-screen width the same way the committed stroke's
         // own transform does, so the preview matches what lands.
-        const width = DEFAULT_FREEHAND_STROKE_WIDTH * viewport.zoom;
+        const width = options.strokeWidth * viewport.zoom;
         let pathEl = groupEl.firstElementChild;
         if (!pathEl || groupEl.childElementCount !== 1) {
           groupEl.replaceChildren();
@@ -3382,8 +3394,8 @@ function GraphCanvasInner({
 
       const segments = buildPressureSegments(
         screenPoints,
-        DEFAULT_FREEHAND_SMOOTHING,
-        DEFAULT_FREEHAND_STROKE_WIDTH * viewport.zoom
+        options.smoothing,
+        options.strokeWidth * viewport.zoom
       );
       // Reuse the existing path elements and only add/remove the difference,
       // rather than replacing the whole subtree on every pointermove.
@@ -5256,6 +5268,7 @@ function GraphCanvasInner({
               onCreate={(kind, options) => createAnnotationAtViewportCenter(kind, options)}
               onSelectTool={handleSelectTool}
               onDragCreate={handleAnnotationDragCreate}
+              onFreehandOptionsChange={handleFreehandOptionsChange}
               labels={atl}
               compact={isCompact}
               // Distinct from `compact`, which is a viewport-WIDTH signal
@@ -5276,6 +5289,7 @@ function GraphCanvasInner({
                 onCreate={(kind, options) => createAnnotationAtViewportCenter(kind, options)}
                 onSelectTool={handleSelectTool}
                 onDragCreate={handleAnnotationDragCreate}
+                onFreehandOptionsChange={handleFreehandOptionsChange}
                 labels={atl}
                 variant="sheet"
                 touch={isTouchMode}

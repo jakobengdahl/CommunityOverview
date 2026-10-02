@@ -434,3 +434,96 @@ describe('buildPressureSegments', () => {
     expect(buildPressureSegments(points, 0.4, 2)).toEqual(buildPressureSegments(points, 0.4, 2));
   });
 });
+
+// Mean absolute turn between successive segments' headings, a roughness
+// measure that tremor inflates and relaxation removes.
+function roughness(points) {
+  let total = 0;
+  for (let i = 1; i < points.length - 1; i++) {
+    const ax = points[i].x - points[i - 1].x;
+    const ay = points[i].y - points[i - 1].y;
+    const bx = points[i + 1].x - points[i].x;
+    const by = points[i + 1].y - points[i].y;
+    total += Math.abs(Math.atan2(ax * by - ay * bx, ax * bx + ay * by));
+  }
+  return total / Math.max(1, points.length - 2);
+}
+
+function tremblingStroke() {
+  const points = [];
+  for (let i = 0; i <= 60; i++) {
+    points.push({ x: i * 3, y: Math.sin(i / 8) * 20 + (i % 2 === 0 ? 1.5 : -1.5) });
+  }
+  return points;
+}
+
+describe('smoothing strength (smoothAnchors)', () => {
+  it('leaves the anchors untouched at smoothing=0', () => {
+    const points = tremblingStroke();
+    expect(smoothAnchors(points, 0)).toBe(points);
+  });
+
+  it('makes 100% far smoother than 0% and rises monotonically through the levels', () => {
+    const points = tremblingStroke();
+    const r0 = roughness(smoothAnchors(points, 0));
+    const r30 = roughness(smoothAnchors(points, 0.3));
+    const r60 = roughness(smoothAnchors(points, 0.6));
+    const r100 = roughness(smoothAnchors(points, 1));
+    expect(r30).toBeLessThan(r0);
+    expect(r60).toBeLessThan(r30);
+    expect(r100).toBeLessThan(r60);
+    expect(r100).toBeLessThan(r0 / 5);
+  });
+
+  it('keeps the first and last point exactly where the pen started and ended', () => {
+    const points = tremblingStroke();
+    const smoothed = smoothAnchors(points, 1);
+    expect(smoothed[0]).toEqual(points[0]);
+    expect(smoothed[smoothed.length - 1]).toEqual(points[points.length - 1]);
+  });
+
+  it('does not mutate its input and keeps pressure on every output point', () => {
+    const points = tremblingStroke().map((p, i) => ({ ...p, pressure: i % 2 ? 0.2 : 0.8 }));
+    const snapshot = JSON.parse(JSON.stringify(points));
+    const smoothed = smoothAnchors(points, 1);
+    expect(points).toEqual(snapshot);
+    smoothed.forEach((p) => expect(Number.isFinite(p.pressure)).toBe(true));
+  });
+
+  it('leaves a perfectly straight evenly sampled line straight', () => {
+    const line = [0, 10, 20, 30, 40].map((x) => ({ x, y: 5 }));
+    smoothAnchors(line, 1).forEach((p) => expect(p.y).toBeCloseTo(5, 9));
+  });
+});
+
+describe('pressure width range', () => {
+  const widthAt = (pressure, base = 4) =>
+    buildPressureSegments(
+      [
+        { x: 0, y: 0, pressure },
+        { x: 10, y: 0, pressure },
+      ],
+      0,
+      base
+    )[0].width;
+
+  it('spreads the thinnest to the thickest stroke by at least 15x, with a nonzero minimum', () => {
+    const thin = widthAt(0);
+    const thick = widthAt(1);
+    expect(thin).toBeGreaterThan(0);
+    expect(thick / thin).toBeGreaterThanOrEqual(15);
+  });
+
+  it('draws mid pressure (what a mouse reports while pressed) at exactly the base width', () => {
+    expect(widthAt(0.5, 4)).toBeCloseTo(4, 9);
+  });
+
+  it('grows monotonically with pressure', () => {
+    const widths = [0, 0.2, 0.4, 0.5, 0.7, 1].map((p) => widthAt(p));
+    for (let i = 1; i < widths.length; i++) expect(widths[i]).toBeGreaterThan(widths[i - 1]);
+  });
+
+  it('never goes below the 0.5px floor even for a hairline base width', () => {
+    expect(widthAt(0, 1)).toBeGreaterThanOrEqual(0.5);
+  });
+});
