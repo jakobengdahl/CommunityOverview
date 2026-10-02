@@ -5,6 +5,8 @@ Tests for MCP loader and tool namespacing.
 import ast
 import json
 import logging
+import os
+import stat
 import urllib.parse
 from pathlib import Path
 from unittest.mock import patch
@@ -13,11 +15,25 @@ import httpx2 as httpx
 import pytest
 
 from backend.agents import mcp_loader
-from backend.agents.config import AgentsSettings, MCPIntegration, MCPTransport
+from backend.agents.config import (
+    AGENTS_WORKSPACE_ENV_VAR,
+    AgentsSettings,
+    MCPIntegration,
+    MCPTransport,
+)
 from backend.agents.mcp_loader import MAX_REDIRECTS, MCPLoader, NamespacedTool
 from backend.core import image_ingest
 from backend.core.events import delivery
 from backend.skills import loader as skills_loader
+
+
+@pytest.fixture
+def workspace(tmp_path, monkeypatch):
+    """Point the agent workspace at a temp dir for the duration of a test."""
+    root = tmp_path / "agent-workspace"
+    monkeypatch.setenv(AGENTS_WORKSPACE_ENV_VAR, str(root))
+    root.mkdir(mode=0o700)
+    return root
 
 
 class TestMCPLoader:
@@ -506,56 +522,175 @@ class TestMCPLoaderLifecycle:
 
         assert loader._tools_cache == {}
 
-    def test_execute_fs_tool_path_traversal(self):
+    def test_execute_fs_tool_path_traversal(self, workspace):
         """Test that _execute_fs_tool blocks path traversal attempts."""
         loader = MCPLoader([])
-        # Use an input that exploits prefix startswith vulnerability
-        # E.g., if base_path is /tmp/agent-workspace,
-        # /tmp/agent-workspace-secret starts with /tmp/agent-workspace
-        input_args = {"path": "../agent-workspace-secret/secret.txt"}
+        # An input that exploits a prefix startswith comparison: a sibling of
+        # the workspace shares its prefix without being inside it.
+        input_args = {"path": f"../{workspace.name}-secret/secret.txt"}
 
         result = loader._execute_fs_tool("read_file", input_args)
 
         assert "error" in result
         assert result["error"] == "Path must be within agent workspace"
 
-    def test_execute_fs_tool_read_file_blocks_symlink_escape(self, tmp_path):
+    def test_execute_fs_tool_read_file_blocks_symlink_escape(self, tmp_path, workspace):
         """Test that read_file blocks symlinks pointing outside the workspace."""
         loader = MCPLoader([])
-        workspace = Path("/tmp/agent-workspace")
-        workspace.mkdir(exist_ok=True)
         outside_file = tmp_path / "outside.txt"
         outside_file.write_text("secret", encoding="utf-8")
-        symlink_path = workspace / f"outside-read-{tmp_path.name}.txt"
+        symlink_path = workspace / "outside-read.txt"
         symlink_path.symlink_to(outside_file)
 
-        try:
-            result = loader._execute_fs_tool("read_file", {"path": symlink_path.name})
-        finally:
-            symlink_path.unlink(missing_ok=True)
+        result = loader._execute_fs_tool("read_file", {"path": symlink_path.name})
 
         assert result == {"error": "Path must be within agent workspace"}
 
-    def test_execute_fs_tool_write_file_blocks_symlink_escape(self, tmp_path):
+    def test_execute_fs_tool_write_file_blocks_symlink_escape(
+        self, tmp_path, workspace
+    ):
         """Test that write_file blocks symlinks pointing outside the workspace."""
         loader = MCPLoader([])
-        workspace = Path("/tmp/agent-workspace")
-        workspace.mkdir(exist_ok=True)
         outside_file = tmp_path / "outside.txt"
         outside_file.write_text("original", encoding="utf-8")
-        symlink_path = workspace / f"outside-write-{tmp_path.name}.txt"
+        symlink_path = workspace / "outside-write.txt"
         symlink_path.symlink_to(outside_file)
 
-        try:
-            result = loader._execute_fs_tool(
-                "write_file",
-                {"path": symlink_path.name, "content": "modified"},
-            )
-        finally:
-            symlink_path.unlink(missing_ok=True)
+        result = loader._execute_fs_tool(
+            "write_file",
+            {"path": symlink_path.name, "content": "modified"},
+        )
 
         assert result == {"error": "Path must be within agent workspace"}
         assert outside_file.read_text(encoding="utf-8") == "original"
+
+    def test_execute_fs_tool_round_trips_inside_the_workspace(self, workspace):
+        """A legitimate write/read pair still works, so the guard is not vacuous."""
+        loader = MCPLoader([])
+
+        written = loader._execute_fs_tool(
+            "write_file", {"path": "notes/a.txt", "content": "hello"}
+        )
+        assert written == {"path": "notes/a.txt", "written": 5}
+        assert loader._execute_fs_tool("read_file", {"path": "notes/a.txt"}) == {
+            "path": "notes/a.txt",
+            "content": "hello",
+        }
+
+    def test_execute_fs_tool_refuses_a_symlinked_workspace_root(
+        self, tmp_path, monkeypatch
+    ):
+        """A symlinked root is refused, not resolved.
+
+        realpath() on the root itself would rebase every containment check on
+        the link's target, so a planted symlink would silently widen the
+        workspace instead of being caught.
+        """
+        target = tmp_path / "elsewhere"
+        target.mkdir()
+        (target / "secret.txt").write_text("secret", encoding="utf-8")
+        root = tmp_path / "linked-workspace"
+        root.symlink_to(target, target_is_directory=True)
+        monkeypatch.setenv(AGENTS_WORKSPACE_ENV_VAR, str(root))
+
+        loader = MCPLoader([])
+        result = loader._execute_fs_tool("read_file", {"path": "secret.txt"})
+
+        assert result == {"error": "Agent workspace must not be a symlink"}
+
+    def test_execute_fs_tool_creates_the_workspace_privately(
+        self, tmp_path, monkeypatch
+    ):
+        """The workspace is created 0o700: a shared-mode dir leaks the agent's files.
+
+        The umask is pinned to 022 for the duration: under a restrictive umask
+        such as 077 a plain makedirs() yields 0o700 too, so the assertion would
+        hold even if the mode argument were dropped from production.
+        """
+        root = tmp_path / "fresh-workspace"
+        monkeypatch.setenv(AGENTS_WORKSPACE_ENV_VAR, str(root))
+
+        previous = os.umask(0o022)
+        try:
+            MCPLoader([])._execute_fs_tool(
+                "write_file", {"path": "a.txt", "content": "x"}
+            )
+        finally:
+            os.umask(previous)
+
+        assert root.is_dir()
+        assert stat.S_IMODE(root.stat().st_mode) == 0o700
+
+    def test_execute_fs_tool_refuses_a_world_writable_workspace_root(
+        self, tmp_path, monkeypatch
+    ):
+        """An existing root keeps its own mode: makedirs(mode=...) only applies
+        when it creates the directory. A root others can write to is the same
+        pre-creation race as a symlink, so it is refused rather than used."""
+        root = tmp_path / "shared-workspace"
+        root.mkdir(mode=0o777)
+        os.chmod(root, 0o777)
+        monkeypatch.setenv(AGENTS_WORKSPACE_ENV_VAR, str(root))
+
+        result = MCPLoader([])._execute_fs_tool(
+            "write_file", {"path": "a.txt", "content": "x"}
+        )
+
+        assert "error" in result
+        assert "not private" in result["error"]
+        assert not (root / "a.txt").exists()
+
+    def test_execute_fs_tool_refuses_a_group_writable_workspace_root(
+        self, tmp_path, monkeypatch
+    ):
+        root = tmp_path / "group-workspace"
+        root.mkdir()
+        os.chmod(root, 0o770)
+        monkeypatch.setenv(AGENTS_WORKSPACE_ENV_VAR, str(root))
+
+        result = MCPLoader([])._execute_fs_tool("read_file", {"path": "a.txt"})
+
+        assert "error" in result
+        assert "not private" in result["error"]
+
+    def test_execute_fs_tool_refuses_a_workspace_root_owned_by_someone_else(
+        self, tmp_path, monkeypatch
+    ):
+        """A directory another local user owns lets them choose where the agent
+        reads and writes, which is the half of the race the symlink check
+        does not cover."""
+        root = tmp_path / "foreign-workspace"
+        root.mkdir(mode=0o700)
+        monkeypatch.setenv(AGENTS_WORKSPACE_ENV_VAR, str(root))
+        real_stat = os.stat
+
+        def stat_with_foreign_owner(path, *args, **kwargs):
+            info = real_stat(path, *args, **kwargs)
+            if os.path.abspath(path) == os.path.abspath(str(root)):
+                fields = list(info)
+                fields[4] = info.st_uid + 1
+                return os.stat_result(fields)
+            return info
+
+        monkeypatch.setattr(os, "stat", stat_with_foreign_owner)
+        result = MCPLoader([])._execute_fs_tool("read_file", {"path": "a.txt"})
+
+        assert "error" in result
+        assert "not private" in result["error"]
+
+    def test_execute_fs_tool_reports_an_unusable_workspace_as_an_error(
+        self, tmp_path, monkeypatch
+    ):
+        """makedirs sits outside the body's try block; a root that cannot be
+        created must still come back as a tool error, not an exception."""
+        blocker = tmp_path / "not-a-dir"
+        blocker.write_text("", encoding="utf-8")
+        monkeypatch.setenv(AGENTS_WORKSPACE_ENV_VAR, str(blocker / "ws"))
+
+        result = MCPLoader([])._execute_fs_tool("read_file", {"path": "a.txt"})
+
+        assert "error" in result
+        assert "workspace" in result["error"].lower()
 
 
 class _StubHttpxModule:

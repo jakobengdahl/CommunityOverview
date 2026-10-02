@@ -17,7 +17,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 import httpx2 as httpx
 
-from .config import MCPIntegration, MCPTransport
+from .config import MCPIntegration, MCPTransport, agent_workspace_dir
 from backend.core.events.delivery import MAX_REDIRECTS, is_safe_url
 
 logger = logging.getLogger(__name__)
@@ -126,6 +126,35 @@ class MCPConnection:
         if self.integration.transport == MCPTransport.STDIO:
             return self.process is not None and self.process.poll() is None
         return True  # HTTP connections are stateless
+
+
+def _unsafe_workspace_reason(path: str) -> Optional[str]:
+    """Why `path` is not safe to use as the agent workspace root, or None.
+
+    Only the directory's own owner and mode are checked. Auditing every parent
+    would reject ordinary layouts (a home under a root-owned /home), and the
+    containment check in _execute_fs_tool already resolves symlinks on the way
+    in, so the root itself is the surface that decides who controls the tree.
+    """
+    import os
+    import stat as stat_module
+
+    try:
+        info = os.stat(path)
+    except OSError as e:
+        return f"cannot stat it ({e})"
+
+    if not stat_module.S_ISDIR(info.st_mode):
+        return "it is not a directory"
+
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is not None and info.st_uid != geteuid():
+        return f"it is owned by uid {info.st_uid}, not uid {geteuid()}"
+
+    if info.st_mode & (stat_module.S_IWGRP | stat_module.S_IWOTH):
+        return f"mode {stat_module.S_IMODE(info.st_mode):04o} lets others write to it"
+
+    return None
 
 
 class MCPLoader:
@@ -959,11 +988,28 @@ class MCPLoader:
         input_args: Dict[str, Any],
     ) -> Any:
         """Execute a FS/Filesystem integration tool."""
-        # For PoC, implement basic file operations in /tmp/agent-workspace
         import os
 
-        base_path = os.path.realpath("/tmp/agent-workspace")
-        os.makedirs(base_path, exist_ok=True)
+        base_path = agent_workspace_dir()
+        # Refuse a symlinked root instead of resolving it: realpath() on the root
+        # itself would make every containment check below compare against the
+        # link's target, so a symlink planted here would widen the workspace to
+        # whatever it points at rather than being caught as an escape.
+        if os.path.islink(base_path):
+            return {"error": "Agent workspace must not be a symlink"}
+        try:
+            os.makedirs(base_path, mode=0o700, exist_ok=True)
+        except OSError as e:
+            return {"error": f"Agent workspace unavailable: {e}"}
+        # `mode` above applies only when makedirs creates the directory, so a
+        # root that already existed keeps whatever mode and owner it had. A
+        # symlink is only half the pre-creation race the workspace setting warns
+        # about - a directory the attacker owns is as effective - so check the
+        # root we ended up with rather than trusting that we made it.
+        unsafe = _unsafe_workspace_reason(base_path)
+        if unsafe:
+            return {"error": f"Agent workspace is not private: {unsafe}"}
+        base_path = os.path.realpath(base_path)
 
         path = input_args.get("path", "")
         if not path:

@@ -46,9 +46,11 @@ TEE = re.compile(r"\|&?\s*tee\b")
 # options, not pipefail, but it too changes the shell the steps run under.
 SHELL_STARTUP_VARS = ("SHELLOPTS", "BASHOPTS", "BASH_ENV")
 
-# Owner decision: bandit stays reporting-only until its last findings on main
-# are cleared. Every other scanner blocks. Promoting bandit edits this set.
-REPORTING_ONLY_STEPS = {("bandit", "Run bandit (medium+ severity, non-blocking)")}
+# The reporting-first stage is over: every scanner in this workflow blocks, so
+# nothing here may carry `continue-on-error`. Re-introducing one - at workflow,
+# job or step level - has to add it to this set deliberately, which is what
+# test_exactly_the_expected_steps_are_reporting_only compares against.
+REPORTING_ONLY_STEPS: set = set()
 
 # A step invokes an audit when a line of its body starts with the scanner, so
 # `pip install pip-audit` is not one and a step that stops teeing still is.
@@ -102,6 +104,15 @@ AUDIT_COMMANDS = {
     ],
     "npm-audit": ['npm audit --omit=dev 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"'],
 }
+
+# bandit's scope, pinned for the same reason and now that it blocks: the cheapest
+# way to turn a future red green is to narrow the scan rather than fix the code.
+# `--exit-zero`, `-lll`, `-s B108`, a dropped `services`, or a widened `-x` each
+# keep the job green over a finding it no longer looks at or no longer reports.
+BANDIT_COMMAND = (
+    "bandit -r backend services -x '*/tests/*,*/test_*.py' -ll 2>&1 "
+    '| tee -a "$GITHUB_STEP_SUMMARY"'
+)
 
 # Actions the workflow may use. A third-party action can export SHELLOPTS or
 # BASH_ENV through GITHUB_ENV where no `run:` body shows it.
@@ -573,7 +584,8 @@ def test_audit_mention_sees_a_quote_split_or_escaped_invocation(line):
 
 def test_audit_mention_leaves_the_non_pip_scanner_lines_alone():
     # The broadened pattern must not swallow the bandit invocation, which is
-    # neither an audit nor a pip line and is pinned nowhere.
+    # neither an audit nor a pip line. Its scope is pinned separately, by
+    # test_bandit_scan_scope_is_pinned against BANDIT_COMMAND.
     for line in (
         "bandit -r backend services -x '*/tests/*,*/test_*.py' -ll",
         "echo '```' >> \"$GITHUB_STEP_SUMMARY\"",
@@ -725,12 +737,68 @@ def test_only_known_actions_are_used():
     assert used == ALLOWED_ACTIONS
 
 
-def test_bandit_reporting_only_state_is_marked_temporary():
-    # Parsed YAML drops comments, so read the raw text around the key.
-    lines = WORKFLOW.read_text().splitlines()
-    step = lines.index("      - name: Run bandit (medium+ severity, non-blocking)")
-    assert lines[step + 1].strip().startswith("# Temporary: reporting-only until")
-    assert lines[step + 2].strip() == "continue-on-error: true"
+def test_bandit_is_blocking():
+    # Located by its invocation, not its name: a renamed step must still be
+    # found, or this passes vacuously the moment someone retitles it.
+    workflow = _workflow()
+    job = workflow["jobs"]["bandit"]
+    assert not job.get("continue-on-error", False)
+    assert "if" not in job, "the bandit job is conditional"
+    assert "needs" not in job, "the bandit job is skipped when what it needs fails"
+    scans = [
+        s for s in job["steps"] if re.search(r"^\s*bandit\b", s.get("run", ""), re.M)
+    ]
+    assert len(scans) == 1, f"expected one bandit invocation, found {len(scans)}"
+    step = scans[0]
+    assert not step.get("continue-on-error", False), (
+        "bandit is reporting-only again; a medium+ finding must fail the workflow"
+    )
+    assert "if" not in step, "the bandit step is conditional"
+
+
+def test_bandit_scan_scope_is_pinned():
+    """What bandit is asked to scan, not just whether its step can fail.
+
+    Blocking means nothing if the scan can be narrowed instead: the step would
+    stay green over a finding in a path it stopped reading or a severity it
+    stopped reporting. Pinned as a whole command so every option moves together.
+    """
+    job = _workflow()["jobs"]["bandit"]
+    scans = [
+        step
+        for step in job["steps"]
+        if re.search(r"^\s*bandit\b", step.get("run", ""), re.M)
+    ]
+    assert len(scans) == 1, f"expected one bandit invocation, found {len(scans)}"
+    # Join the backslash continuations the workflow wraps the command over.
+    body = scans[0]["run"].replace("\\\n", " ")
+    invocations = [
+        line.strip() for line in body.splitlines() if re.match(r"^\s*bandit\b", line)
+    ]
+    assert len(invocations) == 1, invocations
+    assert _normalised(invocations[0]) == _normalised(BANDIT_COMMAND)
+
+
+def test_bandit_scan_is_not_narrowed_by_configuration():
+    # An env var or a working-directory change narrows the scan without the
+    # command line showing it, exactly as for the audits.
+    workflow = _workflow()
+    job = workflow["jobs"]["bandit"]
+    assert "working-directory" not in str(job), "bandit runs somewhere unexpected"
+    scopes = [workflow.get("env") or {}, job.get("env") or {}]
+    for step in job["steps"]:
+        scopes.append(step.get("env") or {})
+    for scope in scopes:
+        for key in scope:
+            assert not key.upper().startswith("BANDIT"), f"{key} narrows bandit"
+
+
+def test_no_step_is_marked_temporarily_reporting_only():
+    # Parsed YAML drops comments, so read the raw text. A leftover "Temporary:
+    # reporting-only" note would outlive the key it described and mislead.
+    text = WORKFLOW.read_text()
+    assert "reporting-only until" not in text
+    assert "non-blocking" not in text
 
 
 def test_teed_steps_run_under_the_default_shell_the_test_executes():
