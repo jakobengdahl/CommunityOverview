@@ -5,6 +5,7 @@ Tests for MCP loader and tool namespacing.
 import ast
 import json
 import logging
+import stat
 import urllib.parse
 from pathlib import Path
 from unittest.mock import patch
@@ -13,11 +14,25 @@ import httpx2 as httpx
 import pytest
 
 from backend.agents import mcp_loader
-from backend.agents.config import AgentsSettings, MCPIntegration, MCPTransport
+from backend.agents.config import (
+    AGENT_WORKSPACE_ENV_VAR,
+    AgentsSettings,
+    MCPIntegration,
+    MCPTransport,
+)
 from backend.agents.mcp_loader import MAX_REDIRECTS, MCPLoader, NamespacedTool
 from backend.core import image_ingest
 from backend.core.events import delivery
 from backend.skills import loader as skills_loader
+
+
+@pytest.fixture
+def workspace(tmp_path, monkeypatch):
+    """Point the agent workspace at a temp dir for the duration of a test."""
+    root = tmp_path / "agent-workspace"
+    monkeypatch.setenv(AGENT_WORKSPACE_ENV_VAR, str(root))
+    root.mkdir()
+    return root
 
 
 class TestMCPLoader:
@@ -506,56 +521,93 @@ class TestMCPLoaderLifecycle:
 
         assert loader._tools_cache == {}
 
-    def test_execute_fs_tool_path_traversal(self):
+    def test_execute_fs_tool_path_traversal(self, workspace):
         """Test that _execute_fs_tool blocks path traversal attempts."""
         loader = MCPLoader([])
-        # Use an input that exploits prefix startswith vulnerability
-        # E.g., if base_path is /tmp/agent-workspace,
-        # /tmp/agent-workspace-secret starts with /tmp/agent-workspace
-        input_args = {"path": "../agent-workspace-secret/secret.txt"}
+        # An input that exploits a prefix startswith comparison: a sibling of
+        # the workspace shares its prefix without being inside it.
+        input_args = {"path": f"../{workspace.name}-secret/secret.txt"}
 
         result = loader._execute_fs_tool("read_file", input_args)
 
         assert "error" in result
         assert result["error"] == "Path must be within agent workspace"
 
-    def test_execute_fs_tool_read_file_blocks_symlink_escape(self, tmp_path):
+    def test_execute_fs_tool_read_file_blocks_symlink_escape(self, tmp_path, workspace):
         """Test that read_file blocks symlinks pointing outside the workspace."""
         loader = MCPLoader([])
-        workspace = Path("/tmp/agent-workspace")
-        workspace.mkdir(exist_ok=True)
         outside_file = tmp_path / "outside.txt"
         outside_file.write_text("secret", encoding="utf-8")
-        symlink_path = workspace / f"outside-read-{tmp_path.name}.txt"
+        symlink_path = workspace / "outside-read.txt"
         symlink_path.symlink_to(outside_file)
 
-        try:
-            result = loader._execute_fs_tool("read_file", {"path": symlink_path.name})
-        finally:
-            symlink_path.unlink(missing_ok=True)
+        result = loader._execute_fs_tool("read_file", {"path": symlink_path.name})
 
         assert result == {"error": "Path must be within agent workspace"}
 
-    def test_execute_fs_tool_write_file_blocks_symlink_escape(self, tmp_path):
+    def test_execute_fs_tool_write_file_blocks_symlink_escape(
+        self, tmp_path, workspace
+    ):
         """Test that write_file blocks symlinks pointing outside the workspace."""
         loader = MCPLoader([])
-        workspace = Path("/tmp/agent-workspace")
-        workspace.mkdir(exist_ok=True)
         outside_file = tmp_path / "outside.txt"
         outside_file.write_text("original", encoding="utf-8")
-        symlink_path = workspace / f"outside-write-{tmp_path.name}.txt"
+        symlink_path = workspace / "outside-write.txt"
         symlink_path.symlink_to(outside_file)
 
-        try:
-            result = loader._execute_fs_tool(
-                "write_file",
-                {"path": symlink_path.name, "content": "modified"},
-            )
-        finally:
-            symlink_path.unlink(missing_ok=True)
+        result = loader._execute_fs_tool(
+            "write_file",
+            {"path": symlink_path.name, "content": "modified"},
+        )
 
         assert result == {"error": "Path must be within agent workspace"}
         assert outside_file.read_text(encoding="utf-8") == "original"
+
+    def test_execute_fs_tool_round_trips_inside_the_workspace(self, workspace):
+        """A legitimate write/read pair still works, so the guard is not vacuous."""
+        loader = MCPLoader([])
+
+        written = loader._execute_fs_tool(
+            "write_file", {"path": "notes/a.txt", "content": "hello"}
+        )
+        assert written == {"path": "notes/a.txt", "written": 5}
+        assert loader._execute_fs_tool("read_file", {"path": "notes/a.txt"}) == {
+            "path": "notes/a.txt",
+            "content": "hello",
+        }
+
+    def test_execute_fs_tool_refuses_a_symlinked_workspace_root(
+        self, tmp_path, monkeypatch
+    ):
+        """A symlinked root is refused, not resolved.
+
+        realpath() on the root itself would rebase every containment check on
+        the link's target, so a planted symlink would silently widen the
+        workspace instead of being caught.
+        """
+        target = tmp_path / "elsewhere"
+        target.mkdir()
+        (target / "secret.txt").write_text("secret", encoding="utf-8")
+        root = tmp_path / "linked-workspace"
+        root.symlink_to(target, target_is_directory=True)
+        monkeypatch.setenv(AGENT_WORKSPACE_ENV_VAR, str(root))
+
+        loader = MCPLoader([])
+        result = loader._execute_fs_tool("read_file", {"path": "secret.txt"})
+
+        assert result == {"error": "Agent workspace must not be a symlink"}
+
+    def test_execute_fs_tool_creates_the_workspace_privately(
+        self, tmp_path, monkeypatch
+    ):
+        """The workspace is created 0o700: a shared-mode dir leaks the agent's files."""
+        root = tmp_path / "fresh-workspace"
+        monkeypatch.setenv(AGENT_WORKSPACE_ENV_VAR, str(root))
+
+        MCPLoader([])._execute_fs_tool("write_file", {"path": "a.txt", "content": "x"})
+
+        assert root.is_dir()
+        assert stat.S_IMODE(root.stat().st_mode) == 0o700
 
 
 class _StubHttpxModule:

@@ -6,11 +6,13 @@ import os
 from unittest.mock import patch
 
 from backend.agents.config import (
+    AGENT_WORKSPACE_ENV_VAR,
     MCPIntegration,
     AgentConfig,
     AgentsSettings,
     MCPTransport,
     REDACTED_ENV_VALUE,
+    agent_workspace_dir,
 )
 from backend.agents.secrets import SECRET_REF_PREFIX
 
@@ -224,3 +226,66 @@ class TestAgentsSettings:
 
             ids = [i.id for i in settings.mcp_integrations]
             assert "GRAPH" in ids
+
+
+class TestAgentWorkspaceDir:
+    """The one setting that decides where the agent's files live."""
+
+    def _fs_command(self):
+        with patch.dict(os.environ, {"AGENTS_ENABLED": "true"}, clear=True):
+            integrations = AgentsSettings._get_default_integrations()
+        fs = [i for i in integrations if i.id == "FS"]
+        assert len(fs) == 1, "no FS integration in the defaults"
+        return fs[0].command
+
+    def test_filesystem_mcp_root_is_the_shared_workspace_setting(self):
+        """The npx server and the built-in FS executor must get the same root.
+
+        They are configured in different modules; if they drift apart the agent
+        reads through one tree and writes through another.
+        """
+        with patch.dict(os.environ, {"AGENTS_ENABLED": "true"}, clear=True):
+            expected = agent_workspace_dir()
+        assert self._fs_command()[-1] == expected
+
+    def test_filesystem_mcp_root_follows_the_override(self):
+        """Overriding the setting moves the server's root with it."""
+        with patch.dict(
+            os.environ,
+            {"AGENTS_ENABLED": "true", AGENT_WORKSPACE_ENV_VAR: "/srv/workspace"},
+            clear=True,
+        ):
+            integrations = AgentsSettings._get_default_integrations()
+            fs = [i for i in integrations if i.id == "FS"][0]
+        assert fs.command[-1] == "/srv/workspace"
+
+    def test_override_is_honoured_and_expanded(self):
+        with patch.dict(
+            os.environ, {AGENT_WORKSPACE_ENV_VAR: "/srv/agent-ws"}, clear=True
+        ):
+            assert agent_workspace_dir() == "/srv/agent-ws"
+        with patch.dict(os.environ, {AGENT_WORKSPACE_ENV_VAR: "~/ws"}, clear=True):
+            assert agent_workspace_dir() == os.path.join(os.path.expanduser("~"), "ws")
+
+    def test_override_is_absolute(self):
+        """A relative override would resolve against the process cwd."""
+        with patch.dict(os.environ, {AGENT_WORKSPACE_ENV_VAR: "ws"}, clear=True):
+            assert os.path.isabs(agent_workspace_dir())
+
+    def test_default_is_not_a_fixed_path_in_the_shared_temp_dir(self):
+        """B108: a predictable path in world-writable /tmp can be pre-created
+        (or pre-created as a symlink) by any other local user, who then
+        controls where the agent reads and writes."""
+        with patch.dict(os.environ, {}, clear=True):
+            default = agent_workspace_dir()
+        assert os.path.isabs(default)
+        for shared in ("/tmp/", "/var/tmp/", "/dev/shm/"):
+            assert not default.startswith(shared), (
+                f"default workspace {default!r} sits in shared {shared}"
+            )
+
+    def test_blank_override_falls_back_to_the_default(self):
+        with patch.dict(os.environ, {AGENT_WORKSPACE_ENV_VAR: ""}, clear=True):
+            fallback = agent_workspace_dir()
+        with patch.dict(os.environ, {}, clear=True):
+            assert fallback == agent_workspace_dir()

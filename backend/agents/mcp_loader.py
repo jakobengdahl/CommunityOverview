@@ -17,7 +17,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 import httpx2 as httpx
 
-from .config import MCPIntegration, MCPTransport
+from .config import MCPIntegration, MCPTransport, agent_workspace_dir
 from backend.core.events.delivery import MAX_REDIRECTS, is_safe_url
 
 logger = logging.getLogger(__name__)
@@ -959,11 +959,17 @@ class MCPLoader:
         input_args: Dict[str, Any],
     ) -> Any:
         """Execute a FS/Filesystem integration tool."""
-        # For PoC, implement basic file operations in /tmp/agent-workspace
         import os
 
-        base_path = os.path.realpath("/tmp/agent-workspace")
-        os.makedirs(base_path, exist_ok=True)
+        base_path = agent_workspace_dir()
+        # Refuse a symlinked root instead of resolving it: realpath() on the root
+        # itself would make every containment check below compare against the
+        # link's target, so a symlink planted here would widen the workspace to
+        # whatever it points at rather than being caught as an escape.
+        if os.path.islink(base_path):
+            return {"error": "Agent workspace must not be a symlink"}
+        os.makedirs(base_path, mode=0o700, exist_ok=True)
+        base_path = os.path.realpath(base_path)
 
         path = input_args.get("path", "")
         if not path:

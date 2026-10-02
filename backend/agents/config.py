@@ -153,6 +153,28 @@ class AgentSchedule:
 #: pass through unredacted.
 REDACTED_ENV_VALUE = "***"
 
+AGENT_WORKSPACE_ENV_VAR = "AGENT_WORKSPACE_DIR"
+
+
+def agent_workspace_dir() -> str:
+    """Root directory the agent's filesystem tools are confined to.
+
+    The built-in FS executor and the filesystem MCP server must be handed the
+    same root or they operate on different trees, so it is decided here only.
+
+    The default is a private per-user directory rather than a fixed path in the
+    shared system temp directory: a predictable path there can be pre-created by
+    any other local user - as a directory they own, or as a symlink - and
+    whoever wins that race chooses where the agent reads and writes. Set
+    AGENT_WORKSPACE_DIR to place the workspace somewhere explicit.
+    """
+    configured = os.environ.get(AGENT_WORKSPACE_ENV_VAR)
+    if configured:
+        return os.path.abspath(os.path.expanduser(configured))
+    return os.path.join(
+        os.path.expanduser("~"), ".communityoverview", "agent-workspace"
+    )
+
 
 class MCPTransport(str, Enum):
     """Transport type for MCP server connections."""
@@ -486,7 +508,7 @@ class AgentsSettings:
                     "npx",
                     "-y",
                     "@anthropic/filesystem-mcp",
-                    "/tmp/agent-workspace",
+                    agent_workspace_dir(),
                 ],
                 enabled=True,
             )
