@@ -46,9 +46,11 @@ TEE = re.compile(r"\|&?\s*tee\b")
 # options, not pipefail, but it too changes the shell the steps run under.
 SHELL_STARTUP_VARS = ("SHELLOPTS", "BASHOPTS", "BASH_ENV")
 
-# Owner decision: bandit stays reporting-only until its last findings on main
-# are cleared. Every other scanner blocks. Promoting bandit edits this set.
-REPORTING_ONLY_STEPS = {("bandit", "Run bandit (medium+ severity, non-blocking)")}
+# The reporting-first stage is over: every scanner in this workflow blocks, so
+# nothing here may carry `continue-on-error`. Re-introducing one - at workflow,
+# job or step level - has to add it to this set deliberately, which is what
+# test_exactly_the_expected_steps_are_reporting_only compares against.
+REPORTING_ONLY_STEPS: set = set()
 
 # A step invokes an audit when a line of its body starts with the scanner, so
 # `pip install pip-audit` is not one and a step that stops teeing still is.
@@ -725,12 +727,31 @@ def test_only_known_actions_are_used():
     assert used == ALLOWED_ACTIONS
 
 
-def test_bandit_reporting_only_state_is_marked_temporary():
-    # Parsed YAML drops comments, so read the raw text around the key.
-    lines = WORKFLOW.read_text().splitlines()
-    step = lines.index("      - name: Run bandit (medium+ severity, non-blocking)")
-    assert lines[step + 1].strip().startswith("# Temporary: reporting-only until")
-    assert lines[step + 2].strip() == "continue-on-error: true"
+def test_bandit_is_blocking():
+    # Located by its invocation, not its name: a renamed step must still be
+    # found, or this passes vacuously the moment someone retitles it.
+    workflow = _workflow()
+    job = workflow["jobs"]["bandit"]
+    assert not job.get("continue-on-error", False)
+    assert "if" not in job, "the bandit job is conditional"
+    assert "needs" not in job, "the bandit job is skipped when what it needs fails"
+    scans = [
+        s for s in job["steps"] if re.search(r"^\s*bandit\b", s.get("run", ""), re.M)
+    ]
+    assert len(scans) == 1, f"expected one bandit invocation, found {len(scans)}"
+    step = scans[0]
+    assert not step.get("continue-on-error", False), (
+        "bandit is reporting-only again; a medium+ finding must fail the workflow"
+    )
+    assert "if" not in step, "the bandit step is conditional"
+
+
+def test_no_step_is_marked_temporarily_reporting_only():
+    # Parsed YAML drops comments, so read the raw text. A leftover "Temporary:
+    # reporting-only" note would outlive the key it described and mislead.
+    text = WORKFLOW.read_text()
+    assert "reporting-only until" not in text
+    assert "non-blocking" not in text
 
 
 def test_teed_steps_run_under_the_default_shell_the_test_executes():
