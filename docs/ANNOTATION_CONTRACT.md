@@ -300,7 +300,15 @@ auto-disarms) that captures actual pointer samples — coalesced samples via
 `event.pressure` when available, never predicted events — into a vector
 stroke (`createFreehandStrokeCapture`,
 `packages/ui-graph-canvas/src/utils/freehandStroke.js`, wired into
-`GraphCanvas.jsx`). `icon` and `vote_dot` now have a bottom-toolbox/mobile-sheet
+`GraphCanvas.jsx`). The pen item carries the same corner arrow as the slot
+items: it opens a fold-out of the stroke options (colour, width, smoothing,
+opacity; `utils/freehandOptions.js`) chosen before drawing, remembered in
+`localStorage`, reported to the canvas through the toolbox's
+`onFreehandOptionsChange` prop and written onto the next stroke's `data`. Smoothing
+relaxes the retained points toward their neighbours (up to 24 averaging passes at
+`smoothing: 1`, none at `0`; endpoints fixed) before the curve fit, and pressure maps
+to width piecewise-linearly: 0.15× the base width at pressure 0, exactly 1× at 0.5
+(what a mouse reports), 3.5× at 1. `icon` and `vote_dot` now have a bottom-toolbox/mobile-sheet
 creation entry point, each with a fixed default (a generic glyph, and a value
 of 1) — GraphCanvas's `createAnnotation` also gives each a data-only
 `geometry.w/h` matching its fixed intrinsic rendered size (32×32 / 24×24), so

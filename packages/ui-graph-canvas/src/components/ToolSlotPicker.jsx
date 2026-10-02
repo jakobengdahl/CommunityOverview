@@ -19,6 +19,10 @@ import './ToolSlotPicker.css';
  * transform with `bottom` instead would double-offset the panel upward by
  * its own height on top of the intended gap.
  *
+ * Passing `children` renders them inside the panel instead of the option
+ * list, for a slot whose fold-out is a set of controls rather than a choice of
+ * one variant (the freehand pen's pre-draw options).
+ *
  * Dismisses on Escape or an outside click/tap and returns focus to
  * `returnFocusRef`'s element, the same convention ContextMenus.jsx's
  * `useMenuOpenFocus` uses for its own flyouts — including not stealing focus
@@ -29,7 +33,9 @@ import './ToolSlotPicker.css';
 export function ToolSlotPicker({
   anchorRef,
   returnFocusRef,
-  options,
+  options = [],
+  children,
+  panelClassName = '',
   currentKey,
   onSelect,
   onClose,
@@ -125,23 +131,29 @@ export function ToolSlotPicker({
   }, []);
 
   return createPortal(
-    <div ref={panelRef} role="group" aria-label={ariaLabel} className="tool-slot-picker">
-      {options.map((option) => (
-        <button
-          key={option.key}
-          type="button"
-          aria-pressed={option.key === currentKey}
-          className={`tool-slot-picker-item${
-            option.key === currentKey ? ' tool-slot-picker-item--current' : ''
-          }`}
-          onClick={() => onSelectRef.current(option.key)}
-        >
-          <span className="tool-slot-picker-item-glyph" aria-hidden="true">
-            {renderGlyph(option.glyph)}
-          </span>
-          <span className="tool-slot-picker-item-label">{option.label}</span>
-        </button>
-      ))}
+    <div
+      ref={panelRef}
+      role="group"
+      aria-label={ariaLabel}
+      className={`tool-slot-picker${panelClassName ? ` ${panelClassName}` : ''}`}
+    >
+      {children ??
+        options.map((option) => (
+          <button
+            key={option.key}
+            type="button"
+            aria-pressed={option.key === currentKey}
+            className={`tool-slot-picker-item${
+              option.key === currentKey ? ' tool-slot-picker-item--current' : ''
+            }`}
+            onClick={() => onSelectRef.current(option.key)}
+          >
+            <span className="tool-slot-picker-item-glyph" aria-hidden="true">
+              {renderGlyph(option.glyph)}
+            </span>
+            <span className="tool-slot-picker-item-label">{option.label}</span>
+          </button>
+        ))}
     </div>,
     document.body
   );

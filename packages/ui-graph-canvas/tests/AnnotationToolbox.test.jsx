@@ -1289,3 +1289,86 @@ describe('AnnotationToolbox', () => {
     });
   });
 });
+
+describe('AnnotationToolbox pen options fold-out', () => {
+  const STORAGE_KEY = 'communityoverview:annotation-toolbox:freehand-options';
+  const open = () => fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+  beforeEach(() => {
+    window.localStorage.removeItem(STORAGE_KEY);
+  });
+
+  it('reports the default pen options on mount', () => {
+    const onFreehandOptionsChange = vi.fn();
+    render(<AnnotationToolbox onFreehandOptionsChange={onFreehandOptionsChange} />);
+    expect(onFreehandOptionsChange).toHaveBeenCalledWith({
+      color: '#111827',
+      strokeWidth: 2,
+      smoothing: 0.3,
+      opacity: 1,
+    });
+  });
+
+  it('opens from a corner button next to the pen, listing colour, width, smoothing and opacity', () => {
+    render(<AnnotationToolbox />);
+    open();
+    fireEvent.click(screen.getByRole('button', { name: /choose pen options/i }));
+    const panel = screen.getByRole('group', { name: /^pen options$/i });
+    ['Colour', 'Stroke width', 'Smoothing', 'Opacity'].forEach((title) =>
+      expect(within(panel).getByText(title)).toBeTruthy()
+    );
+  });
+
+  it('applies a chosen option, remembers it, and arms the pen', () => {
+    const onFreehandOptionsChange = vi.fn();
+    const onSelectTool = vi.fn();
+    render(
+      <AnnotationToolbox
+        onFreehandOptionsChange={onFreehandOptionsChange}
+        onSelectTool={onSelectTool}
+      />
+    );
+    open();
+    fireEvent.click(screen.getByRole('button', { name: /choose pen options/i }));
+    const panel = screen.getByRole('group', { name: /^pen options$/i });
+    fireEvent.click(within(panel).getByRole('button', { name: '#60A5FA' }));
+    expect(onFreehandOptionsChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ color: '#60A5FA' })
+    );
+    expect(onSelectTool).toHaveBeenCalledWith('freehand', undefined);
+    expect(JSON.parse(window.localStorage.getItem(STORAGE_KEY)).color).toBe('#60A5FA');
+  });
+
+  it('does not toggle an already armed pen off when an option is chosen', () => {
+    const onSelectTool = vi.fn();
+    render(<AnnotationToolbox activeKind="freehand" onSelectTool={onSelectTool} />);
+    open();
+    fireEvent.click(screen.getByRole('button', { name: /choose pen options/i }));
+    fireEvent.click(
+      within(screen.getByRole('group', { name: /^pen options$/i })).getByRole('button', {
+        name: '#FB923C',
+      })
+    );
+    expect(onSelectTool).not.toHaveBeenCalled();
+  });
+
+  it('restores remembered options and ignores a corrupt stored value', () => {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ color: '#F472B6', strokeWidth: 5 }));
+    const first = vi.fn();
+    const { unmount } = render(<AnnotationToolbox onFreehandOptionsChange={first} />);
+    expect(first).toHaveBeenCalledWith(
+      expect.objectContaining({ color: '#F472B6', strokeWidth: 5 })
+    );
+    unmount();
+    window.localStorage.setItem(STORAGE_KEY, '{not json');
+    const second = vi.fn();
+    render(<AnnotationToolbox onFreehandOptionsChange={second} />);
+    expect(second).toHaveBeenCalledWith(expect.objectContaining({ color: '#111827' }));
+  });
+
+  it('keeps the plain Freehand button name so existing arming paths are unchanged', () => {
+    render(<AnnotationToolbox />);
+    open();
+    expect(screen.getByRole('button', { name: /^freehand$/i })).toBeTruthy();
+  });
+});

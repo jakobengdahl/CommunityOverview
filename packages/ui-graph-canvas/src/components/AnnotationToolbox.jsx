@@ -7,6 +7,13 @@ import {
   resolveAnnotationIcon,
 } from '../utils/annotationIcons';
 import { GENERIC_ANNOTATION_COLORS, DEFAULT_GENERIC_COLOR } from '../utils/annotations';
+import {
+  FREEHAND_COLORS,
+  FREEHAND_WIDTHS,
+  FREEHAND_SMOOTHING_LEVELS,
+  FREEHAND_OPACITY_LEVELS,
+  normalizeFreehandOptions,
+} from '../utils/freehandOptions';
 import { ToolSlotPicker } from './ToolSlotPicker';
 import './AnnotationToolbox.css';
 
@@ -89,6 +96,18 @@ const VOTE_DOT_VARIANTS = GENERIC_ANNOTATION_COLORS.map((color) => ({
 const VOTE_DOT_VARIANT_KEYS = VOTE_DOT_VARIANTS.map((variant) => variant.color);
 const VOTE_DOT_SLOT_STORAGE_KEY = 'communityoverview:annotation-toolbox:vote-dot-slot';
 const VOTE_DOT_SLOT_ITEM_KEY = 'vote-dot-slot';
+// The pen's pre-draw stroke options (colour, width, smoothing, opacity) are
+// remembered per browser as one JSON object, like the other slots' choices.
+const FREEHAND_OPTIONS_STORAGE_KEY = 'communityoverview:annotation-toolbox:freehand-options';
+
+function readStoredFreehandOptions() {
+  try {
+    const raw = window.localStorage?.getItem(FREEHAND_OPTIONS_STORAGE_KEY);
+    return normalizeFreehandOptions(raw ? JSON.parse(raw) : null);
+  } catch {
+    return normalizeFreehandOptions(null);
+  }
+}
 
 const TOOLBOX_ITEMS_TRAILING = [
   // A heat-map circle. Drag-to-create like every placing item, and — since it
@@ -255,6 +274,11 @@ function AnnotationToolbox({
   compact = false,
   touch = false,
   activeKind = null,
+  // Called with the pen's current stroke options (a full
+  // {color, strokeWidth, smoothing, opacity} object) on mount and whenever the
+  // user changes them in the pen's fold-out, so the host can draw the next
+  // stroke with them. Optional: without it the pen keeps its built-in defaults.
+  onFreehandOptionsChange,
   // 'toolbar' (default): the collapsible pill this component has always
   // been, own toggle button, starts collapsed. 'sheet': hosted inside a
   // dedicated BottomSheet (see GraphCanvas's annotationToolboxPortalContainer)
@@ -286,6 +310,28 @@ function AnnotationToolbox({
     DEFAULT_GENERIC_COLOR
   );
   const [voteDotPickerOpen, setVoteDotPickerOpen] = useState(false);
+  const [freehandOptions, setFreehandOptionsState] = useState(readStoredFreehandOptions);
+  const [freehandPickerOpen, setFreehandPickerOpen] = useState(false);
+  const freehandSlotRef = useRef(null);
+  const freehandCornerButtonRef = useRef(null);
+  const onFreehandOptionsChangeRef = useRef(onFreehandOptionsChange);
+  onFreehandOptionsChangeRef.current = onFreehandOptionsChange;
+  useEffect(() => {
+    onFreehandOptionsChangeRef.current?.(freehandOptions);
+  }, [freehandOptions]);
+  const updateFreehandOptions = (patch) => {
+    const next = normalizeFreehandOptions({ ...freehandOptions, ...patch });
+    setFreehandOptionsState(next);
+    try {
+      window.localStorage?.setItem(FREEHAND_OPTIONS_STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      // Storage unavailable: the choice still applies for this session.
+    }
+    // Choosing how to draw reads as "I want to draw now", the same way picking
+    // a shape arms the shape tool. Re-arming would toggle the pen back off, so
+    // only arm when it is not already live.
+    if (activeKind !== 'freehand') activateTool('freehand');
+  };
   const shapeSlotRef = useRef(null);
   const shapeCornerButtonRef = useRef(null);
   const iconSlotRef = useRef(null);
@@ -307,6 +353,7 @@ function AnnotationToolbox({
       setShapePickerOpen(false);
       setIconPickerOpen(false);
       setVoteDotPickerOpen(false);
+      setFreehandPickerOpen(false);
     }
   }, [expanded]);
   // Sole purpose: swallow the click that follows a completed pointer drag
@@ -480,6 +527,12 @@ function AnnotationToolbox({
     voteDot: 'Vote dot',
     voteDotPickerOpen: 'Choose a vote dot colour',
     voteDotPicker: 'Vote dot colours',
+    freehandPickerOpen: 'Choose pen options',
+    freehandPicker: 'Pen options',
+    freehandColor: 'Colour',
+    freehandWidth: 'Stroke width',
+    freehandSmoothing: 'Smoothing',
+    freehandOpacity: 'Opacity',
     heatmap: 'Heat map',
     image: 'Image',
     freehand: 'Freehand',
@@ -558,7 +611,7 @@ function AnnotationToolbox({
   // `renderShapeSlot` below). Unchanged in behaviour from before the shape
   // slot existed; only pulled out into its own function so it can be called
   // for the items on both sides of the slot.
-  const renderToolboxItem = ({ kind, glyph, labelKey, shape, draggable }) => {
+  const renderToolboxItem = ({ kind, glyph, labelKey, shape, draggable }, extraProps = {}) => {
     // image/freehand have no draggable object to create (a file picker, an
     // armed mode) — both stay click-only: no draggable attribute, no
     // dragstart handler, no pointer-drag handlers, no grab cursor.
@@ -573,6 +626,7 @@ function AnnotationToolbox({
       <button
         key={itemKey}
         type="button"
+        {...extraProps}
         className={`annotation-toolbox-item${
           activeKind === kind ? ' annotation-toolbox-item--active' : ''
         }${isDraggableKind ? ' annotation-toolbox-item--draggable' : ''}`}
@@ -885,6 +939,107 @@ function AnnotationToolbox({
     );
   };
 
+  // The pen: the plain freehand item plus a corner button (and right-click)
+  // opening a fold-out of stroke options to choose BEFORE drawing — the same
+  // affordance the shape/icon/vote-dot slots have. The pen is click-only (a
+  // mode, not an object to carry), so unlike those slots there is no drag
+  // path here.
+  const renderFreehandSlot = (item) => {
+    const pickerRow = (titleKey, choices, current, field, renderChoice) => (
+      <div key={field}>
+        <div className="freehand-options-title">{lbl[titleKey]}</div>
+        <div className="freehand-options-row">
+          {choices.map((choice) => renderChoice(choice, choice === current, field))}
+        </div>
+      </div>
+    );
+    const choiceButton = (choice, current, field, content, extra = {}) => (
+      <button
+        key={String(choice)}
+        type="button"
+        aria-pressed={current}
+        className={`freehand-options-choice${current ? ' freehand-options-choice--current' : ''}${
+          extra.className ? ` ${extra.className}` : ''
+        }`}
+        style={extra.style}
+        aria-label={extra.ariaLabel}
+        onClick={() => updateFreehandOptions({ [field]: choice })}
+      >
+        {content}
+      </button>
+    );
+    return (
+      <div className="annotation-toolbox-slot" key="freehand-slot" ref={freehandSlotRef}>
+        {renderToolboxItem(item, {
+          onContextMenu: (e) => {
+            e.preventDefault();
+            setFreehandPickerOpen(true);
+          },
+          onMouseDown: (event) => {
+            if (event.button !== 0) return;
+            setFreehandPickerOpen(false);
+          },
+        })}
+        <button
+          ref={freehandCornerButtonRef}
+          type="button"
+          className="annotation-toolbox-slot-corner"
+          aria-label={lbl.freehandPickerOpen}
+          aria-haspopup="true"
+          aria-expanded={freehandPickerOpen}
+          onClick={() => setFreehandPickerOpen(true)}
+        >
+          <span aria-hidden="true">▾</span>
+        </button>
+        {freehandPickerOpen && (
+          <ToolSlotPicker
+            anchorRef={freehandSlotRef}
+            returnFocusRef={freehandCornerButtonRef}
+            ariaLabel={lbl.freehandPicker}
+            panelClassName="tool-slot-picker--options"
+            onClose={() => setFreehandPickerOpen(false)}
+          >
+            {pickerRow(
+              'freehandColor',
+              FREEHAND_COLORS,
+              freehandOptions.color,
+              'color',
+              (choice, current, field) =>
+                choiceButton(choice, current, field, null, {
+                  className: 'freehand-options-swatch',
+                  style: { backgroundColor: choice },
+                  ariaLabel: choice,
+                })
+            )}
+            {pickerRow(
+              'freehandWidth',
+              FREEHAND_WIDTHS,
+              freehandOptions.strokeWidth,
+              'strokeWidth',
+              (choice, current) => choiceButton(choice, current, 'strokeWidth', choice)
+            )}
+            {pickerRow(
+              'freehandSmoothing',
+              FREEHAND_SMOOTHING_LEVELS,
+              freehandOptions.smoothing,
+              'smoothing',
+              (choice, current) =>
+                choiceButton(choice, current, 'smoothing', `${Math.round(choice * 100)}%`)
+            )}
+            {pickerRow(
+              'freehandOpacity',
+              FREEHAND_OPACITY_LEVELS,
+              freehandOptions.opacity,
+              'opacity',
+              (choice, current) =>
+                choiceButton(choice, current, 'opacity', `${Math.round(choice * 100)}%`)
+            )}
+          </ToolSlotPicker>
+        )}
+      </div>
+    );
+  };
+
   // The vote-dot slot: same collapsed-slot pattern as shape and icon, but the
   // variant IS the colour. A vote dot has no other property worth choosing at
   // creation time, and picking the colour afterwards through the property
@@ -1014,7 +1169,9 @@ function AnnotationToolbox({
           {renderShapeSlot()}
           {renderIconSlot()}
           {renderVoteDotSlot()}
-          {TOOLBOX_ITEMS_TRAILING.map(renderToolboxItem)}
+          {TOOLBOX_ITEMS_TRAILING.map((item) =>
+            item.kind === 'freehand' ? renderFreehandSlot(item) : renderToolboxItem(item)
+          )}
         </div>
       )}
 
