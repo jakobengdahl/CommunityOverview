@@ -39,6 +39,10 @@
  * exactly as before). A stroke saved with smoothing>0 renders differently
  * from earlier builds — its wobble is now averaged out in proportion to the
  * stored value, so e.g. the default 0.3 is visibly smoother than before.
+ * Strokes that carry pressure also change width: the pressure-to-width map was
+ * widened (see MIN/MAX_PRESSURE_WIDTH_FACTOR), so they render thinner at light
+ * and thicker at hard presses than before even at smoothing=0. Only the path
+ * geometry of a smoothing=0 stroke is untouched.
  *
  * Pure functions, no randomness or wall-clock reads, so the same input always
  * produces the same output.
@@ -309,8 +313,12 @@ export function buildFreehandPath(points, smoothing = 0) {
 // The 0.15-3.5 span (about 23x thinnest to thickest, up from 0.25-2.6, ~10x)
 // was widened again after stylus testing found the difference too subtle: a
 // pen rarely spans the full 0-1 scale in one stroke, so the usable range is a
-// fraction of it. The floor keeps a light stroke a visible line (widthFor-
-// Pressure additionally never goes below 0.5 px).
+// fraction of it. The factor floor keeps a light stroke a visible line, and
+// widthForPressure additionally never goes below MIN_PRESSURE_WIDTH_PX. That
+// pixel floor is set below the thinnest width every offered base width
+// (1.5-8) produces (1.5 * 0.15 = 0.225 px), so it never hides the thin end:
+// each offered width, including the default 2, spans about 23x.
+const MIN_PRESSURE_WIDTH_PX = 0.2;
 const MIN_PRESSURE_WIDTH_FACTOR = 0.15;
 const MAX_PRESSURE_WIDTH_FACTOR = 3.5;
 
@@ -332,7 +340,7 @@ function widthForPressure(pressure, baseWidth) {
     clamped <= 0.5
       ? MIN_PRESSURE_WIDTH_FACTOR + (1 - MIN_PRESSURE_WIDTH_FACTOR) * (clamped / 0.5)
       : 1 + (MAX_PRESSURE_WIDTH_FACTOR - 1) * ((clamped - 0.5) / 0.5);
-  return Math.max(0.5, baseWidth * factor);
+  return Math.max(MIN_PRESSURE_WIDTH_PX, baseWidth * factor);
 }
 
 /**

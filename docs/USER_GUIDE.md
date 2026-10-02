@@ -380,7 +380,7 @@ To choose those options *before* drawing, click the small arrow on the **Freehan
 the choice applies to the strokes you draw next and is remembered in your browser. Higher
 smoothing averages out hand tremor, so 100% draws a clearly smoother line than 0%, which
 keeps every sampled point as drawn. On a pressure-sensitive stylus a light touch draws a
-fine line and a hard press a much thicker one (roughly twenty times thicker); a medium
+fine line and a hard press a much thicker one (about twenty-three times thicker at every offered width); a medium
 press draws at the chosen width, which is also what a mouse produces.
 
 **Image** annotations can be added three ways: pick **Image** in the toolbox to choose a

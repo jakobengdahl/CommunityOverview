@@ -8,6 +8,7 @@ import {
   smoothAnchors,
   segmentsFromCurvePoints,
 } from '../src/utils/freehandPath';
+import { FREEHAND_WIDTHS } from '../src/utils/freehandOptions';
 
 // A "jittery" hand-drawn line: an L-shaped stroke (roughly horizontal, then
 // roughly vertical) with small perpendicular wobble at every sample — the
@@ -507,23 +508,40 @@ describe('pressure width range', () => {
       base
     )[0].width;
 
-  it('spreads the thinnest to the thickest stroke by at least 15x, with a nonzero minimum', () => {
-    const thin = widthAt(0);
-    const thick = widthAt(1);
-    expect(thin).toBeGreaterThan(0);
-    expect(thick / thin).toBeGreaterThanOrEqual(15);
-  });
+  it.each(FREEHAND_WIDTHS)(
+    'spreads thinnest to thickest by at least 15x at offered width %s, with a nonzero minimum',
+    (base) => {
+      const thin = widthAt(0, base);
+      const thick = widthAt(1, base);
+      expect(thin).toBeGreaterThan(0);
+      expect(thick / thin).toBeGreaterThanOrEqual(15);
+    }
+  );
 
   it('draws mid pressure (what a mouse reports while pressed) at exactly the base width', () => {
     expect(widthAt(0.5, 4)).toBeCloseTo(4, 9);
   });
 
-  it('grows monotonically with pressure', () => {
-    const widths = [0, 0.2, 0.4, 0.5, 0.7, 1].map((p) => widthAt(p));
-    for (let i = 1; i < widths.length; i++) expect(widths[i]).toBeGreaterThan(widths[i - 1]);
+  it('grows strictly with pressure across a 0..1 sweep when the base is not floor-limited', () => {
+    let prev = widthAt(0, 4);
+    for (let i = 1; i <= 100; i++) {
+      const w = widthAt(i / 100, 4);
+      expect(w).toBeGreaterThan(prev);
+      prev = w;
+    }
   });
 
-  it('never goes below the 0.5px floor even for a hairline base width', () => {
-    expect(widthAt(0, 1)).toBeGreaterThanOrEqual(0.5);
+  it.each(FREEHAND_WIDTHS)('never narrows as pressure rises at offered width %s', (base) => {
+    let prev = widthAt(0, base);
+    for (let i = 1; i <= 100; i++) {
+      const w = widthAt(i / 100, base);
+      expect(w).toBeGreaterThanOrEqual(prev);
+      prev = w;
+    }
+  });
+
+  it('never goes below the 0.2px floor even for a hairline base width', () => {
+    expect(widthAt(0, 1)).toBeCloseTo(0.2, 9);
+    expect(widthAt(0, 0.01)).toBeCloseTo(0.2, 9);
   });
 });
