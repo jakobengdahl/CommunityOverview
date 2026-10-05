@@ -480,6 +480,15 @@ class TestRejectedAddNodesLeavesNoInlineVector:
         storage.add_system_listener(seen.append)
         return seen
 
+    @staticmethod
+    def _without_generation(monkeypatch, storage):
+        def no_generation(nodes):
+            raise RuntimeError("no embedding model")
+
+        monkeypatch.setattr(
+            storage.vector_store, "update_nodes_embeddings", no_generation
+        )
+
     @pytest.mark.parametrize("repeat_existing", [False, True])
     def test_a_landed_node_carries_no_embedding_into_later_events(
         self, temp_storage, repeat_existing
@@ -506,7 +515,8 @@ class TestRejectedAddNodesLeavesNoInlineVector:
         assert (event.entity.before or {}).get("embedding") is None
         assert (event.entity.after or {}).get("embedding") is None
 
-    def test_a_landed_node_keeps_its_supplied_vector(self, temp_storage):
+    def test_a_landed_node_keeps_its_supplied_vector(self, temp_storage, monkeypatch):
+        self._without_generation(monkeypatch, temp_storage)
         temp_storage.add_nodes(
             [
                 Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5]),
@@ -555,6 +565,7 @@ class TestRejectedAddNodesLeavesNoInlineVector:
     def test_a_raise_mid_batch_settles_the_landed_vector(
         self, temp_storage, monkeypatch
     ):
+        self._without_generation(monkeypatch, temp_storage)
         self._raise_on_second_node(monkeypatch, temp_storage)
 
         result = temp_storage.add_nodes(
@@ -600,6 +611,7 @@ class TestRejectedAddNodesLeavesNoInlineVector:
     def test_the_settled_vector_survives_a_reload(
         self, temp_storage, monkeypatch, failure
     ):
+        self._without_generation(monkeypatch, temp_storage)
         if failure == "raise":
             self._raise_on_second_node(monkeypatch, temp_storage)
         second_id = "a" if failure == "duplicate_id" else "boom"
@@ -644,7 +656,8 @@ class TestRejectedAddNodesLeavesNoInlineVector:
             [0.25, 0.5]
         )
 
-    def test_every_landed_vector_in_a_batch_is_settled(self, temp_storage):
+    def test_every_landed_vector_in_a_batch_is_settled(self, temp_storage, monkeypatch):
+        self._without_generation(monkeypatch, temp_storage)
         result = temp_storage.add_nodes(
             [
                 Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5]),
@@ -662,8 +675,9 @@ class TestRejectedAddNodesLeavesNoInlineVector:
             )
 
     def test_a_supplied_vector_replaces_an_orphan_index_vector_for_a_new_id(
-        self, temp_storage
+        self, temp_storage, monkeypatch
     ):
+        self._without_generation(monkeypatch, temp_storage)
         temp_storage.vector_store.load_vectors({"a": [0.75, 1.0]})
 
         result = temp_storage.add_nodes(
@@ -704,6 +718,12 @@ class TestAdoptionKeepsVectorsIfTheIndexRaises:
     def test_a_transient_load_failure_in_add_nodes_does_not_lose_the_vector(
         self, temp_storage, monkeypatch
     ):
+        def no_generation(nodes):
+            raise RuntimeError("no embedding model")
+
+        monkeypatch.setattr(
+            temp_storage.vector_store, "update_nodes_embeddings", no_generation
+        )
         load = temp_storage.vector_store.load_vectors
         calls = []
 
@@ -791,6 +811,26 @@ class TestFailedAddNodesGeneratesLandedVectors:
             return build(node)
 
         monkeypatch.setattr(storage, "_build_match_fields", build_or_raise)
+
+    @pytest.mark.parametrize("exit_kind", ["failure", "success"])
+    def test_a_generated_vector_wins_over_a_supplied_one(
+        self, temp_storage, monkeypatch, exit_kind
+    ):
+        self._add_existing(temp_storage, monkeypatch)
+        calls = self._recording_generation(monkeypatch, temp_storage)
+        landed = Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5])
+        batch = [landed]
+        if exit_kind == "failure":
+            batch.append(Node(id="old", type=NodeType.ACTOR, name="Again"))
+
+        result = temp_storage.add_nodes(batch, [])
+
+        assert result.success is (exit_kind == "success")
+        assert calls == [["a"]]
+        assert landed.embedding is None
+        assert temp_storage.vector_store.get_vector_list("a") == pytest.approx(
+            [1.0, 1.0]
+        )
 
     def test_a_rejected_duplicate_id_still_generates_for_the_landed_nodes(
         self, temp_storage, monkeypatch
@@ -891,6 +931,22 @@ class TestFailedAddNodesGeneratesLandedVectors:
         assert temp_storage.vector_store.get_vector_list("a") == pytest.approx(
             [1.0, 1.0]
         )
+
+    def test_a_failing_generator_is_called_once_across_an_edge_failure(
+        self, temp_storage, monkeypatch
+    ):
+        self._add_existing(temp_storage, monkeypatch)
+        calls = self._recording_generation(monkeypatch, temp_storage, fail=True)
+
+        result = temp_storage.add_nodes(
+            [Node(id="a", type=NodeType.ACTOR, name="Alpha")],
+            [Edge(source="a", target="missing", type=RelationshipType.RELATES_TO)],
+        )
+
+        assert result.success is False
+        assert "does not exist" in result.message
+        assert calls == [["a"]]
+        assert temp_storage.get_node("a") is not None
 
     def test_a_generation_failure_on_a_failed_add_keeps_its_result(
         self, temp_storage, monkeypatch
