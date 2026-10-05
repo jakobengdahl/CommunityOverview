@@ -11,12 +11,17 @@ go through ChatService -> GraphService.
 """
 
 import asyncio
+import logging
+
 import os
 import tempfile
-from typing import Optional, Dict, Any
 from pathlib import Path, PurePosixPath
+from typing import Any, Dict, Optional
 
 from backend.ui.document_processor import DocumentProcessor
+
+
+logger = logging.getLogger(__name__)
 
 
 class DocumentService:
@@ -69,7 +74,10 @@ class DocumentService:
         if path.suffix.lower() not in self.SUPPORTED_EXTENSIONS:
             return {
                 "success": False,
-                "error": f"Unsupported file format: {path.suffix}. Supported: {', '.join(self.SUPPORTED_EXTENSIONS)}",
+                "error": (
+                    f"Unsupported file format: {path.suffix}. "
+                    f"Supported: {', '.join(self.SUPPORTED_EXTENSIONS)}"
+                ),
                 "filename": path.name,
             }
 
@@ -91,10 +99,11 @@ class DocumentService:
                 "char_count": len(text),
                 "word_count": len(text.split()),
             }
-        except Exception as e:
+        except Exception:
+            logger.exception(f"Error extracting text from {path.name}")
             return {
                 "success": False,
-                "error": f"Error extracting text: {str(e)}",
+                "error": "An internal error occurred while extracting text.",
                 "filename": path.name,
             }
 
@@ -118,7 +127,10 @@ class DocumentService:
         if ext not in self.SUPPORTED_EXTENSIONS:
             return {
                 "success": False,
-                "error": f"Unsupported file format: {ext}. Supported: {', '.join(self.SUPPORTED_EXTENSIONS)}",
+                "error": (
+                    f"Unsupported file format: {ext}. "
+                    f"Supported: {', '.join(self.SUPPORTED_EXTENSIONS)}"
+                ),
                 "filename": self._display_filename(filename),
             }
 
@@ -149,10 +161,11 @@ class DocumentService:
                 "filename": filename,
                 "size": len(file_content),
             }
-        except Exception as e:
+        except Exception:
+            logger.exception(f"Error saving file {filename}")
             return {
                 "success": False,
-                "error": f"Error saving file: {str(e)}",
+                "error": "An internal error occurred while saving the file.",
                 "filename": self._display_filename(filename),
             }
 

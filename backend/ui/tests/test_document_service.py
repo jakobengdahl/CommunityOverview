@@ -116,7 +116,7 @@ class TestDocumentServiceUpload:
         assert "too large" in too_large["error"].lower()
         assert too_large["filename"] == "big.txt"
         assert not write_failed["success"]
-        assert "disk full" in write_failed["error"]
+        assert "An internal error occurred" in write_failed["error"]
         assert write_failed["filename"] == "notes .txt"
 
     def test_save_upload_rejects_large_files(self, document_service):

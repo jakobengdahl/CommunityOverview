@@ -1,0 +1,4 @@
+## 2025-01-30 - Fix Information Disclosure (CWE-209) in UI endpoints
+**Vulnerability:** Raw exception strings (e.g., `str(e)`) from unexpected internal server errors were being passed directly to API responses in `backend/ui/chat_logic.py`, `backend/ui/chat_service.py`, and `backend/ui/document_service.py`. This could leak sensitive internal application paths, stack traces, or configuration details.
+**Learning:** Generic `except Exception as e:` blocks were using `{"error": str(e)}` to quickly return error details to the client instead of logging the full exception server-side and returning a sanitized generic message.
+**Prevention:** Always log the full exception (`logger.exception`) on the backend, but only return generic error messages (e.g., "An internal error occurred") to clients to avoid CWE-209. Exceptions that need to be fed back to tools/agents should be explicitly caught (like `ValueError` for bad arguments).
