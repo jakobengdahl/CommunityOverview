@@ -1199,7 +1199,8 @@ class ChatProcessor:
                     resolution.profile, api_key_override=api_key
                 )
             except Exception as e:
-                return None, f"❌ Error: {e}"
+                logger.error(f"Failed to create provider: {e}")
+                return None, "❌ Error: Failed to initialize AI provider"
             return llm_provider, None
 
         # Legacy single-provider path
@@ -1322,12 +1323,14 @@ class ChatProcessor:
 
             # Provide user-friendly message for rate limits
             if "rate_limit" in error_msg.lower() or "429" in error_msg:
-                error_msg = (
+                user_msg = (
                     "API rate limit reached. This happens when many nodes are processed simultaneously. "
                     "Try again in ~60 seconds, or request fewer nodes at a time (5-10)."
                 )
+            else:
+                user_msg = "An internal error occurred processing your message."
 
-            return {"content": error_msg, "toolUsed": None, "toolResult": None}
+            return {"content": user_msg, "toolUsed": None, "toolResult": None}
 
     def _handle_tool_use(
         self,
@@ -1482,8 +1485,12 @@ class ChatProcessor:
                     }
 
                     tool_result = func(**valid_args)
-                except Exception as e:
+                except ValueError as e:
+                    # Specific validation errors allow the LLM to self-correct
                     tool_result = {"error": str(e)}
+                except Exception as e:
+                    logger.error(f"Error executing tool {tool_name}: {e}")
+                    tool_result = {"error": "An internal error occurred during tool execution."}
             else:
                 tool_result = {"error": f"Tool {tool_name} not found"}
 
