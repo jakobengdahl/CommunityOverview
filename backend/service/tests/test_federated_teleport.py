@@ -175,6 +175,28 @@ def test_a_local_node_resolves_as_already_being_here(tmp_path):
     assert "route" not in result
 
 
+def test_a_local_node_whose_id_looks_federated_is_still_local(tmp_path):
+    # add_nodes lets a caller choose the id, so a local node can be created with
+    # a federated-shaped one. Its own (absent) provenance decides, not the id.
+    service = _service(tmp_path)
+    service._storage.add_nodes(
+        [
+            Node(
+                id="federated::esam-main::spoof",
+                type=NodeType.ACTOR,
+                name="Mine",
+            )
+        ],
+        [],
+    )
+
+    result = service.resolve_teleport("federated::esam-main::spoof")
+
+    assert result["status"] == teleport.STATUS_LOCAL, result
+    assert result["origin_graph_id"] == ""
+    assert "route" not in result
+
+
 def test_an_unknown_id_is_neither_local_nor_routed(tmp_path):
     result = _service(tmp_path).resolve_teleport("no-such-node")
 

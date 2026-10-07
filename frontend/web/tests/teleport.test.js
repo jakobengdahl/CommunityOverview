@@ -214,6 +214,19 @@ describe('teleportToSourceGraph — what may be opened', () => {
     expect(h.notifications).toEqual([['error', 'federation.teleport_failed']]);
   });
 
+  it.each(['/app', '//host/app', 'esam.example/app', 'app'])(
+    'refuses the relative route %s even on an ok status',
+    async (route) => {
+      // The backend refuses these too, but the browser-side check is the one
+      // standing between a relative route and window.open resolving it against
+      // this page's own origin.
+      const h = harness({ status: 'ok', route, cross_deployment: false });
+
+      expect(await h.run()).toBe('failed');
+      expect(h.opened).toEqual([]);
+    }
+  );
+
   it.each([undefined, null, '', 42])('refuses a route of %p', async (route) => {
     const h = harness({ status: 'ok', route, cross_deployment: false });
 

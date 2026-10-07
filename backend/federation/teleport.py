@@ -263,11 +263,16 @@ def resolve_teleport_target(
     from a header the caller controls.
     """
     metadata = node_metadata or {}
-    # The requested id is the classifier of last resort: a node that is not
-    # found has no metadata to read, and without this the visibility check
-    # would fall through to the local-graph check and answer "no such node" for
-    # a graph the caller may not see — an existence oracle for that graph.
-    requested_graph_id, _ = parse_federated_node_id(node_id)
+    # The requested id classifies a node that was NOT found: it has no metadata
+    # to read, and without this the visibility check would fall through to the
+    # local-graph check and answer "no such node" for a graph the caller may not
+    # see — an existence oracle for that graph.
+    #
+    # Only then. A node that exists is classified by its own provenance alone,
+    # because the id is caller-supplied and any mutating caller may choose it:
+    # letting it speak for a node that is really here would make a purely local
+    # node answer for a remote graph.
+    requested_graph_id = "" if node_exists else parse_federated_node_id(node_id)[0]
     origin_graph_id = _normalize(metadata.get("origin_graph_id")) or _normalize(
         requested_graph_id
     )

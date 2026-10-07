@@ -292,6 +292,21 @@ class TestTheOriginComparedAgainst:
 
         assert "backlink" not in body
 
+    @pytest.mark.parametrize("public_base_url", ["localhost:8100", "not-a-url", "/app"])
+    def test_a_public_url_that_is_not_a_web_url_gives_us_no_origin(
+        self, make_client, public_base_url
+    ):
+        # Set but unusable is covered in the pure resolver; this pins it where
+        # the env var is actually read, so the hop still reports and no
+        # backlink is invented.
+        client, _ = make_client(public_base_url=public_base_url)
+
+        body = _post(client, "federated::esam-main::remote-1").json()
+
+        assert body["status"] == teleport.STATUS_OK
+        assert body["cross_deployment"] is True
+        assert "backlink" not in body
+
     def test_a_configured_public_url_offers_a_backlink(self, make_client):
         client, _ = make_client()
 

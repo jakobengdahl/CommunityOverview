@@ -258,10 +258,38 @@ def test_the_nodes_own_provenance_wins_over_the_requested_id():
     assert target.origin_graph_id == "remote-a"
 
 
+def test_an_existing_node_with_no_provenance_is_local_whatever_its_id_looks_like():
+    # The id is caller-supplied and any mutating caller may choose it, so it
+    # must not speak for a node that is really here. The fallback exists only
+    # for a node that was not found.
+    target = _resolve(
+        node_metadata={},
+        node_exists=True,
+        node_id="federated::esam-main::spoof",
+    )
+
+    assert target.status == teleport.STATUS_LOCAL
+    assert target.origin_graph_id == ""
+
+
+def test_an_existing_local_node_is_not_denied_on_the_strength_of_its_id():
+    target = _resolve(
+        node_metadata={},
+        node_exists=True,
+        node_id="federated::some-graph::spoof",
+        graph_access_matches=_allow_only(""),
+    )
+
+    assert target.status == teleport.STATUS_LOCAL
+
+
 @pytest.mark.parametrize(
     "node_id,expected",
     [
         ("federated::esam-main::remote-1", ("esam-main", "remote-1")),
+        # An empty graph segment carries no graph, so it falls back to local
+        # rather than naming a graph called "".
+        ("federated::::n", ("", "n")),
         ("federated::g::a::b", ("g", "a::b")),
         ("federated::  g  ::n", ("g", "n")),
         ("local-1", ("", "")),
@@ -644,6 +672,17 @@ def test_an_owned_parameter_is_removed_rather_than_inherited():
 )
 def test_deployment_origin_rejects_anything_that_is_not_a_web_url(url):
     assert teleport.deployment_origin(url) == ""
+
+
+def test_an_ipv6_origin_keeps_its_brackets():
+    # The origin is only ever compared against another origin from this same
+    # function, so unbracketing would not corrupt a URL — but it would let
+    # host/port collide, so two different deployments could compare equal and
+    # skip the UI's confirmation.
+    assert teleport.deployment_origin("http://[::1]:8080/app") == "http://[::1]:8080"
+    assert teleport.deployment_origin("http://[::1]:8080/") != (
+        teleport.deployment_origin("http://[::1:8080]/")
+    )
 
 
 def test_deployment_origin_ignores_credentials_in_the_url():

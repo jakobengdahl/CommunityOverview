@@ -260,7 +260,7 @@ The response's `status` is one of:
 | `ok` | Remote, visible, and a route was built | yes |
 | `local` | This graph owns the node; there is nowhere to go | no |
 | `permission_denied` | The caller's narrowing does not admit the source graph | no |
-| `graph_unavailable` | Known but unreachable: disabled, no `gui_url`, or a degraded/offline cache | no |
+| `graph_unavailable` | Cannot be opened; `reason` says why (see below) | no |
 | `unknown_node` | No local or cached node by that id | no |
 
 ### The four defined behaviours
@@ -296,7 +296,7 @@ The response's `status` is one of:
   back on their own at a bogus path. A scheme such as `javascript:`, `file:` or
   `data:` is refused for a sharper reason: carrying a host makes it parse as
   absolute, and the resolved route is handed to `window.open`, so it would run
-  in the caller's origin. `federation.ROUTE_SCHEMES` is the allowed set, and the
+  in the caller's origin. `teleport.ROUTE_SCHEMES` is the allowed set, and the
   browser re-checks the scheme before opening rather than trusting one layer.
   Refusing all of these also means `cross_deployment` is a real comparison
   whenever the status is `ok`, rather than an unknown defaulting to `true`.
@@ -318,13 +318,19 @@ The response's `status` is one of:
 
 ### Route parameters
 
-The canonical route appends these to the source graph's configured `gui_url`,
-preserving its existing query and dropping its fragment:
+The canonical route is built onto the source graph's configured `gui_url`, and
+its fragment is dropped:
 
-A parameter already on `gui_url` is kept, but one of the same name is
-**replaced** rather than appended after: the receiving end reads the first value
-of a repeated parameter, so appending would let a `gui_url` configured with its
-own `node=` shadow the node the route exists to focus.
+The route **owns** the four parameters below. A parameter already on `gui_url`
+is kept unless it is one of those four: an owned key is **replaced** when the
+route carries a value for it and **removed** when it does not. Replacing rather
+than appending matters because the receiving end reads the first value of a
+repeated parameter, so appending would let a `gui_url` configured with its own
+`node=` shadow the node the route exists to focus. Removing matters because a
+configured `q=` or `node=` must not survive into a route that carries none of
+its own — above all into a backlink, which addresses no node at all. So do not
+configure a default search term on `gui_url` and expect it to survive; it will
+not.
 
 | Parameter | Carries | Consumed by this app on arrival |
 |---|---|---|

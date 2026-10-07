@@ -331,11 +331,9 @@ def resolve_teleport(
 
     graph_config = None
     cache_status = ""
-    origin_graph_id = (
-        access.node_graph_id(node)
-        if node is not None
-        else teleport.parse_federated_node_id(node_id)[0]
-    )
+    # Only a found node's own provenance; a missing node skips the lookup block
+    # below regardless, and the resolver reads the graph out of node_id itself.
+    origin_graph_id = access.node_graph_id(node) if node is not None else ""
     if (
         origin_graph_id
         and federation_manager is not None
