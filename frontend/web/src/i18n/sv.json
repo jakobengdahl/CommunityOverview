@@ -416,7 +416,19 @@
     "depth_label": "Djup",
     "depth_tooltip": "Djupnivåer styrs av installationens konfiguration",
     "depth_indicator": "Djup {current}/{max}",
-    "depth_indicator_tooltip": "Aktuell federerad söknivå och högsta tillåtna nivå"
+    "depth_indicator_tooltip": "Aktuell federerad söknivå och högsta tillåtna nivå",
+    "teleport_action": "Öppna i källgrafen",
+    "teleport_action_tooltip": "Öppna noden i den graf som äger den",
+    "teleport_opening": "Öppnar {graph}…",
+    "teleport_already_local": "Noden finns redan i den aktuella grafen.",
+    "teleport_permission_denied": "Du har inte åtkomst till nodens källgraf.",
+    "teleport_graph_unavailable": "{graph} kan inte nås just nu.",
+    "teleport_graph_unavailable_unnamed": "Källgrafen kan inte nås just nu.",
+    "teleport_unknown_node": "Noden kunde inte hittas.",
+    "teleport_failed": "Kunde inte avgöra var noden kommer ifrån.",
+    "teleport_cross_deployment_confirm": "{graph} är en separat installation. Öppna i en ny flik?",
+    "teleport_returned_from": "Öppnad från {graph}.",
+    "teleport_focus_not_found": "Den länkade noden finns inte i den här grafen."
   },
   "canvas": {
     "lazy_showing": "Visar {loaded} av {total} noder",
@@ -556,7 +568,8 @@
     "annotation_multi_select_mode": "Markera flera",
     "annotation_overlap_picker_title": "Flera objekt här — välj ett",
     "annotation_size": "Storlek",
-    "annotation_more_actions": "Fler åtgärder"
+    "annotation_more_actions": "Fler åtgärder",
+    "open_in_source_graph": "Öppna i källgrafen"
   },
   "annotation_toolbox": {
     "toggle_expand": "Lägg till kommentar",

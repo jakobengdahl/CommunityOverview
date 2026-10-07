@@ -416,7 +416,19 @@
     "depth_label": "Depth",
     "depth_tooltip": "Depth levels are defined by installation configuration",
     "depth_indicator": "Depth {current}/{max}",
-    "depth_indicator_tooltip": "Current federated search depth and maximum allowed depth"
+    "depth_indicator_tooltip": "Current federated search depth and maximum allowed depth",
+    "teleport_action": "Open in source graph",
+    "teleport_action_tooltip": "Open this node in the graph that owns it",
+    "teleport_opening": "Opening {graph}…",
+    "teleport_already_local": "This node is already in the current graph.",
+    "teleport_permission_denied": "You do not have access to this node's source graph.",
+    "teleport_graph_unavailable": "{graph} cannot be reached right now.",
+    "teleport_graph_unavailable_unnamed": "The source graph cannot be reached right now.",
+    "teleport_unknown_node": "This node could not be found.",
+    "teleport_failed": "Could not work out where this node comes from.",
+    "teleport_cross_deployment_confirm": "{graph} is a separate deployment. Open it in a new tab?",
+    "teleport_returned_from": "Opened from {graph}.",
+    "teleport_focus_not_found": "The linked node is not in this graph."
   },
   "canvas": {
     "lazy_showing": "Showing {loaded} of {total} nodes",
@@ -556,7 +568,8 @@
     "annotation_multi_select_mode": "Select multiple",
     "annotation_overlap_picker_title": "Multiple objects here — choose one",
     "annotation_size": "Size",
-    "annotation_more_actions": "More actions"
+    "annotation_more_actions": "More actions",
+    "open_in_source_graph": "Open in source graph"
   },
   "annotation_toolbox": {
     "toggle_expand": "Add annotation",

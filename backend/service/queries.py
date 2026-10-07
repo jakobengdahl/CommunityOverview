@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from backend.core import NodeType, RelationshipType
 from backend.core.storage_search import MATCH_MODE_SUBSTRING, validate_match_mode
+from backend.federation import teleport
 from backend.runtime.authorization import GRAPH_ACTION_READ
 
 from . import access
@@ -296,6 +297,58 @@ def search_graph(
     if action:
         result["action"] = action
     return result
+
+
+def resolve_teleport(
+    storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
+    federation_manager: Optional["FederationManager"],
+    node_id: str,
+    *,
+    session_id: str = "",
+    search_query: str = "",
+    request_origin: str = "",
+    local_gui_url: str = "",
+) -> Dict[str, Any]:
+    """Resolve the canonical route from ``node_id`` to its source graph.
+
+    Looks the node up locally first and then in the federation cache, so the
+    same id resolves whether or not it has been adopted. Authorization is the
+    request's existing graph-access narrowing — this function hands that
+    narrowing to ``teleport.resolve_teleport_target`` and does not decide
+    visibility itself.
+    """
+    decision = access.evaluate_graph_access(
+        hook, action=GRAPH_ACTION_READ, target="resolve_teleport"
+    )
+    if not decision.allowed:
+        return access.build_access_denied_result(
+            action=GRAPH_ACTION_READ, target="resolve_teleport", decision=decision
+        )
+
+    node = storage.get_node(node_id)
+    if node is None and federation_manager is not None:
+        node = federation_manager.get_cached_node(node_id)
+
+    graph_config = None
+    cache_status = ""
+    origin_graph_id = access.node_graph_id(node) if node is not None else ""
+    if origin_graph_id and federation_manager is not None:
+        graph_config = federation_manager.get_graph_config_for_node(node_id)
+        cache_status = federation_manager.get_cache_status(origin_graph_id)
+
+    target = teleport.resolve_teleport_target(
+        node_metadata=(node.metadata if node is not None else None),
+        node_exists=node is not None,
+        graph_access_matches=decision.graph_access.matches,
+        graph_config=graph_config,
+        cache_status=cache_status,
+        request_origin=request_origin,
+        session_id=session_id,
+        search_query=search_query,
+        local_gui_url=local_gui_url,
+    )
+    return target.to_dict()
 
 
 def get_node_details(

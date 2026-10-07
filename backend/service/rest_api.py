@@ -36,7 +36,11 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from pydantic import ValidationError as PydanticValidationError
 
-from backend.config.config_loader import RestInterfaceConfig, get_rest_interfaces
+from backend.config.config_loader import (
+    RestInterfaceConfig,
+    get_public_base_url,
+    get_rest_interfaces,
+)
 from backend.core.image_ingest import (
     DEFAULT_MAX_SOURCE_IMAGE_BYTES,
     ImageFetchError,
@@ -325,6 +329,18 @@ class DeleteEdgeRequest(BaseModel):
     )
     event_correlation_id: Optional[str] = Field(
         None, description="Correlation ID for chaining events"
+    )
+
+
+class ResolveTeleportRequest(BaseModel):
+    """Request model for resolving the route to a node's source graph."""
+
+    node_id: str = Field(..., description="Local or federated node ID")
+    session_id: Optional[str] = Field(
+        None, description="Session to offer as the way back"
+    )
+    search_query: Optional[str] = Field(
+        None, description="Search context to carry into the source graph"
     )
 
 
@@ -630,6 +646,22 @@ def _register_similarity_endpoints(router: APIRouter, service: GraphService) -> 
             threshold=request.threshold,
             limit=request.limit,
         )
+
+    @router.post("/federation/teleport")
+    async def resolve_teleport(
+        request: ResolveTeleportRequest, http_request: Request
+    ) -> Dict[str, Any]:
+        """Resolve the canonical route from a node to its source graph."""
+        with use_request_authorization(headers=http_request.headers):
+            result = service.resolve_teleport(
+                node_id=request.node_id,
+                session_id=request.session_id or "",
+                search_query=request.search_query or "",
+                request_origin=str(http_request.base_url),
+                local_gui_url=get_public_base_url(),
+            )
+        _raise_for_access_denied(result)
+        return result
 
     @router.post("/federation/adopt")
     async def adopt_federated_node(

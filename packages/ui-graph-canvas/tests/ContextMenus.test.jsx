@@ -54,6 +54,8 @@ const labels = {
   annotationNearbyLabel: 'Label',
   annotationNearbyIcon: 'Icon',
   annotationNearbyText: 'Text',
+  openInSourceGraph: 'Open in source graph',
+  openInSourceGraphTooltip: 'Open this node in the graph that owns it',
 };
 
 describe('buildContextMenuUrl', () => {
@@ -449,6 +451,98 @@ describe('NodeContextMenu', () => {
       fireEvent.click(screen.getByRole('button', { name: /restore incident edges/i }));
       expect(onRestoreEdges).toHaveBeenCalledWith(['e1', 'e2']);
     });
+  });
+});
+
+describe('NodeContextMenu teleport action (task-federated-graph-teleport)', () => {
+  const localNode = { id: 'n1', data: { nodeType: 'Actor', label: 'Alice', metadata: {} } };
+  const federatedNode = {
+    id: 'federated::esam-main::remote-1',
+    data: {
+      nodeType: 'Actor',
+      label: 'External Node',
+      metadata: { origin_graph_id: 'esam-main', origin_graph_name: 'eSam' },
+    },
+  };
+
+  it('offers the action when the host supplies a teleport handler', () => {
+    render(
+      <NodeContextMenu
+        menu={{ x: 0, y: 0, node: federatedNode }}
+        labels={labels}
+        onTeleport={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    expect(screen.getByRole('button', { name: /open in source graph/i })).toBeTruthy();
+  });
+
+  it('omits the action when no teleport handler is supplied', () => {
+    // GraphCanvas withholds the handler for a node this graph owns, so the
+    // absence of a handler is how a local node gets no teleport item.
+    render(
+      <NodeContextMenu menu={{ x: 0, y: 0, node: localNode }} labels={labels} onClose={vi.fn()} />
+    );
+    expect(screen.queryByRole('button', { name: /open in source graph/i })).toBeNull();
+  });
+
+  it('passes the node id and data to the handler, then closes', () => {
+    const onTeleport = vi.fn();
+    const onClose = vi.fn();
+    render(
+      <NodeContextMenu
+        menu={{ x: 0, y: 0, node: federatedNode }}
+        labels={labels}
+        onTeleport={onTeleport}
+        onClose={onClose}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /open in source graph/i }));
+    expect(onTeleport).toHaveBeenCalledWith(federatedNode.id, federatedNode.data);
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('carries the tooltip label', () => {
+    render(
+      <NodeContextMenu
+        menu={{ x: 0, y: 0, node: federatedNode }}
+        labels={labels}
+        onTeleport={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    expect(
+      screen.getByRole('button', { name: /open in source graph/i }).getAttribute('title')
+    ).toBe('Open this node in the graph that owns it');
+  });
+
+  it('is a top-level roving-focus item like the other menu actions', () => {
+    render(
+      <NodeContextMenu
+        menu={{ x: 0, y: 0, node: federatedNode }}
+        labels={labels}
+        onTeleport={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    expect(
+      screen.getByRole('button', { name: /open in source graph/i }).getAttribute('data-menu-item')
+    ).toBe('root');
+  });
+
+  it('leaves the ordinary actions in place alongside it', () => {
+    render(
+      <NodeContextMenu
+        menu={{ x: 0, y: 0, node: federatedNode }}
+        labels={labels}
+        onEdit={vi.fn()}
+        onExpand={vi.fn()}
+        onTeleport={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    expect(screen.getByRole('button', { name: /find related nodes/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /open in source graph/i })).toBeTruthy();
   });
 });
 

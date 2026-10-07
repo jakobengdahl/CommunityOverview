@@ -334,6 +334,16 @@ class FederationManager:
             return None
         return self._get_graph_config(origin_graph_id)
 
+    def get_cache_status(self, graph_id: str) -> str:
+        """Return the cache health state for ``graph_id`` ("" when unknown).
+
+        Teleport uses this to tell a configured-but-unreachable source graph
+        apart from one that can be opened.
+        """
+        with self._lock:
+            entry = self._cache.get(graph_id)
+            return entry.status if entry is not None else ""
+
     def get_max_selectable_depth(self) -> int:
         """Return effective max depth users may select for federated search."""
         max_depth = int(self._config.federation.max_traversal_depth or 0)

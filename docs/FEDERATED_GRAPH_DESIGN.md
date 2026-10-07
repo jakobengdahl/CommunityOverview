@@ -228,6 +228,90 @@ Even though federation is transparent, users must see provenance:
 - Filter toggles: local only / include external.
 - Search results grouped by source graph.
 - Detail panel shows sync freshness and source links (GUI/MCP/file).
+- An explicit way to open a remote node in its own graph (see "Teleport navigation
+  contract"); implemented in the result list and the node context menu.
+
+## Teleport navigation contract
+
+Federated search puts remote nodes next to local ones; teleport is the
+navigation step back to the graph that owns a node. The contract below is open
+core. Hosted routing and authorization — resolving a tenant-visible route and
+deciding whether a caller may reach a deployment — live in the SaaS layer and
+consume this contract.
+
+### Resolution
+
+`POST /api/federation/teleport` takes a `node_id` (local or federated), plus an
+optional `session_id` and `search_query` to carry along. Resolution lives in
+`backend/federation/teleport.py` and is pure: it reads the provenance the
+federation cache already stamps on a node, the graph's configuration and cache
+health, and the caller's already-evaluated graph-access narrowing. It makes no
+authorization decision of its own.
+
+A node's owning graph is decided by one field, `metadata.origin_graph_id` — the
+same field `access.node_graph_id` narrows graph visibility on. A local node
+carries none, so the local and federated paths classify a node off one piece of
+provenance rather than each keeping its own notion.
+
+The response's `status` is one of:
+
+| `status` | Meaning | `route` |
+|---|---|---|
+| `ok` | Remote, visible, and a route was built | yes |
+| `local` | This graph owns the node; there is nowhere to go | no |
+| `permission_denied` | The caller's narrowing does not admit the source graph | no |
+| `graph_unavailable` | Known but unreachable: disabled, no `gui_url`, or a degraded/offline cache | no |
+| `unknown_node` | No local or cached node by that id | no |
+
+### The four defined behaviours
+
+- **Permission denial.** Visibility is checked before any endpoint is read, so a
+  denied response names no graph, no endpoint and no node — it cannot be used to
+  discover that a graph exists. It is a status the UI renders, not a `403`: the
+  request itself was allowed, only this one graph is not visible.
+- **Unavailable graph.** A `reason` distinguishes `graph_disabled`,
+  `graph_unreachable`, `no_gui_url_configured`, `graph_not_configured` and
+  `no_origin_node_id`. The graph *is* named here, because a caller who reaches
+  this state is already entitled to see it.
+- **Cross-deployment.** `cross_deployment` compares the scheme, host and port of
+  the target `gui_url` against the request's own origin, so two graphs served as
+  different paths of one deployment are not reported as a hop. An origin that
+  cannot be parsed counts as cross-deployment: the UI's confirmation is the safe
+  default when the hop cannot be proven to stay in place.
+- **Backlink.** When `COMMUNITYOVERVIEW_PUBLIC_BASE_URL` is set, the response
+  carries a `backlink` to this deployment and the outbound route carries
+  `from_session`. Standalone deployments do not know their own public URL, so no
+  backlink is invented rather than a guessed or `localhost` one being emitted.
+
+### Route parameters
+
+The canonical route appends these to the source graph's configured `gui_url`,
+preserving its existing query and dropping its fragment:
+
+| Parameter | Carries |
+|---|---|
+| `node` | The origin node id to focus |
+| `from_graph` | The graph the visitor came from |
+| `from_session` | The session to offer as the way back |
+| `q` | The search context to preserve |
+
+The receiving end is the same contract read in reverse: this app consumes
+`?node=` by focusing that node, and `?from_graph=` by naming where the visitor
+came from. A route this app hands out is one it can also consume.
+
+### UI surfaces
+
+An explicit action, never a change to ordinary navigation:
+
+- The search result list shows a teleport button on a result another graph owns.
+  Selecting the result itself still brings it onto the current canvas.
+- The node context menu shows **Open in source graph** for a node another graph
+  owns. Double-click still opens the node detail dialog.
+
+Both surfaces read provenance through `isFederatedNode` (exported from
+`@community-graph/ui-graph-canvas`) and map a resolved status to its outcome
+through `frontend/web/src/utils/teleport.js`, so one node cannot offer different
+actions in the two places.
 
 ## Security and governance
 
@@ -257,12 +341,20 @@ Even though federation is transparent, users must see provenance:
 - `GET /federation/status` diagnostics endpoint
 - `POST /federation/sync` on-demand sync endpoint
 - Node adoption: `POST /api/federation/adopt` clones a federated node into the local graph
+- Teleport navigation: `POST /api/federation/teleport` resolves the canonical route from a
+  node to the graph that owns it, with permission-denial, unavailable-graph,
+  cross-deployment and backlink behaviour defined (see "Teleport navigation contract")
+- Teleport UI: an explicit action in the search result list and the node context menu,
+  with ordinary selection and double-click behaviour unchanged
+- Inbound `?node=` deep link focuses a node a teleport arrived at
 - Federated event subscriptions (`scope: local_and_federated`)
 
 ### Remaining / future work
 
 - **Phase 4 (MCP federation):** controlled cross-graph writes via MCP connector with scoped credentials
 - **Phase 5 (advanced subscriptions):** live-remote event sources beyond sync-engine events
+- **Hosted teleport routing (SaaS):** tenant-visible route resolution and the authorization
+  decision behind a cross-deployment hop; consumes the open-core contract above
 
 ## Critical acceptance criteria
 
@@ -283,6 +375,7 @@ Even though federation is transparent, users must see provenance:
 - [x] UI labels/filters for provenance and hop count.
 - [x] Sync scheduler with resilience primitives.
 - [x] Federated subscription schema + compatibility migration.
+- [x] Teleport route contract + provenance-driven UI action (open core).
 - [ ] MCP connector with scoped credentials (Phase 4).
 - [ ] Load/failure testing with multiple simulated remote graphs.
 

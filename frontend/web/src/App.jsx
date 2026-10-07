@@ -13,6 +13,7 @@ import AppDialogs from './components/AppDialogs';
 import ConfirmDialog from './components/ConfirmDialog';
 import AppInstallPrompt from './components/AppInstallPrompt';
 import * as api from './services/api';
+import { teleportToSourceGraph } from './utils/teleport';
 import * as sessionStore from './services/sessionStore';
 import {
   annotationsToGroups,
@@ -157,6 +158,7 @@ function App() {
 
   const urlGuideStartedRef = useRef(false);
   const urlViewLoadedRef = useRef(false);
+  const urlFocusNodeLoadedRef = useRef(false);
   const latestViewport = useRef(null);
   const dialogOpenRef = useRef(false);
   const appRef = useRef(null);
@@ -1076,6 +1078,37 @@ function App() {
     setTimeout(() => setNotification(null), 3000);
   }, []);
 
+  // Arrive from a teleport: ?node=<id> focuses that node, and ?from_graph
+  // names where the visitor came from. This is the receiving half of the
+  // navigation contract whose outbound half handleTeleportToSourceGraph
+  // builds — the parameter names live in backend/federation/teleport.py, so a
+  // route this app hands out is one it can also consume.
+  useEffect(() => {
+    if (!stats || urlFocusNodeLoadedRef.current) return;
+    const params = new URLSearchParams(window.location.search);
+    const focusId = params.get('node');
+    if (!focusId) return;
+    urlFocusNodeLoadedRef.current = true;
+    (async () => {
+      try {
+        const result = await api.getNodeDetails(focusId);
+        if (!result?.success || !result.node) {
+          showNotification('info', t('federation.teleport_focus_not_found'));
+          return;
+        }
+        addNodesToVisualization([result.node], result.edges || []);
+        setFocusNodeId(result.node.id);
+        const fromGraph = params.get('from_graph');
+        if (fromGraph) {
+          showNotification('info', t('federation.teleport_returned_from', { graph: fromGraph }));
+        }
+      } catch (err) {
+        console.error('[App] Failed to focus node from URL:', err);
+        showNotification('info', t('federation.teleport_focus_not_found'));
+      }
+    })();
+  }, [stats, addNodesToVisualization, setFocusNodeId, showNotification, t]);
+
   useEffect(() => {
     const syncOfflineState = () => setIsOffline(window.navigator?.onLine === false);
     window.addEventListener('online', syncOfflineState);
@@ -1158,6 +1191,21 @@ function App() {
       setDetailNode,
       showNotification,
     ]
+  );
+
+  // Callback: leave for the graph that owns this node. The status-to-outcome
+  // mapping lives in utils/teleport.js so the canvas context menu and the
+  // search result list answer the four defined behaviours identically.
+  const handleTeleportToSourceGraph = useCallback(
+    (nodeId, _nodeData, { searchQuery = '' } = {}) =>
+      teleportToSourceGraph({
+        nodeId,
+        sessionId,
+        searchQuery,
+        t,
+        showNotification,
+      }),
+    [sessionId, showNotification, t]
   );
 
   // Callback: open the node detail dialog directly on its change-history tab
@@ -2429,6 +2477,7 @@ function App() {
 
   const shellProps = {
     sessionId,
+    onTeleportToSourceGraph: handleTeleportToSourceGraph,
     sessions,
     currentSessionId: sessionId,
     onNewSession: handleNewSession,
@@ -2672,7 +2721,10 @@ function App() {
             annotationAttachToCancel: t('context_menu.annotation_attach_to_cancel'),
             annotationMultiSelectMode: t('context_menu.annotation_multi_select_mode'),
             annotationOverlapPickerTitle: t('context_menu.annotation_overlap_picker_title'),
+            openInSourceGraph: t('context_menu.open_in_source_graph'),
+            openInSourceGraphTooltip: t('federation.teleport_action_tooltip'),
           }}
+          onTeleportToSourceGraph={handleTeleportToSourceGraph}
           annotationToolboxLabels={{
             toggleExpand: t('annotation_toolbox.toggle_expand'),
             toggleCollapse: t('annotation_toolbox.toggle_collapse'),
