@@ -72,23 +72,49 @@ const REFERENCE_SAFE_URL_SCHEME_SET = new Set(REFERENCE_SAFE_URL_SCHEMES);
 //   `https:/example.org` -> `https://example.org/` (infers the missing slash)
 // The first is the dangerous one — a tile would open somewhere its author
 // never wrote — and neither is something an author can have meant. Requiring
-// the authority up front also makes this agree exactly with the backend gate
-// (`reference_url_error`, which parses with the stricter-here `urlsplit`),
-// so the two are one rule rather than two with a documented asymmetry.
+// the authority up front also closes the gap where this side and the backend
+// gate (`reference_url_error`, which parses with the lenient `urlsplit`) read
+// the same string as different destinations.
 const REFERENCE_EXPLICIT_AUTHORITY = /^https?:\/\/[^/?#]/i;
+
+// The whitespace a target may not contain, and the set trimmed from its ends.
+// Enumerated rather than written `\s` because the backend runs the same gate
+// in Python and the two languages disagree: `\s` matches U+FEFF where
+// `str.isspace()` does not, and `str.isspace()` is true for U+0085 (NEL)
+// where `\s` is not — and `trim()` and `str.strip()` split the same way.
+// Round 3 of the review loop measured both directions costing a real defect;
+// `REFERENCE_WHITESPACE_CHARS` in backend/core/session_annotations.py carries
+// the full note. This is the UNION of the two notions, so each side refuses
+// everything either language calls whitespace, and the characters are listed
+// in docs/fixtures/reference_url_gate.json, which both sides drive.
+const REFERENCE_WHITESPACE_CLASS =
+  '\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680' +
+  '\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff';
+const REFERENCE_WHITESPACE_RE = new RegExp(`[${REFERENCE_WHITESPACE_CLASS}]`, 'u');
+const REFERENCE_WHITESPACE_TRIM_RE = new RegExp(
+  `^[${REFERENCE_WHITESPACE_CLASS}]+|[${REFERENCE_WHITESPACE_CLASS}]+$`,
+  'gu'
+);
+
+/** Trim a reference target with the gate's own whitespace set, not `trim()`. */
+export function trimReferenceTarget(value) {
+  if (typeof value !== 'string') return '';
+  return value.replace(REFERENCE_WHITESPACE_TRIM_RE, '');
+}
 
 export function isSafeReferenceUrl(value) {
   if (typeof value !== 'string') return false;
   // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u001f\u007f]/.test(value)) return false;
-  const candidate = value.trim();
+  const candidate = trimReferenceTarget(value);
   if (!candidate) return false;
-  // Whitespace anywhere in the trimmed target, matching the backend gate
-  // (`reference_url_error`) exactly. The WHATWG parser tolerates a space in a
-  // path or query and rejects one in a host, so without this the two sides
-  // disagreed in BOTH directions — see that function's comment for what each
-  // direction costs. A real URL percent-encodes its spaces, and `%20` passes.
-  if (/\s/u.test(candidate)) return false;
+  // Whitespace anywhere in the trimmed target, read off the same enumerated
+  // set the backend gate (`reference_url_error`) uses. The WHATWG parser
+  // tolerates a space in a path or query and rejects one in a host, so
+  // without this the two sides disagreed in BOTH directions — see that
+  // function's comment for what each direction costs. A real URL
+  // percent-encodes its spaces, and `%20` passes.
+  if (REFERENCE_WHITESPACE_RE.test(candidate)) return false;
   if (!REFERENCE_EXPLICIT_AUTHORITY.test(candidate)) return false;
   let parsed;
   try {

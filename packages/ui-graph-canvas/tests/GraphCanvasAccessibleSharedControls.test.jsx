@@ -145,6 +145,58 @@ describe('GraphCanvas: the overlap-object picker', () => {
     expect(screen.getByRole('button', { name: 'Sticky note, Second' })).toBeInTheDocument();
   });
 
+  // Round 3 of the review loop: round 2 threaded the host's broken verdict into
+  // the node accessible names and this call site kept building its labels
+  // without it, so the same tile was drawn dashed with no open control and
+  // announced here as live. The contract's "the accessible name carries the
+  // broken state, so it is never only a colour" has to hold wherever a name is
+  // built, not only in the one place that was edited.
+  const referenceNode = (id, x, y, data) => ({
+    id,
+    type: 'reference',
+    position: { x, y },
+    width: 40,
+    height: 40,
+    data,
+  });
+
+  it("carries a reference's host-reported broken state into the picker's label", () => {
+    render(<GraphCanvas nodes={[]} edges={[]} isReferenceTargetAvailable={() => false} />);
+    const ref = referenceNode('r1', -10, -10, {
+      target_kind: 'session',
+      target: '1234-5678-9012-3456',
+      label: 'Programme board',
+    });
+    const note = noteNode('n1', -5, -5, 30, 30, { text: 'Second' });
+    setNodesAndRerender([ref, note]);
+
+    clickNode(ref, 0, 0);
+
+    expect(
+      screen.getByRole('button', { name: 'Reference, session, Programme board, broken target' })
+    ).toBeInTheDocument();
+  });
+
+  it('does not call a reference broken in the picker when the host has no opinion', () => {
+    // `undefined` is "cannot judge", which is what a host that resolves no
+    // targets returns for everything — reading it as broken would grey out
+    // every reference on such a host.
+    render(<GraphCanvas nodes={[]} edges={[]} isReferenceTargetAvailable={() => undefined} />);
+    const ref = referenceNode('r1', -10, -10, {
+      target_kind: 'session',
+      target: '1234-5678-9012-3456',
+      label: 'Programme board',
+    });
+    const note = noteNode('n1', -5, -5, 30, 30, { text: 'Second' });
+    setNodesAndRerender([ref, note]);
+
+    clickNode(ref, 0, 0);
+
+    expect(
+      screen.getByRole('button', { name: 'Reference, session, Programme board' })
+    ).toBeInTheDocument();
+  });
+
   it('offers nothing when the click point is inside exactly one box', () => {
     render(<GraphCanvas nodes={[]} edges={[]} />);
     const a = noteNode('a', -10, -10, 40, 40);

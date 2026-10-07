@@ -209,6 +209,36 @@ REFERENCE_MAX_PREVIEW_FIELD_LENGTH = 500
 REFERENCE_PREVIEW_FIELDS: FrozenSet[str] = frozenset({"title", "description", "site"})
 
 
+# The whitespace a reference target may not contain, and the set trimmed from
+# its ends. Spelled out character by character rather than deferring to
+# ``str.isspace()`` because the canvas runs the same gate in JavaScript
+# (``isSafeReferenceUrl`` in
+# packages/ui-graph-canvas/src/utils/annotationModel.js) and the two languages
+# do not mean the same thing by "whitespace": ``str.isspace()`` is true for
+# U+0085 (NEL) where JavaScript's ``\s`` is not, and ``\s`` matches U+FEFF
+# where ``str.isspace()`` does not — and ``str.strip()`` and
+# ``String.prototype.trim()`` split exactly the same way. Round 3 of the review
+# loop measured both: U+0085 mid-target was refused here and accepted there, so
+# a paste minted a tile the server then dropped; U+FEFF mid-target was accepted
+# here and refused there, so a stored tile drew permanently as "Unsafe link —
+# not opened". Both are the failure modes ``reference_url_error``'s own comment
+# says the rule exists to prevent, and two earlier rounds had each fixed one
+# instance of the same class by hand.
+#
+# The set is the UNION of the two languages' notions, so each side refuses
+# everything either language would call whitespace — strictly stricter than
+# either alone, which is the safe direction for a gate. It is enumerated in
+# docs/fixtures/reference_url_gate.json, which both sides drive, so a character
+# that stops agreeing fails on the side that moved.
+REFERENCE_WHITESPACE_CHARS: FrozenSet[str] = frozenset(
+    "\u0009\u000a\u000b\u000c\u000d\u0020\u0085\u00a0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+_REFERENCE_WHITESPACE_TRIM = "".join(sorted(REFERENCE_WHITESPACE_CHARS))
+
+
 def _has_control_characters(value: str) -> bool:
     """Whether *value* contains a C0 control character or DEL.
 
@@ -254,7 +284,7 @@ def reference_url_error(url: Any) -> Optional[str]:
             "newline inside a URL scheme is stripped by the browser and is "
             "not accepted here"
         )
-    candidate = url.strip()
+    candidate = url.strip(_REFERENCE_WHITESPACE_TRIM)
     if not candidate:
         return "content.target must not be empty for a url reference"
     try:
@@ -289,10 +319,12 @@ def reference_url_error(url: Any) -> Optional[str]:
     # a path or query (which the canvas happily accepts, so the only human
     # creation path could produce a tile the server then rejected) while
     # letting a NON-BREAKING space through in the HOST, which IDNA rejects — so
-    # the canvas drew it permanently broken. One rule covering every
-    # whitespace character makes the two agree; a real URL carries its spaces
-    # percent-encoded, and ``%20`` is accepted.
-    if any(ch.isspace() for ch in candidate):
+    # the canvas drew it permanently broken. Round 3 then found that "every
+    # whitespace character" was still two different rules, because each side
+    # was asking its own language; both now ask
+    # ``REFERENCE_WHITESPACE_CHARS``, whose comment has the measurements. A
+    # real URL carries its spaces percent-encoded, and ``%20`` is accepted.
+    if any(ch in REFERENCE_WHITESPACE_CHARS for ch in candidate):
         return "content.target must not contain whitespace"
     try:
         port = parts.port

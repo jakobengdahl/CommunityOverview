@@ -84,6 +84,7 @@ import {
   HEATMAP_DEFAULT_INTENSITY,
   REFERENCE_DEFAULT_SIZE,
   isSafeReferenceUrl,
+  trimReferenceTarget,
 } from '../utils/annotationModel';
 import {
   directNeighborIds,
@@ -319,6 +320,40 @@ function remoteMarkerEqual(a, b) {
 /**
  * GraphCanvas - Main graph visualization component
  */
+// Whether the image-paste path will actually consume this clipboard — the
+// question the URL-paste handler has to ask before standing down for it.
+//
+// Not "is there an image on the clipboard": the image handler takes a paste
+// only when the host wired `onImageIngest`, an `image/*` item is present, AND
+// that item yields a file. Round 3 of the review loop found the coarser test
+// silently discarding a legitimate URL paste whenever any of the other two
+// were false, because then nothing handled it at all.
+//
+// Every item is scanned, not just the first: `DataTransferItemList` order
+// follows the source application rather than any spec, and reading only
+// `items[0]` puts the double-create back for a clipboard that happens to list
+// its text item first. Exported so that rule is testable on its own, without
+// depending on which of the two document listeners registered first.
+export function clipboardImageWillBeIngested(items, onImageIngest) {
+  if (!onImageIngest || !items) return false;
+  const imageItem = Array.from(items).find((item) => item.type?.startsWith('image/'));
+  return !!imageItem && !!imageItem.getAsFile();
+}
+
+// A `reference` is the one kind whose broken state is not fully visible from
+// its own data: the host answers whether the target still resolves. Shared by
+// every place that builds an accessible name for a node, because round 2 wired
+// this into the node labels and round 3 found the overlap picker still naming
+// the same tile as live — one helper rather than one copy per call site.
+//
+// Only an explicit `false` breaks a tile. `undefined` is "cannot judge", which
+// a host that resolves no targets returns for everything.
+function referenceHostBroken(node, isReferenceTargetAvailable) {
+  if (node?.type !== 'reference') return false;
+  const target = trimReferenceTarget(node.data?.target || '');
+  return isReferenceTargetAvailable?.(node.data?.target_kind, target) === false;
+}
+
 function GraphCanvasInner({
   nodes: inputNodes = [],
   edges: inputEdges = [],
@@ -2671,10 +2706,21 @@ function GraphCanvasInner({
       // of the order. After that this handler ran first, saw nothing
       // prevented, and the double-create came back (round 2 of the review
       // loop). Reading the clipboard needs no assumption about who runs first.
-      const items = event.clipboardData?.items;
-      if (items && Array.from(items).some((item) => item.type?.startsWith('image/'))) {
-        return;
-      }
+      // Mirrors the image handler's OWN three conditions, not just "is there
+      // an image on the clipboard". Round 3 of the review loop found the
+      // coarser test discarding a legitimate paste in two ways, both silent:
+      // a host that wires no `onImageIngest` has no image listener at all
+      // (the effect above returns before registering one), yet the coarse
+      // guard still bailed here — so URL paste did not work on exactly the
+      // host this effect's comment above says it must; and an image item
+      // whose `getAsFile()` returns null is skipped there WITHOUT
+      // `preventDefault`, so neither handler did anything. Asking whether the
+      // image path will actually consume this paste keeps the two mutually
+      // exclusive without either of them going dark.
+      if (clipboardImageWillBeIngested(event.clipboardData?.items, onImageIngest)) return;
+      // Still needed for a paste some OTHER handler on the page has already
+      // consumed: the image path no longer reaches this line, but a host's own
+      // listener calling `preventDefault` does.
       if (event.defaultPrevented) return;
       // `?.` only guards `clipboardData` being absent, not `getData` being
       // missing from it. This handler does not own that object — it comes from
@@ -2687,7 +2733,11 @@ function GraphCanvasInner({
       if (typeof event.clipboardData?.getData !== 'function') return;
       const text = event.clipboardData.getData('text/plain');
       if (!text) return;
-      const candidate = text.trim();
+      // The gate's own trim, not `trim()`: the two differ on U+0085 and
+      // U+FEFF, and storing a string the gate would trim differently from the
+      // one it validated is how the value validated and the value persisted
+      // come apart.
+      const candidate = trimReferenceTarget(text);
       if (!isSafeReferenceUrl(candidate)) return;
       event.preventDefault();
       createAnnotation('reference', viewportCenterPosition(), {
@@ -2698,7 +2748,13 @@ function GraphCanvasInner({
     };
     document.addEventListener('paste', handleUrlPaste);
     return () => document.removeEventListener('paste', handleUrlPaste);
-  }, [createAnnotation, viewportCenterPosition, showNotification, cml.referencePasteCreated]);
+  }, [
+    createAnnotation,
+    viewportCenterPosition,
+    showNotification,
+    cml.referencePasteCreated,
+    onImageIngest,
+  ]);
 
   // Dismiss the pane annotation menu on any outside interaction (e.g. clicking a
   // graph node, which handlePaneClick does not cover), matching the annotation
@@ -2837,7 +2893,9 @@ function GraphCanvasInner({
           candidates: candidates.map((n) => ({
             id: n.id,
             label:
-              computeAnnotationAriaLabel(n.type, n.data, annotationContextValue.labels) || n.id,
+              computeAnnotationAriaLabel(n.type, n.data, annotationContextValue.labels, {
+                hostBroken: referenceHostBroken(n, isReferenceTargetAvailable),
+              }) || n.id,
           })),
         });
       } else {
@@ -2854,6 +2912,7 @@ function GraphCanvasInner({
       notifyRemoteLockedAttempt,
       screenToFlowPosition,
       annotationContextValue.labels,
+      isReferenceTargetAvailable,
     ]
   );
 
@@ -5130,15 +5189,10 @@ function GraphCanvasInner({
   const nodesWithAriaLabels = useMemo(
     () =>
       nodes.map((n) => {
-        // A `reference` is the one kind whose broken state is not fully
-        // visible from its own data: the host answers whether the target still
-        // resolves. That answer has to reach the name here, because ReactFlow
+        // The host's answer has to reach the name here, because ReactFlow
         // reads `node.ariaLabel` and it OVERRIDES the tile's own text — so a
         // host-reported broken tile would otherwise be announced as live.
-        const hostBroken =
-          n.type === 'reference' &&
-          isReferenceTargetAvailable?.(n.data?.target_kind, (n.data?.target || '').trim()) ===
-            false;
+        const hostBroken = referenceHostBroken(n, isReferenceTargetAvailable);
         const ariaLabel = computeAnnotationAriaLabel(
           n.type,
           n.data,

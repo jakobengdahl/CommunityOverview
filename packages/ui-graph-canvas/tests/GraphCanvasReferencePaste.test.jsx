@@ -10,6 +10,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, act } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';
+import { clipboardImageWillBeIngested } from '../src/components/GraphCanvas';
 
 const hoisted = vi.hoisted(() => {
   const h = { setNodes: null, nodes: [], reactFlow: null };
@@ -285,6 +286,92 @@ describe('GraphCanvas reference paste', () => {
     render(<GraphCanvas nodes={[]} edges={[]} />);
     pasteText('https://example.org');
     expect(referenceNodes()).toHaveLength(1);
+  });
+
+  // Round 3 of the review loop: the image-item guard asked "is there an image
+  // on the clipboard", which is not the same question as "will the image
+  // handler take this paste". In both cases below the answer to the second is
+  // no, and the coarse guard made the URL handler stand down anyway, so
+  // nothing happened at all and the paste was silently lost.
+  //
+  // `pasteText` cannot see either one: it builds a clipboard with no image
+  // item, so it never reaches the guard. That is why the test above
+  // ('works on a host that wired no image ingest') passed throughout.
+  function pasteImagePlusUrl(url, { reversed = false, file = null } = {}) {
+    const imageItem = { type: 'image/png', getAsFile: () => file };
+    const textItem = { type: 'text/plain', getAsFile: () => null };
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    event.clipboardData = {
+      items: reversed ? [textItem, imageItem] : [imageItem, textItem],
+      getData: (type) => (type === 'text/plain' ? url : ''),
+    };
+    act(() => {
+      document.dispatchEvent(event);
+    });
+    return event;
+  }
+
+  it('creates a tile from an image+url clipboard when no image ingest is wired', () => {
+    // The host has no image listener registered AT ALL (the image effect
+    // returns before `addEventListener`), so there is nothing for this paste
+    // to collide with. frontend/widget is such a host in this repo.
+    const file = new File([new Uint8Array([137, 80, 78, 71])], 'pic.png', { type: 'image/png' });
+    render(<GraphCanvas nodes={[]} edges={[]} />);
+
+    pasteImagePlusUrl('https://example.org/pic.png', { file });
+
+    expect(referenceNodes()).toHaveLength(1);
+    expect(referenceNodes()[0].data.target).toBe('https://example.org/pic.png');
+  });
+
+  it('creates a tile when the image item yields no file', () => {
+    // The image handler bails on a null `getAsFile()` WITHOUT calling
+    // preventDefault, so if this handler also stands down the paste is lost.
+    const onImageIngest = vi.fn();
+    render(<GraphCanvas nodes={[]} edges={[]} onImageIngest={onImageIngest} />);
+
+    pasteImagePlusUrl('https://example.org/pic.png', { file: null });
+
+    expect(referenceNodes()).toHaveLength(1);
+    expect(onImageIngest).not.toHaveBeenCalled();
+  });
+
+  // Round 3's mutation pass: both double-create tests above put the image item
+  // FIRST, so narrowing the scan to `items[0]` left them green — and a test
+  // that merely reverses the clipboard order cannot catch it either, because
+  // the image listener is registered first and `defaultPrevented` covers for
+  // the narrowed scan. Asserting the rule itself is what pins it: these need
+  // no listener at all, so no ordering assumption can mask them.
+  describe('clipboardImageWillBeIngested', () => {
+    const file = new File([new Uint8Array([137, 80, 78, 71])], 'pic.png', { type: 'image/png' });
+    const imageItem = { type: 'image/png', getAsFile: () => file };
+    const emptyImageItem = { type: 'image/png', getAsFile: () => null };
+    const textItem = { type: 'text/plain', getAsFile: () => null };
+    const ingest = () => {};
+
+    it('is true for an ingestible image wherever it sits in the list', () => {
+      expect(clipboardImageWillBeIngested([imageItem, textItem], ingest)).toBe(true);
+      expect(clipboardImageWillBeIngested([textItem, imageItem], ingest)).toBe(true);
+      expect(clipboardImageWillBeIngested([textItem, textItem, imageItem], ingest)).toBe(true);
+    });
+
+    it('is false when the host wired no image ingest', () => {
+      expect(clipboardImageWillBeIngested([imageItem, textItem], undefined)).toBe(false);
+    });
+
+    it('is false when the image item yields no file', () => {
+      expect(clipboardImageWillBeIngested([emptyImageItem, textItem], ingest)).toBe(false);
+    });
+
+    it('is false for a clipboard with no image and for a missing list', () => {
+      expect(clipboardImageWillBeIngested([textItem], ingest)).toBe(false);
+      expect(clipboardImageWillBeIngested([], ingest)).toBe(false);
+      expect(clipboardImageWillBeIngested(undefined, ingest)).toBe(false);
+    });
+
+    it('tolerates an item with no type', () => {
+      expect(clipboardImageWillBeIngested([{ getAsFile: () => null }], ingest)).toBe(false);
+    });
   });
 
   it('renders the pasted tile through the registered reference node type', () => {

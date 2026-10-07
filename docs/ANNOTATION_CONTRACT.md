@@ -2170,6 +2170,21 @@ an unsaved tile with no explanation. Review rounds have found drift in both
 directions, which is why the fixture exists rather than a comment asking the
 next person to keep the two in step.
 
+Where a rule cannot be read off either language's built-ins, the two sides
+share an **enumerated** definition rather than each asking its own runtime.
+Whitespace is the case in point: Python's `str.isspace()` is true for U+0085
+where JavaScript's `\s` is not, and `\s` matches U+FEFF where `str.isspace()`
+does not — and `str.strip()` and `String.prototype.trim()` split exactly the
+same way, so even the trim disagreed. A target carrying either character was
+therefore accepted by one side and refused by the other, one direction each.
+Both now read `REFERENCE_WHITESPACE_CHARS`
+(`backend/core/session_annotations.py`) and `REFERENCE_WHITESPACE_CLASS`
+(`packages/ui-graph-canvas/src/utils/annotationModel.js`), which list the same
+characters — the union of the two languages' notions, so each side refuses
+everything either runtime would call whitespace — and trim with that set
+instead of `strip()`/`trim()`. A new rule of this kind belongs in the fixture
+with a case on each side, not in a `\s`.
+
 #### Rendering
 
 A reference must not read as a graph node — that is the whole point of giving
