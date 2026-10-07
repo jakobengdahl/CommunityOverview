@@ -196,6 +196,46 @@ def test_an_adopted_node_resolves_as_local_because_adoption_strips_provenance(tm
     assert result["status"] == teleport.STATUS_LOCAL
 
 
+def test_an_adoption_reference_stub_still_resolves_to_its_source_graph(tmp_path):
+    # adopt_federated_node also writes a LOCAL reference stub keyed by the
+    # federated id (is_federated_reference, provenance retained) — the duality
+    # search_graph dedups on. The stub lives in storage, not in the cache, so
+    # resolving the graph config from the node's cache entry reported a
+    # configured, healthy graph as unavailable. Both the config and the cache
+    # status are keyed on origin_graph_id instead.
+    service = _service(tmp_path)
+    assert service.adopt_federated_node("federated::esam-main::remote-1")["success"]
+
+    stub = service._storage.get_node("federated::esam-main::remote-1")
+    assert stub is not None and stub.metadata.get("is_federated_reference") is True
+
+    result = service.resolve_teleport("federated::esam-main::remote-1")
+
+    assert result["status"] == teleport.STATUS_OK, result
+    assert result["origin_graph_name"] == "eSam"
+    assert parse_qs(urlsplit(result["route"]).query)["node"] == ["remote-1"]
+
+
+def test_a_stub_resolves_even_once_the_cache_no_longer_holds_the_node(tmp_path):
+    service = _service(tmp_path)
+    assert service.adopt_federated_node("federated::esam-main::remote-1")["success"]
+    # A restart before the first sync, or the remote dropping the node.
+    service._federation_manager._cache["esam-main"].nodes = {}
+
+    result = service.resolve_teleport("federated::esam-main::remote-1")
+
+    assert result["status"] == teleport.STATUS_OK, result
+
+
+def test_the_route_names_this_graph_so_the_far_end_can_say_where_it_came_from(
+    tmp_path,
+):
+    result = _service(tmp_path).resolve_teleport("federated::esam-main::remote-1")
+
+    params = parse_qs(urlsplit(result["route"]).query)
+    assert params["from_graph"] == [_service(tmp_path)._storage.get_graph_name()]
+
+
 # ---------------------------------------------------------------------------
 # Behaviour 1: permission denial comes from the existing narrowing
 # ---------------------------------------------------------------------------
@@ -221,6 +261,7 @@ def test_a_denied_caller_is_told_nothing_about_the_graph(tmp_path):
     assert result["origin_graph_name"] == ""
     assert "esam.example" not in repr(result)
     assert "eSam" not in repr(result)
+    assert result["reason"] == teleport.REASON_NOT_VISIBLE
 
 
 def test_a_caller_narrowed_to_the_source_graph_still_gets_its_route(tmp_path):

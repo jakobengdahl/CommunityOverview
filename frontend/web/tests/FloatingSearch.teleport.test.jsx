@@ -123,12 +123,20 @@ describe('FloatingSearch teleport action (task-federated-graph-teleport)', () =>
     expect(screen.getByText('eSam: Shared capability')).toBeInTheDocument();
   });
 
-  it('marks the row so the extra action is visible in its layout', async () => {
+  it('gives every result a row and only the federated one an extra action', async () => {
     await searchWith([FEDERATED_RESULT, LOCAL_RESULT], { onTeleport: vi.fn() });
 
-    await waitFor(() =>
-      expect(document.querySelectorAll('.floating-search-result-row.has-teleport')).toHaveLength(1)
-    );
     expect(document.querySelectorAll('.floating-search-result-row')).toHaveLength(2);
+    expect(document.querySelectorAll('.floating-search-result')).toHaveLength(2);
+    expect(teleportButtons()).toHaveLength(1);
+  });
+
+  it('labels the row through the shared provenance reader', async () => {
+    // getResultLabel and the teleport gate must agree about which graph owns a
+    // node; they read it through the same function.
+    await searchWith([FEDERATED_RESULT, LOCAL_RESULT], { onTeleport: vi.fn() });
+
+    expect(screen.getByText('eSam: Shared capability')).toBeInTheDocument();
+    expect(screen.getByText('Local Graph: Local initiative')).toBeInTheDocument();
   });
 });

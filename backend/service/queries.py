@@ -334,7 +334,12 @@ def resolve_teleport(
     cache_status = ""
     origin_graph_id = access.node_graph_id(node) if node is not None else ""
     if origin_graph_id and federation_manager is not None:
-        graph_config = federation_manager.get_graph_config_for_node(node_id)
+        # Both keyed on origin_graph_id, the provenance field the local path
+        # narrows on. Resolving the config from the node's cache entry instead
+        # would report a configured, healthy graph as unavailable for any node
+        # that carries provenance without being cached — an adopted node's
+        # local reference stub (mutations.adopt_federated_node) above all.
+        graph_config = federation_manager.get_graph_config(origin_graph_id)
         cache_status = federation_manager.get_cache_status(origin_graph_id)
 
     target = teleport.resolve_teleport_target(
@@ -343,10 +348,15 @@ def resolve_teleport(
         graph_access_matches=decision.graph_access.matches,
         graph_config=graph_config,
         cache_status=cache_status,
-        request_origin=request_origin,
+        # The configured public URL is this deployment's real origin; the
+        # request's own base_url is the internal one behind a TLS-terminating
+        # proxy (uvicorn runs without --proxy-headers), whose scheme alone would
+        # make every hop look cross-deployment.
+        request_origin=local_gui_url or request_origin,
         session_id=session_id,
         search_query=search_query,
         local_gui_url=local_gui_url,
+        local_graph_name=storage.get_graph_name(),
     )
     return target.to_dict()
 

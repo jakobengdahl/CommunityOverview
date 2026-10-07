@@ -127,6 +127,7 @@ function App() {
     focusNodeId,
     clearFocusNode,
     setFocusNodeId,
+    setGuideSearchInput,
     pendingGroups,
     setPendingGroups,
     pendingAnnotations,
@@ -159,6 +160,13 @@ function App() {
   const urlGuideStartedRef = useRef(false);
   const urlViewLoadedRef = useRef(false);
   const urlFocusNodeLoadedRef = useRef(false);
+  // The saved-view load clears the canvas after its own await, so focusing a
+  // ?node= before it settles can have the node wiped out from under the focus.
+  // Starts settled when there is no ?view= to wait for, which is also why this
+  // is derived at mount rather than set from inside the view effect.
+  const [urlViewSettled, setUrlViewSettled] = useState(
+    () => !new URLSearchParams(window.location.search).get('view')
+  );
   const latestViewport = useRef(null);
   const dialogOpenRef = useRef(false);
   const appRef = useRef(null);
@@ -1062,6 +1070,8 @@ function App() {
         if (result.annotations?.length) setPendingAnnotations(result.annotations);
       } catch (err) {
         console.error('[App] Failed to load view from URL:', err);
+      } finally {
+        setUrlViewSettled(true);
       }
     })();
   }, [
@@ -1084,11 +1094,15 @@ function App() {
   // builds — the parameter names live in backend/federation/teleport.py, so a
   // route this app hands out is one it can also consume.
   useEffect(() => {
-    if (!stats || urlFocusNodeLoadedRef.current) return;
+    // Waits for ?view= to settle: a saved-view load clears the canvas after its
+    // own await, and a gui_url may legitimately carry both parameters.
+    if (!stats || !urlViewSettled || urlFocusNodeLoadedRef.current) return;
     const params = new URLSearchParams(window.location.search);
     const focusId = params.get('node');
     if (!focusId) return;
     urlFocusNodeLoadedRef.current = true;
+    const searchContext = params.get('q');
+    const fromGraph = params.get('from_graph');
     (async () => {
       try {
         const result = await api.getNodeDetails(focusId);
@@ -1098,7 +1112,11 @@ function App() {
         }
         addNodesToVisualization([result.node], result.edges || []);
         setFocusNodeId(result.node.id);
-        const fromGraph = params.get('from_graph');
+        // Carry the sender's search text into the search box so the visitor
+        // lands on the node without losing what they were looking for.
+        if (searchContext) {
+          setGuideSearchInput({ text: searchContext, animated: false });
+        }
         if (fromGraph) {
           showNotification('info', t('federation.teleport_returned_from', { graph: fromGraph }));
         }
@@ -1107,7 +1125,15 @@ function App() {
         showNotification('info', t('federation.teleport_focus_not_found'));
       }
     })();
-  }, [stats, addNodesToVisualization, setFocusNodeId, showNotification, t]);
+  }, [
+    stats,
+    urlViewSettled,
+    addNodesToVisualization,
+    setFocusNodeId,
+    setGuideSearchInput,
+    showNotification,
+    t,
+  ]);
 
   useEffect(() => {
     const syncOfflineState = () => setIsOffline(window.navigator?.onLine === false);

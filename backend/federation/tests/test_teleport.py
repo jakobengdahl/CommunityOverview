@@ -98,6 +98,18 @@ def test_a_node_with_no_metadata_at_all_is_owned_here():
     assert target.status == teleport.STATUS_LOCAL
 
 
+def test_the_is_federated_marker_does_not_make_a_node_remote():
+    # origin_graph_id is the single classifier on the backend as well as the
+    # frontend (nodeProvenance.test.js pins the other side). A node carrying the
+    # marker but no origin graph is owned here, so the user is told they are
+    # already in the right graph rather than that a source graph is unreachable.
+    target = _resolve(
+        node_metadata={"is_federated": True, "federation_distance": 1},
+    )
+
+    assert target.status == teleport.STATUS_LOCAL
+
+
 def test_an_empty_origin_graph_id_is_treated_as_local_not_as_a_remote_graph():
     target = _resolve(node_metadata={"origin_graph_id": "   "})
 
@@ -109,6 +121,15 @@ def test_an_unknown_node_is_reported_as_unknown_rather_than_local():
 
     assert target.status == teleport.STATUS_UNKNOWN_NODE
     assert target.to_dict()["success"] is False
+
+
+def test_a_missing_node_is_unknown_even_when_federated_metadata_is_passed():
+    # node_exists is checked before the local/remote split, so an id that names
+    # no node cannot be routed on the strength of metadata alone.
+    target = _resolve(node_exists=False)
+
+    assert target.status == teleport.STATUS_UNKNOWN_NODE
+    assert target.route is None
 
 
 def test_a_federated_node_resolves_to_a_route_into_its_source_graph():
@@ -159,7 +180,19 @@ def test_denial_is_decided_before_an_unavailable_graph_is_reported():
     )
 
     assert target.status == teleport.STATUS_PERMISSION_DENIED
-    assert target.reason == "source_graph_not_visible"
+    assert target.reason == teleport.REASON_NOT_VISIBLE
+
+
+def test_the_denial_reason_does_not_say_whether_the_graph_was_local_or_remote():
+    # A reason that distinguished the two would tell a caller probing ids that
+    # the node belongs to a graph other than the local one, and so that a graph
+    # they cannot see exists.
+    local = _resolve(node_metadata={}, graph_access_matches=_deny_all)
+    remote = _resolve(graph_access_matches=_deny_all)
+
+    assert local.status == remote.status == teleport.STATUS_PERMISSION_DENIED
+    assert local.reason == remote.reason == teleport.REASON_NOT_VISIBLE
+    assert local.to_dict() == remote.to_dict()
 
 
 def test_narrowing_that_admits_another_graph_still_denies_this_one():
@@ -183,7 +216,7 @@ def test_a_local_node_is_denied_when_the_local_graph_is_not_visible():
     )
 
     assert target.status == teleport.STATUS_PERMISSION_DENIED
-    assert target.reason == "local_graph_not_visible"
+    assert target.reason == teleport.REASON_NOT_VISIBLE
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +345,20 @@ def test_an_unknown_caller_origin_is_reported_as_cross_deployment(request_origin
     assert target.cross_deployment is True
 
 
+@pytest.mark.parametrize("gui_url", ["esam.example/app", "/app", "app"])
+def test_an_unparseable_target_origin_is_reported_as_cross_deployment(gui_url):
+    # A gui_url entered without a scheme is a plausible misconfiguration, and
+    # its origin cannot be determined. G4 says either side being indeterminate
+    # counts as a hop, so the UI still confirms before leaving.
+    target = _resolve(
+        graph_config=_graph(gui_url=gui_url),
+        request_origin="https://here.example/",
+    )
+
+    assert teleport.deployment_origin(gui_url) == ""
+    assert target.cross_deployment is True
+
+
 def test_the_configured_trust_level_is_reported_with_the_route():
     target = _resolve(graph_config=_graph(trust_level="external"))
 
@@ -342,6 +389,18 @@ def test_no_backlink_is_invented_when_the_public_url_is_unset():
 
     assert target.backlink is None
     assert "backlink" not in target.to_dict()
+
+
+def test_the_route_names_the_graph_the_visitor_came_from():
+    target = _resolve(local_graph_name="Our Graph")
+
+    assert parse_qs(urlsplit(target.route).query)["from_graph"] == ["Our Graph"]
+
+
+def test_no_from_graph_parameter_when_this_graph_has_no_name():
+    target = _resolve(local_graph_name="")
+
+    assert "from_graph" not in parse_qs(urlsplit(target.route).query)
 
 
 def test_build_backlink_returns_none_without_a_base_url():
@@ -379,6 +438,35 @@ def test_existing_query_parameters_on_the_gui_url_are_preserved():
     params = parse_qs(urlsplit(target.route).query)
     assert params["lang"] == ["sv"]
     assert params["node"] == ["node-7"]
+
+
+def test_a_colliding_parameter_on_the_gui_url_does_not_shadow_the_teleport_one():
+    # The receiving end reads the first value of a repeated parameter, so a
+    # gui_url carrying its own node=/q= must not win over the route's.
+    target = _resolve(
+        graph_config=_graph(gui_url="https://graph-a.example/app?node=stale&q=old"),
+        search_query="fresh",
+    )
+
+    params = parse_qs(urlsplit(target.route).query)
+    assert params["node"] == ["node-7"]
+    assert params["q"] == ["fresh"]
+
+
+def test_a_non_colliding_parameter_survives_alongside_the_teleport_ones():
+    target = _resolve(
+        graph_config=_graph(gui_url="https://graph-a.example/app?lang=sv&node=stale"),
+    )
+
+    params = parse_qs(urlsplit(target.route).query)
+    assert params["lang"] == ["sv"]
+    assert params["node"] == ["node-7"]
+
+
+def test_build_route_replaces_rather_than_appends_a_colliding_parameter():
+    route = teleport.build_route("https://x.example/app?node=stale", "new-7")
+
+    assert parse_qs(urlsplit(route).query)["node"] == ["new-7"]
 
 
 def test_a_fragment_on_the_gui_url_is_dropped_from_the_route():

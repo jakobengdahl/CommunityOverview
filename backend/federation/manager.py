@@ -334,6 +334,16 @@ class FederationManager:
             return None
         return self._get_graph_config(origin_graph_id)
 
+    def get_graph_config(self, graph_id: str) -> Optional[FederationGraphConfig]:
+        """Resolve a graph's config by its id, or None when it is not configured.
+
+        Keyed on ``graph_id`` rather than on a cached node, so a node that
+        carries provenance but is not in the cache — an adopted node's local
+        reference stub, or any node whose cache entry has not been synced yet —
+        still resolves to the graph that owns it.
+        """
+        return self._get_graph_config(graph_id)
+
     def get_cache_status(self, graph_id: str) -> str:
         """Return the cache health state for ``graph_id`` ("" when unknown).
 

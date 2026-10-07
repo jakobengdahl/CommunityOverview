@@ -36,8 +36,14 @@ describe('originGraphId', () => {
     expect(originGraphId(undefined)).toBe('');
   });
 
-  it('ignores a non-string origin graph rather than coercing it', () => {
-    expect(originGraphId({ metadata: { origin_graph_id: 7 } })).toBe('');
+  it('coerces a non-string origin graph the way the backend does', () => {
+    // access.node_graph_id / teleport._normalize do `str(value or "").strip()`,
+    // so the two readers must agree on a value that is not a string: truthy
+    // coerces, falsy is local.
+    expect(originGraphId({ metadata: { origin_graph_id: 7 } })).toBe('7');
+    expect(originGraphId({ metadata: { origin_graph_id: 0 } })).toBe('');
+    expect(originGraphId({ metadata: { origin_graph_id: false } })).toBe('');
+    expect(originGraphId({ metadata: { origin_graph_id: null } })).toBe('');
   });
 });
 

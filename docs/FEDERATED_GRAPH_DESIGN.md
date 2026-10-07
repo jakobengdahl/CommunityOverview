@@ -265,19 +265,29 @@ The response's `status` is one of:
 
 ### The four defined behaviours
 
-- **Permission denial.** Visibility is checked before any endpoint is read, so a
-  denied response names no graph, no endpoint and no node — it cannot be used to
-  discover that a graph exists. It is a status the UI renders, not a `403`: the
-  request itself was allowed, only this one graph is not visible.
+- **Permission denial.** Visibility is checked before any endpoint or graph field
+  is read, so a denied response carries no route, no endpoint, no graph id, no
+  graph name and no node id, and a single `reason` (`not_visible`) that does not
+  say whether the node was local or remote — a reason that distinguished the two
+  would tell a caller probing ids that a graph they cannot see exists. It is a
+  status the UI renders, not a `403`: the request itself was allowed, only this
+  one graph is not visible. A node the narrowing hides is still reported as
+  denied rather than missing, so the UI can say why; that is a deliberate
+  difference from `get_node_details`, which answers "not found" for an invisible
+  node.
 - **Unavailable graph.** A `reason` distinguishes `graph_disabled`,
   `graph_unreachable`, `no_gui_url_configured`, `graph_not_configured` and
   `no_origin_node_id`. The graph *is* named here, because a caller who reaches
   this state is already entitled to see it.
 - **Cross-deployment.** `cross_deployment` compares the scheme, host and port of
-  the target `gui_url` against the request's own origin, so two graphs served as
-  different paths of one deployment are not reported as a hop. An origin that
-  cannot be parsed counts as cross-deployment: the UI's confirmation is the safe
-  default when the hop cannot be proven to stay in place.
+  the target `gui_url` against this deployment's own origin, so two graphs served
+  as different paths of one deployment are not reported as a hop. That origin is
+  `COMMUNITYOVERVIEW_PUBLIC_BASE_URL` where it is set, falling back to the
+  request's `base_url`: behind a TLS-terminating proxy the request's own base URL
+  is the *internal* one (uvicorn runs without `--proxy-headers`), whose scheme
+  alone would make every hop look cross-deployment. An origin on **either** side
+  that cannot be parsed counts as cross-deployment: the UI's confirmation is the
+  safe default when the hop cannot be proven to stay in place.
 - **Backlink.** When `COMMUNITYOVERVIEW_PUBLIC_BASE_URL` is set, the response
   carries a `backlink` to this deployment and the outbound route carries
   `from_session`. Standalone deployments do not know their own public URL, so no
@@ -288,16 +298,24 @@ The response's `status` is one of:
 The canonical route appends these to the source graph's configured `gui_url`,
 preserving its existing query and dropping its fragment:
 
-| Parameter | Carries |
-|---|---|
-| `node` | The origin node id to focus |
-| `from_graph` | The graph the visitor came from |
-| `from_session` | The session to offer as the way back |
-| `q` | The search context to preserve |
+A parameter already on `gui_url` is kept, but one of the same name is
+**replaced** rather than appended after: the receiving end reads the first value
+of a repeated parameter, so appending would let a `gui_url` configured with its
+own `node=` shadow the node the route exists to focus.
 
-The receiving end is the same contract read in reverse: this app consumes
-`?node=` by focusing that node, and `?from_graph=` by naming where the visitor
-came from. A route this app hands out is one it can also consume.
+| Parameter | Carries | Consumed by this app on arrival |
+|---|---|---|
+| `node` | The origin node id to focus | Yes — the node is fetched and focused |
+| `from_graph` | The name of the graph the visitor came from | Yes — shown as "Opened from &lt;graph&gt;" |
+| `q` | The search context to preserve | Yes — prefills the search box |
+| `from_session` | The sender's session, to offer a way back | No — carried for the receiving deployment to build a return link; open core does not render a back control |
+
+`from_graph` carries the local graph's *name*, not an id: open core has no graph
+id for itself (local is the empty id), and the name is what the receiving end
+displays.
+
+So the receiving end is the same contract read in reverse for the three
+parameters it acts on, and a route this app hands out is one it can consume.
 
 ### UI surfaces
 

@@ -38,7 +38,10 @@ function metadataOf(node) {
  */
 export function originGraphId(node) {
   const value = metadataOf(node).origin_graph_id;
-  return typeof value === 'string' ? value.trim() : '';
+  // Coerced the way the backend's access.node_graph_id / teleport._normalize do
+  // (`str(value or "").strip()`), so a non-string value classifies the same on
+  // both sides of the wire rather than the two readers disagreeing.
+  return value ? String(value).trim() : '';
 }
 
 /**

@@ -6,7 +6,7 @@ import * as api from '../services/api';
 import './FloatingSearch.css';
 import { useI18n } from '../i18n';
 import { savedViewMetadataToCanvasMetadata } from '../utils/sessionAnnotations';
-import { isFederatedNode } from '@community-graph/ui-graph-canvas';
+import { isFederatedNode, originGraphName } from '@community-graph/ui-graph-canvas';
 
 function FloatingSearch({ variant = 'floating', onTeleport }) {
   const { t, language } = useI18n();
@@ -160,14 +160,15 @@ function FloatingSearch({ variant = 'floating', onTeleport }) {
         return node.name;
       }
 
-      const originGraphId = node.metadata?.origin_graph_id;
-      const originGraphName =
-        node.metadata?.origin_graph_name ||
-        (originGraphId ? graphDisplayNames[originGraphId] : null) ||
-        graphDisplayNames.local ||
-        t('floating_search.local_graph');
+      // Same reader the canvas context menu uses to decide what is federated,
+      // so one node cannot be labelled by one rule here and acted on by another
+      // there.
+      const graphName = originGraphName(node, {
+        graphDisplayNames,
+        localLabel: t('floating_search.local_graph'),
+      });
 
-      return `${originGraphName}: ${node.name}`;
+      return `${graphName}: ${node.name}`;
     },
     [graphDisplayNames, showGraphPrefix, t]
   );
@@ -460,10 +461,7 @@ function FloatingSearch({ variant = 'floating', onTeleport }) {
             const canTeleport = Boolean(onTeleport) && isFederatedNode(node);
 
             return (
-              <div
-                key={node.id}
-                className={`floating-search-result-row${canTeleport ? ' has-teleport' : ''}`}
-              >
+              <div key={node.id} className="floating-search-result-row">
                 <button
                   className={`floating-search-result ${index === selectedIndex ? 'selected' : ''}`}
                   onClick={() => selectResult(node)}

@@ -936,8 +936,8 @@ Four cases are handled explicitly:
 | "&lt;Graph&gt; cannot be reached right now" | The graph is configured but offline, disabled, or has no address set for its interface |
 | "This node is already in the current graph" | The node is local, so there is nowhere to travel to |
 
-Arriving from a teleport, the app focuses the node named in the link and tells you which
-graph you came from.
+Arriving from a teleport, the app focuses the node named in the link, puts the search text
+back in the search box, and tells you which graph you came from.
 
 **Node adoption:** If you want to permanently link a local node to an entity
 from a remote graph, right-click the federated node and choose **Adopt** (if available).

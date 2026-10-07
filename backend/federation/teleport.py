@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 STATUS_LOCAL = "local"
 STATUS_OK = "ok"
@@ -46,6 +46,10 @@ STATUS_UNKNOWN_NODE = "unknown_node"
 
 #: Cache states that mean the remote graph is not currently answering.
 UNAVAILABLE_CACHE_STATES = frozenset({"degraded", "offline", "disabled"})
+
+#: The single denial reason. Deliberately does not distinguish the local graph
+#: from a remote one — see ``resolve_teleport_target``.
+REASON_NOT_VISIBLE = "not_visible"
 
 #: Query parameters of the canonical route. The receiving deployment reads
 #: ``node`` to focus the node, and the rest to offer a way back.
@@ -127,8 +131,12 @@ def build_route(
 ) -> str:
     """Build the canonical route into ``gui_url`` focused on ``origin_node_id``.
 
-    Existing query parameters on ``gui_url`` are preserved; the teleport
-    parameters are appended, and the fragment is dropped because it is not part
+    Query parameters already on ``gui_url`` are kept, but a teleport parameter
+    *replaces* one of the same name rather than being appended after it: the
+    receiving end reads the first value of a repeated parameter, so appending
+    would let a ``gui_url`` configured with its own ``node=`` shadow the node
+    this route exists to focus. Mirrors ``config_loader.build_session_url``,
+    which merges the same way. The fragment is dropped because it is not part
     of the addressing contract.
     """
     base = _normalize(gui_url)
@@ -144,13 +152,15 @@ def build_route(
     if search_query:
         params.append((PARAM_QUERY, search_query))
 
-    existing = parts.query
-    appended = urlencode([(k, v) for k, v in params if v])
-    query = (
-        f"{existing}&{appended}" if existing and appended else (existing or appended)
-    )
+    teleport_params = {key: value for key, value in params if value}
+    merged = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if key not in teleport_params
+    ]
+    merged.extend(teleport_params.items())
 
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, ""))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(merged), ""))
 
 
 def build_backlink(
@@ -161,10 +171,10 @@ def build_backlink(
 ) -> Optional[str]:
     """Build the route back to this deployment, when its own URL is known.
 
-    The open-core app does not know its own public URL, so this returns None
-    unless a deployment supplies one. The hosted layer is where that value
-    comes from; keeping the function here keeps the parameter names in one
-    place for both sides.
+    A standalone deployment has no configured public URL, so this returns None
+    rather than emitting a guessed or ``localhost`` one — the same rule
+    ``config_loader.build_session_url`` follows. Keeping the function here keeps
+    the parameter names in one place for both ends of the hop.
     """
     base = _normalize(local_gui_url)
     if not base:
@@ -184,6 +194,7 @@ def resolve_teleport_target(
     session_id: str = "",
     search_query: str = "",
     local_gui_url: str = "",
+    local_graph_name: str = "",
 ) -> TeleportTarget:
     """Resolve where a node's source graph is and how to reach it.
 
@@ -195,28 +206,29 @@ def resolve_teleport_target(
     metadata = node_metadata or {}
     origin_graph_id = _normalize(metadata.get("origin_graph_id"))
 
+    # Nothing to resolve for an id that names no node, whatever metadata a
+    # caller happened to pass alongside it.
+    if not node_exists:
+        return TeleportTarget(status=STATUS_UNKNOWN_NODE)
+
+    # Visibility is checked before any endpoint or graph field is read, so a
+    # denied response can carry none of them. One reason for both the local and
+    # the remote case on purpose: a reason that said which of the two it was
+    # would tell a caller probing ids that the node belongs to a graph other
+    # than the local one, and so that a graph they cannot see exists.
+    if not graph_access_matches(graph_id=origin_graph_id):
+        return TeleportTarget(
+            status=STATUS_PERMISSION_DENIED,
+            reason=REASON_NOT_VISIBLE,
+        )
+
     # A node with no origin graph is owned here. This is the same field the
     # local path uses for visibility narrowing, so local and federated nodes
     # are classified off one piece of provenance rather than two.
     if not origin_graph_id:
-        if not node_exists:
-            return TeleportTarget(status=STATUS_UNKNOWN_NODE)
-        if not graph_access_matches(graph_id=""):
-            return TeleportTarget(
-                status=STATUS_PERMISSION_DENIED,
-                reason="local_graph_not_visible",
-            )
         return TeleportTarget(
             status=STATUS_LOCAL,
             origin_node_id=_normalize(metadata.get("origin_node_id")),
-        )
-
-    # Check visibility before reading any endpoint, so a denied caller cannot
-    # learn whether the graph is configured, reachable, or where it lives.
-    if not graph_access_matches(graph_id=origin_graph_id):
-        return TeleportTarget(
-            status=STATUS_PERMISSION_DENIED,
-            reason="source_graph_not_visible",
         )
 
     origin_graph_name = _normalize(metadata.get("origin_graph_name"))
@@ -281,7 +293,10 @@ def resolve_teleport_target(
     route = build_route(
         gui_url,
         origin_node_id,
-        return_graph_id="",
+        # Open core has no graph *id* for itself — local is the empty id — so
+        # the route names this graph the way the UI names it, which is what the
+        # receiving end displays.
+        return_graph_id=_normalize(local_graph_name),
         return_session_id=session_id,
         search_query=search_query,
     )
