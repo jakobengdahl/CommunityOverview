@@ -131,6 +131,42 @@ with open(_URL_GATE_FIXTURE, encoding="utf-8") as _handle:
     _URL_GATE = json.load(_handle)
 
 
+class TestTargetEmptinessUsesTheGatesOwnWhitespaceSet:
+    """A target of nothing but whitespace is empty, by the gate's definition.
+
+    Round 4 of the review loop: the non-empty check used bare ``str.strip()``,
+    whose notion of whitespace excludes U+FEFF. So a ``session`` or
+    ``resource`` target of a single U+FEFF was stored as non-empty here, while
+    the canvas trimmed it to nothing with the shared set and reported
+    ``'missing'`` — a tile that could only ever draw broken, created through a
+    path that reported success. ``url`` was already safe because
+    ``reference_url_error`` re-checks it with the right set; these two kinds
+    are not re-checked anywhere, so this was their only gate.
+    """
+
+    @pytest.mark.parametrize("kind", ["session", "resource"])
+    @pytest.mark.parametrize(
+        "target",
+        ["\ufeff", "\u0085", "\u00a0", "\u3000", "\u2028", " \ufeff \u0085 "],
+    )
+    def test_a_whitespace_only_target_is_not_a_target(self, kind, target):
+        error = reference_content_error(
+            {"target_kind": kind, "target": target}, require_complete=True
+        )
+        assert error is not None
+        assert "non-empty" in error
+
+    @pytest.mark.parametrize("kind", ["session", "resource"])
+    def test_a_target_padded_with_that_whitespace_is_still_accepted(self, kind):
+        assert (
+            reference_content_error(
+                {"target_kind": kind, "target": "\ufeff8244-1742\u0085"},
+                require_complete=True,
+            )
+            is None
+        )
+
+
 class TestCrossLanguageUrlGateAgreement:
     """The backend gate and the renderer's own gate must agree.
 

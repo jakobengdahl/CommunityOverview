@@ -293,7 +293,8 @@ reader says such a tile is broken, so this is never carried by the colour alone.
 A session or a piece of supporting material that *has since been deleted* is different:
 nothing on the canvas can tell until it is actually looked up, so the tile stays live and
 the problem is reported when you follow it. You get an error message rather than a dead
-tile.
+tile. For supporting material you stay where you are; for a session you are taken to that
+board, which opens empty, and told that the link could not be found.
 
 Either way the tile stays put, so you can rename or delete it rather than wondering where
 it went — and if it is pointing at the wrong place rather than a missing one, ask an

@@ -225,9 +225,13 @@ REFERENCE_PREVIEW_FIELDS: FrozenSet[str] = frozenset({"title", "description", "s
 # says the rule exists to prevent, and two earlier rounds had each fixed one
 # instance of the same class by hand.
 #
-# The set is the UNION of the two languages' notions, so each side refuses
-# everything either language would call whitespace — strictly stricter than
-# either alone, which is the safe direction for a gate. It is enumerated in
+# The set is the union of the two languages' notions, less the C0 separators
+# U+001C-U+001F that ``str.isspace()`` also reports and that
+# ``_has_control_characters`` already refuses before this set is consulted. So
+# each side does refuse everything either language would call whitespace —
+# strictly stricter than either alone, which is the safe direction for a gate
+# — but by two checks rather than by this list alone, which is why the list is
+# not literally the union. It is enumerated in
 # docs/fixtures/reference_url_gate.json, which both sides drive, so a character
 # that stops agreeing fails on the side that moved.
 REFERENCE_WHITESPACE_CHARS: FrozenSet[str] = frozenset(
@@ -398,7 +402,10 @@ def reference_content_error(
             )
     if "target" in source:
         target = source["target"]
-        if not isinstance(target, str) or not target.strip():
+        if not isinstance(target, str) or not target.strip(_REFERENCE_WHITESPACE_TRIM):
+            # The gate's own set, not ``str.strip()``: a target of nothing but
+            # U+FEFF is not whitespace to Python and would pass here, then trim
+            # to empty on the canvas and draw as a permanently broken tile.
             return "content.target must be a non-empty string"
         if len(target) > REFERENCE_MAX_TARGET_LENGTH:
             return (

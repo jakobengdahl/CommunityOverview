@@ -538,6 +538,22 @@ describe('reference annotation — rendering and activation', () => {
       expect(isReferenceTargetAvailable).toHaveBeenCalledWith('session', '8244-1742');
     });
 
+    // Round 4: the previous test pads with an ASCII SPACE, which both
+    // `.trim()` and the gate's set strip, so it was green whichever this used.
+    // U+0085 is the one character in the gate set `.trim()` does not strip,
+    // and GraphCanvas's `referenceHostBroken` trims with the gate set — so a
+    // bare `.trim()` here made the tile and the accessible name ask the host
+    // about DIFFERENT strings for the same tile, which is round 2's own
+    // defect (dashed tile announced as live) re-opened one layer down.
+    it('asks the host about the gate-trimmed target, not the .trim() one', () => {
+      const isReferenceTargetAvailable = vi.fn(() => true);
+      renderReference(
+        { target_kind: 'session', target: '\u00858244-1742-3391-0057' },
+        { isReferenceTargetAvailable }
+      );
+      expect(isReferenceTargetAvailable).toHaveBeenCalledWith('session', '8244-1742-3391-0057');
+    });
+
     it('does not navigate at all when no host handler is wired', () => {
       // A reference on a host that wired nothing must not fall back to a
       // guess about the host's routing.

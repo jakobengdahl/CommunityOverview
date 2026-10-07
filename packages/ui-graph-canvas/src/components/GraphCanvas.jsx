@@ -2701,11 +2701,16 @@ function GraphCanvasInner({
       // listeners are bubble-phase on `document`, so `defaultPrevented` only
       // works while the image handler is registered first — and it is not
       // always: the two live in separate effects with different dependency
-      // arrays, and the image effect's `onImageIngest` changes identity on a
-      // session switch, so it alone re-runs and its listener moves to the END
-      // of the order. After that this handler ran first, saw nothing
-      // prevented, and the double-create came back (round 2 of the review
-      // loop). Reading the clipboard needs no assumption about who runs first.
+      // arrays, so either can re-run alone and have its listener move to the
+      // END of the order. When the image one does, this handler runs first,
+      // sees nothing prevented, and the double-create is back (round 2 of the
+      // review loop). `readImageFileAsDataUrl` or `cml.imageIngestFailed`
+      // changing does exactly that today; round 2's own example,
+      // `onImageIngest` changing on a session switch, no longer does, because
+      // round 3 put it in this effect's array too — so both now re-run
+      // together, in declaration order. Depending on that would be depending
+      // on today's dependency lists. Reading the clipboard needs no
+      // assumption about who runs first.
       // Mirrors the image handler's OWN three conditions, not just "is there
       // an image on the clipboard". Round 3 of the review loop found the
       // coarser test discarding a legitimate paste in two ways, both silent:

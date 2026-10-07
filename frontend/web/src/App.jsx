@@ -3,6 +3,7 @@ import {
   GraphCanvas,
   CANVAS_ANNOTATION_TYPES,
   isSafeReferenceUrl,
+  trimReferenceTarget,
 } from '@community-graph/ui-graph-canvas';
 import '@community-graph/ui-graph-canvas/styles';
 import useGraphStore from './store/graphStore';
@@ -2137,10 +2138,10 @@ function App() {
   // round-trip), then swap the session ID (reconnects the SSE stream, reflects
   // the URL) and load the target's canvas from the server.
   const switchToSession = useCallback(
-    (targetId, { register = true, eagerConnect = false } = {}) => {
+    (targetId, { register = true, eagerConnect = false, onMissing } = {}) => {
       requestSessionSnapshot(async () => {
         try {
-          await loadSessionFromServer(targetId, { eagerConnect });
+          await loadSessionFromServer(targetId, { eagerConnect, onMissing });
           setSessionId(targetId);
           reflectSessionUrl(targetId);
           if (register) sessionStore.touchSession(targetId);
@@ -2273,7 +2274,17 @@ function App() {
         }
         // Eager connect for the same reason handleConnectSession above does
         // it: this is a join by id, not a session this browser created.
-        switchToSession(target, { eagerConnect: true });
+        //
+        // `onMissing` for the same reason the ?session= deep-link path passes
+        // it (contract §5.3): a 404 does not throw — the hook clears the
+        // canvas and seeds a new session under that id — so without this,
+        // following a tile to a session that has since been deleted would move
+        // the user off their board onto a blank canvas with no explanation.
+        // A reference tile is the same kind of deep link.
+        switchToSession(target, {
+          eagerConnect: true,
+          onMissing: () => showNotification('info', t('sessions.link_not_found')),
+        });
         return;
       }
       if (targetKind === 'url') {
@@ -2282,14 +2293,23 @@ function App() {
         // call that actually hands a string to the browser, and a guard at the
         // point of use costs one function call; the alternative is trusting
         // every layer upstream of it to have stayed correct.
-        if (!isSafeReferenceUrl(target)) {
+        //
+        // Trimmed with the gate's OWN set before both the check and the open,
+        // so the string validated is the string handed to the browser.
+        // `isSafeReferenceUrl` trims internally, so passing it a raw value
+        // made it approve one string while `window.open` received another —
+        // and U+0085 survives `String.prototype.trim()`, so a stored target
+        // the shared fixture lists as valid resolved against the app's own
+        // origin instead of the author's page.
+        const safeTarget = trimReferenceTarget(target);
+        if (!isSafeReferenceUrl(safeTarget)) {
           showNotification('error', t('context_menu.reference_unsafe_target'));
           return;
         }
         // `noopener,noreferrer`: the opened page must not get a handle on this
         // window (reverse tabnabbing) and should not be told where it came
         // from.
-        window.open(target, '_blank', 'noopener,noreferrer');
+        window.open(safeTarget, '_blank', 'noopener,noreferrer');
         return;
       }
       if (targetKind === 'resource') {

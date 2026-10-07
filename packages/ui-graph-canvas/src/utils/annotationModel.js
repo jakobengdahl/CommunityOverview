@@ -84,9 +84,11 @@ const REFERENCE_EXPLICIT_AUTHORITY = /^https?:\/\/[^/?#]/i;
 // where `\s` is not — and `trim()` and `str.strip()` split the same way.
 // Round 3 of the review loop measured both directions costing a real defect;
 // `REFERENCE_WHITESPACE_CHARS` in backend/core/session_annotations.py carries
-// the full note. This is the UNION of the two notions, so each side refuses
-// everything either language calls whitespace, and the characters are listed
-// in docs/fixtures/reference_url_gate.json, which both sides drive.
+// the full note. It is the union of the two notions less the C0 separators
+// U+001C-U+001F, which the control-character check above already refuses, so
+// each side still refuses everything either language calls whitespace — by
+// two checks rather than by this class alone. The characters are listed in
+// docs/fixtures/reference_url_gate.json, which both sides drive.
 const REFERENCE_WHITESPACE_CLASS =
   '\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680' +
   '\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff';
@@ -151,7 +153,7 @@ export function normalizeReferenceTargetKind(value) {
  */
 export function referenceTargetProblem(data = {}) {
   const kind = normalizeReferenceTargetKind(data.target_kind);
-  const target = typeof data.target === 'string' ? data.target.trim() : '';
+  const target = trimReferenceTarget(data.target);
   if (!kind || !target) return 'missing';
   if (kind === 'url' && !isSafeReferenceUrl(target)) return 'unsafe';
   return null;

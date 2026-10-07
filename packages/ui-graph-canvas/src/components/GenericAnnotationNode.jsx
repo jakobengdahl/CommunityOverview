@@ -28,6 +28,7 @@ import {
   normalizeHeatmapIntensity,
   normalizeReferenceTargetKind,
   referenceTargetProblem,
+  trimReferenceTarget,
 } from '../utils/annotationModel';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
@@ -861,7 +862,12 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
   // same values without re-deriving them. Harmless for every other kind:
   // nothing reads these.
   const referenceTargetKind = normalizeReferenceTargetKind(data?.target_kind);
-  const referenceTarget = typeof data?.target === 'string' ? data.target.trim() : '';
+  // `trimReferenceTarget`, not `.trim()`: the gate's whitespace set and
+  // JavaScript's differ on U+0085, and this value decides both what the tile
+  // draws and WHICH STRING the host is asked about. GraphCanvas's own
+  // `referenceHostBroken` trims with the gate set, so a bare `.trim()` here
+  // made the two ask the host different questions about the same tile.
+  const referenceTarget = trimReferenceTarget(data?.target);
   // Two independent reasons a reference cannot be followed, folded into one
   // state. `referenceTargetProblem` is what this package can see for itself
   // (no target, or a url target it refuses to render as a link);

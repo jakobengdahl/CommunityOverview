@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, waitFor, act } from '@testing-library/react';
+import { render, waitFor, act, screen } from '@testing-library/react';
 
 // The session-scoped helpers App delegates to are tested on their own in
 // appAwaitingHandlerEpochGuards.test.js. What those tests cannot see is App's
@@ -133,6 +133,9 @@ async function renderApp() {
   });
   expect(nodeIds()).toEqual(['a', 'b']);
 }
+
+import referenceUrlGate from '../../../docs/fixtures/reference_url_gate.json';
+import { trimReferenceTarget } from '@community-graph/ui-graph-canvas';
 
 describe('App handler wiring', () => {
   beforeEach(() => {
@@ -367,6 +370,36 @@ describe('App handler wiring', () => {
       );
     });
 
+    // Round 4 of the review loop: `isSafeReferenceUrl` trims internally with
+    // the gate's own whitespace set, so handing it a raw value made it approve
+    // one string while `window.open` received another. U+0085 is the one
+    // character in that set `String.prototype.trim()` does not strip, and the
+    // shared fixture lists a U+0085-padded address under `accept` — so this is
+    // declared-valid stored input, not an edge case. Untrimmed, the browser
+    // cannot parse it as absolute and resolves it against the app's own
+    // origin, sending the user to a 404 on their own host from a tile that
+    // reads, announces and behaves as live.
+    //
+    // Driven off the fixture's `accept` list rather than a literal, and
+    // asserting the exact argument, because the previous tests here padded
+    // with an ASCII space, which `.trim()` handles — so they were green either
+    // way.
+    it.each(referenceUrlGate.accept.filter((v) => v !== v.trim() || /[\u0085\ufeff]/.test(v)))(
+      'opens the trimmed form of the fixture-accepted target %j',
+      async (target) => {
+        await renderApp();
+        await act(async () => {
+          await canvas().onReferenceOpen({ targetKind: 'url', target });
+        });
+        expect(openSpy).toHaveBeenCalledTimes(1);
+        const [opened] = openSpy.mock.calls[0];
+        expect(opened).toBe(trimReferenceTarget(target));
+        // The real assertion: what was opened must be an absolute http(s) URL,
+        // not something a browser resolves against this app's origin.
+        expect(new URL(opened, 'https://app.invalid/graph').origin).not.toBe('https://app.invalid');
+      }
+    );
+
     it.each([
       'javascript:alert(1)',
       'JavaScript:alert(1)',
@@ -418,6 +451,47 @@ describe('App handler wiring', () => {
       await act(async () => {
         await canvas().onReferenceOpen({ targetKind: 'session', target: '8244-1742-3391-0057' });
       });
+      expect(openSpy).not.toHaveBeenCalled();
+    });
+
+    // Round 4 of the review loop: USER_GUIDE.md says that following a tile to a
+    // target that has since been deleted gets you "an error message rather than
+    // a dead tile". That was true for `resource` and false for `session`: a 404
+    // from `getSession` does NOT throw — the hook clears the canvas, resets
+    // session state and seeds a new session under that id — so the user was
+    // moved off their board onto a blank canvas, with the dead id reflected
+    // into the URL and added to their recents, and told nothing.
+    //
+    // `onMissing` is the mechanism the ?session= deep-link path already uses
+    // for exactly this (contract §5.3); following a reference tile is the same
+    // kind of deep link.
+    it('surfaces a notice when the session target no longer exists', async () => {
+      await renderApp();
+      const missing = Object.assign(new Error('not found'), { status: 404 });
+      api.getSession.mockRejectedValueOnce(missing);
+
+      await act(async () => {
+        await canvas().onReferenceOpen({
+          targetKind: 'session',
+          target: '8244-1742-3391-0057',
+        });
+      });
+      // A session switch is queued behind a snapshot round trip: App bumps
+      // `saveViewSignal` and waits for the canvas to answer with `onSaveView`
+      // before running the switch. The real canvas does that; this file's stub
+      // does not, so drive it here or the switch never happens.
+      await act(async () => {
+        await canvas().onSaveView({ nodes: [], edges: [] });
+      });
+
+      expect(api.getSession).toHaveBeenCalledWith('8244-1742-3391-0057', {
+        resolve: true,
+      });
+      expect(
+        await screen.findByText(
+          'That session link could not be found — it may have been deleted or expired.'
+        )
+      ).toBeInTheDocument();
       expect(openSpy).not.toHaveBeenCalled();
     });
 
