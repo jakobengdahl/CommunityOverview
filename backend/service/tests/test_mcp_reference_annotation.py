@@ -143,6 +143,26 @@ class TestCreate:
         assert result["success"] is False
         assert result["error"] == "invalid_content"
 
+    @pytest.mark.parametrize("content", [None, {}])
+    def test_a_create_with_no_content_at_all_is_invalid_content(
+        self, annotation_tools, content
+    ):
+        # `reference` is the first generic type with REQUIRED content, so it is
+        # the first to reach the builders with nothing to validate — the
+        # builders early-return on a falsy payload, so this used to be refused
+        # by the store with a bare op-error message instead of the
+        # `invalid_content` this tool documents (round 2 of the review loop).
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id, type="reference", x=0, y=0, content=content
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "invalid_content"
+        assert tools_map["list_annotations"](session_id=session.id)["annotations"] == []
+
     def test_an_unknown_target_kind_is_refused(self, annotation_tools):
         tools_map, manager = annotation_tools
         session = manager.create_session()
@@ -181,6 +201,98 @@ class TestCreate:
 
         assert result["error"] == "invalid_type"
         assert "reference" in result["message"]
+
+
+class TestUpsert:
+    """`create_annotation` with an `annotation_id` that already exists is an
+    upsert, and the store applies it with a shallow merge — so re-sending a
+    subset of the payload is a legitimate edit for every other generic type
+    (the heatmap branch says so in its own comment).
+
+    Round 1's fix for the two-step kind flip made the builders validate the
+    merged result, but `build_annotation` had no notion of a stored
+    annotation, so it judged every payload as if it stood alone and refused a
+    partial reference upsert outright. Round 2 found it while testing that
+    fix — the defect was in the fix, not in the original change.
+    """
+
+    def test_a_partial_upsert_keeps_the_stored_target(self, annotation_tools):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = _create(
+            tools_map,
+            session.id,
+            target_kind="url",
+            target="https://example.org/handbook",
+            label="Old",
+        )
+        annotation_id = created["annotation"]["id"]
+
+        result = tools_map["create_annotation"](
+            session_id=session.id,
+            type="reference",
+            x=5,
+            y=5,
+            annotation_id=annotation_id,
+            content={"label": "Renamed"},
+        )
+
+        assert result["success"] is True, result
+        content = result["annotation"]["content"]
+        assert content["label"] == "Renamed"
+        assert content["target"] == "https://example.org/handbook"
+        assert content["target_kind"] == "url"
+
+    @pytest.mark.parametrize("target", UNSAFE_TARGETS)
+    def test_an_unsafe_partial_upsert_is_still_refused(self, annotation_tools, target):
+        # The upsert must not become a hole in the gate: the merged result is
+        # what gets judged, so a partial payload is read against the stored
+        # target kind.
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = _create(
+            tools_map, session.id, target_kind="url", target="https://example.org"
+        )
+
+        result = tools_map["create_annotation"](
+            session_id=session.id,
+            type="reference",
+            x=0,
+            y=0,
+            annotation_id=created["annotation"]["id"],
+            content={"target": target},
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "invalid_content"
+        stored = tools_map["list_annotations"](session_id=session.id)["annotations"][0]
+        assert stored["content"]["target"] == "https://example.org"
+
+    def test_a_kind_only_upsert_flip_to_url_is_refused(self, annotation_tools):
+        # The MCP counterpart of the two-step flip: store something unsafe
+        # under a kind that permits it, then promote the kind alone.
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = _create(
+            tools_map,
+            session.id,
+            target_kind="resource",
+            target="javascript:alert(1)",
+        )
+
+        result = tools_map["create_annotation"](
+            session_id=session.id,
+            type="reference",
+            x=0,
+            y=0,
+            annotation_id=created["annotation"]["id"],
+            content={"target_kind": "url"},
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "invalid_content"
+        stored = tools_map["list_annotations"](session_id=session.id)["annotations"][0]
+        assert stored["content"]["target_kind"] == "resource"
 
 
 class TestUpdate:

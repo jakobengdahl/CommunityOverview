@@ -11,7 +11,22 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, act } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';
 
-const hoisted = vi.hoisted(() => ({ setNodes: null, nodes: [] }));
+const hoisted = vi.hoisted(() => {
+  const h = { setNodes: null, nodes: [], reactFlow: null };
+  h.reactFlow = {
+    fitView: () => {},
+    zoomIn: () => {},
+    zoomOut: () => {},
+    getNodes: () => h.nodes,
+    getEdges: () => [],
+    setNodes: (u) => h.setNodes(u),
+    setEdges: () => {},
+    screenToFlowPosition: ({ x, y }) => ({ x, y }),
+    setCenter: () => {},
+    getViewport: () => ({ x: 0, y: 0, zoom: 1 }),
+  };
+  return h;
+});
 
 vi.mock('reactflow', async () => {
   const React = await vi.importActual('react');
@@ -38,18 +53,14 @@ vi.mock('reactflow', async () => {
       return [nodes, setNodes, vi.fn()];
     },
     useEdgesState: (initial) => [initial || [], vi.fn(), vi.fn()],
-    useReactFlow: () => ({
-      fitView: vi.fn(),
-      zoomIn: vi.fn(),
-      zoomOut: vi.fn(),
-      getNodes: () => hoisted.nodes,
-      getEdges: () => [],
-      setNodes: (u) => hoisted.setNodes(u),
-      setEdges: vi.fn(),
-      screenToFlowPosition: ({ x, y }) => ({ x, y }),
-      setCenter: vi.fn(),
-      getViewport: () => ({ x: 0, y: 0, zoom: 1 }),
-    }),
+    // A STABLE object, memoized across renders, because that is what reactflow
+    // v11 does (`useViewportHelper` is a `useMemo`). A mock returning a fresh
+    // literal each render gives `screenToFlowPosition` a new identity every
+    // time, which re-runs EVERY effect that depends on it — and that hides
+    // listener-ordering bugs, because all the listeners re-register together
+    // and keep their relative order. The order-dependence round 2 found is
+    // only visible when one effect re-runs alone.
+    useReactFlow: () => hoisted.reactFlow,
     useOnSelectionChange: () => {},
     useStore: () => 1,
     Background: () => null,
@@ -209,6 +220,36 @@ describe('GraphCanvas reference paste', () => {
   it('does not also create a tile when the image handler claimed the paste', () => {
     const onImageIngest = vi.fn();
     render(<GraphCanvas nodes={[]} edges={[]} onImageIngest={onImageIngest} />);
+
+    const file = new File([new Uint8Array([137, 80, 78, 71])], 'pic.png', {
+      type: 'image/png',
+    });
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    event.clipboardData = {
+      items: [
+        { type: 'image/png', getAsFile: () => file },
+        { type: 'text/plain', getAsFile: () => null },
+      ],
+      getData: (type) => (type === 'text/plain' ? 'https://example.org/pic.png' : ''),
+    };
+    act(() => {
+      document.dispatchEvent(event);
+    });
+
+    expect(referenceNodes()).toHaveLength(0);
+  });
+
+  // The guard must not depend on which listener registered first. The two
+  // paste effects have different dependency arrays, and the image effect's
+  // `onImageIngest` changes identity on a session switch — so it alone
+  // re-runs and its listener moves to the end of the bubble order. Round 2 of
+  // the review loop found the original `defaultPrevented`-only guard failing
+  // exactly here, which the first-mount test above cannot see.
+  it('does not create a tile after the image listener has been re-registered', () => {
+    const { rerender } = render(<GraphCanvas nodes={[]} edges={[]} onImageIngest={vi.fn()} />);
+    // A NEW onImageIngest identity, nothing else changed — what a session
+    // switch does to this prop in the host.
+    rerender(<GraphCanvas nodes={[]} edges={[]} onImageIngest={vi.fn()} />);
 
     const file = new File([new Uint8Array([137, 80, 78, 71])], 'pic.png', {
       type: 'image/png',

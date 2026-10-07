@@ -901,7 +901,7 @@ export function isEligibleAttachTarget(node, selfId) {
 // precedent of GenericAnnotationNode.jsx's own shape/icon picker buttons
 // (`aria-label={name}`) — this file adds no new translation surface for
 // vocabulary that was already untranslated elsewhere in the same menu.
-export function computeAnnotationAriaLabel(kind, data, labels = {}) {
+export function computeAnnotationAriaLabel(kind, data, labels = {}, options = {}) {
   const d = data || {};
   const withDetail = (kindWord, detail) => (detail ? `${kindWord}, ${detail}` : kindWord);
   const text = (v) => (typeof v === 'string' && v.trim() ? v.trim() : '');
@@ -945,7 +945,15 @@ export function computeAnnotationAriaLabel(kind, data, labels = {}) {
       const name = targetWord ? `${kindWord}, ${targetWord}` : kindWord;
       const detail = text(d.label) || text(d.target);
       const named = withDetail(name, detail);
-      return referenceTargetProblem(d)
+      // `hostBroken` is the fourth broken condition in
+      // docs/ANNOTATION_CONTRACT.md's "Broken targets" list — the one only the
+      // host can answer. Without it the name said "broken" for the three
+      // structural cases and stayed silent for the host-reported one, so a
+      // screen reader announced a live reference for a tile drawn dashed with
+      // no open control: exactly the colour-only signal the name exists to
+      // avoid, and contrary to what the contract and the user guide both
+      // promise (round 2 of the review loop).
+      return referenceTargetProblem(d) || options.hostBroken
         ? `${named}, ${labels.ariaKindReferenceBroken || 'broken target'}`
         : named;
     }

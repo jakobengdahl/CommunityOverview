@@ -26,7 +26,23 @@
     "backend green, because no case in any list made the parser raise - so an",
     "unsafe scheme hidden behind an unparseable authority was storable with the",
     "suite reporting green. A well-formed IPv6 host is in `accept` so the fix",
-    "cannot be 'refuse anything with a bracket'."
+    "cannot be 'refuse anything with a bracket'.",
+    "",
+    "Round 2 found the earlier 'no space' rule failing in BOTH directions at once:",
+    "it refused a space in a path or query, which the canvas accepted - so the",
+    "paste path could create a tile the server then dropped, leaving it unsaved -",
+    "while letting a NON-BREAKING space through in the host, which IDNA rejects,",
+    "so the canvas drew it permanently broken. Both sides now refuse whitespace",
+    "anywhere in the trimmed target. The percent-encoded form is in `accept`, so",
+    "this cannot be satisfied by refusing every URL that once held a space.",
+    "",
+    "The forms carrying a SECOND http:// later in the string exist for the anchor",
+    "on the canvas gate's authority regex. Round 2's mutation pass dropped that",
+    "anchor and nothing failed: every other refuse case happens to fail the",
+    "unanchored regex too, so the anchor was pinned only by coincidence. Without",
+    "it the WHATWG parser repairs these into a host taken from the PATH",
+    "(http:///http://evil.example -> http://http//evil.example), which the canvas",
+    "would then draw as live and openable while the backend refuses to store it."
   ],
   "accept": [
     "https://example.org/handbook",
@@ -79,6 +95,15 @@
     "http:/example.org",
     "javascript://[/alert(1)",
     "http://[::1",
-    "https://[::1"
+    "https://[::1",
+    "https://example.org/?q=a b",
+    "https://example.org/a b",
+    "https://example.org/#frag ment",
+    "https://exa mple.org/x",
+    "https://example.org/\ttab",
+    "http:///http://evil.example",
+    "https:/http://evil.example",
+    "https:///a.http://b",
+    "HTTP:///http://evil.example"
   ]
 }

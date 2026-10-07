@@ -2151,9 +2151,24 @@ session state, a saved view, a remote collaborator's op or a host that
 hydrated it from elsewhere, so a canvas that drew whatever it was given would
 turn any gap in any of those into a `javascript:` link under the user's
 cursor. A target the canvas refuses renders in the broken state below instead.
-The host applies the identical check once more at the point where it actually
-hands the string to a browser; the package exports `isSafeReferenceUrl` so
-there is one rule rather than three copies that can drift.
+The host applies the same check once more at the point where it actually hands
+the string to a browser, and the package exports `isSafeReferenceUrl` so the
+host runs the canvas's own function rather than a third copy.
+
+**The backend and the canvas are two implementations, not one.** They parse
+with different libraries — Python's lenient `urlsplit` and the strict WHATWG
+`URL` — so they are kept in agreement by a shared fixture,
+`docs/fixtures/reference_url_gate.json`, that both sides drive: every `accept`
+case must be accepted by both and every `refuse` case refused by both. That
+pins the enumerated cases and nothing more, which is the honest claim. It is
+worth the care in both directions: a target the backend accepts and the canvas
+refuses is stored and then drawn permanently as "Unsafe link — not opened", a
+false statement about what is usually a typo on a tile with no GUI way to
+repoint it; and one the backend refuses while the canvas accepts passes the
+paste gate, appears on the canvas, and is then dropped by the server, leaving
+an unsaved tile with no explanation. Review rounds have found drift in both
+directions, which is why the fixture exists rather than a comment asking the
+next person to keep the two in step.
 
 #### Rendering
 

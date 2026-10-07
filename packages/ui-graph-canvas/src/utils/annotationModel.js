@@ -83,6 +83,12 @@ export function isSafeReferenceUrl(value) {
   if (/[\u0000-\u001f\u007f]/.test(value)) return false;
   const candidate = value.trim();
   if (!candidate) return false;
+  // Whitespace anywhere in the trimmed target, matching the backend gate
+  // (`reference_url_error`) exactly. The WHATWG parser tolerates a space in a
+  // path or query and rejects one in a host, so without this the two sides
+  // disagreed in BOTH directions — see that function's comment for what each
+  // direction costs. A real URL percent-encodes its spaces, and `%20` passes.
+  if (/\s/u.test(candidate)) return false;
   if (!REFERENCE_EXPLICIT_AUTHORITY.test(candidate)) return false;
   let parsed;
   try {

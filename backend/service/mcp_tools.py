@@ -59,6 +59,7 @@ from backend.core.session_annotations import (
     HEATMAP_DEFAULT_INTENSITY,
     HEATMAP_TYPE,
     IMAGE_TYPE,
+    REFERENCE_TYPE,
     annotation_type_of,
     build_annotation,
     build_annotation_patch,
@@ -67,6 +68,7 @@ from backend.core.session_annotations import (
     is_group,
     normalize_generic_type,
     project_annotation,
+    reference_content_error,
     resolve_annotation_type_alias,
     translate_freehand_points,
     translate_line_endpoints,
@@ -3237,6 +3239,26 @@ def register_mcp_tools(
             and "intensity" not in (content or {})
         ):
             content = {**(content or {}), "intensity": HEATMAP_DEFAULT_INTENSITY}
+        # A `reference` is the first generic type whose content is REQUIRED, so it
+        # is the first to reach this with nothing to validate: `_apply_content`
+        # early-returns on a falsy `content`, so a create with `content` omitted
+        # or `{}` used to pass the builders untouched and be refused by the
+        # store instead — correctly, but as a bare op error rather than the
+        # `invalid_content` this tool documents (round 2 of the review loop).
+        # Only for a FRESH create: an upsert that re-sends a subset of the
+        # payload keeps the stored rest under the store's shallow merge, so
+        # demanding a complete one there would break a legitimate edit.
+        if normalized_type == REFERENCE_TYPE and existing_annotation is None:
+            reference_error = reference_content_error(
+                content or {}, require_complete=True
+            )
+            if reference_error:
+                return {
+                    "success": False,
+                    "error": "invalid_content",
+                    "message": reference_error,
+                }
+
         try:
             annotation = build_annotation(
                 type=normalized_type,
@@ -3250,6 +3272,7 @@ def register_mcp_tools(
                 z=z,
                 locked=locked,
                 annotation_id=annotation_id,
+                existing=existing_annotation,
             )
         except ValueError as exc:
             return {"success": False, "error": "invalid_content", "message": str(exc)}

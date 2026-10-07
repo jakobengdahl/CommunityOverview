@@ -271,17 +271,29 @@ def reference_url_error(url: Any) -> Optional[str]:
         )
     if not parts.hostname:
         return "content.target must include a host"
-    # The two checks below exist to keep this gate no more permissive than the
-    # renderer's (``isSafeReferenceUrl`` in
-    # packages/ui-graph-canvas/src/utils/annotationModel.js), which parses with
-    # the WHATWG ``URL`` constructor. ``urlsplit`` is deliberately lenient and
-    # accepts both, so without them an agent could store a target that this
-    # side called valid and the canvas then drew permanently broken, labelled
-    # "Unsafe link — not opened" — a false statement about what is really a
-    # typo, on a tile with no GUI way to repoint it. A gate that accepts what
-    # the renderer refuses is not a gate, it is a trap.
-    if " " in candidate:
-        return "content.target must not contain a space"
+    # The two checks below exist to keep this gate and the renderer's
+    # (``isSafeReferenceUrl`` in
+    # packages/ui-graph-canvas/src/utils/annotationModel.js) deciding the same
+    # thing. ``urlsplit`` is deliberately lenient where the WHATWG ``URL``
+    # constructor is strict, and a disagreement hurts in both directions: a
+    # target this side accepts and the canvas refuses is stored and then drawn
+    # permanently as "Unsafe link — not opened" (a false statement about a
+    # typo, on a tile with no GUI way to repoint it), while a target this side
+    # refuses and the canvas accepts passes the paste gate, lands on the canvas
+    # as a local node, and is then dropped by the server — leaving an unsaved
+    # tile with no explanation.
+    #
+    # Whitespace is refused ANYWHERE in the trimmed target, not just a space
+    # and not just in the authority. Round 2 of the review loop caught the
+    # narrower "no space" rule failing both ways at once: it refused a space in
+    # a path or query (which the canvas happily accepts, so the only human
+    # creation path could produce a tile the server then rejected) while
+    # letting a NON-BREAKING space through in the HOST, which IDNA rejects — so
+    # the canvas drew it permanently broken. One rule covering every
+    # whitespace character makes the two agree; a real URL carries its spaces
+    # percent-encoded, and ``%20`` is accepted.
+    if any(ch.isspace() for ch in candidate):
+        return "content.target must not contain whitespace"
     try:
         port = parts.port
     except ValueError:
@@ -1121,6 +1133,7 @@ def build_annotation(
     z: Optional[float] = None,
     locked: bool = False,
     annotation_id: Optional[str] = None,
+    existing: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build a v1 annotation dict of *type* for the ``annotation_created`` op.
 
@@ -1145,6 +1158,12 @@ def build_annotation(
     that omits ``content`` keeps the stored intensity under the store's
     shallow merge, and a default written here would silently reset it. The
     MCP tool fills the default for a fresh create instead.
+
+    Pass *existing* when this build replaces an annotation already stored
+    under the same id (an upsert). Without it a `reference` upsert that
+    re-sends only part of its payload is refused as incomplete, even though
+    the store's shallow merge would have kept the rest — the defect round 2 of
+    the review loop turned up while testing round 1's own fix.
     """
     if type == HEATMAP_TYPE:
         if w is None and h is None:
@@ -1180,7 +1199,14 @@ def build_annotation(
         annotation["size"] = {"w": geometry["w"], "h": geometry["h"]}
     if style is not None:
         annotation["style"] = dict(style)
-    _apply_content(annotation, content, ann_type=type)
+    # *existing* is the annotation already stored under this id, when this
+    # build is an UPSERT rather than a fresh create. It matters only for a
+    # cross-field type like `reference`: the store applies an upsert with a
+    # shallow merge, so re-sending a subset of the payload is a legitimate
+    # edit, and validating that subset as if it stood alone refuses it for
+    # fields the stored annotation already carries. Omitted — a genuine fresh
+    # create — the payload is required to be complete.
+    _apply_content(annotation, content, ann_type=type, existing=existing)
     if annotation_id is not None:
         annotation["id"] = annotation_id
     return annotation

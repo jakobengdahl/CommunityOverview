@@ -2656,15 +2656,25 @@ function GraphCanvasInner({
     const handleUrlPaste = (event) => {
       const tag = event.target?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || event.target?.isContentEditable) return;
-      // Someone else already claimed this paste — in practice the image-paste
-      // handler above, which calls preventDefault() once it has a file to
-      // ingest. Copying an image out of a web app or a chat client puts BOTH
-      // an `image/*` item and a `text/plain` URL on the clipboard, and both
-      // listeners are bubble-phase on `document`, so without this one paste
-      // ingested the image AND dropped a reference tile on top of it. Reading
-      // `defaultPrevented` rather than re-inspecting the clipboard for an
-      // image keeps the two handlers from each having to know the other's
-      // rule: whoever consumed the event owns it.
+      // A clipboard carrying an image belongs to the image-paste handler, not
+      // to this one. Copying an image out of a web app or a chat client puts
+      // BOTH an `image/*` item and a `text/plain` URL on it, and one paste
+      // must not ingest the image AND drop a reference tile on top of it.
+      //
+      // Decided from the clipboard's own contents rather than from
+      // `event.defaultPrevented`, which is what this first used. Both
+      // listeners are bubble-phase on `document`, so `defaultPrevented` only
+      // works while the image handler is registered first — and it is not
+      // always: the two live in separate effects with different dependency
+      // arrays, and the image effect's `onImageIngest` changes identity on a
+      // session switch, so it alone re-runs and its listener moves to the END
+      // of the order. After that this handler ran first, saw nothing
+      // prevented, and the double-create came back (round 2 of the review
+      // loop). Reading the clipboard needs no assumption about who runs first.
+      const items = event.clipboardData?.items;
+      if (items && Array.from(items).some((item) => item.type?.startsWith('image/'))) {
+        return;
+      }
       if (event.defaultPrevented) return;
       // `?.` only guards `clipboardData` being absent, not `getData` being
       // missing from it. This handler does not own that object — it comes from
@@ -5120,11 +5130,25 @@ function GraphCanvasInner({
   const nodesWithAriaLabels = useMemo(
     () =>
       nodes.map((n) => {
-        const ariaLabel = computeAnnotationAriaLabel(n.type, n.data, annotationContextValue.labels);
+        // A `reference` is the one kind whose broken state is not fully
+        // visible from its own data: the host answers whether the target still
+        // resolves. That answer has to reach the name here, because ReactFlow
+        // reads `node.ariaLabel` and it OVERRIDES the tile's own text — so a
+        // host-reported broken tile would otherwise be announced as live.
+        const hostBroken =
+          n.type === 'reference' &&
+          isReferenceTargetAvailable?.(n.data?.target_kind, (n.data?.target || '').trim()) ===
+            false;
+        const ariaLabel = computeAnnotationAriaLabel(
+          n.type,
+          n.data,
+          annotationContextValue.labels,
+          { hostBroken }
+        );
         if (!ariaLabel || n.ariaLabel === ariaLabel) return n;
         return { ...n, ariaLabel };
       }),
-    [nodes, annotationContextValue.labels]
+    [nodes, annotationContextValue.labels, isReferenceTargetAvailable]
   );
 
   const marksLegend = useMemo(() => {

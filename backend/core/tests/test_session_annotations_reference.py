@@ -148,9 +148,15 @@ class TestCrossLanguageUrlGateAgreement:
     Writing the fixture then found drift the other way too: the canvas's
     WHATWG parser *repaired* ``http:///path`` into ``http://path/``, re-reading
     the path as the hostname, so a tile would have opened somewhere its author
-    never wrote. Both sides now require an explicit ``scheme://authority`` and
-    a port in range, so there is no asymmetry left to document — every case
-    here must get the same verdict from both.
+    never wrote. Round 2 found a third and a fourth, from the "no space" rule
+    that had been added for the first: it refused a space in a path or query,
+    which the canvas accepted, while letting a NON-BREAKING space through in
+    the host, which the canvas refuses. Both sides now refuse whitespace
+    anywhere in the trimmed target.
+
+    What this pins is every case in the fixture, on both sides — not a general
+    claim that two different parsers agree everywhere. That is the point of
+    enumerating them.
 
     The fixture is shared with
     ``packages/ui-graph-canvas/tests/ReferenceAnnotation.test.jsx``, so moving a

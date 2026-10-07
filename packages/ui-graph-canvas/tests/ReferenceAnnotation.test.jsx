@@ -296,6 +296,38 @@ describe('reference annotation — accessible name', () => {
     expect(name).toBe(`REFERENS-sentinel, ${sentinel}, L`);
   });
 
+  // The fourth broken condition in the contract's own list — the one only the
+  // host can answer. ReactFlow reads `node.ariaLabel` and it overrides the
+  // tile's text, so a host-reported broken tile was being announced as live
+  // while drawn dashed with no open control (round 2 of the review loop).
+  it('says a host-reported broken target is broken', () => {
+    const live = computeAnnotationAriaLabel(
+      'reference',
+      { target_kind: 'session', target: '8244-1742-3391-0057', label: 'Gone' },
+      { ariaKindReferenceBroken: 'TRASIGT-sentinel' }
+    );
+    expect(live).not.toContain('TRASIGT-sentinel');
+
+    const broken = computeAnnotationAriaLabel(
+      'reference',
+      { target_kind: 'session', target: '8244-1742-3391-0057', label: 'Gone' },
+      { ariaKindReferenceBroken: 'TRASIGT-sentinel' },
+      { hostBroken: true }
+    );
+    expect(broken).toContain('TRASIGT-sentinel');
+  });
+
+  it('does not call a structurally fine reference broken on a silent host', () => {
+    // `undefined` from the host is "no opinion", not "gone".
+    const name = computeAnnotationAriaLabel(
+      'reference',
+      { target_kind: 'url', target: 'https://example.org/x', label: 'L' },
+      { ariaKindReferenceBroken: 'TRASIGT-sentinel' },
+      { hostBroken: undefined }
+    );
+    expect(name).not.toContain('TRASIGT-sentinel');
+  });
+
   it('reads the broken-state word from its own prop', () => {
     const name = computeAnnotationAriaLabel(
       'reference',
