@@ -19,7 +19,14 @@
     "parser REPAIRED `http:///path` into `http://path/` - re-reading the path as",
     "the hostname, so a tile would have opened somewhere its author never wrote.",
     "Both sides now require an explicit scheme://authority and a port in range,",
-    "so there is no asymmetry left to document."
+    "so there is no asymmetry left to document.",
+    "",
+    "The bracket forms make Python's urlsplit raise ValueError. The gate refuses",
+    "on that exception; a mutation turning it into `return None` left the whole",
+    "backend green, because no case in any list made the parser raise - so an",
+    "unsafe scheme hidden behind an unparseable authority was storable with the",
+    "suite reporting green. A well-formed IPv6 host is in `accept` so the fix",
+    "cannot be 'refuse anything with a bracket'."
   ],
   "accept": [
     "https://example.org/handbook",
@@ -31,7 +38,8 @@
     "https://user:pw@example.org/x",
     "https://sub.domain.example.org/deep/path",
     "http://example.org:1/x",
-    "http://example.org:65535/x"
+    "http://example.org:65535/x",
+    "https://[::1]/ok"
   ],
   "refuse": [
     "javascript:alert(1)",
@@ -68,6 +76,9 @@
     "http://1.2.3.4:x/",
     "https://example.org:0/x",
     "https:/example.org",
-    "http:/example.org"
+    "http:/example.org",
+    "javascript://[/alert(1)",
+    "http://[::1",
+    "https://[::1"
   ]
 }

@@ -275,6 +275,36 @@ describe('reference annotation — accessible name', () => {
     );
     expect(name).toBe('Referens, underlag, Metodguide');
   });
+
+  // Every aria key, not just two of them. Round 1's mutation review hardcoded
+  // the broken-state suffix and misspelled the session and url entries of the
+  // key table with the suite still green, because only these two keys were
+  // ever overridden with a non-English value (S6).
+  // A resolvable target per kind, so the name under test is the live one — a
+  // bare 'x' is a legitimately broken url target and would append the broken
+  // suffix, which is a different assertion (below).
+  it.each([
+    ['session', '8244-1742-3391-0057', 'ariaKindReferenceSession', 'SESSION-sentinel'],
+    ['url', 'https://example.org/x', 'ariaKindReferenceUrl', 'WEBBSIDA-sentinel'],
+    ['resource', 'res-1', 'ariaKindReferenceResource', 'UNDERLAG-sentinel'],
+  ])('reads the %s target word from its own prop', (targetKind, target, key, sentinel) => {
+    const name = computeAnnotationAriaLabel(
+      'reference',
+      { target_kind: targetKind, target, label: 'L' },
+      { ariaKindReference: 'REFERENS-sentinel', [key]: sentinel }
+    );
+    expect(name).toBe(`REFERENS-sentinel, ${sentinel}, L`);
+  });
+
+  it('reads the broken-state word from its own prop', () => {
+    const name = computeAnnotationAriaLabel(
+      'reference',
+      { target_kind: 'url', target: 'javascript:alert(1)', label: 'L' },
+      { ariaKindReference: 'REFERENS-sentinel', ariaKindReferenceBroken: 'TRASIGT-sentinel' }
+    );
+    expect(name).toContain('TRASIGT-sentinel');
+    expect(name).not.toContain('broken target');
+  });
 });
 
 describe('reference annotation — rendering and activation', () => {
@@ -379,9 +409,9 @@ describe('reference annotation — rendering and activation', () => {
     const openReference = vi.fn();
     renderReference(
       { target_kind: 'resource', target: 'r-1', selected: true },
-      { openReference, labels: { referenceOpen: 'Open target' } }
+      { openReference, labels: { referenceOpen: 'ÖPPNA-MÅL-sentinel' } }
     );
-    const button = screen.getByRole('button', { name: 'Open target' });
+    const button = screen.getByRole('button', { name: 'ÖPPNA-MÅL-sentinel' });
     fireEvent.click(button);
     expect(openReference).toHaveBeenCalledWith(
       expect.objectContaining({ targetKind: 'resource', target: 'r-1' })
@@ -418,9 +448,9 @@ describe('reference annotation — rendering and activation', () => {
     it('hides the open control on a broken reference', () => {
       renderReference(
         { target_kind: 'url', target: 'javascript:alert(1)', selected: true },
-        { labels: { referenceOpen: 'Open target' } }
+        { labels: { referenceOpen: 'ÖPPNA-MÅL-sentinel' } }
       );
-      expect(screen.queryByRole('button', { name: 'Open target' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'ÖPPNA-MÅL-sentinel' })).toBeNull();
     });
 
     it('says why, preferring the reason over any preview text', () => {
@@ -431,9 +461,9 @@ describe('reference annotation — rendering and activation', () => {
           label: 'Looks innocent',
           preview: { site: 'example.org' },
         },
-        { labels: { referenceUnsafeTarget: 'Unsafe link — not opened' } }
+        { labels: { referenceUnsafeTarget: 'OSÄKER-LÄNK-sentinel' } }
       );
-      expect(screen.getByText('Unsafe link — not opened')).toBeInTheDocument();
+      expect(screen.getByText('OSÄKER-LÄNK-sentinel')).toBeInTheDocument();
       expect(screen.queryByText('example.org')).toBeNull();
     });
 
@@ -495,17 +525,22 @@ describe('reference annotation — property editor', () => {
     hoisted.nodes = [];
   });
 
+  // Deliberately NOT the English defaults. A label override identical to the
+  // default makes every assertion pass whether the component reads the prop
+  // or hardcodes the literal — round 1's mutation review replaced all nine
+  // label reads with their English strings and the suite stayed green (S6).
+  // Sentinels are the only thing that tells the two apart.
   const LABELS = {
-    referenceTarget: 'Target',
-    referenceTargetSession: 'Session',
-    referenceTargetUrl: 'Web page',
-    referenceTargetResource: 'Supporting material',
-    referenceTargetUnknown: 'Unknown target',
-    referenceOpen: 'Open target',
-    referenceRename: 'Rename',
-    referenceLabel: 'Label',
-    referenceBrokenTarget: 'Target not available',
-    editAnnotation: 'Edit',
+    referenceTarget: 'MÅL-sentinel',
+    referenceTargetSession: 'SESSION-sentinel',
+    referenceTargetUrl: 'WEBBSIDA-sentinel',
+    referenceTargetResource: 'UNDERLAG-sentinel',
+    referenceTargetUnknown: 'OKÄNT-sentinel',
+    referenceOpen: 'ÖPPNA-sentinel',
+    referenceRename: 'BYT-NAMN-sentinel',
+    referenceLabel: 'ETIKETT-sentinel',
+    referenceBrokenTarget: 'TRASIGT-sentinel',
+    editAnnotation: 'REDIGERA-sentinel',
   };
 
   // Returns a scope limited to the open menu. The tile itself carries the
@@ -518,13 +553,13 @@ describe('reference annotation — property editor', () => {
     fireEvent.contextMenu(rendered.container.querySelector('.kind-reference'));
     const menu = document.querySelector('.graph-annotation-context-menu--bar');
     expect(menu).toBeTruthy();
-    fireEvent.click(within(menu).getByRole('button', { name: 'Target' }));
+    fireEvent.click(within(menu).getByRole('button', { name: LABELS.referenceTarget }));
     return within(menu);
   }
 
   it('names the target kind and shows the target, read-only', () => {
     const menu = openMenu({ target_kind: 'session', target: '8244-1742', label: 'Overview' });
-    expect(menu.getByText('Session')).toBeInTheDocument();
+    expect(menu.getByText(LABELS.referenceTargetSession)).toBeInTheDocument();
     expect(menu.getByText('8244-1742')).toBeInTheDocument();
     // Read-only: repointing goes through the validated MCP/API path in v1, so
     // there is no free-text target field here that would need its own copy of
@@ -535,7 +570,7 @@ describe('reference annotation — property editor', () => {
   it('activates the target from the menu', () => {
     const openReference = vi.fn();
     const menu = openMenu({ target_kind: 'url', target: 'https://example.org' }, { openReference });
-    fireEvent.click(menu.getByRole('button', { name: 'Open target' }));
+    fireEvent.click(menu.getByRole('button', { name: LABELS.referenceOpen }));
     expect(openReference).toHaveBeenCalledWith(
       expect.objectContaining({ targetKind: 'url', target: 'https://example.org' })
     );
@@ -546,8 +581,8 @@ describe('reference annotation — property editor', () => {
       { target_kind: 'session', target: '0000-0000', label: 'Gone' },
       { isReferenceTargetAvailable: () => false }
     );
-    expect(menu.getByRole('button', { name: 'Open target' })).toBeDisabled();
-    expect(menu.getAllByText('Target not available').length).toBeGreaterThan(0);
+    expect(menu.getByRole('button', { name: LABELS.referenceOpen })).toBeDisabled();
+    expect(menu.getAllByText(LABELS.referenceBrokenTarget).length).toBeGreaterThan(0);
   });
 
   it('renames the label through an inline editor that writes data.label', async () => {
@@ -555,9 +590,9 @@ describe('reference annotation — property editor', () => {
     // instead — and it must write `label`, not the `text` field every other
     // editable kind uses.
     const menu = openMenu({ target_kind: 'resource', target: 'r-1', label: 'Old' });
-    fireEvent.click(menu.getByRole('button', { name: 'Rename' }));
+    fireEvent.click(menu.getByRole('button', { name: LABELS.referenceRename }));
 
-    const input = await screen.findByRole('textbox', { name: 'Label' });
+    const input = await screen.findByRole('textbox', { name: LABELS.referenceLabel });
     fireEvent.change(input, { target: { value: 'New name' } });
 
     const node = applyLatestUpdate({ id: 'r1', data: { label: 'Old' } });
@@ -567,8 +602,8 @@ describe('reference annotation — property editor', () => {
 
   it('commits the rename on Enter', async () => {
     const menu = openMenu({ target_kind: 'resource', target: 'r-1', label: 'Old' });
-    fireEvent.click(menu.getByRole('button', { name: 'Rename' }));
-    const input = await screen.findByRole('textbox', { name: 'Label' });
+    fireEvent.click(menu.getByRole('button', { name: LABELS.referenceRename }));
+    const input = await screen.findByRole('textbox', { name: LABELS.referenceLabel });
     fireEvent.change(input, { target: { value: '  Trimmed  ' } });
     fireEvent.keyDown(input, { key: 'Enter' });
 
@@ -578,6 +613,6 @@ describe('reference annotation — property editor', () => {
 
   it('names an unrecognised target kind rather than leaving the row blank', () => {
     const menu = openMenu({ target_kind: 'graph_node', target: 'x', label: 'Mystery' });
-    expect(menu.getByText('Unknown target')).toBeInTheDocument();
+    expect(menu.getByText(LABELS.referenceTargetUnknown)).toBeInTheDocument();
   });
 });

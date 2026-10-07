@@ -80,6 +80,17 @@ UNSAFE_TARGETS = [
     "http://",
     "https://",
     "http:///path",
+    # Forms that make urlsplit RAISE rather than return a bad split. The gate
+    # refuses on the exception, and a mutation replacing that refusal with
+    # `return None` left the entire backend green — nothing in this list made
+    # the parser raise, so an unsafe scheme behind an unparseable authority was
+    # storable on every write path with the suite green (round 1 mutation
+    # review, S1). A valid IPv6 host is asserted acceptable in
+    # TestCrossLanguageUrlGateAgreement, so this cannot be satisfied by
+    # refusing every bracket.
+    "javascript://[/alert(1)",
+    "http://[::1",
+    "https://[::1",
 ]
 
 # The subset of UNSAFE_TARGETS that a NON-url reference may legitimately hold,
@@ -582,6 +593,34 @@ class TestRawSessionOpPath:
             )
         assert session.state["annotations"] == []
 
+    @pytest.mark.parametrize("target", UNSAFE_TARGETS)
+    def test_even_a_trusted_replay_cannot_store_an_unsafe_target(self, store, target):
+        # `_require_safe_reference_target` is deliberately skipped for an undo's
+        # trusted replay, which is exactly why `_validate_annotation` carries an
+        # unconditional check as well. Deleting that check left the entire
+        # backend green while making a trusted replay store javascript:
+        # (round 1 mutation review, S3) — the one assertion that tells the
+        # unconditional floor apart from the two call-site guards.
+        session = store.create()
+        with pytest.raises(OpError):
+            store.apply_state_op(
+                session,
+                _create_op(
+                    _reference(
+                        target_kind="url", target=target, position={"x": 0, "y": 0}
+                    )
+                ),
+                trusted_replay=True,
+            )
+        assert session.state["annotations"] == []
+
+    def test_a_trusted_replay_of_a_safe_reference_still_works(self, store):
+        # The unconditional check must not break undo for a legitimate
+        # annotation, which is the reason the image guard exempts replays.
+        session = store.create()
+        store.apply_state_op(session, _safe_reference_op(), trusted_replay=True)
+        assert session.state["annotations"][0]["target"] == "https://example.org"
+
     def test_the_payload_survives_the_browsers_whole_object_echo(self, store):
         # The browser re-sends the WHOLE annotation on every move/resize/lock
         # (sessionSyncClient.js), so the unconditional validator sees a
@@ -769,6 +808,49 @@ class TestSavedViewMetadata:
             }
         }
         assert saved_view_annotation_error(metadata) is None
+
+    @pytest.mark.parametrize("target", UNSAFE_TARGETS)
+    def test_a_reference_declared_only_by_kind_is_refused(self, target):
+        # `saved_view_annotation_error` reads RAW stored annotations out of node
+        # metadata, so unlike the two session-op call sites nothing has
+        # canonicalised `type` onto them first. An annotation carrying only the
+        # legacy `kind` alias must still be recognised as a reference — a
+        # mutation dropping that fallback left the whole backend green while
+        # making saved-view metadata accept `{"kind": "reference", ...}` with a
+        # javascript: target (round 1 mutation review, S2).
+        metadata = {
+            "annotation_document": {
+                "schema_version": 1,
+                "annotations": [
+                    {
+                        "id": "r1",
+                        "kind": REFERENCE_TYPE,
+                        "target_kind": "url",
+                        "target": target,
+                    }
+                ],
+            }
+        }
+        assert saved_view_annotation_error(metadata) is not None
+
+    def test_the_sanitizer_also_recognises_a_kind_only_reference(self):
+        # The guard and the sanitizer must agree about what a reference is, or
+        # a view refused by one is left intact by the other.
+        metadata = {
+            "annotation_document": {
+                "schema_version": 1,
+                "annotations": [
+                    {
+                        "id": "r1",
+                        "kind": REFERENCE_TYPE,
+                        "target_kind": "url",
+                        "target": "javascript:alert(1)",
+                    }
+                ],
+            }
+        }
+        sanitized = sanitize_saved_view_metadata(metadata)
+        assert "target" not in sanitized["annotation_document"]["annotations"][0]
 
     def test_the_legacy_annotations_list_is_covered_too(self):
         metadata = {
