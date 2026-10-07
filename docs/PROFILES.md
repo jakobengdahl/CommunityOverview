@@ -131,6 +131,7 @@ Each node type has the following fields:
 | `icon` | No | Bootstrap Icon name for the toolbar (e.g. `"DatabaseFill"`, `"PeopleFill"`). Omitted or unregistered names fall back to the built-in icon for known type names, otherwise to a neutral circle |
 | `static` | No | If `true`, nodes of this type cannot be created via the chat. Used for system types |
 | `ui_form` | No | Specialized creation dialog. `"skill"` opens the SKILL.md-compatible form |
+| `labels` | No | Localized display names for this node type, keyed by language code (e.g. `{"sv": "Aktör"}`). Used where the UI shows a translated type name (search results, the metamodel explorer); a language with no entry falls back to the type name itself |
 | `context_menu` | No | Array of extra items for the right-click context menu (see below) |
 | `allows_attachments` | No | `true` marks this node type as accepting file attachments. Defaults to `false`. Returned by `get_schema` on every node type, so clients can read it unconditionally. Per [ADR 0008](adr/0008-node-attachment-storage.md) section 7 it gates uploads only — listing, downloading and deleting files already attached stay available, so turning it back off never strands them. The upload, list, download and delete endpoints are a later slice: today the flag is declared and exposed, and nothing reads it yet |
 

@@ -43,7 +43,7 @@ class TestConfigLoader:
         assert "node_types" in schema
         assert "relationship_types" in schema
 
-        # All six system node types must be present regardless of config file content
+        # Every system node type must be present regardless of config file content
         for system_type in config_loader.SYSTEM_NODE_TYPES:
             assert system_type in schema["node_types"], (
                 f"System type '{system_type}' missing from schema"
