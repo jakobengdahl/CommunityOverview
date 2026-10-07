@@ -185,3 +185,60 @@ describe('identifier minting', () => {
     expect(randomSpy).not.toHaveBeenCalled();
   });
 });
+
+// resolveTeleport is the one place the browser and the backend's
+// ResolveTeleportRequest meet, and both sides were written together. It is
+// mocked in every component test that exercises teleport, so without this the
+// path and all three field names could be wrong and nothing would notice.
+// The backend half is pinned by test_federated_teleport_rest_endpoint.py's
+// test_the_request_body_field_names_are_the_ones_the_client_sends.
+describe('resolveTeleport', () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    vi.resetModules();
+  });
+
+  async function capture(nodeId, options) {
+    const calls = [];
+    global.fetch = vi.fn(async (url, init) => {
+      calls.push({ url, init });
+      return { ok: true, status: 200, json: async () => ({ status: 'local' }) };
+    });
+    const { resolveTeleport } = await import('../src/services/api.js');
+    await resolveTeleport(nodeId, options);
+    return calls[0];
+  }
+
+  it('posts to the federation teleport endpoint', async () => {
+    const call = await capture('n1', {});
+
+    expect(call.url).toMatch(/\/api\/federation\/teleport$/);
+    expect(call.init.method).toBe('POST');
+  });
+
+  it('sends the node, session and search context under the names the server reads', async () => {
+    const call = await capture('federated::esam-main::remote-1', {
+      sessionId: '1111-2222',
+      searchQuery: 'external',
+    });
+
+    expect(JSON.parse(call.init.body)).toEqual({
+      node_id: 'federated::esam-main::remote-1',
+      session_id: '1111-2222',
+      search_query: 'external',
+    });
+  });
+
+  it('returns the resolved body to the caller', async () => {
+    global.fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ status: 'ok', route: 'https://esam.example/app?node=remote-1' }),
+    }));
+    const { resolveTeleport } = await import('../src/services/api.js');
+
+    await expect(resolveTeleport('n1')).resolves.toMatchObject({ status: 'ok' });
+  });
+});

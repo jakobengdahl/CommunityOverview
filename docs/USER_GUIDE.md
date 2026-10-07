@@ -920,8 +920,9 @@ what is permanently stored in the local graph.
 **Opening a result in the graph that owns it:** a search result from a remote graph
 carries a small "open in source graph" button at the right-hand end of its row, and the
 same action appears as **Open in source graph** when you right-click such a node on the
-canvas. Both open the node in its own graph in a new tab, with your current search text
-carried along, so the session you were in stays open behind it.
+canvas. Both open the node in its own graph in a new tab, so the session you were in
+stays open behind it. Going from a search result also carries your current search text
+across; going from the canvas does not, because there is no search in progress there.
 
 Clicking the result itself is unchanged — it still brings the node onto your current
 canvas. Double-clicking a node still opens its detail dialog. Teleport is always an
@@ -936,8 +937,9 @@ Four cases are handled explicitly:
 | "&lt;Graph&gt; cannot be reached right now" | The graph is configured but offline, disabled, or has no address set for its interface |
 | "This node is already in the current graph" | The node is local, so there is nowhere to travel to |
 
-Arriving from a teleport, the app focuses the node named in the link, puts the search text
-back in the search box, and tells you which graph you came from.
+Arriving from a teleport, the app focuses the node named in the link, tells you which
+graph you came from, and — when the link carries search text — puts it back in the search
+box.
 
 **Node adoption:** If you want to permanently link a local node to an entity
 from a remote graph, right-click the federated node and choose **Adopt** (if available).

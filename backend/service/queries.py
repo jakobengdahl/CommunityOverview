@@ -333,7 +333,20 @@ def resolve_teleport(
     graph_config = None
     cache_status = ""
     origin_graph_id = access.node_graph_id(node) if node is not None else ""
-    if origin_graph_id and federation_manager is not None:
+    if (
+        origin_graph_id
+        and federation_manager is not None
+        # Every other federation path gates on the global flag — search_graph,
+        # get_graph_stats via access.get_visible_federation_graph_display_names,
+        # and adopt_federated_node, which refuses outright. A cache can be left
+        # healthy from before the flag was turned off, so without this the one
+        # path that ignored it would still route.
+        and federation_manager.enabled
+        # Read nothing about the graph for a caller the narrowing excludes, so
+        # G1's ordering holds at this layer too and not only inside the pure
+        # resolver, which would discard these values anyway.
+        and decision.graph_access.matches(graph_id=origin_graph_id)
+    ):
         # Both keyed on origin_graph_id, the provenance field the local path
         # narrows on. Resolving the config from the node's cache entry instead
         # would report a configured, healthy graph as unavailable for any node

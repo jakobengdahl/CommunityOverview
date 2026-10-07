@@ -125,8 +125,9 @@ def test_an_unknown_node_is_reported_as_unknown_rather_than_local():
 
 def test_a_missing_node_is_unknown_even_when_federated_metadata_is_passed():
     # node_exists is checked before the local/remote split, so an id that names
-    # no node cannot be routed on the strength of metadata alone.
-    target = _resolve(node_exists=False)
+    # no node cannot be routed on the strength of metadata alone. The narrowing
+    # admits this graph, so the answer is about the node rather than access.
+    target = _resolve(node_exists=False, graph_access_matches=_allow_all)
 
     assert target.status == teleport.STATUS_UNKNOWN_NODE
     assert target.route is None
@@ -193,6 +194,26 @@ def test_the_denial_reason_does_not_say_whether_the_graph_was_local_or_remote():
     assert local.status == remote.status == teleport.STATUS_PERMISSION_DENIED
     assert local.reason == remote.reason == teleport.REASON_NOT_VISIBLE
     assert local.to_dict() == remote.to_dict()
+
+
+def test_denial_does_not_reveal_whether_the_node_exists():
+    # A federated id embeds its graph id, so answering "no such node" for an
+    # invisible graph and "denied" for a visible one would confirm which graphs
+    # are configured and synced to anyone able to probe ids. Visibility is
+    # therefore decided before existence, and both answers are identical.
+    present = _resolve(graph_access_matches=_deny_all, node_exists=True)
+    absent = _resolve(graph_access_matches=_deny_all, node_exists=False)
+
+    assert present.status == absent.status == teleport.STATUS_PERMISSION_DENIED
+    assert present.to_dict() == absent.to_dict()
+
+
+def test_a_visible_graph_may_still_report_an_unknown_node():
+    # The caller is entitled to see this graph, so "no such node" tells them
+    # nothing they could not already learn.
+    target = _resolve(graph_access_matches=_allow_all, node_exists=False)
+
+    assert target.status == teleport.STATUS_UNKNOWN_NODE
 
 
 def test_narrowing_that_admits_another_graph_still_denies_this_one():
@@ -345,18 +366,32 @@ def test_an_unknown_caller_origin_is_reported_as_cross_deployment(request_origin
     assert target.cross_deployment is True
 
 
-@pytest.mark.parametrize("gui_url", ["esam.example/app", "/app", "app"])
-def test_an_unparseable_target_origin_is_reported_as_cross_deployment(gui_url):
-    # A gui_url entered without a scheme is a plausible misconfiguration, and
-    # its origin cannot be determined. G4 says either side being indeterminate
-    # counts as a hop, so the UI still confirms before leaving.
+@pytest.mark.parametrize(
+    "gui_url", ["esam.example/app", "/app", "app", "localhost:8100"]
+)
+def test_a_gui_url_that_is_not_an_absolute_url_yields_no_route(gui_url):
+    # A gui_url without a scheme and host is not a route anywhere: a browser
+    # would resolve it against the caller's own origin, so the user would
+    # confirm leaving for another deployment and land back on their own. It
+    # degrades like any other unreachable graph rather than being handed out.
     target = _resolve(
         graph_config=_graph(gui_url=gui_url),
         request_origin="https://here.example/",
     )
 
     assert teleport.deployment_origin(gui_url) == ""
-    assert target.cross_deployment is True
+    assert target.status == teleport.STATUS_GRAPH_UNAVAILABLE
+    assert target.reason == "gui_url_not_absolute"
+    assert target.route is None
+
+
+def test_an_ok_route_always_has_a_determinate_target_origin():
+    # Because a non-absolute gui_url is refused above, cross_deployment on an
+    # ok route is a real comparison rather than an unknown defaulting to true.
+    target = _resolve()
+
+    assert target.status == teleport.STATUS_OK
+    assert teleport.deployment_origin(target.route) != ""
 
 
 def test_the_configured_trust_level_is_reported_with_the_route():
@@ -461,6 +496,22 @@ def test_a_non_colliding_parameter_survives_alongside_the_teleport_ones():
     params = parse_qs(urlsplit(target.route).query)
     assert params["lang"] == ["sv"]
     assert params["node"] == ["node-7"]
+
+
+def test_a_blank_configured_parameter_is_not_discarded_from_the_route():
+    route = teleport.build_route("https://x.example/app?blank=&x=1", "n1")
+
+    params = parse_qs(urlsplit(route).query, keep_blank_values=True)
+    assert params["blank"] == [""]
+    assert params["x"] == ["1"]
+    assert params["node"] == ["n1"]
+
+
+def test_build_backlink_refuses_a_base_url_that_is_not_absolute():
+    # The receiving deployment would resolve a relative backlink against its
+    # own origin, which is not where the visitor came from.
+    assert teleport.build_backlink("/app", session_id="s1") is None
+    assert teleport.build_backlink("here.example/app", session_id="s1") is None
 
 
 def test_build_route_replaces_rather_than_appends_a_colliding_parameter():

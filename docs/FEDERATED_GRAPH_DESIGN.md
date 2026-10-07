@@ -271,14 +271,25 @@ The response's `status` is one of:
   say whether the node was local or remote — a reason that distinguished the two
   would tell a caller probing ids that a graph they cannot see exists. It is a
   status the UI renders, not a `403`: the request itself was allowed, only this
-  one graph is not visible. A node the narrowing hides is still reported as
-  denied rather than missing, so the UI can say why; that is a deliberate
-  difference from `get_node_details`, which answers "not found" for an invisible
-  node.
+  one graph is not visible. Visibility is decided **before the node is known to
+  exist**, so every id naming a graph the narrowing excludes gets the identical
+  answer: a federated id embeds its graph id
+  (`federated::<graph_id>::<origin_id>`), and answering "no such node" for an
+  invisible graph while answering "denied" for a visible one would confirm which
+  graphs are configured and synced to anyone able to probe ids. A caller who
+  *may* see the graph can still be told `unknown_node`, which tells them nothing
+  they could not already learn.
 - **Unavailable graph.** A `reason` distinguishes `graph_disabled`,
-  `graph_unreachable`, `no_gui_url_configured`, `graph_not_configured` and
-  `no_origin_node_id`. The graph *is* named here, because a caller who reaches
-  this state is already entitled to see it.
+  `graph_unreachable`, `no_gui_url_configured`, `gui_url_not_absolute`,
+  `graph_not_configured` and `no_origin_node_id`. The graph *is* named here,
+  because a caller who reaches this state is already entitled to see it.
+  `gui_url_not_absolute` covers a `gui_url` configured without a scheme and
+  host: a browser would resolve it against the *caller's* own origin, so the
+  user would confirm leaving for another deployment and land back on their own
+  at a bogus path. Refusing it also means `cross_deployment` is a real
+  comparison whenever the status is `ok`, rather than an unknown defaulting to
+  `true`. Federation being disabled globally lands here too, as
+  `graph_not_configured`.
 - **Cross-deployment.** `cross_deployment` compares the scheme, host and port of
   the target `gui_url` against this deployment's own origin, so two graphs served
   as different paths of one deployment are not reported as a hop. That origin is

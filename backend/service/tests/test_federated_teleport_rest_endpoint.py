@@ -28,7 +28,7 @@ from backend.runtime.authorization import (
     GraphAuthorizationDecision,
 )
 from backend.service import GraphService
-from backend.service.rest_api import create_rest_router
+from backend.service.rest_api import ResolveTeleportRequest, create_rest_router
 
 _GUI_URL = "https://esam.example/app"
 _PUBLIC_BASE_URL = "https://here.example/app"
@@ -217,6 +217,39 @@ class TestTheOriginComparedAgainst:
             _post(client, "federated::esam-main::remote-1").json()["cross_deployment"]
             is True
         )
+
+    def test_a_request_header_can_never_supply_the_origin(self, make_client):
+        # With no public URL configured this deployment's origin genuinely cannot
+        # be determined, so the hop must be reported as cross-deployment. Taking
+        # the origin from a request header would let a caller claim the target's
+        # origin and suppress the UI's confirmation.
+        client, _ = make_client(
+            public_base_url="", gui_url="https://elsewhere.example/app"
+        )
+
+        body = client.post(
+            "/api/federation/teleport",
+            json={"node_id": "federated::esam-main::remote-1"},
+            headers={
+                "Origin": "https://elsewhere.example",
+                "X-Forwarded-Host": "elsewhere.example",
+                "Host": "elsewhere.example",
+            },
+        ).json()
+
+        assert body["status"] == teleport.STATUS_OK
+        assert body["cross_deployment"] is True
+
+    def test_the_request_body_field_names_are_the_ones_the_client_sends(
+        self, make_client
+    ):
+        # The one place the browser's resolveTeleport and this model meet; both
+        # sides changed together, so pin the names from this end too.
+        assert set(ResolveTeleportRequest.model_fields) == {
+            "node_id",
+            "session_id",
+            "search_query",
+        }
 
     def test_an_unset_public_url_offers_no_backlink(self, make_client):
         client, _ = make_client(public_base_url="")

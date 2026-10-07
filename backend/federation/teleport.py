@@ -166,20 +166,22 @@ def build_route(
 def build_backlink(
     local_gui_url: str,
     *,
-    node_id: str = "",
     session_id: str = "",
 ) -> Optional[str]:
     """Build the route back to this deployment, when its own URL is known.
 
     A standalone deployment has no configured public URL, so this returns None
     rather than emitting a guessed or ``localhost`` one — the same rule
-    ``config_loader.build_session_url`` follows. Keeping the function here keeps
-    the parameter names in one place for both ends of the hop.
+    ``config_loader.build_session_url`` follows. A configured value that is not
+    an absolute URL is refused for the same reason the target ``gui_url`` is:
+    the receiving deployment would resolve it against its own origin, which is
+    not where the visitor came from. Keeping the function here keeps the
+    parameter names in one place for both ends of the hop.
     """
     base = _normalize(local_gui_url)
-    if not base:
+    if not base or not deployment_origin(base):
         return None
-    route = build_route(base, node_id, return_session_id=session_id)
+    route = build_route(base, "", return_session_id=session_id)
     return route or None
 
 
@@ -206,21 +208,23 @@ def resolve_teleport_target(
     metadata = node_metadata or {}
     origin_graph_id = _normalize(metadata.get("origin_graph_id"))
 
-    # Nothing to resolve for an id that names no node, whatever metadata a
-    # caller happened to pass alongside it.
-    if not node_exists:
-        return TeleportTarget(status=STATUS_UNKNOWN_NODE)
-
-    # Visibility is checked before any endpoint or graph field is read, so a
-    # denied response can carry none of them. One reason for both the local and
-    # the remote case on purpose: a reason that said which of the two it was
-    # would tell a caller probing ids that the node belongs to a graph other
-    # than the local one, and so that a graph they cannot see exists.
+    # Visibility comes first — before the node is known to exist, and before
+    # any endpoint or graph field is read. A federated id embeds its graph id
+    # (``federated::<graph_id>::<origin_id>``), so answering "no such node" for
+    # an invisible graph and "denied" for a visible-but-forbidden one would
+    # confirm, to anyone able to probe ids, which graphs are configured and
+    # synced. Every id naming a graph the narrowing excludes gets the same
+    # answer, with the same single reason for the local and the remote case.
     if not graph_access_matches(graph_id=origin_graph_id):
         return TeleportTarget(
             status=STATUS_PERMISSION_DENIED,
             reason=REASON_NOT_VISIBLE,
         )
+
+    # Only then: nothing to resolve for an id that names no node, whatever
+    # metadata a caller happened to pass alongside it.
+    if not node_exists:
+        return TeleportTarget(status=STATUS_UNKNOWN_NODE)
 
     # A node with no origin graph is owned here. This is the same field the
     # local path uses for visibility narrowing, so local and federated nodes
@@ -280,6 +284,23 @@ def resolve_teleport_target(
             reason="no_gui_url_configured",
         )
 
+    target_origin = deployment_origin(gui_url)
+    if not target_origin:
+        # A gui_url without a scheme and host is not a route anywhere: the
+        # browser would resolve it against the *caller's* own origin, so the
+        # user would confirm leaving for another deployment and land back on
+        # their own at a bogus path. Omitting the scheme is an easy operator
+        # mistake, so it degrades like any other unreachable graph. This also
+        # makes cross_deployment meaningful whenever the status is ok.
+        return TeleportTarget(
+            status=STATUS_GRAPH_UNAVAILABLE,
+            origin_graph_id=origin_graph_id,
+            origin_graph_name=display_name,
+            origin_node_id=origin_node_id,
+            trust_level=trust_level,
+            reason="gui_url_not_absolute",
+        )
+
     if not origin_node_id:
         return TeleportTarget(
             status=STATUS_GRAPH_UNAVAILABLE,
@@ -310,13 +331,12 @@ def resolve_teleport_target(
             reason="no_gui_url_configured",
         )
 
-    target_origin = deployment_origin(gui_url)
+    # target_origin is non-empty by the guard above, so this is a real
+    # comparison: an unknown *caller* origin is the only indeterminate side left,
+    # and it reports a hop, because the UI's warning is the safe default when we
+    # cannot prove the hop stays in place.
     caller_origin = deployment_origin(request_origin)
-    # Unknown origins are reported as a cross-deployment hop: the UI's warning
-    # is the safe default when we cannot prove the hop stays in place.
-    cross_deployment = not (
-        target_origin and caller_origin and target_origin == caller_origin
-    )
+    cross_deployment = target_origin != caller_origin
 
     return TeleportTarget(
         status=STATUS_OK,
@@ -326,8 +346,5 @@ def resolve_teleport_target(
         origin_node_id=origin_node_id,
         cross_deployment=cross_deployment,
         trust_level=trust_level,
-        backlink=build_backlink(
-            local_gui_url,
-            session_id=session_id,
-        ),
+        backlink=build_backlink(local_gui_url, session_id=session_id),
     )

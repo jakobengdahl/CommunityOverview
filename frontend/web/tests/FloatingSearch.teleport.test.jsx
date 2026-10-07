@@ -3,6 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import FloatingSearch from '../src/components/FloatingSearch';
 import useGraphStore from '../src/store/graphStore';
+import en from '../src/i18n/en.json';
 
 vi.mock('../src/services/api', () => ({
   searchGraph: vi.fn(),
@@ -129,6 +130,18 @@ describe('FloatingSearch teleport action (task-federated-graph-teleport)', () =>
     expect(document.querySelectorAll('.floating-search-result-row')).toHaveLength(2);
     expect(document.querySelectorAll('.floating-search-result')).toHaveLength(2);
     expect(teleportButtons()).toHaveLength(1);
+  });
+
+  it('takes its tooltip from i18n rather than rendering a key name', async () => {
+    // keyParity.test.js compares en.json with sv.json but cannot see which keys
+    // the source actually calls, so a mistyped key renders as the key itself and
+    // nothing fails. The aria-label is already pinned by the role query above.
+    await searchWith([FEDERATED_RESULT], { onTeleport: vi.fn() });
+
+    const button = screen.getByRole('button', { name: /open in source graph/i });
+    expect(button.getAttribute('title')).toBe(en.federation.teleport_action_tooltip);
+    expect(button.getAttribute('title')).not.toContain('federation.');
+    expect(button.getAttribute('aria-label')).toBe(en.federation.teleport_action);
   });
 
   it('labels the row through the shared provenance reader', async () => {

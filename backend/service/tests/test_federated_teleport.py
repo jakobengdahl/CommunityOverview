@@ -294,6 +294,105 @@ def test_a_refused_request_is_an_access_denied_error_not_a_teleport_status(tmp_p
     assert "status" not in result
 
 
+def _two_graph_service(tmp_path):
+    """A service with two configured graphs, both cached and healthy."""
+    graph_file = tmp_path / "graph.json"
+    graph_file.write_text(json.dumps({"nodes": [], "edges": []}), encoding="utf-8")
+    storage = GraphStorage(str(graph_file))
+
+    config = FederationFileConfig.model_validate(
+        {
+            "federation": {
+                "enabled": True,
+                "graphs": [
+                    {
+                        "graph_id": "esam-main",
+                        "display_name": "eSam",
+                        "trust_level": "partner",
+                        "endpoints": {
+                            "graph_json_url": "https://esam.example/graph.json",
+                            "gui_url": "https://esam.example/app",
+                        },
+                    },
+                    {
+                        "graph_id": "other-main",
+                        "display_name": "Other",
+                        "trust_level": "external",
+                        "endpoints": {
+                            "graph_json_url": "https://other.example/graph.json",
+                            "gui_url": "https://other.example/app",
+                        },
+                    },
+                ],
+            }
+        }
+    )
+    manager = FederationManager(config)
+    for graph, node_id in zip(config.federation.graphs, ("remote-1", "other-1")):
+        cache_nodes, _ = manager._build_cache(
+            graph, [{"id": node_id, "type": "Actor", "name": node_id}], []
+        )
+        manager._cache[graph.graph_id].nodes = cache_nodes
+        manager._cache[graph.graph_id].status = "healthy"
+    return GraphService(storage, federation_manager=manager)
+
+
+def test_a_node_routes_to_its_own_graph_not_to_another_configured_one(tmp_path):
+    # Every other fixture configures a single graph, which cannot tell a
+    # correctly-keyed config lookup from one that ignores the graph id and
+    # returns whichever graph comes first.
+    service = _two_graph_service(tmp_path)
+
+    first = service.resolve_teleport("federated::esam-main::remote-1")
+    second = service.resolve_teleport("federated::other-main::other-1")
+
+    assert first["route"].startswith("https://esam.example/app")
+    assert first["origin_graph_name"] == "eSam"
+    assert first["trust_level"] == "partner"
+    assert second["route"].startswith("https://other.example/app")
+    assert second["origin_graph_name"] == "Other"
+    assert second["trust_level"] == "external"
+
+
+def test_no_other_graphs_endpoint_appears_for_a_narrowed_caller(tmp_path):
+    service = _two_graph_service(tmp_path)
+    service._authorization_hook = _NarrowingHook("esam-main")
+
+    allowed = service.resolve_teleport("federated::esam-main::remote-1")
+    denied = service.resolve_teleport("federated::other-main::other-1")
+
+    assert allowed["status"] == teleport.STATUS_OK
+    assert "other.example" not in repr(allowed)
+    assert denied["status"] == teleport.STATUS_PERMISSION_DENIED
+    assert "other.example" not in repr(denied)
+    assert "Other" not in repr(denied)
+
+
+# ---------------------------------------------------------------------------
+# Federation disabled globally
+# ---------------------------------------------------------------------------
+
+
+def test_a_cached_node_does_not_route_while_federation_is_disabled(tmp_path):
+    # Every other federation path gates on the global flag; a cache left healthy
+    # from before the flag was turned off must not keep teleport working.
+    service = _service(tmp_path)
+    service._federation_manager._config.federation.enabled = False
+
+    result = service.resolve_teleport("federated::esam-main::remote-1")
+
+    assert result["status"] == teleport.STATUS_GRAPH_UNAVAILABLE
+    assert result["reason"] == "graph_not_configured"
+    assert "route" not in result
+
+
+def test_a_local_node_still_resolves_while_federation_is_disabled(tmp_path):
+    service = _service(tmp_path, local_nodes=[_local_node()])
+    service._federation_manager._config.federation.enabled = False
+
+    assert service.resolve_teleport("local-1")["status"] == teleport.STATUS_LOCAL
+
+
 # ---------------------------------------------------------------------------
 # Behaviour 2: unavailable graph
 # ---------------------------------------------------------------------------
