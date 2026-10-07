@@ -215,7 +215,6 @@ class GraphService:
         node_id: str,
         session_id: str = "",
         search_query: str = "",
-        request_origin: str = "",
         local_gui_url: str = "",
     ) -> Dict[str, Any]:
         return queries.resolve_teleport(
@@ -225,7 +224,6 @@ class GraphService:
             node_id,
             session_id=session_id,
             search_query=search_query,
-            request_origin=request_origin,
             local_gui_url=local_gui_url,
         )
 

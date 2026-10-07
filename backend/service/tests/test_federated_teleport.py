@@ -127,7 +127,7 @@ def test_the_route_carries_the_session_and_the_search_context(tmp_path):
 def test_a_teleport_out_of_this_deployment_is_flagged_cross_deployment(tmp_path):
     result = _service(tmp_path).resolve_teleport(
         "federated::esam-main::remote-1",
-        request_origin="https://here.example/",
+        local_gui_url="https://here.example/",
     )
 
     assert result["cross_deployment"] is True
@@ -136,7 +136,7 @@ def test_a_teleport_out_of_this_deployment_is_flagged_cross_deployment(tmp_path)
 def test_a_teleport_within_one_deployment_is_not_flagged(tmp_path):
     result = _service(tmp_path, gui_url="https://here.example/other").resolve_teleport(
         "federated::esam-main::remote-1",
-        request_origin="https://here.example/",
+        local_gui_url="https://here.example/app",
     )
 
     assert result["cross_deployment"] is False
@@ -264,6 +264,23 @@ def test_a_denied_caller_is_told_nothing_about_the_graph(tmp_path):
     assert result["reason"] == teleport.REASON_NOT_VISIBLE
 
 
+def test_denial_is_identical_whether_or_not_the_node_exists(tmp_path):
+    # Through the real entry point, which passes no metadata for a node it did
+    # not find — the shape the pure-resolver test could not reach. A differing
+    # answer here is a per-node existence oracle inside a graph the caller may
+    # not see, and also distinguishes a synced invisible graph from an
+    # unconfigured one.
+    service = _service(tmp_path)
+    service._authorization_hook = _NarrowingHook("other-graph")
+
+    existing = service.resolve_teleport("federated::esam-main::remote-1")
+    missing = service.resolve_teleport("federated::esam-main::no-such-node")
+    unconfigured = service.resolve_teleport("federated::never-configured::whatever")
+
+    assert existing["status"] == teleport.STATUS_PERMISSION_DENIED
+    assert existing == missing == unconfigured
+
+
 def test_a_caller_narrowed_to_the_source_graph_still_gets_its_route(tmp_path):
     service = _service(tmp_path)
     service._authorization_hook = _NarrowingHook("esam-main")
@@ -271,6 +288,71 @@ def test_a_caller_narrowed_to_the_source_graph_still_gets_its_route(tmp_path):
     result = service.resolve_teleport("federated::esam-main::remote-1")
 
     assert result["status"] == teleport.STATUS_OK
+
+
+def test_a_caller_scoped_to_the_remote_graph_alone_still_gets_its_route(tmp_path):
+    # A SaaS caller may be entitled to a federated graph and not to the host's
+    # own local graph. The pre-check that avoids reading config for an excluded
+    # graph must test the node's graph, not the local one, or such a caller is
+    # told a healthy, configured, entitled graph is unreachable.
+    service = _service(tmp_path)
+    service._authorization_hook = _NarrowingHook("esam-main", allow_local=False)
+
+    result = service.resolve_teleport("federated::esam-main::remote-1")
+
+    assert result["status"] == teleport.STATUS_OK, result
+    assert result["route"].startswith("https://esam.example/app")
+
+
+def test_provenance_alone_classifies_a_node_as_remote(tmp_path):
+    # access.node_graph_id narrows visibility on origin_graph_id alone, so a node
+    # that carries provenance without the is_federated marker — a profile seed,
+    # an import, or a node created through MCP/REST — is already remote for
+    # access control. Teleport must agree rather than reading a second marker.
+    service = _service(tmp_path)
+    service._storage.add_nodes(
+        [
+            Node(
+                id="seeded-1",
+                type=NodeType.ACTOR,
+                name="Seeded",
+                metadata={
+                    "origin_graph_id": "esam-main",
+                    "origin_graph_name": "eSam",
+                    "origin_node_id": "remote-1",
+                },
+            )
+        ],
+        [],
+    )
+
+    result = service.resolve_teleport("seeded-1")
+
+    assert result["status"] == teleport.STATUS_OK, result
+    assert parse_qs(urlsplit(result["route"]).query)["node"] == ["remote-1"]
+
+
+def test_nothing_about_an_excluded_graph_is_even_looked_up(tmp_path):
+    # The payload is identical either way because the resolver denies before it
+    # reads anything, so the property is only observable as a call that does not
+    # happen.
+    service = _service(tmp_path)
+    service._authorization_hook = _NarrowingHook("other-graph")
+    manager = service._federation_manager
+    looked_up = []
+    real_config = manager.get_graph_config
+    real_status = manager.get_cache_status
+    manager.get_graph_config = lambda gid: (
+        looked_up.append(("config", gid)) or real_config(gid)
+    )
+    manager.get_cache_status = lambda gid: (
+        looked_up.append(("status", gid)) or real_status(gid)
+    )
+
+    result = service.resolve_teleport("federated::esam-main::remote-1")
+
+    assert result["status"] == teleport.STATUS_PERMISSION_DENIED
+    assert looked_up == []
 
 
 def test_a_local_node_is_withheld_from_a_caller_narrowed_off_the_local_graph(tmp_path):

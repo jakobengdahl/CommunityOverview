@@ -273,32 +273,44 @@ The response's `status` is one of:
   status the UI renders, not a `403`: the request itself was allowed, only this
   one graph is not visible. Visibility is decided **before the node is known to
   exist**, so every id naming a graph the narrowing excludes gets the identical
-  answer: a federated id embeds its graph id
-  (`federated::<graph_id>::<origin_id>`), and answering "no such node" for an
-  invisible graph while answering "denied" for a visible one would confirm which
-  graphs are configured and synced to anyone able to probe ids. A caller who
-  *may* see the graph can still be told `unknown_node`, which tells them nothing
-  they could not already learn.
+  answer — answering "no such node" for an invisible graph while answering
+  "denied" for a visible one would confirm which graphs are configured and
+  synced to anyone able to probe ids.
+
+  That requires a graph id for a node that was not found, which has no metadata
+  to read. A cached federated node's id *is*
+  `federated::<graph_id>::<origin_node_id>`, so the id itself supplies it:
+  `teleport.parse_federated_node_id` reads the graph back out, and
+  `FederationManager._build_cache` composes ids with the matching builder so the
+  format has one owner. A node's own `origin_graph_id` still wins where it has
+  one, which is what makes an adoption reference stub resolve to its source
+  graph. A caller who *may* see the graph can still be told `unknown_node`,
+  which tells them nothing they could not already learn.
 - **Unavailable graph.** A `reason` distinguishes `graph_disabled`,
   `graph_unreachable`, `no_gui_url_configured`, `gui_url_not_absolute`,
   `graph_not_configured` and `no_origin_node_id`. The graph *is* named here,
   because a caller who reaches this state is already entitled to see it.
-  `gui_url_not_absolute` covers a `gui_url` configured without a scheme and
-  host: a browser would resolve it against the *caller's* own origin, so the
-  user would confirm leaving for another deployment and land back on their own
-  at a bogus path. Refusing it also means `cross_deployment` is a real
-  comparison whenever the status is `ok`, rather than an unknown defaulting to
-  `true`. Federation being disabled globally lands here too, as
-  `graph_not_configured`.
+  `gui_url_not_absolute` covers a `gui_url` that is not an absolute `http(s)`
+  URL. Without a scheme and host a browser resolves it against the *caller's*
+  own origin, so the user would confirm leaving for another deployment and land
+  back on their own at a bogus path. A scheme such as `javascript:`, `file:` or
+  `data:` is refused for a sharper reason: carrying a host makes it parse as
+  absolute, and the resolved route is handed to `window.open`, so it would run
+  in the caller's origin. `federation.ROUTE_SCHEMES` is the allowed set, and the
+  browser re-checks the scheme before opening rather than trusting one layer.
+  Refusing all of these also means `cross_deployment` is a real comparison
+  whenever the status is `ok`, rather than an unknown defaulting to `true`.
+  Federation being disabled globally lands here too, as `graph_not_configured`.
 - **Cross-deployment.** `cross_deployment` compares the scheme, host and port of
   the target `gui_url` against this deployment's own origin, so two graphs served
   as different paths of one deployment are not reported as a hop. That origin is
-  `COMMUNITYOVERVIEW_PUBLIC_BASE_URL` where it is set, falling back to the
-  request's `base_url`: behind a TLS-terminating proxy the request's own base URL
-  is the *internal* one (uvicorn runs without `--proxy-headers`), whose scheme
-  alone would make every hop look cross-deployment. An origin on **either** side
-  that cannot be parsed counts as cross-deployment: the UI's confirmation is the
-  safe default when the hop cannot be proven to stay in place.
+  `COMMUNITYOVERVIEW_PUBLIC_BASE_URL` and nothing else. Nothing derived from the
+  request is used: a request's own host comes from the `Host` header, so a caller
+  could otherwise claim the target's origin and suppress the confirmation. A
+  deployment that has not configured its public URL therefore has no origin to
+  compare and reports **every** hop, which is the safe default — the alternative
+  is trusting the caller. Credentials in a configured URL are not part of an
+  origin, so two URLs differing only in userinfo are the same deployment.
 - **Backlink.** When `COMMUNITYOVERVIEW_PUBLIC_BASE_URL` is set, the response
   carries a `backlink` to this deployment and the outbound route carries
   `from_session`. Standalone deployments do not know their own public URL, so no

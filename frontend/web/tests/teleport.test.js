@@ -197,6 +197,54 @@ describe('teleportToSourceGraph — the remaining outcomes', () => {
   });
 });
 
+describe('teleportToSourceGraph — what may be opened', () => {
+  it.each([
+    'javascript://x%0aalert(document.domain)//',
+    'javascript:alert(1)',
+    'data:text/html,<script>alert(1)</script>',
+    'file:///etc/passwd',
+    'vbscript://host/x',
+  ])('refuses to open %s even on an ok status', async (route) => {
+    // The backend refuses to build these, but this is the last step before
+    // window.open, so it does not take that on trust.
+    const h = harness({ status: 'ok', route, cross_deployment: false });
+
+    expect(await h.run()).toBe('failed');
+    expect(h.opened).toEqual([]);
+    expect(h.notifications).toEqual([['error', 'federation.teleport_failed']]);
+  });
+
+  it.each([undefined, null, '', 42])('refuses a route of %p', async (route) => {
+    const h = harness({ status: 'ok', route, cross_deployment: false });
+
+    expect(await h.run()).toBe('failed');
+    expect(h.opened).toEqual([]);
+  });
+
+  it.each(['https://esam.example/app?node=r1', 'http://esam.example/app?node=r1'])(
+    'opens %s',
+    async (route) => {
+      const h = harness({ status: 'ok', route, cross_deployment: false });
+
+      expect(await h.run()).toBe('ok');
+      expect(h.opened).toEqual([route]);
+    }
+  );
+
+  it('refuses a script route before asking for confirmation', async () => {
+    // Otherwise the user is asked to approve something that must be refused.
+    const h = harness({
+      status: 'ok',
+      route: 'javascript://x%0aalert(1)//',
+      cross_deployment: true,
+    });
+
+    expect(await h.run()).toBe('failed');
+    expect(h.confirmed).toEqual([]);
+    expect(h.opened).toEqual([]);
+  });
+});
+
 describe('teleportToSourceGraph — defaults', () => {
   beforeEach(() => {
     vi.restoreAllMocks();

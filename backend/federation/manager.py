@@ -13,6 +13,7 @@ import httpx2 as httpx
 from backend.core import storage_search
 from backend.core.models import Edge, Node
 
+from . import teleport
 from .config import FederationFileConfig, FederationGraphConfig
 
 
@@ -521,7 +522,9 @@ class FederationManager:
         id_mapping: Dict[str, str] = {}
         for source_node in source_nodes:
             origin_node_id = source_node.get("id")
-            federated_node_id = f"federated::{graph.graph_id}::{origin_node_id}"
+            federated_node_id = teleport.build_federated_node_id(
+                graph.graph_id, origin_node_id
+            )
             id_mapping[str(origin_node_id)] = federated_node_id
 
             metadata = dict(source_node.get("metadata") or {})
@@ -562,7 +565,9 @@ class FederationManager:
             if not source or not target:
                 continue
 
-            edge_id = f"federated::{graph.graph_id}::{source_edge.get('id', f'{source}->{target}')}"
+            edge_id = teleport.build_federated_node_id(
+                graph.graph_id, source_edge.get("id", f"{source}->{target}")
+            )
             edge_payload = {
                 "id": edge_id,
                 "source": source,

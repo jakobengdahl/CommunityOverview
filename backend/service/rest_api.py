@@ -657,7 +657,6 @@ def _register_similarity_endpoints(router: APIRouter, service: GraphService) -> 
                 node_id=request.node_id,
                 session_id=request.session_id or "",
                 search_query=request.search_query or "",
-                request_origin=str(http_request.base_url),
                 local_gui_url=get_public_base_url(),
             )
         _raise_for_access_denied(result)

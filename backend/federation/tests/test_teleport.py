@@ -70,9 +70,10 @@ def _resolve(**overrides):
         "graph_access_matches": _allow_all,
         "graph_config": _graph(),
         "cache_status": "healthy",
-        "request_origin": "https://graph-a.example/",
         "session_id": "",
         "search_query": "",
+        # No configured public URL by default, so a hop reports as
+        # cross-deployment unless a test supplies this deployment's own origin.
         "local_gui_url": "",
     }
     kwargs.update(overrides)
@@ -199,13 +200,87 @@ def test_the_denial_reason_does_not_say_whether_the_graph_was_local_or_remote():
 def test_denial_does_not_reveal_whether_the_node_exists():
     # A federated id embeds its graph id, so answering "no such node" for an
     # invisible graph and "denied" for a visible one would confirm which graphs
-    # are configured and synced to anyone able to probe ids. Visibility is
-    # therefore decided before existence, and both answers are identical.
-    present = _resolve(graph_access_matches=_deny_all, node_exists=True)
-    absent = _resolve(graph_access_matches=_deny_all, node_exists=False)
+    # are configured and synced to anyone able to probe ids.
+    #
+    # A missing node reaches the resolver with no metadata at all — that is what
+    # queries.resolve_teleport passes — so the absent case is given that shape
+    # rather than a metadata dict it could never carry. Pinning the
+    # metadata-rich pair instead is what let this leak read as closed.
+    present = _resolve(
+        graph_access_matches=_deny_all,
+        node_exists=True,
+        node_id="federated::remote-a::node-7",
+    )
+    absent = teleport.resolve_teleport_target(
+        node_metadata=None,
+        node_exists=False,
+        graph_access_matches=_deny_all,
+        node_id="federated::remote-a::no-such-node",
+        graph_config=None,
+    )
 
     assert present.status == absent.status == teleport.STATUS_PERMISSION_DENIED
     assert present.to_dict() == absent.to_dict()
+
+
+def test_the_requested_id_supplies_the_graph_when_the_node_is_missing():
+    target = teleport.resolve_teleport_target(
+        node_metadata=None,
+        node_exists=False,
+        graph_access_matches=_allow_only("other-graph"),
+        node_id="federated::remote-a::no-such-node",
+    )
+
+    assert target.status == teleport.STATUS_PERMISSION_DENIED
+
+
+def test_a_missing_local_id_is_an_unknown_node():
+    target = teleport.resolve_teleport_target(
+        node_metadata=None,
+        node_exists=False,
+        graph_access_matches=_allow_all,
+        node_id="local-1",
+    )
+
+    assert target.status == teleport.STATUS_UNKNOWN_NODE
+
+
+def test_the_nodes_own_provenance_wins_over_the_requested_id():
+    # An adoption reference stub is a local node keyed by a federated id; its
+    # metadata is the authority on which graph owns it.
+    target = _resolve(
+        node_metadata=_federated_metadata(origin_graph_id="remote-a"),
+        node_id="federated::some-other-graph::node-7",
+        graph_access_matches=_allow_only("remote-a"),
+    )
+
+    assert target.status == teleport.STATUS_OK
+    assert target.origin_graph_id == "remote-a"
+
+
+@pytest.mark.parametrize(
+    "node_id,expected",
+    [
+        ("federated::esam-main::remote-1", ("esam-main", "remote-1")),
+        ("federated::g::a::b", ("g", "a::b")),
+        ("federated::  g  ::n", ("g", "n")),
+        ("local-1", ("", "")),
+        ("federated::only", ("", "")),
+        ("other::g::n", ("", "")),
+        ("", ("", "")),
+    ],
+)
+def test_a_federated_id_parses_into_its_graph_and_origin(node_id, expected):
+    assert teleport.parse_federated_node_id(node_id) == expected
+
+
+def test_the_id_builder_and_the_parser_agree():
+    # FederationManager._build_cache builds ids with the builder, so the format
+    # teleport reads a graph id back out of is the format that was written.
+    built = teleport.build_federated_node_id("esam-main", "remote-1")
+
+    assert built == "federated::esam-main::remote-1"
+    assert teleport.parse_federated_node_id(built) == ("esam-main", "remote-1")
 
 
 def test_a_visible_graph_may_still_report_an_unknown_node():
@@ -314,7 +389,7 @@ def test_an_unavailable_graph_falls_back_to_the_cached_display_name():
 def test_a_route_to_the_same_deployment_is_not_cross_deployment():
     target = _resolve(
         graph_config=_graph(gui_url="https://same.example/graph-a"),
-        request_origin="https://same.example/",
+        local_gui_url="https://same.example/",
     )
 
     assert target.status == teleport.STATUS_OK
@@ -324,7 +399,7 @@ def test_a_route_to_the_same_deployment_is_not_cross_deployment():
 def test_a_route_to_a_different_host_is_cross_deployment():
     target = _resolve(
         graph_config=_graph(gui_url="https://other.example/app"),
-        request_origin="https://same.example/",
+        local_gui_url="https://same.example/",
     )
 
     assert target.cross_deployment is True
@@ -333,7 +408,7 @@ def test_a_route_to_a_different_host_is_cross_deployment():
 def test_a_different_port_is_a_different_deployment():
     target = _resolve(
         graph_config=_graph(gui_url="https://same.example:8443/app"),
-        request_origin="https://same.example/",
+        local_gui_url="https://same.example/",
     )
 
     assert target.cross_deployment is True
@@ -342,7 +417,7 @@ def test_a_different_port_is_a_different_deployment():
 def test_a_different_scheme_is_a_different_deployment():
     target = _resolve(
         graph_config=_graph(gui_url="http://same.example/app"),
-        request_origin="https://same.example/",
+        local_gui_url="https://same.example/",
     )
 
     assert target.cross_deployment is True
@@ -351,23 +426,40 @@ def test_a_different_scheme_is_a_different_deployment():
 def test_origin_comparison_ignores_case_and_path():
     target = _resolve(
         graph_config=_graph(gui_url="https://SAME.example/a/deep/path"),
-        request_origin="https://same.EXAMPLE/elsewhere",
+        local_gui_url="https://same.EXAMPLE/elsewhere",
     )
 
     assert target.cross_deployment is False
 
 
-@pytest.mark.parametrize("request_origin", ["", "not-a-url", "/relative/only"])
-def test_an_unknown_caller_origin_is_reported_as_cross_deployment(request_origin):
-    # The UI warns before leaving; defaulting to "same deployment" when we
-    # cannot tell would drop that warning exactly when it is least safe.
-    target = _resolve(request_origin=request_origin)
+@pytest.mark.parametrize("local_gui_url", ["", "not-a-url", "/relative/only"])
+def test_a_deployment_with_no_origin_of_its_own_reports_every_hop(local_gui_url):
+    # A deployment with no configured public URL has no origin to compare, so
+    # the UI still confirms. Defaulting to "same deployment" would drop that
+    # warning exactly when it is least safe, and the only other candidate — the
+    # request's own host — comes from a header the caller controls.
+    target = _resolve(local_gui_url=local_gui_url)
 
     assert target.cross_deployment is True
 
 
 @pytest.mark.parametrize(
-    "gui_url", ["esam.example/app", "/app", "app", "localhost:8100"]
+    "gui_url",
+    [
+        "esam.example/app",
+        "/app",
+        "app",
+        "localhost:8100",
+        # Protocol-relative: a very common way to write a scheme-agnostic URL,
+        # and still resolved against the caller's origin by the browser.
+        "//esam.example/app",
+        # These parse as absolute, but are not somewhere a graph lives — and the
+        # route would be handed to window.open.
+        "javascript://x%0aalert(document.domain)//",
+        "vbscript://host/x",
+        "file://host/etc/passwd",
+        "ftp://host/x",
+    ],
 )
 def test_a_gui_url_that_is_not_an_absolute_url_yields_no_route(gui_url):
     # A gui_url without a scheme and host is not a route anywhere: a browser
@@ -376,7 +468,7 @@ def test_a_gui_url_that_is_not_an_absolute_url_yields_no_route(gui_url):
     # degrades like any other unreachable graph rather than being handed out.
     target = _resolve(
         graph_config=_graph(gui_url=gui_url),
-        request_origin="https://here.example/",
+        local_gui_url="https://here.example/",
     )
 
     assert teleport.deployment_origin(gui_url) == ""
@@ -507,11 +599,59 @@ def test_a_blank_configured_parameter_is_not_discarded_from_the_route():
     assert params["node"] == ["n1"]
 
 
-def test_build_backlink_refuses_a_base_url_that_is_not_absolute():
+@pytest.mark.parametrize(
+    "base",
+    ["/app", "here.example/app", "//here.example/app", "javascript://x/%0aalert(1)//"],
+)
+def test_build_backlink_refuses_a_base_url_that_is_not_a_web_url(base):
     # The receiving deployment would resolve a relative backlink against its
-    # own origin, which is not where the visitor came from.
-    assert teleport.build_backlink("/app", session_id="s1") is None
-    assert teleport.build_backlink("here.example/app", session_id="s1") is None
+    # own origin, which is not where the visitor came from; a script URL is not
+    # a way home at all.
+    assert teleport.build_backlink(base, session_id="s1") is None
+
+
+def test_a_backlink_addresses_no_node_even_if_its_base_url_named_one():
+    # build_route owns the node parameter, so a configured base carrying its own
+    # node= does not leave a stale one on the way home.
+    backlink = teleport.build_backlink(
+        "https://here.example/app?node=stale&lang=sv", session_id="s1"
+    )
+
+    params = parse_qs(urlsplit(backlink).query)
+    assert "node" not in params
+    assert params["lang"] == ["sv"]
+    assert params["from_session"] == ["s1"]
+
+
+def test_an_owned_parameter_is_removed_rather_than_inherited():
+    route = teleport.build_route("https://x.example/app?q=old&lang=sv", "n1")
+
+    params = parse_qs(urlsplit(route).query)
+    assert "q" not in params
+    assert params["lang"] == ["sv"]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "javascript://x/%0aalert(1)//",
+        "vbscript://host/x",
+        "data://host/text/html,x",
+        "file://host/share/x",
+        "ftp://host/x",
+        "//host/app",
+    ],
+)
+def test_deployment_origin_rejects_anything_that_is_not_a_web_url(url):
+    assert teleport.deployment_origin(url) == ""
+
+
+def test_deployment_origin_ignores_credentials_in_the_url():
+    # Two URLs differing only in userinfo are the same deployment, so a
+    # configured credential does not make a hop look cross-deployment.
+    assert teleport.deployment_origin("https://u:p@h.example/x") == (
+        teleport.deployment_origin("https://h.example/y")
+    )
 
 
 def test_build_route_replaces_rather_than_appends_a_colliding_parameter():

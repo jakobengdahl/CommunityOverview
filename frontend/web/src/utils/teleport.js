@@ -16,6 +16,30 @@
 
 import * as api from '../services/api';
 
+/** Schemes a resolved route may use — it is about to be handed to the browser. */
+const OPENABLE_SCHEMES = new Set(['http:', 'https:']);
+
+/**
+ * True when `route` is an absolute http(s) URL.
+ *
+ * The backend already refuses to build anything else (see
+ * `backend/federation/teleport.py`'s `ROUTE_SCHEMES`), so this is a second
+ * check on the same rule rather than the only one: a `javascript:` URL that
+ * reached `window.open` would run in this page's origin, which is too bad an
+ * outcome to leave to one layer.
+ *
+ * @param {unknown} route - Candidate route from the resolver
+ * @returns {boolean}
+ */
+function isOpenableRoute(route) {
+  if (typeof route !== 'string' || route === '') return false;
+  try {
+    return OPENABLE_SCHEMES.has(new URL(route).protocol);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * @param {Object} params
  * @param {string} params.nodeId - Node to teleport from
@@ -55,6 +79,12 @@ export async function teleportToSourceGraph({
 
   switch (target?.status) {
     case 'ok': {
+      // The server only reports ok with an http(s) route, but this is the last
+      // step before window.open, so it does not take that on trust.
+      if (!isOpenableRoute(target.route)) {
+        showNotification('error', t('federation.teleport_failed'));
+        return 'failed';
+      }
       if (
         target.cross_deployment &&
         !ask(t('federation.teleport_cross_deployment_confirm', { graph: graphLabel }))

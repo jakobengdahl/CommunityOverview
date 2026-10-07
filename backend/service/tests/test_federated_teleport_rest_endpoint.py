@@ -223,22 +223,56 @@ class TestTheOriginComparedAgainst:
         # be determined, so the hop must be reported as cross-deployment. Taking
         # the origin from a request header would let a caller claim the target's
         # origin and suppress the UI's confirmation.
+        #
+        # The gui_url is http, matching the scheme TestClient's own base_url
+        # carries: with an https gui_url this passed on the scheme mismatch
+        # alone and said nothing about whether the header was consulted.
         client, _ = make_client(
-            public_base_url="", gui_url="https://elsewhere.example/app"
+            public_base_url="", gui_url="http://elsewhere.example/app"
         )
 
         body = client.post(
             "/api/federation/teleport",
             json={"node_id": "federated::esam-main::remote-1"},
             headers={
-                "Origin": "https://elsewhere.example",
-                "X-Forwarded-Host": "elsewhere.example",
                 "Host": "elsewhere.example",
+                "Origin": "http://elsewhere.example",
+                "X-Forwarded-Host": "elsewhere.example",
+                "X-Forwarded-Proto": "http",
             },
         ).json()
 
         assert body["status"] == teleport.STATUS_OK
         assert body["cross_deployment"] is True
+
+    def test_a_denial_is_identical_whether_or_not_the_node_exists(self, make_client):
+        client, _ = make_client(hook=_NarrowingHook("other-graph"))
+
+        existing = client.post(
+            "/api/federation/teleport",
+            json={"node_id": "federated::esam-main::remote-1"},
+        ).json()
+        missing = client.post(
+            "/api/federation/teleport",
+            json={"node_id": "federated::esam-main::no-such-node"},
+        ).json()
+
+        assert existing["status"] == teleport.STATUS_PERMISSION_DENIED
+        assert existing == missing
+
+    def test_a_script_gui_url_never_becomes_a_route(self, make_client):
+        # The route is handed to window.open, so a scheme that would execute in
+        # the caller's own origin must not resolve to one.
+        client, _ = make_client(gui_url="javascript://x%0aalert(document.domain)//")
+
+        body = client.post(
+            "/api/federation/teleport",
+            json={"node_id": "federated::esam-main::remote-1"},
+        ).json()
+
+        assert body["status"] == teleport.STATUS_GRAPH_UNAVAILABLE
+        assert body["reason"] == "gui_url_not_absolute"
+        assert "route" not in body
 
     def test_the_request_body_field_names_are_the_ones_the_client_sends(
         self, make_client

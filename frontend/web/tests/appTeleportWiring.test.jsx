@@ -212,6 +212,29 @@ describe('App teleport wiring', () => {
       expect(store().guideSearchInput).toBeNull();
     });
 
+    it('says which graph the visitor came from', async () => {
+      api.getNodeDetails.mockResolvedValue({ success: true, node: REMOTE_NODE, edges: [] });
+      setSearch('?node=remote-1&from_graph=eSam');
+
+      await renderApp();
+
+      await waitFor(() =>
+        expect(
+          screen.getByText(en.federation.teleport_returned_from.replace('{graph}', 'eSam'))
+        ).toBeInTheDocument()
+      );
+    });
+
+    it('says nothing about a sender the link does not name', async () => {
+      api.getNodeDetails.mockResolvedValue({ success: true, node: REMOTE_NODE, edges: [] });
+      setSearch('?node=remote-1');
+
+      await renderApp();
+
+      await waitFor(() => expect(store().focusNodeId).toBe('remote-1'));
+      expect(screen.queryByText(/Opened from/i)).toBeNull();
+    });
+
     it('does nothing at all without a node parameter', async () => {
       // q alone is not an arrival; nothing should be fetched or prefilled.
       setSearch('?q=external');

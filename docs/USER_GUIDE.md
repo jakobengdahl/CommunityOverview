@@ -934,7 +934,7 @@ Four cases are handled explicitly:
 |---|---|
 | A confirmation before the tab opens | The source graph runs on a separate installation, so you are leaving this one |
 | "You do not have access to this node's source graph" | Your access does not include that graph. Nothing about it is revealed |
-| "&lt;Graph&gt; cannot be reached right now" | The graph is configured but offline, disabled, or has no address set for its interface |
+| "&lt;Graph&gt; cannot be reached right now" | The graph is unknown, offline, disabled, or has no usable address for its interface |
 | "This node is already in the current graph" | The node is local, so there is nowhere to travel to |
 
 Arriving from a teleport, the app focuses the node named in the link, tells you which

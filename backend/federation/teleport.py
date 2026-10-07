@@ -25,9 +25,11 @@ The outcomes are the contract the SaaS layer and the UI both code against:
     and no endpoint is named, so the response cannot be used to discover that a
     graph exists.
 ``graph_unavailable``
-    The source graph is known but cannot be reached right now: it is disabled,
-    it has no ``gui_url`` configured, or its cache is degraded/offline. The
-    graph is named, because the caller is already entitled to see it.
+    The source graph cannot be opened: it is disabled, federation is off, it is
+    no longer configured, its cache is degraded/offline, it has no ``gui_url``,
+    its ``gui_url`` is not an http(s) URL, or the node carries no origin id. The
+    ``reason`` field says which. The graph is named, because the caller is
+    already entitled to see it.
 ``unknown_node``
     Nothing — local or cached — is known by that id.
 """
@@ -50,6 +52,18 @@ UNAVAILABLE_CACHE_STATES = frozenset({"degraded", "offline", "disabled"})
 #: The single denial reason. Deliberately does not distinguish the local graph
 #: from a remote one — see ``resolve_teleport_target``.
 REASON_NOT_VISIBLE = "not_visible"
+
+#: A cached federated node's id is ``federated::<graph_id>::<origin_node_id>``.
+#: The format lives here, and ``FederationManager._build_cache`` builds ids with
+#: it, because teleport has to read the graph id back out of an id whose node is
+#: not (or no longer) cached — that is the only classifier available then.
+FEDERATED_ID_PREFIX = "federated"
+FEDERATED_ID_SEPARATOR = "::"
+
+#: Schemes a route may use. The resolved route is handed to ``window.open``, so
+#: anything else — ``javascript:``, ``vbscript:``, ``file:`` and friends, which
+#: parse as absolute whenever they carry a host — is not a route to a graph.
+ROUTE_SCHEMES = frozenset({"http", "https"})
 
 #: Query parameters of the canonical route. The receiving deployment reads
 #: ``node`` to focus the node, and the rest to offer a way back.
@@ -102,23 +116,57 @@ def _normalize(value: Any) -> str:
     return str(value or "").strip()
 
 
-def deployment_origin(url: str) -> str:
-    """Return the scheme+host+port of ``url``, lowercased, or "" if unparseable.
+def build_federated_node_id(graph_id: str, origin_node_id: Any) -> str:
+    """Compose the cache id for a node fetched from ``graph_id``."""
+    return FEDERATED_ID_SEPARATOR.join(
+        (FEDERATED_ID_PREFIX, str(graph_id), str(origin_node_id))
+    )
 
-    Used to decide ``cross_deployment``. Comparing origins rather than full
-    URLs means two graphs served as different paths of one deployment are not
-    reported as a cross-deployment hop.
+
+def parse_federated_node_id(node_id: str) -> tuple[str, str]:
+    """Split a federated cache id into ``(graph_id, origin_node_id)``.
+
+    Returns ``("", "")`` for anything that is not one, so a local id simply has
+    no graph to read. The origin id keeps any separator it contained, since only
+    the graph id is delimited.
+    """
+    candidate = _normalize(node_id)
+    parts = candidate.split(FEDERATED_ID_SEPARATOR, 2)
+    if len(parts) != 3 or parts[0] != FEDERATED_ID_PREFIX:
+        return "", ""
+    return parts[1].strip(), parts[2]
+
+
+def deployment_origin(url: str) -> str:
+    """Return the scheme+host+port of ``url``, lowercased, or "" if it is not one.
+
+    Used both to decide ``cross_deployment`` and to decide whether a configured
+    URL is a route at all. Comparing origins rather than full URLs means two
+    graphs served as different paths of one deployment are not reported as a
+    cross-deployment hop. Only ``http`` and ``https`` qualify: a script or file
+    URL carrying a host parses as absolute but is not somewhere a graph lives,
+    and the route it would produce ends up in ``window.open``.
     """
     candidate = _normalize(url)
     if not candidate:
         return ""
     try:
         parts = urlsplit(candidate)
+        host = parts.hostname
+        port = parts.port
     except ValueError:
         return ""
-    if not parts.scheme or not parts.netloc:
+    if parts.scheme.lower() not in ROUTE_SCHEMES or not host:
         return ""
-    return f"{parts.scheme.lower()}://{parts.netloc.lower()}"
+    # hostname/port rather than netloc, so credentials in a configured URL are
+    # not part of the identity of a deployment: two URLs differing only in
+    # userinfo are the same origin, not a cross-deployment hop.
+    authority = host.lower()
+    if ":" in authority:  # IPv6 literal — keep it bracketed
+        authority = f"[{authority}]"
+    if port is not None:
+        authority = f"{authority}:{port}"
+    return f"{parts.scheme.lower()}://{authority}"
 
 
 def build_route(
@@ -144,19 +192,23 @@ def build_route(
         return ""
 
     parts = urlsplit(base)
-    params = [(PARAM_NODE, _normalize(origin_node_id))]
-    if return_graph_id:
-        params.append((PARAM_RETURN_GRAPH, return_graph_id))
-    if return_session_id:
-        params.append((PARAM_RETURN_SESSION, return_session_id))
-    if search_query:
-        params.append((PARAM_QUERY, search_query))
+    params = [
+        (PARAM_NODE, _normalize(origin_node_id)),
+        (PARAM_RETURN_GRAPH, _normalize(return_graph_id)),
+        (PARAM_RETURN_SESSION, _normalize(return_session_id)),
+        (PARAM_QUERY, _normalize(search_query)),
+    ]
 
+    # The builder owns these four keys: a value it has is written, a value it
+    # does not have is *removed* rather than inherited from the configured URL.
+    # Inheriting would let a base URL carrying its own node= survive into a
+    # backlink, which addresses no node at all.
+    owned = {key for key, _ in params}
     teleport_params = {key: value for key, value in params if value}
     merged = [
         (key, value)
         for key, value in parse_qsl(parts.query, keep_blank_values=True)
-        if key not in teleport_params
+        if key not in owned
     ]
     merged.extend(teleport_params.items())
 
@@ -190,9 +242,9 @@ def resolve_teleport_target(
     node_metadata: Optional[Dict[str, Any]],
     node_exists: bool,
     graph_access_matches,
+    node_id: str = "",
     graph_config: Optional[Any] = None,
     cache_status: str = "",
-    request_origin: str = "",
     session_id: str = "",
     search_query: str = "",
     local_gui_url: str = "",
@@ -204,9 +256,21 @@ def resolve_teleport_target(
     called as ``graph_access_matches(graph_id=...)`` — the same callable shape
     ``GraphAccessNarrowing.matches`` has, so this module never re-implements an
     authorization rule.
+
+    ``local_gui_url`` is this deployment's configured public URL. It is the
+    origin a route is compared against as well as the base of the backlink;
+    nothing derived from the request is used, because a request's own host comes
+    from a header the caller controls.
     """
     metadata = node_metadata or {}
-    origin_graph_id = _normalize(metadata.get("origin_graph_id"))
+    # The requested id is the classifier of last resort: a node that is not
+    # found has no metadata to read, and without this the visibility check
+    # would fall through to the local-graph check and answer "no such node" for
+    # a graph the caller may not see — an existence oracle for that graph.
+    requested_graph_id, _ = parse_federated_node_id(node_id)
+    origin_graph_id = _normalize(metadata.get("origin_graph_id")) or _normalize(
+        requested_graph_id
+    )
 
     # Visibility comes first — before the node is known to exist, and before
     # any endpoint or graph field is read. A federated id embeds its graph id
@@ -332,10 +396,12 @@ def resolve_teleport_target(
         )
 
     # target_origin is non-empty by the guard above, so this is a real
-    # comparison: an unknown *caller* origin is the only indeterminate side left,
-    # and it reports a hop, because the UI's warning is the safe default when we
-    # cannot prove the hop stays in place.
-    caller_origin = deployment_origin(request_origin)
+    # comparison. A deployment with no configured public URL has no origin of
+    # its own to compare, so every hop reports as cross-deployment: the UI's
+    # confirmation is the safe default when we cannot prove the hop stays in
+    # place, and the alternative — trusting the request's host header — would
+    # let a caller suppress that confirmation.
+    caller_origin = deployment_origin(local_gui_url)
     cross_deployment = target_origin != caller_origin
 
     return TeleportTarget(

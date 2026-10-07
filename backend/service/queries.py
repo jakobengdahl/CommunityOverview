@@ -307,7 +307,6 @@ def resolve_teleport(
     *,
     session_id: str = "",
     search_query: str = "",
-    request_origin: str = "",
     local_gui_url: str = "",
 ) -> Dict[str, Any]:
     """Resolve the canonical route from ``node_id`` to its source graph.
@@ -332,7 +331,11 @@ def resolve_teleport(
 
     graph_config = None
     cache_status = ""
-    origin_graph_id = access.node_graph_id(node) if node is not None else ""
+    origin_graph_id = (
+        access.node_graph_id(node)
+        if node is not None
+        else teleport.parse_federated_node_id(node_id)[0]
+    )
     if (
         origin_graph_id
         and federation_manager is not None
@@ -359,15 +362,17 @@ def resolve_teleport(
         node_metadata=(node.metadata if node is not None else None),
         node_exists=node is not None,
         graph_access_matches=decision.graph_access.matches,
+        # Passed so the graph id can be read back out of the id itself when the
+        # node is not found and has no metadata to classify it by.
+        node_id=node_id,
         graph_config=graph_config,
         cache_status=cache_status,
-        # The configured public URL is this deployment's real origin; the
-        # request's own base_url is the internal one behind a TLS-terminating
-        # proxy (uvicorn runs without --proxy-headers), whose scheme alone would
-        # make every hop look cross-deployment.
-        request_origin=local_gui_url or request_origin,
         session_id=session_id,
         search_query=search_query,
+        # This deployment's configured public URL is the only origin compared
+        # against. The request's own base_url is derived from the Host header,
+        # so trusting it would let a caller claim the target's origin and
+        # suppress the UI's cross-deployment confirmation.
         local_gui_url=local_gui_url,
         local_graph_name=storage.get_graph_name(),
     )
