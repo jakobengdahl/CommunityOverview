@@ -161,10 +161,22 @@ describe('GraphCanvas: the overlap-object picker', () => {
   });
 
   it("carries a reference's host-reported broken state into the picker's label", () => {
-    render(<GraphCanvas nodes={[]} edges={[]} isReferenceTargetAvailable={() => false} />);
+    // The host DISCRIMINATES on its arguments, and the stored target is padded.
+    // A host callback that ignores what it is passed cannot tell a correct call
+    // from one with the arguments swapped or the target untrimmed — round 4's
+    // mutation pass flipped both and the whole suite stayed green. Swapping them
+    // against the real host makes every session reference report `undefined`,
+    // so none is ever announced broken: a dashed, unopenable tile announced as
+    // live, which is round 3's own G7 fix reinstated.
+    const isReferenceTargetAvailable = vi.fn((kind, target) =>
+      kind === 'session' && target === '1234-5678-9012-3456' ? false : undefined
+    );
+    render(
+      <GraphCanvas nodes={[]} edges={[]} isReferenceTargetAvailable={isReferenceTargetAvailable} />
+    );
     const ref = referenceNode('r1', -10, -10, {
       target_kind: 'session',
-      target: '1234-5678-9012-3456',
+      target: '\u00851234-5678-9012-3456 ',
       label: 'Programme board',
     });
     const note = noteNode('n1', -5, -5, 30, 30, { text: 'Second' });
@@ -172,6 +184,7 @@ describe('GraphCanvas: the overlap-object picker', () => {
 
     clickNode(ref, 0, 0);
 
+    expect(isReferenceTargetAvailable).toHaveBeenCalledWith('session', '1234-5678-9012-3456');
     expect(
       screen.getByRole('button', { name: 'Reference, session, Programme board, broken target' })
     ).toBeInTheDocument();

@@ -7,6 +7,7 @@ import {
   isSafeReferenceUrl,
   normalizeReferenceTargetKind,
   referenceTargetProblem,
+  trimReferenceTarget,
   REFERENCE_SAFE_URL_SCHEMES,
   REFERENCE_TARGET_KINDS,
 } from '../src/utils/annotationModel';
@@ -81,6 +82,46 @@ function renderReference(data, context = {}) {
     </AnnotationContext.Provider>
   );
 }
+
+// Round 4's mutation pass narrowed this side's whitespace class to only the
+// characters some fixture `refuse` case happens to use — 10 of 26 — and BOTH JS
+// suites stayed green. On this side that is the DANGEROUS direction: with
+// U+202F out of the class, `https://trusted.example<U+202F>@evil.example/`
+// passes the gate, and the WHATWG parser folds everything before the `@` into
+// USERINFO — so `hostname` is evil.example while the tile's visible target text
+// reads trusted.example. A tile that lies about where it goes.
+//
+// One case per enumerated character, driven off the fixture's own `whitespace`
+// array, so a character dropped here fails its own case rather than hiding
+// behind a refuse list that never mentioned it.
+describe('reference URL gate — the whitespace enumeration itself', () => {
+  it.each(urlGate.whitespace)('refuses U+%s inside a path', (code) => {
+    const char = String.fromCodePoint(parseInt(code, 16));
+    expect(isSafeReferenceUrl(`https://example.org/a${char}b`)).toBe(false);
+  });
+
+  it.each(urlGate.whitespace)('handles U+%s at the ends', (code) => {
+    const char = String.fromCodePoint(parseInt(code, 16));
+    const padded = `${char}https://example.org/x${char}`;
+    if (char.codePointAt(0) < 0x20) {
+      // C0 controls are refused outright rather than stripped — the same
+      // deliberate rule the backend applies, so that the string validated is
+      // the string stored.
+      expect(isSafeReferenceUrl(padded)).toBe(false);
+    } else {
+      expect(trimReferenceTarget(padded)).toBe('https://example.org/x');
+      expect(isSafeReferenceUrl(padded)).toBe(true);
+    }
+  });
+
+  it('refuses a target that hides its real host behind userinfo', () => {
+    // The concrete harm behind this whole describe block: the visible text and
+    // the actual destination must not be able to disagree.
+    const spoof = 'https://trusted.example\u202f@evil.example/';
+    expect(isSafeReferenceUrl(spoof)).toBe(false);
+    expect(referenceTargetProblem({ target_kind: 'url', target: spoof })).toBe('unsafe');
+  });
+});
 
 // The other half of the shared cross-language fixture that
 // backend/core/tests/test_session_annotations_reference.py drives. The backend

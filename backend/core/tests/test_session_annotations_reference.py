@@ -41,6 +41,7 @@ from backend.core.session_annotations import (
     reference_content_error,
     reference_url_error,
     sanitize_saved_view_metadata,
+    REFERENCE_WHITESPACE_CHARS,
     saved_view_annotation_error,
 )
 from backend.core.session_store import (
@@ -165,6 +166,88 @@ class TestTargetEmptinessUsesTheGatesOwnWhitespaceSet:
             )
             is None
         )
+
+
+class TestTheWhitespaceSetItselfIsPinned:
+    """The ENUMERATION is the contract, not a sample of it.
+
+    Round 4's mutation pass narrowed this set to only the characters some
+    ``refuse`` case below happens to use — 10 of 26 — and the whole backend
+    stayed green. A sampled refuse list can only ever pin the characters
+    someone thought to write down. Both sides therefore assert equality with
+    ``docs/fixtures/reference_url_gate.json``'s ``whitespace`` array, so a
+    character added or dropped on one side fails on the side that moved.
+    """
+
+    def test_the_set_is_exactly_the_shared_enumeration(self):
+        expected = {chr(int(code, 16)) for code in _URL_GATE["whitespace"]}
+        assert REFERENCE_WHITESPACE_CHARS == expected
+
+    @pytest.mark.parametrize("code", _URL_GATE["whitespace"])
+    def test_every_enumerated_character_is_refused_mid_path(self, code):
+        char = chr(int(code, 16))
+        assert reference_url_error(f"https://example.org/a{char}b") is not None
+
+    @pytest.mark.parametrize("code", _URL_GATE["whitespace"])
+    def test_every_enumerated_character_is_handled_at_the_ends(self, code):
+        """Padding is trimmed — unless the character is a C0 control.
+
+        Five members of the set (U+0009-U+000D) are also control characters,
+        and ``_has_control_characters`` refuses those OUTRIGHT rather than
+        stripping them, before the trim is reached. That is deliberate and
+        documented there: a browser strips a tab inside a scheme before
+        resolving it, so normalising first and asking afterwards validates one
+        string and runs another. Both outcomes are correct; asserting a single
+        one for all 26 would be asserting something false about five of them.
+        """
+        char = chr(int(code, 16))
+        error = reference_url_error(f"{char}https://example.org/x{char}")
+        if ord(char) < 0x20:
+            assert error is not None
+            assert "control characters" in error
+        else:
+            assert error is None
+
+
+class TestSavedViewPathDemandsACompletePayload:
+    """A SavedView annotation with no ``target_kind`` must not be stored.
+
+    Round 4's mutation pass flipped this call site's ``require_complete`` to
+    ``False`` and the whole backend stayed green — while the mutation makes a
+    ``javascript:`` target STORABLE through node metadata, because
+    ``reference_content_error`` only consults the scheme gate under
+    ``if target_kind == "url"`` and an absent kind is ``None``. That is the
+    exact gap ``reference_content_error``'s own docstring warns about, and the
+    sibling raw-op call site already had this test; this one did not.
+    """
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            "javascript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "file:///etc/passwd",
+            "vbscript:msgbox(1)",
+        ],
+    )
+    def test_a_kindless_saved_view_reference_is_refused(self, target):
+        metadata = {
+            "annotations": [{"id": "a1", "type": "reference", "target": target}]
+        }
+        assert saved_view_annotation_error(metadata) is not None
+
+    def test_a_complete_saved_view_reference_still_passes(self):
+        metadata = {
+            "annotations": [
+                {
+                    "id": "a1",
+                    "type": "reference",
+                    "target_kind": "url",
+                    "target": "https://example.org/x",
+                }
+            ]
+        }
+        assert saved_view_annotation_error(metadata) is None
 
 
 class TestCrossLanguageUrlGateAgreement:

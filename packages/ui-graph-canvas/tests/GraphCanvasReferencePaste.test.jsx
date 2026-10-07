@@ -349,6 +349,20 @@ describe('GraphCanvas reference paste', () => {
     const textItem = { type: 'text/plain', getAsFile: () => null };
     const ingest = () => {};
 
+    // Every other case here builds `image/png`, so narrowing the check to that
+    // exact string left both suites green (round 4's mutation pass) — while the
+    // canvas's own file picker accepts jpeg and webp, so pasting one would be
+    // ingested by the image handler AND leave this one standing, re-opening the
+    // round-2 double-create.
+    it.each(['image/jpeg', 'image/webp', 'image/gif', 'image/svg+xml'])(
+      'is true for %s, not only image/png',
+      (type) => {
+        expect(
+          clipboardImageWillBeIngested([{ type, getAsFile: () => file }, textItem], ingest)
+        ).toBe(true);
+      }
+    );
+
     it('is true for an ingestible image wherever it sits in the list', () => {
       expect(clipboardImageWillBeIngested([imageItem, textItem], ingest)).toBe(true);
       expect(clipboardImageWillBeIngested([textItem, imageItem], ingest)).toBe(true);
