@@ -59,6 +59,12 @@ import { createContext } from 'react';
  *   - `container`: the host DOM node to portal the open menu's content into
  *     while `capable` and the sheet is actually open; null otherwise (before
  *     the request has been acted on, or once closed).
+ *   - `requestOpen`/`requestClose`: ask the host to open/close its mobile
+ *     edit sheet (bound to `useSurfaceManager`'s `'detail'` surface in
+ *     `frontend/web`'s `MobileShell`/`App.jsx`). The default below is a
+ *     no-op, `capable: false` context — the same "no host wired up" fail-safe
+ *     every other AnnotationContext field already defaults to.
+ *
  * `openReference({annotationId, targetKind, target, label})` is how a
  * `reference` annotation hands an activation (double-click, its ↗ control,
  * or "Open target" in its property editor) to the host, which decides what
@@ -74,12 +80,6 @@ import { createContext } from 'react';
  * `undefined` — "no host opinion" — which leaves a reference judged on the
  * structural checks the canvas can make on its own (annotationModel.js's
  * `referenceTargetProblem`).
- *
- *   - `requestOpen`/`requestClose`: ask the host to open/close its mobile
- *     edit sheet (bound to `useSurfaceManager`'s `'detail'` surface in
- *     `frontend/web`'s `MobileShell`/`App.jsx`). The default below is a
- *     no-op, `capable: false` context — the same "no host wired up" fail-safe
- *     every other AnnotationContext field already defaults to.
  */
 export const AnnotationContext = createContext({
   notifyChange: () => {},

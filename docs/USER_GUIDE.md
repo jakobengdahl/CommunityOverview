@@ -285,8 +285,10 @@ right-click menu — both do exactly the same thing, and both work from the keyb
 address was never one the app will open, the tile turns dashed and grey and its second
 line tells you why ("Target not available", or "Unsafe link — not opened"). The **↗**
 button disappears and double-clicking does nothing. The tile itself stays put so you can
-rename, repoint or delete it rather than wondering where it went. A screen reader says a
-broken tile is broken, so this is never carried by the colour alone.
+rename or delete it rather than wondering where it went — and if it is pointing at the
+wrong place rather than a missing one, ask an assistant to repoint it, the same way
+session and supporting-material tiles are created. A screen reader says a broken tile is
+broken, so this is never carried by the colour alone.
 
 The app only ever opens ordinary `http` and `https` web addresses from a tile. Anything
 else is refused when the tile is created, refused again when storing it, and refused a

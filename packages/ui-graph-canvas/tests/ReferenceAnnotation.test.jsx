@@ -11,6 +11,7 @@ import {
   REFERENCE_TARGET_KINDS,
 } from '../src/utils/annotationModel';
 import { computeAnnotationAriaLabel, overlayToFlowNode } from '../src/utils/annotations';
+import urlGate from '../../../docs/fixtures/reference_url_gate.json';
 
 const hoisted = vi.hoisted(() => ({ resizerProps: [], setNodes: vi.fn(), nodes: [] }));
 
@@ -80,6 +81,25 @@ function renderReference(data, context = {}) {
     </AnnotationContext.Provider>
   );
 }
+
+// The other half of the shared cross-language fixture that
+// backend/core/tests/test_session_annotations_reference.py drives. The backend
+// gate and this one are separate implementations by design — the backend
+// decides what may be STORED, this decides what may be DRAWN AS CLICKABLE, and
+// this side must not trust what it is handed. Separate implementations drift,
+// and round 1 of the review loop caught drift in the dangerous direction: the
+// backend's lenient `urlsplit` accepted hosts with spaces and out-of-range
+// ports that this strict WHATWG parser refuses, so a target could be stored
+// and then render permanently broken as "Unsafe link — not opened".
+describe('reference URL gate — agreement with the backend', () => {
+  it.each(urlGate.accept)('accepts the shared case %j', (target) => {
+    expect(isSafeReferenceUrl(target)).toBe(true);
+  });
+
+  it.each(urlGate.refuse)('refuses the shared case %j', (target) => {
+    expect(isSafeReferenceUrl(target)).toBe(false);
+  });
+});
 
 describe('reference annotation — model', () => {
   it('is one of the v1 annotation types and has exactly three target kinds', () => {

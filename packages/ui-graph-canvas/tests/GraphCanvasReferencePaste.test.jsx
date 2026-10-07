@@ -158,6 +158,33 @@ describe('GraphCanvas reference paste', () => {
     expect(referenceNodes()).toHaveLength(0);
   });
 
+  // A clipboardData the handler did not build: `items` but no `getData`. The
+  // package's own image-paste tests dispatch exactly this shape, and an
+  // uncaught throw in a document-level listener breaks every other paste
+  // handler on the page, not just this one.
+  it('survives a clipboardData with no getData method', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} />);
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    event.clipboardData = { items: [{ type: 'image/png', getAsFile: () => null }] };
+    expect(() =>
+      act(() => {
+        document.dispatchEvent(event);
+      })
+    ).not.toThrow();
+    expect(referenceNodes()).toHaveLength(0);
+  });
+
+  it('survives a paste with no clipboardData at all', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} />);
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    expect(() =>
+      act(() => {
+        document.dispatchEvent(event);
+      })
+    ).not.toThrow();
+    expect(referenceNodes()).toHaveLength(0);
+  });
+
   it('ignores an empty clipboard', () => {
     render(<GraphCanvas nodes={[]} edges={[]} />);
     pasteText('');
@@ -173,6 +200,42 @@ describe('GraphCanvas reference paste', () => {
     );
     pasteText('https://example.org', screen.getByTestId('some-input'));
     expect(referenceNodes()).toHaveLength(0);
+  });
+
+  // Copying an image out of a web app or chat client puts BOTH an image item
+  // and a text/plain URL on the clipboard. Both paste listeners are
+  // bubble-phase on `document`, so one paste used to ingest the image AND
+  // drop a reference tile on top of it.
+  it('does not also create a tile when the image handler claimed the paste', () => {
+    const onImageIngest = vi.fn();
+    render(<GraphCanvas nodes={[]} edges={[]} onImageIngest={onImageIngest} />);
+
+    const file = new File([new Uint8Array([137, 80, 78, 71])], 'pic.png', {
+      type: 'image/png',
+    });
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    event.clipboardData = {
+      items: [
+        { type: 'image/png', getAsFile: () => file },
+        { type: 'text/plain', getAsFile: () => null },
+      ],
+      getData: (type) => (type === 'text/plain' ? 'https://example.org/pic.png' : ''),
+    };
+    act(() => {
+      document.dispatchEvent(event);
+    });
+
+    expect(referenceNodes()).toHaveLength(0);
+  });
+
+  it('still creates a tile from a text-only paste when image ingest is wired', () => {
+    // The guard must key off the event actually being consumed, not merely
+    // off a host that happens to support images.
+    const onImageIngest = vi.fn();
+    render(<GraphCanvas nodes={[]} edges={[]} onImageIngest={onImageIngest} />);
+    pasteText('https://example.org/handbook');
+    expect(referenceNodes()).toHaveLength(1);
+    expect(onImageIngest).not.toHaveBeenCalled();
   });
 
   it('works on a host that wired no image ingest', () => {

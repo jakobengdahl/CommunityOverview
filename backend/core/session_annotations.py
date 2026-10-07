@@ -271,6 +271,23 @@ def reference_url_error(url: Any) -> Optional[str]:
         )
     if not parts.hostname:
         return "content.target must include a host"
+    # The two checks below exist to keep this gate no more permissive than the
+    # renderer's (``isSafeReferenceUrl`` in
+    # packages/ui-graph-canvas/src/utils/annotationModel.js), which parses with
+    # the WHATWG ``URL`` constructor. ``urlsplit`` is deliberately lenient and
+    # accepts both, so without them an agent could store a target that this
+    # side called valid and the canvas then drew permanently broken, labelled
+    # "Unsafe link — not opened" — a false statement about what is really a
+    # typo, on a tile with no GUI way to repoint it. A gate that accepts what
+    # the renderer refuses is not a gate, it is a trap.
+    if " " in candidate:
+        return "content.target must not contain a space"
+    try:
+        port = parts.port
+    except ValueError:
+        return "content.target has an invalid port"
+    if port is not None and not 1 <= port <= 65535:
+        return "content.target has an invalid port"
     return None
 
 
@@ -383,28 +400,50 @@ def reference_annotation_error(
     the image guard came to be needed.
 
     *existing* supplies the stored annotation under this id, when there is
-    one, for the single purpose of resolving the target kind of a patch that
-    changes only ``target``. It is **not** an exemption: a stored value is
-    never a reason to accept a new one here (see ``reference_url_error``).
+    one. **The whole stored annotation is merged under the patch**, and the
+    result — the annotation as it would be *after* this write — is what gets
+    validated. Not the patch alone, and not one hand-picked field of the
+    stored state.
+
+    That matters because a reference's rules are cross-field: the scheme gate
+    reads ``target`` *and* ``target_kind``, and ``SessionStore`` applies a
+    patch with a shallow ``dict.update``, so either field can arrive while
+    the other stays stored. Resolving only one of them leaves the other
+    unchecked, and a two-step write then slips past a gate that refuses both
+    steps individually:
+
+        created  {target_kind: "resource", target: "javascript:alert(1)"}
+            -> accepted, correctly: a resource target is a node id, not a
+               URL, so it is not held to the scheme rule
+        updated  {target_kind: "url"}
+            -> must be REFUSED, because the annotation this produces is a
+               url reference whose target is "javascript:alert(1)"
+
+    Validating the merged result is what makes that refusal fall out rather
+    than needing to be enumerated, and it is the same shape
+    ``_validate_generic_content`` already used on the MCP path — which is why
+    the MCP tools refused this flip while the raw-op path accepted it. Two
+    gates that disagree are one gate.
+
+    Merging is **not** an exemption. A stored value is never a reason to
+    accept anything: it is only ever re-checked, so a stored annotation that
+    is already bad fails here too (see ``reference_url_error``).
 
     The type is resolved from *annotation* **or** from *existing*: a patch is
     allowed to omit ``type``, and reading the type from the patch alone would
-    make every such patch non-reference and therefore unchecked — the gate
-    would pass exactly the sparse repoint it exists to catch. (The two store
-    call sites canonicalise ``type`` onto the patch before calling, so they
-    were never exposed to that; this keeps the function correct on its own
-    terms for any other caller.)
+    make every such patch non-reference and therefore unchecked. (The two
+    store call sites canonicalise ``type`` onto the patch before calling, so
+    they were never exposed to that; this keeps the function correct on its
+    own terms for any other caller.)
     """
     annotation_kind = annotation_type_of(annotation)
     if annotation_kind is None and isinstance(existing, dict):
         annotation_kind = annotation_type_of(existing)
     if annotation_kind != REFERENCE_TYPE:
         return None
-    source = dict(annotation)
-    if "target_kind" not in source and isinstance(existing, dict):
-        stored_kind = existing.get("target_kind")
-        if stored_kind is not None:
-            source["target_kind"] = stored_kind
+    source = (
+        {**existing, **annotation} if isinstance(existing, dict) else dict(annotation)
+    )
     return reference_content_error(source, require_complete=require_complete)
 
 

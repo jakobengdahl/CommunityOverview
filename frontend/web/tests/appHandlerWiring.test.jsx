@@ -336,4 +336,114 @@ describe('App handler wiring', () => {
     expect(api.getNodeDetails).toHaveBeenCalledWith('v2');
     expect(nodeIds()).toEqual(['v1', 'v2']);
   });
+  // ── Reference tiles ────────────────────────────────────────────────────
+  // The host is the THIRD place the reference URL gate is applied — the
+  // backend decides what may be stored, the canvas what it may draw as
+  // clickable, and this is the call that actually hands a string to the
+  // browser. It was the only one of the three with no test.
+  describe('onReferenceOpen', () => {
+    let openSpy;
+
+    beforeEach(() => {
+      openSpy = vi.spyOn(window, 'open').mockReturnValue(null);
+    });
+
+    afterEach(() => {
+      openSpy.mockRestore();
+    });
+
+    it('opens a safe url target in a new tab with noopener,noreferrer', async () => {
+      await renderApp();
+      await act(async () => {
+        await canvas().onReferenceOpen({
+          targetKind: 'url',
+          target: 'https://example.org/handbook',
+        });
+      });
+      expect(openSpy).toHaveBeenCalledWith(
+        'https://example.org/handbook',
+        '_blank',
+        'noopener,noreferrer'
+      );
+    });
+
+    it.each([
+      'javascript:alert(1)',
+      'JavaScript:alert(1)',
+      'data:text/html,<script>alert(1)</script>',
+      'file:///etc/passwd',
+      'vbscript:msgbox(1)',
+      '//evil.example/x',
+      '/admin',
+      'http:///path',
+    ])('never opens the unsafe target %j', async (target) => {
+      await renderApp();
+      await act(async () => {
+        await canvas().onReferenceOpen({ targetKind: 'url', target });
+      });
+      expect(openSpy).not.toHaveBeenCalled();
+    });
+
+    it('fetches, adds and focuses a resource target', async () => {
+      await renderApp();
+      api.getNodeDetails.mockImplementationOnce(async (id) => ({
+        success: true,
+        node: { id, type: 'Resource', name: 'Method guide' },
+        edges: [],
+      }));
+      await act(async () => {
+        await canvas().onReferenceOpen({ targetKind: 'resource', target: 'res-1' });
+      });
+      expect(api.getNodeDetails).toHaveBeenCalledWith('res-1');
+      expect(nodeIds()).toContain('res-1');
+    });
+
+    it('does not add anything when a resource target cannot be fetched', async () => {
+      await renderApp();
+      const before = nodeIds();
+      api.getNodeDetails.mockImplementationOnce(async () => {
+        throw new Error('gone');
+      });
+      await act(async () => {
+        await canvas().onReferenceOpen({ targetKind: 'resource', target: 'res-missing' });
+      });
+      expect(nodeIds()).toEqual(before);
+      expect(openSpy).not.toHaveBeenCalled();
+    });
+
+    it('does not open a window for a session target', async () => {
+      // A session target switches boards in-app; it must never become a
+      // browser navigation.
+      await renderApp();
+      await act(async () => {
+        await canvas().onReferenceOpen({ targetKind: 'session', target: '8244-1742-3391-0057' });
+      });
+      expect(openSpy).not.toHaveBeenCalled();
+    });
+
+    it('refuses a malformed session id', async () => {
+      await renderApp();
+      await act(async () => {
+        await canvas().onReferenceOpen({ targetKind: 'session', target: 'not-a-session' });
+      });
+      expect(openSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('isReferenceTargetAvailable', () => {
+    it('reports only a malformed session id as unavailable', async () => {
+      // A well-formed id this browser has never visited is NOT reported gone:
+      // the local list is what this browser opened, not what exists on the
+      // server, so a colleague's shared session must not render broken.
+      await renderApp();
+      expect(canvas().isReferenceTargetAvailable('session', 'not-a-session')).toBe(false);
+      expect(canvas().isReferenceTargetAvailable('session', '8244-1742-3391-0057')).toBeUndefined();
+    });
+
+    it('offers no opinion on url or resource targets', async () => {
+      await renderApp();
+      expect(canvas().isReferenceTargetAvailable('url', 'https://example.org')).toBeUndefined();
+      expect(canvas().isReferenceTargetAvailable('resource', 'res-1')).toBeUndefined();
+    });
+  });
 });

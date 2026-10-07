@@ -2656,7 +2656,26 @@ function GraphCanvasInner({
     const handleUrlPaste = (event) => {
       const tag = event.target?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || event.target?.isContentEditable) return;
-      const text = event.clipboardData?.getData('text/plain');
+      // Someone else already claimed this paste — in practice the image-paste
+      // handler above, which calls preventDefault() once it has a file to
+      // ingest. Copying an image out of a web app or a chat client puts BOTH
+      // an `image/*` item and a `text/plain` URL on the clipboard, and both
+      // listeners are bubble-phase on `document`, so without this one paste
+      // ingested the image AND dropped a reference tile on top of it. Reading
+      // `defaultPrevented` rather than re-inspecting the clipboard for an
+      // image keeps the two handlers from each having to know the other's
+      // rule: whoever consumed the event owns it.
+      if (event.defaultPrevented) return;
+      // `?.` only guards `clipboardData` being absent, not `getData` being
+      // missing from it. This handler does not own that object — it comes from
+      // the event, which may be synthesised by another library, a polyfill or
+      // an older browser that exposes `items` without `getData` (the canvas's
+      // own image-paste tests build exactly such an object, which is how this
+      // surfaced). An uncaught throw here is worse than a missed paste: it is
+      // a document-level listener, so it breaks every other paste handler on
+      // the page too.
+      if (typeof event.clipboardData?.getData !== 'function') return;
+      const text = event.clipboardData.getData('text/plain');
       if (!text) return;
       const candidate = text.trim();
       if (!isSafeReferenceUrl(candidate)) return;

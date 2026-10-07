@@ -22,6 +22,9 @@ in one layer still fails here rather than quietly passing because the other
 layers happened to cover for it.
 """
 
+import json
+import os
+
 import pytest
 
 from backend.core.session_annotations import (
@@ -79,6 +82,18 @@ UNSAFE_TARGETS = [
     "http:///path",
 ]
 
+# The subset of UNSAFE_TARGETS that a NON-url reference may legitimately hold,
+# and therefore the only ones a two-step kind flip could ever promote. The
+# others — empty, whitespace-only, and the control-character ones — are refused
+# under every target kind, so they are unstorable at step one and there is no
+# sequence to test. (That they are refused for a `resource` target too is
+# asserted in TestPayloadRules and TestUrlGate.)
+FLIPPABLE_UNSAFE_TARGETS = [
+    t
+    for t in UNSAFE_TARGETS
+    if t.strip() and not any(ord(c) < 0x20 or ord(c) == 0x7F for c in t)
+]
+
 SAFE_TARGETS = [
     "https://example.org/handbook",
     "http://example.org",
@@ -90,6 +105,59 @@ SAFE_TARGETS = [
 
 def _reference(**fields):
     return {"type": REFERENCE_TYPE, "kind": REFERENCE_TYPE, "id": "r1", **fields}
+
+
+_URL_GATE_FIXTURE = os.path.join(
+    os.path.dirname(__file__),
+    "..",
+    "..",
+    "..",
+    "docs",
+    "fixtures",
+    "reference_url_gate.json",
+)
+with open(_URL_GATE_FIXTURE, encoding="utf-8") as _handle:
+    _URL_GATE = json.load(_handle)
+
+
+class TestCrossLanguageUrlGateAgreement:
+    """The backend gate and the renderer's own gate must agree.
+
+    They are separate implementations on purpose — the backend decides what may
+    be stored, the canvas decides what it may draw as clickable, and the canvas
+    must not trust what it is handed. Separate implementations drift, and the
+    drift found in round 1 of the review loop was in the dangerous direction:
+    ``urlsplit`` is lenient where the WHATWG ``URL`` parser is strict, so the
+    backend accepted ``https://exa mple.org/x``, ``https://example.org:99999/x``
+    and ``http://1.2.3.4:x/`` while the canvas refused all three — storing a
+    target that then rendered permanently broken and labelled "Unsafe link —
+    not opened", which is a false statement about a typo, on a tile with no GUI
+    way to repoint it.
+
+    Writing the fixture then found drift the other way too: the canvas's
+    WHATWG parser *repaired* ``http:///path`` into ``http://path/``, re-reading
+    the path as the hostname, so a tile would have opened somewhere its author
+    never wrote. Both sides now require an explicit ``scheme://authority`` and
+    a port in range, so there is no asymmetry left to document — every case
+    here must get the same verdict from both.
+
+    The fixture is shared with
+    ``packages/ui-graph-canvas/tests/ReferenceAnnotation.test.jsx``, so moving a
+    case on either side fails on that side.
+    """
+
+    @pytest.mark.parametrize("target", _URL_GATE["accept"])
+    def test_accepts_every_shared_accept_case(self, target):
+        assert reference_url_error(target) is None, target
+
+    @pytest.mark.parametrize("target", _URL_GATE["refuse"])
+    def test_refuses_every_shared_refuse_case(self, target):
+        assert reference_url_error(target) is not None, target
+
+    def test_the_fixture_covers_the_schemes_the_task_names(self):
+        refused = " ".join(_URL_GATE["refuse"]).lower()
+        for scheme in ("javascript:", "data:", "file:", "vbscript:"):
+            assert scheme in refused, scheme
 
 
 class TestReferenceIsAGenericAnnotationType:
@@ -526,6 +594,155 @@ class TestRawSessionOpPath:
         store.apply_state_op(session, {"op": "annotation_updated", "annotation": echo})
         assert session.state["annotations"][0]["position"] == {"x": 9, "y": 9}
         assert session.state["annotations"][0]["target"] == "https://example.org"
+
+
+class TestTwoStepTargetKindFlip:
+    """The hole round 1 of the review loop found, pinned on both op paths.
+
+    A reference's rules are cross-field and the store applies a patch with a
+    shallow merge, so either half can arrive while the other stays stored.
+    Every single-write case was already covered; the two-step was not, and the
+    gate resolved only ``target_kind`` from the stored annotation — so a
+    ``resource`` reference holding an unsafe string (legitimate: a resource
+    target is a node id, not a URL) could be promoted to ``url`` by a patch
+    that carried no target at all, and the gate had nothing to check.
+
+    These assert the composite state, not just the call's return: the point is
+    that no SEQUENCE of individually-acceptable writes reaches a url reference
+    with an unsafe target.
+    """
+
+    @pytest.mark.parametrize("target", FLIPPABLE_UNSAFE_TARGETS)
+    @pytest.mark.parametrize("stored_kind", ["resource", "session"])
+    def test_flipping_the_kind_to_url_over_an_update_is_refused(
+        self, store, stored_kind, target
+    ):
+        session = store.create()
+        store.apply_state_op(
+            session,
+            _create_op(
+                _reference(
+                    target_kind=stored_kind,
+                    target=target,
+                    position={"x": 0, "y": 0},
+                )
+            ),
+        )
+        with pytest.raises(OpError):
+            store.apply_state_op(
+                session,
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "r1",
+                        "type": REFERENCE_TYPE,
+                        "target_kind": "url",
+                    },
+                },
+            )
+        stored = session.state["annotations"][0]
+        assert stored["target_kind"] == stored_kind
+        assert stored["target"] == target
+
+    @pytest.mark.parametrize("target", FLIPPABLE_UNSAFE_TARGETS)
+    def test_flipping_the_kind_to_url_over_a_same_id_upsert_is_refused(
+        self, store, target
+    ):
+        # The create branch drops require_complete when an annotation already
+        # exists under the id, so the upsert is its own path to the same flip.
+        session = store.create()
+        store.apply_state_op(
+            session,
+            _create_op(
+                _reference(
+                    target_kind="resource", target=target, position={"x": 0, "y": 0}
+                )
+            ),
+        )
+        with pytest.raises(OpError):
+            store.apply_state_op(
+                session,
+                _create_op(_reference(target_kind="url", position={"x": 0, "y": 0})),
+            )
+        stored = session.state["annotations"][0]
+        assert stored["target_kind"] == "resource"
+        assert stored["target"] == target
+
+    def test_the_same_flip_is_refused_by_the_pure_validator(self, store):
+        stored = _reference(target_kind="resource", target="javascript:alert(1)")
+        assert reference_annotation_error({"target_kind": "url"}, stored) is not None
+
+    def test_a_flip_to_url_with_a_safe_target_in_the_same_write_is_allowed(self, store):
+        # The refusal must be about the resulting annotation being unsafe, not
+        # about flipping a kind — repointing a reference is legitimate.
+        session = store.create()
+        store.apply_state_op(
+            session,
+            _create_op(
+                _reference(
+                    target_kind="resource",
+                    target="resource-1",
+                    position={"x": 0, "y": 0},
+                )
+            ),
+        )
+        store.apply_state_op(
+            session,
+            {
+                "op": "annotation_updated",
+                "annotation": {
+                    "id": "r1",
+                    "type": REFERENCE_TYPE,
+                    "target_kind": "url",
+                    "target": "https://example.org",
+                },
+            },
+        )
+        stored = session.state["annotations"][0]
+        assert stored["target_kind"] == "url"
+        assert stored["target"] == "https://example.org"
+
+    def test_flipping_a_url_reference_away_from_url_is_allowed(self, store):
+        # The other direction is fine: a session/resource target is not held
+        # to the scheme rule, so demoting a safe url reference is not a flip
+        # into danger.
+        session = store.create()
+        store.apply_state_op(session, _safe_reference_op())
+        store.apply_state_op(
+            session,
+            {
+                "op": "annotation_updated",
+                "annotation": {
+                    "id": "r1",
+                    "type": REFERENCE_TYPE,
+                    "target_kind": "resource",
+                    "target": "resource-1",
+                },
+            },
+        )
+        assert session.state["annotations"][0]["target_kind"] == "resource"
+
+    def test_a_label_only_patch_still_re_checks_the_stored_pair(self, store):
+        # Merging the stored annotation means every patch re-validates the
+        # whole resulting object. A stored annotation that is already bad is
+        # not grandfathered by an unrelated edit.
+        session = store.create()
+        store.apply_state_op(session, _safe_reference_op())
+        # Reach past the op path to plant a bad stored state, the way a gap in
+        # some other path would.
+        session.state["annotations"][0]["target"] = "javascript:alert(1)"
+        with pytest.raises(OpError):
+            store.apply_state_op(
+                session,
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "r1",
+                        "type": REFERENCE_TYPE,
+                        "label": "Harmless rename",
+                    },
+                },
+            )
 
 
 class TestSavedViewMetadata:

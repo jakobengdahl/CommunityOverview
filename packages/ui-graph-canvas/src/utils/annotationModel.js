@@ -65,12 +65,25 @@ const REFERENCE_SAFE_URL_SCHEME_SET = new Set(REFERENCE_SAFE_URL_SCHEMES);
  * normalises first and asks afterwards passes exactly the string the browser
  * then runs.
  */
+// An explicit `scheme://` followed by the start of a real authority. Checked
+// on the RAW string, before `new URL` ever sees it, because the WHATWG parser
+// repairs these forms into a different destination rather than rejecting them:
+//   `http:///path`      -> `http://path/`      (re-reads the path as the host!)
+//   `https:/example.org` -> `https://example.org/` (infers the missing slash)
+// The first is the dangerous one — a tile would open somewhere its author
+// never wrote — and neither is something an author can have meant. Requiring
+// the authority up front also makes this agree exactly with the backend gate
+// (`reference_url_error`, which parses with the stricter-here `urlsplit`),
+// so the two are one rule rather than two with a documented asymmetry.
+const REFERENCE_EXPLICIT_AUTHORITY = /^https?:\/\/[^/?#]/i;
+
 export function isSafeReferenceUrl(value) {
   if (typeof value !== 'string') return false;
   // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u001f\u007f]/.test(value)) return false;
   const candidate = value.trim();
   if (!candidate) return false;
+  if (!REFERENCE_EXPLICIT_AUTHORITY.test(candidate)) return false;
   let parsed;
   try {
     parsed = new URL(candidate);
@@ -81,7 +94,13 @@ export function isSafeReferenceUrl(value) {
     return false;
   }
   if (!REFERENCE_SAFE_URL_SCHEME_SET.has(parsed.protocol)) return false;
-  return Boolean(parsed.hostname);
+  if (!parsed.hostname) return false;
+  // A port is optional, but a present one must be a real port. WHATWG accepts
+  // `:0`; the backend does not, and a tile pointing at port 0 opens nothing.
+  if (parsed.port !== '' && !(Number(parsed.port) >= 1 && Number(parsed.port) <= 65535)) {
+    return false;
+  }
+  return true;
 }
 
 export function normalizeReferenceTargetKind(value) {

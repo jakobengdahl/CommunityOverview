@@ -151,6 +151,7 @@
       "heatmap": "a heat-map circle",
       "image": "an image",
       "freehand": "a freehand drawing",
+      "reference": "a reference tile",
       "unknown": "an annotation"
     },
     "desc": {
