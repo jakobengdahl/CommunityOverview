@@ -43,7 +43,7 @@ class TestConfigLoader:
         assert "node_types" in schema
         assert "relationship_types" in schema
 
-        # All six system node types must be present regardless of config file content
+        # Every system node type must be present regardless of config file content
         for system_type in config_loader.SYSTEM_NODE_TYPES:
             assert system_type in schema["node_types"], (
                 f"System type '{system_type}' missing from schema"
@@ -1334,3 +1334,98 @@ class TestBuildSessionUrl:
 
         os.environ[PUBLIC_BASE_URL_ENV] = "https://app.example.test"
         assert build_session_url("") is None
+
+
+class TestAllowsAttachmentsSchemaField:
+    """Tests for the per-node-type ``allows_attachments`` schema flag.
+
+    See ADR 0008 section 7: a declared bool on ``NodeTypeConfig``, default
+    ``false``, returned by ``get_schema`` on every node type.
+    """
+
+    @pytest.fixture(autouse=True)
+    def setup_and_cleanup(self):
+        from backend.config import config_loader
+
+        config_loader.reset_loader()
+        yield
+        os.environ.pop("SCHEMA_FILE", None)
+        config_loader.reset_loader()
+
+    @staticmethod
+    def _load(tmp_path, node_types):
+        from backend.config import config_loader
+
+        config_file = tmp_path / "schema_config.json"
+        config_file.write_text(
+            json.dumps({"schema": {"node_types": node_types}}), encoding="utf-8"
+        )
+        os.environ["SCHEMA_FILE"] = str(config_file)
+        config_loader.reset_loader()
+        return config_loader.get_schema()
+
+    def test_flag_declared_in_config_survives_loading(self, tmp_path):
+        """A declared flag must reach clients, not be dropped as an extra key."""
+        schema = self._load(
+            tmp_path,
+            {
+                "WithAttachments": {
+                    "fields": ["name"],
+                    "allows_attachments": True,
+                },
+                "WithoutAttachments": {
+                    "fields": ["name"],
+                    "allows_attachments": False,
+                },
+            },
+        )
+
+        assert schema["node_types"]["WithAttachments"]["allows_attachments"] is True
+        assert schema["node_types"]["WithoutAttachments"]["allows_attachments"] is False
+
+    def test_omitted_flag_defaults_to_false(self, tmp_path):
+        """A config written before this field existed must not enable uploads."""
+        schema = self._load(tmp_path, {"Legacy": {"fields": ["name"]}})
+
+        assert schema["node_types"]["Legacy"]["allows_attachments"] is False
+
+    def test_flag_is_reported_for_every_node_type(self, tmp_path):
+        """Clients may read the key unconditionally, on any node type."""
+        schema = self._load(tmp_path, {"Declared": {"fields": ["name"]}})
+
+        missing = [
+            name
+            for name, cfg in schema["node_types"].items()
+            if "allows_attachments" not in cfg
+        ]
+        assert missing == []
+
+    def test_system_node_types_do_not_allow_attachments(self):
+        """Code-injected system types stay at the default."""
+        from backend.config import config_loader
+
+        schema = config_loader.get_schema()
+
+        for type_name in config_loader.SYSTEM_NODE_TYPES:
+            assert schema["node_types"][type_name]["allows_attachments"] is False, (
+                f"System type '{type_name}' must not allow attachments by default"
+            )
+
+    def test_no_shipped_profile_enables_attachments(self):
+        """The field is additive: no profile gains uploads from this change."""
+        from backend.config import config_loader
+
+        config_dir = Path(__file__).parent.parent.parent / "config"
+        profiles = sorted(config_dir.glob("*/schema_config.json"))
+        assert profiles, "no profile schema_config.json files found"
+
+        for profile in profiles:
+            os.environ["SCHEMA_FILE"] = str(profile)
+            config_loader.reset_loader()
+            schema = config_loader.get_schema()
+            enabled = [
+                name
+                for name, cfg in schema["node_types"].items()
+                if cfg["allows_attachments"]
+            ]
+            assert enabled == [], f"{profile.parent.name} enables uploads on {enabled}"
