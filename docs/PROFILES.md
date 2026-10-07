@@ -131,7 +131,19 @@ Each node type has the following fields:
 | `icon` | No | Bootstrap Icon name for the toolbar (e.g. `"DatabaseFill"`, `"PeopleFill"`). Omitted or unregistered names fall back to the built-in icon for known type names, otherwise to a neutral circle |
 | `static` | No | If `true`, nodes of this type cannot be created via the chat. Used for system types |
 | `ui_form` | No | Specialized creation dialog. `"skill"` opens the SKILL.md-compatible form |
+| `labels` | No | Localized display names for this node type, keyed by language code (e.g. `{"sv": "Aktör"}`). Its live effect is on **search**: every label value, in every language, is joined into the type's lexical search text, so a query like `aktör` matches nodes of that type — in local and in federated results alike (see `backend/DEVELOPMENT.md`). Removing a label narrows search silently. As a *display* name it is looked up by the active UI language — always `en` while the UI is locked to English (see above) — so an `en` entry does render as the type name in search results and the metamodel explorer, while entries for other languages stay dormant until language switching returns; whenever the active language has no entry the path falls back to the raw type name. No shipped profile declares an `en` label, so none shows a translated type name today. The metamodel explorer's `Label (sv)` column is separate: it always shows the `sv` entry whatever the UI language, and `—` when unset |
 | `context_menu` | No | Array of extra items for the right-click context menu (see below) |
+| `allows_attachments` | No | `true` marks this node type as accepting file attachments. Defaults to `false`. Returned by `get_schema` on every node type, so clients can read it unconditionally. Per [ADR 0008](adr/0008-node-attachment-storage.md) section 7 it gates uploads only — listing, downloading and deleting files already attached stay available, so turning it back off never strands them. The upload, list, download and delete endpoints are a later slice: today the flag is declared and exposed, and nothing reads it yet |
+
+**A malformed value discards the whole file.** These fields are validated when
+the profile loads, and validation covers the schema file as a unit. A value of
+the wrong type for any of them — `"allows_attachments": "ture"`, a `null`, a
+list where a bool belongs — fails that validation, and the loader logs a
+warning and falls back to built-in defaults: every node type *and* relationship
+type the profile declares is dropped, leaving only the code-managed system
+types. Nothing else reports the profile as broken, so check the startup log
+after editing. Boolean fields do accept the usual spellings (`true`, `"true"`,
+`"yes"`, `1`), so only genuinely unparseable values trip this.
 
 Every node — regardless of its type or its `fields` list — also carries a
 universal `aliases` field: a list of alternative names/synonyms. Aliases are
