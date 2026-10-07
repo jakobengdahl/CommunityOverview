@@ -2103,6 +2103,87 @@ def register_mcp_tools(
         }
 
     @register_tool
+    def search_reference_target_sessions(
+        query: Optional[str] = None,
+        limit: int = 20,
+        exclude_session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Find sessions a `reference` annotation can point at.
+
+        The discovery half of a session reference (`create_annotation` with
+        type `reference` and `content.target_kind` "session"): search the
+        sessions by id or display name, then pass the `session_id` you want
+        as `content.target`.
+
+        Matching is a case-insensitive substring over the session id and its
+        display name, so a partial id ("8244") and a partial name ("programme")
+        both work. An omitted or empty `query` lists the candidates, most
+        recently updated first — the same order `list_visualization_sessions`
+        uses.
+
+        Only sessions are returned: this tool reads the session index and
+        nothing else, so it can never surface a graph node as a candidate.
+        Hosted deployments additionally restrict which sessions a given viewer
+        may see; that enforcement is not in this repo, so here the result is
+        every session the caller's read authorization already allows.
+
+        Args:
+            query: Optional case-insensitive substring matched against each
+                session's id and display name. Omit to list candidates.
+            limit: Maximum number of candidates to return (1-100, default 20).
+            exclude_session_id: A session to leave out of the results —
+                normally the session you are placing the reference on, since a
+                tile pointing at the session it sits in goes nowhere. Ignored
+                when it is not a valid session id.
+
+        Returns:
+            Dict with success, sessions (the same lightweight projections
+            `list_visualization_sessions` returns, each usable as a
+            reference's `target` via its `session_id`), count (how many are
+            returned) and total_matches (how many matched before `limit`).
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        denied = _authorize_session(
+            GRAPH_ACTION_READ, "search_reference_target_sessions"
+        )
+        if denied:
+            return denied
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= 100
+        ):
+            return {
+                "success": False,
+                "error": "invalid_limit",
+                "message": "limit must be an integer from 1 to 100.",
+            }
+        mutate_allowed = (
+            _authorize_session(GRAPH_ACTION_MUTATE, "visualization_session") is None
+        )
+        needle = (query or "").strip().lower()
+        matches = []
+        for meta in session_manager.list_sessions():
+            meta_id = meta.get("id") or ""
+            if exclude_session_id and meta_id == exclude_session_id:
+                continue
+            if needle:
+                name = meta.get("name") or ""
+                if needle not in meta_id.lower() and needle not in name.lower():
+                    continue
+            matches.append(meta)
+        return {
+            "success": True,
+            "count": len(matches[:limit]),
+            "total_matches": len(matches),
+            "sessions": [
+                _project_meta(m, mutate_allowed=mutate_allowed) for m in matches[:limit]
+            ],
+        }
+
+    @register_tool
     def get_visualization_session(session_id: str) -> Dict[str, Any]:
         """
         Inspect one visualization session's resource metadata.
@@ -2959,7 +3040,7 @@ def register_mcp_tools(
 
         Covers every v1 annotation type except `note`, `group` and `image`:
         `text`, `label`, `line` (`arrow` accepted as an alias),
-        `shape`, `icon`, `vote_dot`, `freehand`, `heatmap`. Use `create_sticky_note` for notes,
+        `shape`, `icon`, `vote_dot`, `freehand`, `heatmap`, `reference`. Use `create_sticky_note` for notes,
         `create_group_annotation` for groups, and `create_image_annotation`
         for images (an image's pixel content must be ingested server-side, so
         it cannot be created from a bare envelope here). An image annotation
@@ -2989,6 +3070,23 @@ def register_mcp_tools(
             circles blend into one field, so the result does not depend on
             their z order among themselves; like `shape` it starts at z -1,
             behind graph nodes.
+          - reference: {"target_kind": "session", "target": "8244-1742-3391-0057",
+            "label": "Programme overview"} — a navigational tile pointing at
+            another session, an external page or supporting material in the
+            graph. `target_kind` is one of "session" (a session id — find
+            candidates with `search_reference_target_sessions`), "url" (an
+            http/https page) or "resource" (a graph node id). BOTH
+            `target_kind` and `target` are required on a create. Optional
+            `label` (shown on the tile; falls back to the target itself),
+            `icon` (a name from the annotation icon set) and `preview`, a
+            text-only object limited to {"title", "description", "site"}.
+            A "url" target must be an http or https URL with a host:
+            `javascript:`, `data:`, `file:`, `vbscript:` and every other
+            scheme are refused as `invalid_content`, because the target is
+            rendered into a link a viewer activates. A reference is
+            annotation state — it is never written to the main graph, and a
+            "resource" reference names a node it neither creates nor owns.
+            Box defaults to 220x72.
 
         `locked=True` combined with an attached/anchored binding (an
         attachable type's `attachment`, or a `line`'s `start`/`end`
@@ -3024,7 +3122,8 @@ def register_mcp_tools(
 
         Args:
             session_id: The session ID shown in the browser header (e.g. "8244-1742")
-            type: One of text/label/line/shape/icon/vote_dot/freehand/heatmap
+            type: One of
+                text/label/line/shape/icon/vote_dot/freehand/heatmap/reference
                 ("arrow" accepted as an alias for "line"; "image" is
                 rejected — use create_image_annotation).
             x: Model-space x of the annotation's anchor/top-left corner.
@@ -3032,8 +3131,11 @@ def register_mcp_tools(
             w: Optional width in model-space px. No default for most types
                 (shape usually needs one, line/icon usually don't); a
                 `heatmap` defaults to 160, and given only one of w/h the
-                other matches it.
-            h: Optional height in model-space px (same heatmap rule as w).
+                other matches it. A `reference` defaults to 220 wide and 72
+                tall, each side independently, so giving only one keeps the
+                other's default.
+            h: Optional height in model-space px (same heatmap/reference
+                rules as w).
             rotation: Optional rotation in degrees.
             content: Optional type-specific payload fields (see above).
             style: Optional style dict (color/opacity; for
@@ -3546,6 +3648,15 @@ def register_mcp_tools(
                 `image` is rejected here: an image annotation's picture is
                 replaced by calling `create_image_annotation` again with the
                 same annotation_id, so the new bytes go through ingest.
+                For a `reference` this is a genuine partial update — send
+                just `{"label": "..."}` to rename one, or just
+                `{"target": "https://..."}` to repoint it, and the fields you
+                leave out keep their stored values. Repointing is still held
+                to the scheme rule: a `target` sent for a reference whose
+                stored `target_kind` is "url" must be an http/https URL with
+                a host, and switching kind and target together (e.g.
+                `{"target_kind": "url", "target": "https://..."}`) is judged
+                on the kind in the same write.
             style: New style dict, if changing it (replaces the whole dict —
                 for text/shape this includes fontSize/font/textAlign, so
                 changing only one of them still means resending every style

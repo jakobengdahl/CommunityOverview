@@ -9,7 +9,10 @@
 import {
   HEATMAP_DEFAULT_DIAMETER,
   HEATMAP_MAX_INTENSITY,
+  REFERENCE_DEFAULT_SIZE,
   normalizeHeatmapIntensity,
+  normalizeReferenceTargetKind,
+  referenceTargetProblem,
 } from './annotationModel';
 
 // text/shape/icon/vote_dot/image/freehand are the rest of the v1
@@ -38,6 +41,7 @@ export const GENERIC_OVERLAY_TYPES = new Set([
   'image',
   'freehand',
   'heatmap',
+  'reference',
 ]);
 export const OVERLAY_TYPES = new Set(['note', 'label', 'arrow', ...GENERIC_OVERLAY_TYPES]);
 export const ANNOTATION_TYPES = new Set([
@@ -81,6 +85,21 @@ export const VOTE_DOT_INTRINSIC_SIZE = { w: 24, h: 24 };
 // callers) is keyed on membership here, not on whether the field happens to
 // be present.
 export const ATTACHABLE_OVERLAY_KINDS = new Set(['text', 'label', 'icon']);
+
+// Per-target-kind words for a reference's accessible name. Props with
+// English defaults, following this package's own i18n rule (see
+// AnnotationContext.js): the host passes translated values, and the
+// fallbacks here are what a host that passes none gets.
+export const REFERENCE_ARIA_TARGET_LABEL_KEYS = Object.freeze({
+  session: 'ariaKindReferenceSession',
+  url: 'ariaKindReferenceUrl',
+  resource: 'ariaKindReferenceResource',
+});
+export const REFERENCE_ARIA_TARGET_FALLBACKS = Object.freeze({
+  session: 'session',
+  url: 'web page',
+  resource: 'supporting material',
+});
 
 // Per-kind payload fields carried on a generic overlay's `data`, beyond the
 // shared id/type/position/style. Drives both overlayToFlowNode and its
@@ -146,6 +165,12 @@ const GENERIC_OVERLAY_FIELDS = {
   // colour or opacity of its own: both are derived from the intensity
   // (heatmapFillStyle below), so the level is the single thing a user sets.
   heatmap: ['intensity'],
+  // A reference tile's whole payload: what it points at (`target_kind` +
+  // `target`), what it shows (`label`, `icon`, an optional text-only
+  // `preview`) and the shared `opacity`. It has no `color` of its own — the
+  // tile is drawn from its target kind, so a per-tile colour would make two
+  // references to different kinds of thing look alike.
+  reference: ['target_kind', 'target', 'label', 'icon', 'preview', 'opacity'],
   // `points` are node-relative (relative to the node's own `position`, the
   // stroke's anchor/first sampled point) — the same convention arrow's
   // dx/dy uses, so a plain ReactFlow drag (which only updates `position`)
@@ -166,7 +191,7 @@ const GENERIC_OVERLAY_FIELDS = {
 
 // Generic overlay kinds that carry an explicit box size (shape/image);
 // icon/vote_dot/text render at a fixed intrinsic size instead.
-const SIZED_GENERIC_KINDS = new Set(['shape', 'image', 'heatmap']);
+const SIZED_GENERIC_KINDS = new Set(['shape', 'image', 'heatmap', 'reference']);
 
 // The kinds that draw geometry.rotation. The capability baseline names
 // text/headings, labels/callouts, sticky notes, images, icons/dots and basic
@@ -542,7 +567,12 @@ export function overlayToFlowNode(overlay) {
     for (const field of GENERIC_OVERLAY_FIELDS[overlay.kind]) data[field] = overlay[field];
     const node = { ...base, data, draggable: !locked, zIndex };
     if (SIZED_GENERIC_KINDS.has(overlay.kind)) {
-      const fallback = overlay.kind === 'heatmap' ? HEATMAP_DEFAULT_BOX : DEFAULT_GENERIC_SIZE;
+      const fallback =
+        overlay.kind === 'heatmap'
+          ? HEATMAP_DEFAULT_BOX
+          : overlay.kind === 'reference'
+            ? REFERENCE_DEFAULT_SIZE
+            : DEFAULT_GENERIC_SIZE;
       node.style = overlay.size
         ? { width: overlay.size.w, height: overlay.size.h }
         : { width: fallback.w, height: fallback.h };
@@ -900,6 +930,24 @@ export function computeAnnotationAriaLabel(kind, data, labels = {}) {
       const level = normalizeHeatmapIntensity(d.intensity);
       const template = labels.ariaKindHeatmap || 'Heat-map circle, intensity {level} of {max}';
       return template.replace('{level}', level).replace('{max}', HEATMAP_MAX_INTENSITY);
+    }
+    case 'reference': {
+      // The accessible name must say three things a sighted user reads off
+      // the tile at a glance: that it is a link, what kind of thing it
+      // points at, and — when it cannot be followed — that it is broken.
+      // Leaving the broken state out of the name would make a dead tile
+      // indistinguishable from a live one without the colour.
+      const kindWord = labels.ariaKindReference || 'Reference';
+      const targetKind = normalizeReferenceTargetKind(d.target_kind);
+      const targetWord =
+        (targetKind && labels[REFERENCE_ARIA_TARGET_LABEL_KEYS[targetKind]]) ||
+        (targetKind ? REFERENCE_ARIA_TARGET_FALLBACKS[targetKind] : '');
+      const name = targetWord ? `${kindWord}, ${targetWord}` : kindWord;
+      const detail = text(d.label) || text(d.target);
+      const named = withDetail(name, detail);
+      return referenceTargetProblem(d)
+        ? `${named}, ${labels.ariaKindReferenceBroken || 'broken target'}`
+        : named;
     }
     case 'image':
       return withDetail(labels.ariaKindImage || 'Image', text(d.alt));

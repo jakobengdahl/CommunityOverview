@@ -12,6 +12,7 @@ export const ANNOTATION_TYPES = Object.freeze([
   'image',
   'freehand',
   'heatmap',
+  'reference',
 ]);
 
 // A heat-map circle's intensity is a whole level from 0 (invisible) to 10
@@ -31,6 +32,84 @@ export function normalizeHeatmapIntensity(value) {
   if (typeof number !== 'number' || !Number.isFinite(number)) return HEATMAP_DEFAULT_INTENSITY;
   return Math.min(HEATMAP_MAX_INTENSITY, Math.max(HEATMAP_MIN_INTENSITY, Math.round(number)));
 }
+
+// The three things a `reference` annotation may point at
+// (docs/ANNOTATION_CONTRACT.md's "Reference tiles"). Mirrors
+// REFERENCE_TARGET_KINDS in backend/core/session_annotations.py.
+export const REFERENCE_TARGET_KINDS = Object.freeze(['session', 'url', 'resource']);
+
+const REFERENCE_TARGET_KIND_SET = new Set(REFERENCE_TARGET_KINDS);
+
+// The only schemes a `url` reference's target may be rendered as an
+// activatable link with. Mirrors REFERENCE_SAFE_URL_SCHEMES in
+// backend/core/session_annotations.py — an allowlist on both sides, so a
+// scheme nobody thought to name is refused rather than drawn as a link.
+export const REFERENCE_SAFE_URL_SCHEMES = Object.freeze(['http:', 'https:']);
+
+const REFERENCE_SAFE_URL_SCHEME_SET = new Set(REFERENCE_SAFE_URL_SCHEMES);
+
+/**
+ * Whether `value` is a URL this package may render as an activatable link.
+ *
+ * The backend gate (`reference_url_error`) is the one that decides what may
+ * be *stored*; this is the renderer's own independent check on what it may
+ * *draw as clickable*, deliberately duplicated rather than trusted. A stored
+ * annotation reaches the canvas from session state, a saved view, a remote
+ * collaborator's op or a host that hydrated it from somewhere else — so a
+ * canvas that drew whatever it was handed would turn any gap in any of those
+ * paths into a `javascript:` link under the user's cursor. Returning false
+ * here is what makes such a reference render in its broken state instead.
+ *
+ * Control characters are rejected outright, not stripped: a browser removes
+ * a tab or newline before resolving `java\tscript:alert(1)`, so a check that
+ * normalises first and asks afterwards passes exactly the string the browser
+ * then runs.
+ */
+export function isSafeReferenceUrl(value) {
+  if (typeof value !== 'string') return false;
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(value)) return false;
+  const candidate = value.trim();
+  if (!candidate) return false;
+  let parsed;
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    // No base is passed on purpose: a relative or scheme-relative target has
+    // no scheme of its own, and resolving it against the app's own origin
+    // would let an innocuous-looking tile point back into the app.
+    return false;
+  }
+  if (!REFERENCE_SAFE_URL_SCHEME_SET.has(parsed.protocol)) return false;
+  return Boolean(parsed.hostname);
+}
+
+export function normalizeReferenceTargetKind(value) {
+  return REFERENCE_TARGET_KIND_SET.has(value) ? value : null;
+}
+
+/**
+ * Why a reference cannot be opened, or `null` when it can.
+ *
+ * `'missing'` — no target kind, or no target at all.
+ * `'unsafe'`  — a url target this package will not render as a link.
+ * Anything the *host* knows is unresolvable (a session that no longer
+ * exists, a resource node that was deleted) is not visible from here; the
+ * host reports those separately, and GenericAnnotationNode folds the two
+ * together into one broken state.
+ */
+export function referenceTargetProblem(data = {}) {
+  const kind = normalizeReferenceTargetKind(data.target_kind);
+  const target = typeof data.target === 'string' ? data.target.trim() : '';
+  if (!kind || !target) return 'missing';
+  if (kind === 'url' && !isSafeReferenceUrl(target)) return 'unsafe';
+  return null;
+}
+
+// The default on-canvas box for a reference tile — it shows a badge, a label
+// and, when present, a preview line, so it is wider than tall. Mirrors
+// DEFAULT_REFERENCE_SIZE in backend/core/session_annotations.py.
+export const REFERENCE_DEFAULT_SIZE = Object.freeze({ w: 220, h: 72 });
 
 // The shape variants `content.shape` accepts (docs/ANNOTATION_CONTRACT.md).
 // Every one renders as its own distinct visual in GenericAnnotationNode.
@@ -262,6 +341,21 @@ function withTypePayload(annotation, type, geometry) {
   if (type === 'heatmap') {
     return { intensity: normalizeHeatmapIntensity(annotation.intensity) };
   }
+  if (type === 'reference') {
+    // Every field is carried, including an unrecognised target kind and an
+    // unsafe target: normalising either away would hide a broken reference
+    // instead of showing it as broken, and silently rewriting a target is
+    // how a tile ends up pointing somewhere the author never chose.
+    // `referenceTargetProblem` is what reads them back.
+    const preview = isPlainObject(annotation.preview) ? clone(annotation.preview) : undefined;
+    return {
+      target_kind: annotation.target_kind ?? null,
+      target: typeof annotation.target === 'string' ? annotation.target : '',
+      label: annotation.label || '',
+      icon: annotation.icon || undefined,
+      ...(preview ? { preview } : {}),
+    };
+  }
   if (type === 'image') {
     return {
       image: clone(annotation.image || {}),
@@ -296,7 +390,11 @@ export function createAnnotation(input = {}) {
   const type = normalizeType(input);
   const geometry = normalizeGeometry(
     input,
-    type === 'heatmap' ? { w: HEATMAP_DEFAULT_DIAMETER, h: HEATMAP_DEFAULT_DIAMETER } : DEFAULT_SIZE
+    type === 'heatmap'
+      ? { w: HEATMAP_DEFAULT_DIAMETER, h: HEATMAP_DEFAULT_DIAMETER }
+      : type === 'reference'
+        ? REFERENCE_DEFAULT_SIZE
+        : DEFAULT_SIZE
   );
   const style = clone(input.style) || {};
   if (input.color !== undefined && style.color === undefined) style.color = input.color;

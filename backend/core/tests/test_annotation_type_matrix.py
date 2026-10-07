@@ -87,8 +87,18 @@ class TestAnnotationTypeMatrixFixture:
             "image",
             "freehand",
             "heatmap",
+            "reference",
         }
         assert types.count("shape") == 2
+        # One reference case per target kind. A reference's payload differs
+        # by target kind far more than a shape's differs by subtype — the
+        # scheme gate applies to exactly one of the three — so covering only
+        # one kind would leave the other two unexercised through the model,
+        # persistence and MCP legs this matrix exists to compare.
+        assert types.count("reference") == 3
+        assert {
+            c["fields"]["target_kind"] for c in CASES if c["type"] == "reference"
+        } == {"session", "url", "resource"}
 
 
 @pytest.fixture

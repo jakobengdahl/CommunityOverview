@@ -39,6 +39,13 @@ export {
   migrateLegacyAnnotations,
   normalizeAnnotationDocument,
   normalizeShapeName,
+  // The renderer's own safe-scheme gate for a `reference` target. Exported so
+  // the host can apply the identical rule at the point where it actually
+  // hands the string to a browser (`window.open`), rather than keeping a
+  // second copy that can drift from this one.
+  isSafeReferenceUrl,
+  REFERENCE_SAFE_URL_SCHEMES,
+  REFERENCE_TARGET_KINDS,
 } from './utils/annotationModel';
 
 // Canvas-facing annotation type set (ReactFlow node `type` values, e.g.

@@ -23,9 +23,14 @@ import { isRemoteLocked } from '../utils/annotations';
  * Returns the state and handlers a caller wires onto its own input element —
  * the element itself (textarea vs. input, styling, rows) stays with the
  * caller, since that is the part that actually differs between them.
+ *
+ * `field` names the `data` key being edited, defaulting to `text` — the key
+ * every kind that predates `reference` stores its editable string under, so
+ * every existing call site is unchanged. A `reference` tile's editable
+ * string is its `label`, not a `text` it does not have.
  */
-export function useEditableText(id, data, { commitOnEnter = false } = {}) {
-  const persistedText = data.text || '';
+export function useEditableText(id, data, { commitOnEnter = false, field = 'text' } = {}) {
+  const persistedText = data[field] || '';
   const [isEditing, setIsEditing] = useState(false);
   const [text, setText] = useState(persistedText);
   const [textWhenLastRendered, setTextWhenLastRendered] = useState(persistedText);
@@ -178,7 +183,7 @@ export function useEditableText(id, data, { commitOnEnter = false } = {}) {
     releaseLease();
     const trimmed = text.trim();
     setNodes((nds) =>
-      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, text: trimmed } } : n))
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, [field]: trimmed } } : n))
     );
     notifyChange('text');
   };
@@ -191,7 +196,7 @@ export function useEditableText(id, data, { commitOnEnter = false } = {}) {
     setText(next);
     if (remoteLocked) return;
     setNodes((nds) =>
-      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, text: next } } : n))
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, [field]: next } } : n))
     );
     notifyChange('text');
   };

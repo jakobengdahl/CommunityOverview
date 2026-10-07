@@ -82,6 +82,8 @@ import {
   defaultAnnotationZ,
   HEATMAP_DEFAULT_DIAMETER,
   HEATMAP_DEFAULT_INTENSITY,
+  REFERENCE_DEFAULT_SIZE,
+  isSafeReferenceUrl,
 } from '../utils/annotationModel';
 import {
   directNeighborIds,
@@ -367,6 +369,28 @@ function GraphCanvasInner({
   // the annotation once it comes back over the session's realtime channel
   // (see remoteAnnotationOps), never a client-side guess of the result.
   onImageIngest,
+  // Called with ({annotationId, targetKind, target, label}) when a human
+  // activates a `reference` annotation — double-clicking the tile, clicking
+  // its ↗ control, or picking "Open target" from its property editor. The
+  // canvas never navigates or opens a window itself: what "open" means for a
+  // session, an external page or a graph resource is the host's shell's
+  // decision, and routing it through one callback is also what keeps a
+  // reference's target out of any `href` the canvas renders (see the
+  // `reference` branch in GenericAnnotationNode.jsx). A reference the canvas
+  // or the host considers broken never reaches this callback.
+  onReferenceOpen,
+  // Called with (targetKind, target) for each `reference` annotation to ask
+  // the HOST whether its target still resolves. Returns `false` for a target
+  // the host knows is gone (a session no longer in its index), `true` for one
+  // it has confirmed, and `undefined` for one it cannot judge — which is the
+  // honest answer for a target whose existence needs a server round trip, and
+  // leaves the reference judged on structure alone.
+  //
+  // A resolver rather than a list of broken annotation ids: the reference
+  // annotations live in this canvas's own node state, so a host asked for ids
+  // would have to enumerate objects it does not hold. It does hold the
+  // session index this answers from.
+  isReferenceTargetAvailable,
   onShowOnly,
   onSelectionChange,
   onNodeDoubleClick: onNodeDoubleClickCallback,
@@ -597,6 +621,24 @@ function GraphCanvasInner({
     annotationAttachToCancel: 'Cancel attaching',
     annotationMultiSelectMode: 'Select multiple',
     annotationOverlapPickerTitle: 'Multiple objects here — choose one',
+    // Reference tiles (docs/ANNOTATION_CONTRACT.md's "Reference tiles").
+    referenceUntitled: 'Reference',
+    referenceOpen: 'Open target',
+    referenceRename: 'Rename',
+    referenceLabel: 'Label',
+    referenceTarget: 'Target',
+    referenceTargetSession: 'Session',
+    referenceTargetUrl: 'Web page',
+    referenceTargetResource: 'Supporting material',
+    referenceTargetUnknown: 'Unknown target',
+    referenceBrokenTarget: 'Target not available',
+    referenceUnsafeTarget: 'Unsafe link — not opened',
+    referencePasteCreated: 'Added a link to the pasted address',
+    ariaKindReference: 'Reference',
+    ariaKindReferenceSession: 'session',
+    ariaKindReferenceUrl: 'web page',
+    ariaKindReferenceResource: 'supporting material',
+    ariaKindReferenceBroken: 'broken target',
     ...contextMenuLabels,
   };
   // Read through a ref inside the freehand pointer-capture effect below, for
@@ -1022,6 +1064,8 @@ function GraphCanvasInner({
       endEditing,
       attachNearby,
       enterAttachMode,
+      openReference: onReferenceOpen,
+      isReferenceTargetAvailable,
       // task-annotation-responsive-bottom-toolbox's edit-surface half — see
       // AnnotationContext's own doc comment on this field for what each part
       // means. `isCompact` alone (not `isTouchMode`) is the gate, mirroring
@@ -1093,6 +1137,22 @@ function GraphCanvasInner({
         ariaKindArrow: cml.ariaKindArrow,
         ariaKindFreehand: cml.ariaKindFreehand,
         ariaKindGroup: cml.ariaKindGroup,
+        ariaKindReference: cml.ariaKindReference,
+        ariaKindReferenceSession: cml.ariaKindReferenceSession,
+        ariaKindReferenceUrl: cml.ariaKindReferenceUrl,
+        ariaKindReferenceResource: cml.ariaKindReferenceResource,
+        ariaKindReferenceBroken: cml.ariaKindReferenceBroken,
+        referenceUntitled: cml.referenceUntitled,
+        referenceOpen: cml.referenceOpen,
+        referenceRename: cml.referenceRename,
+        referenceLabel: cml.referenceLabel,
+        referenceTarget: cml.referenceTarget,
+        referenceTargetSession: cml.referenceTargetSession,
+        referenceTargetUrl: cml.referenceTargetUrl,
+        referenceTargetResource: cml.referenceTargetResource,
+        referenceTargetUnknown: cml.referenceTargetUnknown,
+        referenceBrokenTarget: cml.referenceBrokenTarget,
+        referenceUnsafeTarget: cml.referenceUnsafeTarget,
         width: cml.annotationWidth,
         height: cml.annotationHeight,
         size: cml.annotationSize,
@@ -1174,6 +1234,24 @@ function GraphCanvasInner({
       cml.ariaKindArrow,
       cml.ariaKindFreehand,
       cml.ariaKindGroup,
+      cml.ariaKindReference,
+      cml.ariaKindReferenceSession,
+      cml.ariaKindReferenceUrl,
+      cml.ariaKindReferenceResource,
+      cml.ariaKindReferenceBroken,
+      cml.referenceUntitled,
+      cml.referenceOpen,
+      cml.referenceRename,
+      cml.referenceLabel,
+      cml.referenceTarget,
+      cml.referenceTargetSession,
+      cml.referenceTargetUrl,
+      cml.referenceTargetResource,
+      cml.referenceTargetUnknown,
+      cml.referenceBrokenTarget,
+      cml.referenceUnsafeTarget,
+      onReferenceOpen,
+      isReferenceTargetAvailable,
       cml.annotationWidth,
       cml.annotationHeight,
       cml.annotationApplySize,
@@ -2175,6 +2253,29 @@ function GraphCanvasInner({
             size: { ...VOTE_DOT_INTRINSIC_SIZE },
           },
         };
+      } else if (kind === 'reference') {
+        // A navigational tile. Created with the target it was given and
+        // nothing invented: an empty `label` means the tile shows the target
+        // itself (GenericAnnotationNode's own fallback), which for a pasted
+        // URL is the honest thing to show until the author renames it. No
+        // `zIndex` override — a reference is content to click, not a backdrop
+        // like `shape`/`heatmap`, so it starts at the default 0 every other
+        // kind does.
+        newNode = {
+          id,
+          type: 'reference',
+          position,
+          data: {
+            target_kind: options.targetKind ?? null,
+            target: options.target || '',
+            label: options.label || '',
+            icon: options.icon,
+          },
+          style: options.box || {
+            width: REFERENCE_DEFAULT_SIZE.w,
+            height: REFERENCE_DEFAULT_SIZE.h,
+          },
+        };
       } else if (kind === 'heatmap') {
         // A circle, so the box is square: a drag-to-draw sweep sizes it by
         // its longer side, and a plain click gets the default diameter. The
@@ -2536,6 +2637,39 @@ function GraphCanvasInner({
     document.addEventListener('paste', handlePaste);
     return () => document.removeEventListener('paste', handlePaste);
   }, [onImageIngest, ingestImageFile, viewportCenterPosition]);
+
+  // Clipboard URL paste (Ctrl/Cmd+V) — the human creation path for a `url`
+  // reference (docs/ANNOTATION_CONTRACT.md's "Reference tiles"), guarded the
+  // same way the image paste above is so pasting into a note's text field is
+  // untouched. A separate effect rather than another branch of that handler
+  // because the two have independent host requirements: a host with no
+  // `onImageIngest` returns early there, and URL paste must still work for it.
+  //
+  // Only a clipboard whose text is, on its own, an http/https URL creates
+  // anything: `isSafeReferenceUrl` is the same renderer-side gate the tile
+  // uses, so a paste can never produce a reference the canvas would then draw
+  // as broken, and pasting ordinary prose (or a `javascript:` string) does
+  // nothing at all rather than silently dropping a dead tile on the canvas.
+  // The event is only consumed when something is actually created, leaving
+  // every other paste to whatever else would have handled it.
+  useEffect(() => {
+    const handleUrlPaste = (event) => {
+      const tag = event.target?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || event.target?.isContentEditable) return;
+      const text = event.clipboardData?.getData('text/plain');
+      if (!text) return;
+      const candidate = text.trim();
+      if (!isSafeReferenceUrl(candidate)) return;
+      event.preventDefault();
+      createAnnotation('reference', viewportCenterPosition(), {
+        targetKind: 'url',
+        target: candidate,
+      });
+      showNotification('success', cml.referencePasteCreated);
+    };
+    document.addEventListener('paste', handleUrlPaste);
+    return () => document.removeEventListener('paste', handleUrlPaste);
+  }, [createAnnotation, viewportCenterPosition, showNotification, cml.referencePasteCreated]);
 
   // Dismiss the pane annotation menu on any outside interaction (e.g. clicking a
   // graph node, which handlePaneClick does not cover), matching the annotation
@@ -4942,6 +5076,7 @@ function GraphCanvasInner({
       icon: guard(GenericAnnotationNode, 'icon'),
       vote_dot: guard(GenericAnnotationNode, 'vote_dot'),
       heatmap: guard(GenericAnnotationNode, 'heatmap'),
+      reference: guard(GenericAnnotationNode, 'reference'),
       image: guard(GenericAnnotationNode, 'image'),
       freehand: guard(FreehandAnnotationNode, 'freehand'),
     };

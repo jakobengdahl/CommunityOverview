@@ -1,5 +1,9 @@
 import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
-import { GraphCanvas, CANVAS_ANNOTATION_TYPES } from '@community-graph/ui-graph-canvas';
+import {
+  GraphCanvas,
+  CANVAS_ANNOTATION_TYPES,
+  isSafeReferenceUrl,
+} from '@community-graph/ui-graph-canvas';
 import '@community-graph/ui-graph-canvas/styles';
 import useGraphStore from './store/graphStore';
 import { useI18n } from './i18n';
@@ -2235,6 +2239,80 @@ function App() {
     [sessionId, switchToSession, showNotification, t]
   );
 
+  // ── Reference tiles (docs/ANNOTATION_CONTRACT.md "Reference tiles") ──────
+  // What the canvas can decide for itself (no target; a url target whose
+  // scheme it refuses to link) it already has. This answers the one thing
+  // only the host knows, and answers `undefined` — "no opinion" — for
+  // everything it does not actually know, because greying out a live tile is
+  // as wrong as leaving a dead one looking live.
+  const isReferenceTargetAvailable = useCallback((targetKind, target) => {
+    // A session id that cannot be a session id is unreachable with certainty.
+    // A well-formed one that is not in this browser's local session list is
+    // NOT: that list is what this browser has visited, not what exists on the
+    // server, so a colleague's shared session would be marked broken on the
+    // strength of never having been opened here.
+    if (targetKind === 'session') {
+      return sessionStore.isValidSessionId(target) ? undefined : false;
+    }
+    // `url` is the canvas's own scheme check, and a `resource` target needs a
+    // graph lookup this cannot do synchronously during render — it is resolved
+    // when the reference is actually opened (handleReferenceOpen below).
+    return undefined;
+  }, []);
+
+  const handleReferenceOpen = useCallback(
+    async ({ targetKind, target }) => {
+      if (targetKind === 'session') {
+        if (!sessionStore.isValidSessionId(target)) {
+          showNotification('error', t('sessions.invalid_session_id'));
+          return;
+        }
+        if (target === sessionId) {
+          showNotification('info', t('context_menu.reference_already_here'));
+          return;
+        }
+        // Eager connect for the same reason handleConnectSession above does
+        // it: this is a join by id, not a session this browser created.
+        switchToSession(target, { eagerConnect: true });
+        return;
+      }
+      if (targetKind === 'url') {
+        // Re-checked here even though the canvas refuses to render an unsafe
+        // target as openable and the server refuses to store one. This is the
+        // call that actually hands a string to the browser, and a guard at the
+        // point of use costs one function call; the alternative is trusting
+        // every layer upstream of it to have stayed correct.
+        if (!isSafeReferenceUrl(target)) {
+          showNotification('error', t('context_menu.reference_unsafe_target'));
+          return;
+        }
+        // `noopener,noreferrer`: the opened page must not get a handle on this
+        // window (reverse tabnabbing) and should not be told where it came
+        // from.
+        window.open(target, '_blank', 'noopener,noreferrer');
+        return;
+      }
+      if (targetKind === 'resource') {
+        // Bring the node into the view and focus it. The existence check is
+        // here rather than in the resolver above because it needs the server:
+        // a resource reference therefore reports a missing target when it is
+        // followed, not before.
+        try {
+          const details = await api.getNodeDetails(target);
+          if (!details?.node) {
+            showNotification('error', t('context_menu.reference_broken_target'));
+            return;
+          }
+          await addNodesToVisualization([details.node], []);
+          setFocusNodeId(target);
+        } catch {
+          showNotification('error', t('context_menu.reference_broken_target'));
+        }
+      }
+    },
+    [sessionId, switchToSession, showNotification, t, addNodesToVisualization, setFocusNodeId]
+  );
+
   const handleRenameSession = useCallback(
     (name) => {
       if (!renameDialog) return;
@@ -2496,6 +2574,8 @@ function App() {
           onCreateAgent={handleCreateAgent}
           onDropCreateNode={handleDropCreateNode}
           onImageIngest={handleImageIngest}
+          onReferenceOpen={handleReferenceOpen}
+          isReferenceTargetAvailable={isReferenceTargetAvailable}
           onShowOnly={handleShowOnly}
           onSelectionChange={handleSelectionChange}
           onNodeDoubleClick={handleNodeDoubleClick}
@@ -2661,6 +2741,23 @@ function App() {
             ariaKindArrow: t('context_menu.aria_kind_arrow'),
             ariaKindFreehand: t('context_menu.aria_kind_freehand'),
             ariaKindGroup: t('context_menu.aria_kind_group'),
+            ariaKindReference: t('context_menu.aria_kind_reference'),
+            ariaKindReferenceSession: t('context_menu.aria_kind_reference_session'),
+            ariaKindReferenceUrl: t('context_menu.aria_kind_reference_url'),
+            ariaKindReferenceResource: t('context_menu.aria_kind_reference_resource'),
+            ariaKindReferenceBroken: t('context_menu.aria_kind_reference_broken'),
+            referenceUntitled: t('context_menu.reference_untitled'),
+            referenceOpen: t('context_menu.reference_open'),
+            referenceRename: t('context_menu.reference_rename'),
+            referenceLabel: t('context_menu.reference_label'),
+            referenceTarget: t('context_menu.reference_target'),
+            referenceTargetSession: t('context_menu.reference_target_session'),
+            referenceTargetUrl: t('context_menu.reference_target_url'),
+            referenceTargetResource: t('context_menu.reference_target_resource'),
+            referenceTargetUnknown: t('context_menu.reference_target_unknown'),
+            referenceBrokenTarget: t('context_menu.reference_broken_target'),
+            referenceUnsafeTarget: t('context_menu.reference_unsafe_target'),
+            referencePasteCreated: t('context_menu.reference_paste_created'),
             annotationWidth: t('context_menu.annotation_width'),
             annotationHeight: t('context_menu.annotation_height'),
             annotationSize: t('context_menu.annotation_size'),

@@ -59,6 +59,22 @@ import { createContext } from 'react';
  *   - `container`: the host DOM node to portal the open menu's content into
  *     while `capable` and the sheet is actually open; null otherwise (before
  *     the request has been acted on, or once closed).
+ * `openReference({annotationId, targetKind, target, label})` is how a
+ * `reference` annotation hands an activation (double-click, its ↗ control,
+ * or "Open target" in its property editor) to the host, which decides what
+ * opening a session / an external page / a graph resource means in its own
+ * shell. Bound to GraphCanvas's `onReferenceOpen` prop. The default is a
+ * no-op, so a reference on a host that wired nothing simply does not
+ * navigate — it never falls back to a guess about the host's routing.
+ *
+ * `isReferenceTargetAvailable(targetKind, target)` asks the host whether a
+ * reference's target still resolves: `false` for one it knows is gone,
+ * `true` for one it has confirmed, `undefined` for one it cannot judge.
+ * Bound to GraphCanvas's prop of the same name. The default returns
+ * `undefined` — "no host opinion" — which leaves a reference judged on the
+ * structural checks the canvas can make on its own (annotationModel.js's
+ * `referenceTargetProblem`).
+ *
  *   - `requestOpen`/`requestClose`: ask the host to open/close its mobile
  *     edit sheet (bound to `useSurfaceManager`'s `'detail'` surface in
  *     `frontend/web`'s `MobileShell`/`App.jsx`). The default below is a
@@ -71,6 +87,8 @@ export const AnnotationContext = createContext({
   beginEditing: async (elementIds) => ({ granted: elementIds || [], denied: {} }),
   endEditing: () => {},
   attachNearby: () => {},
+  openReference: () => {},
+  isReferenceTargetAvailable: () => undefined,
   editSheet: { capable: false, container: null, requestOpen: () => {}, requestClose: () => {} },
   labels: {
     color: 'Colour',
@@ -130,6 +148,23 @@ export const AnnotationContext = createContext({
     ariaKindArrow: 'Arrow',
     ariaKindFreehand: 'Freehand stroke',
     ariaKindGroup: 'Group',
+    ariaKindReference: 'Reference',
+    ariaKindReferenceSession: 'session',
+    ariaKindReferenceUrl: 'web page',
+    ariaKindReferenceResource: 'supporting material',
+    ariaKindReferenceBroken: 'broken target',
+    // Reference tiles (docs/ANNOTATION_CONTRACT.md's "Reference tiles").
+    referenceUntitled: 'Reference',
+    referenceOpen: 'Open target',
+    referenceRename: 'Rename',
+    referenceLabel: 'Label',
+    referenceTarget: 'Target',
+    referenceTargetSession: 'Session',
+    referenceTargetUrl: 'Web page',
+    referenceTargetResource: 'Supporting material',
+    referenceTargetUnknown: 'Unknown target',
+    referenceBrokenTarget: 'Target not available',
+    referenceUnsafeTarget: 'Unsafe link — not opened',
     // The two property-bar groups with no section heading to inherit a name
     // from (task-annotation-compact-property-bar): 'size' collects the non-drag
     // width/height controls, 'moreActions' the one-shot commands.

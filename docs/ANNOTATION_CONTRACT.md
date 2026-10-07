@@ -34,6 +34,10 @@ V1 supports these annotation types:
 - `heatmap` — a soft red heat-map circle with a whole-number intensity from 0
   to 10, blended with its neighbours into one field — see
   [Heat-map circles](#heat-map-circles)
+- `reference` — a navigational tile pointing at another session, an external
+  web page or supporting material in the graph, with a label, an optional icon
+  and optional text-only preview metadata — see
+  [Reference tiles](#reference-tiles)
 
 Existing canvas note, label, arrow and group descriptors are migrated into
 the v1 model.
@@ -1736,7 +1740,7 @@ above.
 
 The rest of the v1 model except `group` — `text`, `label`, `line` (`arrow`
 accepted as a legacy alias), `shape`, `icon`, `vote_dot`, `image`,
-`freehand`, `heatmap` — is exposed the same way through a generic tool set:
+`freehand`, `heatmap`, `reference` — is exposed the same way through a generic tool set:
 `list_annotations` / `create_annotation` / `update_annotation` /
 `delete_annotation` / `reorder_annotation` / `set_annotation_lock` /
 `duplicate_annotation`, over the same session op protocol and
@@ -1774,6 +1778,15 @@ despite having no MCP `duplicate_annotation` equivalent at all (`note` is
 excluded from that tool, not merely from a subset of its behaviour) — the
 GUI and MCP surfaces for duplication are two independent mechanisms that
 happen to produce the same op shape, not one built on the other.
+
+`reference` is created and edited entirely through that generic set — it needs
+no dedicated creation tool the way `image` does, because its payload is a
+validated envelope rather than ingested bytes. It has one tool of its own,
+and it is a *read*: `search_reference_target_sessions`, which finds the
+sessions a session reference can point at (see
+[Reference tiles](#reference-tiles)). Its target is still gate-checked on
+every write, by the same rule the raw op path applies — a generic tool is not
+a way around it.
 
 `note` stays on its own dedicated tool set; `group` (node-membership boxes)
 has its own dedicated tool set too: `create_group_annotation` creates or
@@ -1861,12 +1874,12 @@ text editing and attachment to a node/annotation, but renders no
 [acceptance matrix](#acceptance-matrix)). `line` supports endpoint drag and
 per-endpoint anchor/attach, but is not resizable either — its geometry is its
 two endpoints, not a box — and has no inline text editing. The rest of the v1
-model — `text`, `shape`, `icon`, `vote_dot`, `image`, `freehand`, `heatmap` —
-renders with
+model — `text`, `shape`, `icon`, `vote_dot`, `image`, `freehand`, `heatmap`,
+`reference` — renders with
 selection and drag-to-move for every kind, plus model-space resize (via the
 same `NodeResizer` handles as `note`) for the kinds that carry an explicit
-box size: `shape`, `image` and `heatmap` (aspect-locked — see [Heat-map
-circles](#heat-map-circles)). `text`, `icon` and `vote_dot` render
+box size: `shape`, `image`, `heatmap` (aspect-locked — see [Heat-map
+circles](#heat-map-circles)) and `reference`. `text`, `icon` and `vote_dot` render
 at a fixed intrinsic size and are not resizable. `freehand` is not resizable
 either, and for a further reason: its shape is not in a box at all but in its
 sampled `points`, so there is nothing for a resize to scale. The canvas
@@ -2041,6 +2054,196 @@ level:
 
 **Activity.** An intensity change is reported as "Changed the intensity of a
 heat-map circle". Level `0` counts as a real value there, not as unset.
+
+### Reference tiles
+
+A `reference` annotation is a navigational tile: it points at something a
+reader should be able to get to from this canvas, without that thing becoming
+part of the graph. It is what makes an overview or dashboard session lead
+into focused working sessions.
+
+**It is annotation state, never graph data.** A reference lives in the
+session's annotation document like every other kind here. It adds no node
+type, no relationship type and no graph write, and a `resource` reference
+names a node it neither creates nor owns. Deleting a reference removes a
+tile; it never removes the thing the tile pointed at.
+
+Its data is the common envelope plus these payload fields:
+
+- `target_kind` — exactly one of `session`, `url`, `resource`. Required.
+- `target` — what to open, read according to `target_kind`: a session id, an
+  http/https URL, or a graph node id. Required, non-empty, at most 2048
+  characters.
+- `label` — the text on the tile, at most 200 characters. Optional; a tile
+  with none shows its `preview.title`, and failing that the target itself.
+- `icon` — an optional name from the annotation icon set, drawn beside the
+  tile's own target-kind badge (which is not the author's to change — see
+  Rendering below), at most 64 characters.
+- `preview` — optional display metadata, limited to the string fields
+  `title`, `description` and `site`, each at most 500 characters.
+- Geometry — a tile with no `w`/`h` gets 220×72. Each side defaults
+  independently, so a create giving only a width keeps the default height.
+  It is resizable. There is no `rotation` control: a tile turned on its side
+  is a worse tile, not an aimed one.
+- Layer — `z = 0`, like every kind except `shape`/`heatmap`. A reference is
+  content to click, not a backdrop.
+
+No field may contain a C0 control character or DEL, in `target`, `label`,
+`icon` or any `preview` value. Rejecting such a string rather than stripping
+it keeps the value that was *validated* byte-identical to the value that is
+*stored*.
+
+**The preview is deliberately text-only.** The field set is closed, not
+free-form, and a `preview` carrying any other key is `invalid_content`. A
+free-form preview would reopen exactly the hole
+[Image ingest enforcement](#image-ingest-enforcement) closes for `image`: a
+key holding a remote URL that every viewer's browser then fetches on open,
+going around ingest's format validation, budgets and SSRF checks. Pixel
+content for a reference is therefore out of scope for v1. Widening the set
+later is additive; shipping a preview that can hold a remote reference and
+taking it back is not.
+
+#### URL scheme rule
+
+**A `url` reference's target must be an `http` or `https` URL with a host.**
+This is an allowlist, not a denylist of the schemes known to be dangerous
+today: the target is rendered into something a viewer activates, so a scheme
+nobody thought to name must be refused rather than shipped. `javascript:`,
+`data:`, `file:` and `vbscript:` are refused, and so is every other scheme —
+`about:`, `blob:`, `intent:`, `ftp:`, `tel:` and whatever comes next. A
+target with no scheme at all is refused too (`//evil.example/x`, `/admin`):
+a browser resolves it against the app's own origin, so a relative target is
+both ambiguous and a way to point an innocuous-looking tile back into the
+app.
+
+The rule is enforced on **every** write path, from one function
+(`reference_url_error` in `backend/core/session_annotations.py`):
+
+| Path | Where |
+|---|---|
+| MCP `create_annotation` / `update_annotation` | the generic builders' content validation → `invalid_content` |
+| a raw session `annotation_created` / `annotation_updated` op (what a browser's own op batch sends) | `session_store._validate_annotation` plus `_require_safe_reference_target` |
+| SavedView / VisualizationView node metadata | `saved_view_annotation_error`, with `sanitize_saved_view_metadata` as defense in depth |
+
+Two differences from the image rule are deliberate:
+
+- **No "already stored" exemption.** An image annotation may re-send a URL
+  that is already stored, because annotations persisted before the ingest
+  rule had to stay movable. Nothing unsafe can ever have been persisted as a
+  reference, so an exemption here could only ever admit a value that got in
+  by a path the gate does not cover.
+- **The check is unconditional.** `_validate_annotation` runs it on every
+  annotation op including an undo's `trusted_replay`, which the image guard
+  skips. A replay carries a whole stored annotation and is therefore judged
+  in full; since nothing unsafe can be stored, the unconditional check can
+  never refuse a legitimate replay.
+
+A partial update is still partial: a patch may rename a reference without
+resending its target, or repoint it without resending its label. A patch that
+sets only `target` carries no `target_kind`, so the gate reads the stored one
+— without that, the sparse repoint it exists to catch would be the one call
+that gets through. A patch that changes both is judged on the new kind.
+
+The canvas keeps its **own** copy of the gate (`isSafeReferenceUrl` in
+`packages/ui-graph-canvas/src/utils/annotationModel.js`), deliberately rather
+than trusting what it is handed: a stored annotation reaches the canvas from
+session state, a saved view, a remote collaborator's op or a host that
+hydrated it from elsewhere, so a canvas that drew whatever it was given would
+turn any gap in any of those into a `javascript:` link under the user's
+cursor. A target the canvas refuses renders in the broken state below instead.
+The host applies the identical check once more at the point where it actually
+hands the string to a browser; the package exports `isSafeReferenceUrl` so
+there is one rule rather than three copies that can drift.
+
+#### Rendering
+
+A reference must not read as a graph node — that is the whole point of giving
+it a symbol of its own. A graph node is a rounded, type-coloured body with a
+centred name; a reference is a squared-off slab with one accented edge, a
+square badge on the left and a left-aligned two-line text block, so the two
+are told apart by silhouette and not only by colour.
+
+The badge states what kind of thing the tile points at and is **not** the
+author's to change: `▣` for a session, `🔗` for a web page, `📄` for
+supporting material. A reference whose badge could be made to look like a
+session while pointing at a URL is a tile that lies about where it goes. The
+author's own `icon` is drawn separately, beside it.
+
+The second line shows `preview.site`, failing that `preview.description`,
+failing that the target — except where the first line is *already* the
+target, in which case it is left empty rather than printing the same string
+twice.
+
+The target is **never** rendered into an `href`, for any target kind, safe
+scheme or not. An anchor would give the canvas a middle-click and
+context-menu "open" path that bypasses both the broken-target guard and the
+host's own routing.
+
+#### Opening
+
+Activation — double-clicking the tile, clicking its `↗` control (shown while
+selected, the non-drag/keyboard path), or picking "Open target" from its
+property editor — is reported to the host with the target kind and target.
+The canvas never navigates and never opens a window itself: what "open" means
+for a session, an external page or a graph resource is the host shell's
+decision.
+
+In `frontend/web` that means: a session target switches to that session; a
+URL target opens in a new tab with `noopener,noreferrer`; a resource target
+is fetched, added to the view and focused.
+
+#### Broken targets
+
+A reference is broken, and never opens, when any of these holds:
+
+- it has no target kind, or no target;
+- its target kind is not one of the three;
+- its target kind is `url` and the target fails the scheme rule;
+- the host reports the target unresolvable.
+
+The last is a host question the canvas cannot answer: it knows neither the
+session index nor the whole graph. `isReferenceTargetAvailable(targetKind,
+target)` asks it, and distinguishes three answers — `false` (gone), `true`
+(confirmed) and `undefined` (cannot judge). Only `false` makes a tile broken;
+reading "don't know" as broken would grey out every reference on every host
+that resolves no targets at all.
+
+A broken tile stays visible and movable, so its author can find and fix or
+delete it, but reads as dead: dashed border, muted accent, the reason on its
+second line (which outranks any preview text), no `↗` control, and a
+`default` cursor matching the fact that double-clicking does nothing. Under
+`forced-colors: active`, where the accent colour is replaced, the dashed
+border still distinguishes it. The accessible name carries the broken state
+too, so it is never only a colour.
+
+#### Authoring surfaces
+
+| Surface | Create | Edit | Move / resize / layer / delete |
+|---|---|---|---|
+| GUI | paste an `http`/`https` address onto the canvas | rename from the property editor's Target section | yes, like every other kind |
+| MCP / API | `create_annotation` with `type: "reference"` | `update_annotation` (partial) | the generic tools |
+
+Pasting creates a tile only when the clipboard text is, on its own, an
+address the canvas would render as a link. So a paste can never produce a
+reference that then draws as broken, and pasting ordinary prose — or a
+`javascript:` string — does nothing rather than dropping a dead tile on the
+canvas. The paste event is consumed only when something was created.
+
+**Repointing a reference is not offered in the GUI in v1.** It is the one
+operation on a reference that can change where a viewer is sent, so it goes
+through the validated MCP/API path rather than a free-text field in a canvas
+menu that would need its own copy of the scheme rule to stay honest. This is
+a tracked gap in the [acceptance matrix](#acceptance-matrix), not an accepted
+scope reduction — see the GUI/MCP parity requirement in
+[Scope](#scope).
+
+Session targets are discovered with the `search_reference_target_sessions`
+MCP tool: a case-insensitive substring over each session's id and display
+name, with `exclude_session_id` for the session being edited (a tile pointing
+at the session it sits in goes nowhere). It reads the session index and
+nothing else, so it can never offer a graph node as a session candidate.
+Hosted deployments additionally restrict which sessions a given viewer may
+see; that enforcement is not in this repository.
 
 ### Fill and border (`shape`)
 
@@ -2631,6 +2834,7 @@ rule](#downstream-closure-rule).
 | `image` | ✅ clipboard paste, OS file drop, and the toolbox's file-picker item all ingest through `POST /api/sessions/{id}/annotations/image` (same pipeline as MCP); move/resize/rotate (right-click)/layer/duplicate/delete via the generic annotation context menu once created — no `lock` control exists in any annotation context menu (only `Unlock`, on an already-locked annotation; locking a generic annotation is MCP-only, `set_annotation_lock`). This row previously overclaimed `lock` and `copy` both when neither GUI action existed (`smallfix-contract-image-row-claims-absent-lock-and-copy`); `copy`/duplicate has since shipped as a client-side action (`AnnotationDuplicateControl`) that never calls `duplicate_annotation` itself — see [Layer order](#layer-order) — while `lock` remains MCP-only, so only half of that correction still applies | ✅ `create_image_annotation` ingests; generic create/update refuse image content, and no session annotation write can persist a *new* non-embedded image URL — note the duplicate, saved-view and budget limits in [enforcement](#image-ingest-enforcement) | ✅ | ✅ | ⚠ actor-scoped undo works, but the op is attributed to a dedicated server client id rather than the pasting browser's own (required so the pasting browser's own SSE subscription sees the embedded result instead of dropping it as a self-authored echo — see `_HUMAN_IMAGE_INGEST_CLIENT_ID` in `rest_api.py`), so only that marker's own undo call reverts it, not the pasting browser's | ⚠ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): a visible Edit button now opens the menu. **Update 2026-08-30 (task-annotation-accessible-shared-controls):** now has a designed accessible name ("Image, {alt}", or just "Image" — always says what it is, not only an echo of whatever `alt` happens to be), Shift+F10 reachability, menu arrow-nav/focus-trap and a non-drag size control (one of `RESIZABLE_KINDS`); screen-reader/physical-device verification still deferred |
 | `freehand` | ⚠ toolbox "Freehand" item arms a one-shot pointer-capture drawing mode (coalesced samples, device pressure when reported, constant-width fallback otherwise, concurrent-input suppressed with a notice); right-click property editor for color/width/smoothing/opacity plus the shared layer and duplicate rows (a stroke drawn without choosing a colour is black — the previous near-white default was invisible on the canvas as rendered); a `rotation` on the document model is still never drawn, and a `w`/`h` resize likewise changes nothing on screen (no gap here any more in what survives — `smallfix-browser-clobbers-unsized-annotation-geometry` is fixed, see the Persistence cell — only in what's ever drawn from it). Both `rotation` and `w`/`h` remaining undrawn are tracked gaps, not decided non-goals (see Canvas rendering) | ✅ generic tool set — `freehand` has been in `GENERIC_ANNOTATION_TYPES` since #422, so create/update/reorder/lock/delete already worked; `duplicate_annotation` was missing the `translate_freehand_points` call `update_annotation`'s patch builder already had (a duplicated stroke kept its original `points` at a moved envelope position), fixed here | ⚠ the document model round-trips it, and the canvas translator no longer drops `geometry.w`/`h` (`smallfix-browser-clobbers-unsized-annotation-geometry`, fixed) — a `w`/`h` an agent set used to be reset to the model default by the next autosave that shipped the stroke, and by any saved view; it now survives both. Still open: `freehandAnnotationToOverlay` anchors the overlay's `position` to `points[0]` and `freehandOverlayToAnnotation` writes it back from that same anchor, so an agent-created stroke whose envelope `position`/`geometry.x`/`geometry.y` differs from its first sample has that position silently replaced on the very first round trip — arguably a normalisation (nothing reads the envelope position independently of `points[0]` today) rather than data loss the way the `w`/`h` clobber was, but undocumented until now and deliberately left open by the same fix rather than folded in (see Canvas rendering). `points` (with their per-point pressure), `smoothing`, `strokeWidth`, `pointerType`, `pressureSource`, colour, `opacity`, `rotation`, `z`, `locked` and now `geometry.w`/`h` all survive | ✅ same op broadcast as every other type — MCP creation now gives a way to exercise this live | ✅ `translate_freehand_points` covers move, and undo restores the sampled points, not just the envelope (`test_undo_of_a_freehand_move_restores_its_sampled_points`) | ❌ no physical stylus/touch pass — the GUI wiring above is verified only under mouse-event emulation, not a real device. Also audited 2026-08-30 for keyboard/screen-reader controls (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): a visible Edit button (via its own right-click menu — freehand's own opacity control stayed a separate implementation, see the audit's "Update, 2026-08-30" note) now opens the menu. **Update 2026-08-30 (task-annotation-accessible-shared-controls):** now has a designed, fixed accessible name ("Freehand stroke"), Shift+F10 reachability and menu arrow-nav/focus-trap; no size control (a stroke's geometry is its sampled points, not a box — see [Canvas rendering](#canvas-rendering)) and no "Attach to…" (not one of `ATTACHABLE_OVERLAY_KINDS`); screen-reader/physical-device verification still deferred (unchanged from the "no physical stylus/touch pass" line above, which this does not close) |
 | `heatmap` | ✅ toolbox create at z −1 (click: 160×160 at intensity 5; drag-to-draw: a square sized by the longer side of the sweep, grown from the press point), move, aspect-locked drag resize (a canvas-created box stays square; the numeric size fields are not locked, so they can make the box non-square, and the handles then keep that ratio; the circle stays round either way), intensity buttons 0–10, layer, duplicate, delete (Edit button or right-click). No colour, opacity or rotation control, by design — see [Heat-map circles](#heat-map-circles) | ✅ generic tool set; `content.intensity` validated as an integer 0–10; default intensity 5 on a fresh create; default diameter 160 | ✅ intensity (including `0`) and size round-trip through both translator pairs and the shared type-matrix fixture | ✅ same op broadcast as every generic type; no heatmap-specific realtime test | ✅ intensity changes classified as their own activity entry; undo is the generic actor-scoped path | ⚠ accessible name with the level, one labelled, `aria-pressed` button per level, the level shown as a number when selected, a dashed rim at level 0 while selected or hovered, and a forced-colours outline — see [Heat-map circles](#heat-map-circles). Screen-reader and physical-device verification deferred, as for every other kind |
+| `reference` | ⚠ paste an `http`/`https` address onto the canvas to create one; move, aspect-free drag resize, non-drag size fields, layer, opacity, duplicate, delete and **Rename** (the label, from the property editor's Target section) all work; double-click opens the target rather than editing text, so the `↗` control (shown while selected) is the click/keyboard equivalent. **Repointing an existing reference is not offered in the GUI** — it is the one operation that changes where a viewer is sent, so it goes through the validated MCP/API path rather than a canvas free-text field that would need its own copy of the scheme rule; a tracked gap per the GUI/MCP parity requirement in [Scope](#scope), not an accepted scope reduction. No rotation control, by design — see [Reference tiles](#reference-tiles) | ✅ generic tool set (`content.target_kind`/`target`/`label`/`icon`/`preview`), with `search_reference_target_sessions` to find session candidates. `target_kind` and `target` are both required on a create; a partial update may rename without resending the target or repoint without resending the label | ✅ all three target kinds round-trip through both translator pairs, session persistence, the MCP surface and the shared type-matrix fixture. An unsafe-scheme `url` target cannot be stored by any write path — the generic tools, a raw session op, or SavedView metadata — and `sanitize_saved_view_metadata` strips one that reached storage some other way, keeping the tile in its broken state rather than dropping it | ✅ same op broadcast as every generic kind; no reference-specific realtime test | ✅ generic actor-scoped path; a rename is classified as a text change and debounced with the other kinds' text | ⚠ accessible name says it is a reference, what kind of thing it points at, its label and — when it cannot be followed — that it is broken, so neither the kind nor the broken state is carried by colour alone; the `↗` control is the non-drag/keyboard activation path; the broken state is also structural (dashed border) under `forced-colors: active`. Screen-reader and physical-device verification deferred, as for every other kind |
 | cross-type | — | — | — | ⚠ create/delete/style/geometry publish immediately and note/label/text/shape text is now live-synced and debounced at 300 ms, split out from the general autosave debounce; every annotation kind now distinguishes a purely cosmetic selection claim (`ClaimMap`, unenforced) from an exclusive edit lease (`LeaseMap`) acquired only when actual editing starts — first-actual-editor-wins, enforced client-side and server-side alike, with the server rejecting a browser write (ops, image ingest and undo alike) against a lease someone else holds (`dec-mcp-agent-ops-vs-annotation-claimmap`, task-annotation-exclusive-edit-leases); the MCP write path's own bypass is now closed too (`task-mcp-annotation-human-edit-guard`): every synchronous MCP write method that can mutate an existing annotation checks the same `LeaseMap` at its own mutation boundary and never acquires one itself ([gap closed](#operation-timing-and-leases)); the two-real-client conflict matrix ([above](#two-client-conflict-matrix)) is now documented and test-covered; the whole-document-last-write-wins finding it originally recorded for concurrent different-field edits with no lease held is now fixed by field-level patches and per-field `base_version` checking (`dec-annotation-field-patches-and-conflicts`, [Field-level patches and base_version](#field-level-patches-and-base_version)) — a legacy caller that supplies no `base_version` at all keeps the old unprotected behaviour as a documented fallback, not a live gap for a real client; a per-kind reconnect/catch-up/duplicate-suppression/lock-ownership audit across `text`/`shape`/`icon`/`vote_dot`/`image`/`freehand` (`GraphCanvasRemote.test.jsx`, `TestPerKindReconnectCatchUpAndLocks`) found no kind-specific gap | ✅ actor-scoped conditional undo (`session_activity.py`) | ⚠ **Update 2026-08-30 (task-annotation-accessible-shared-controls):** every shared/cross-type gap this row used to name is now closed and test-covered — Shift+F10/Menu-key now finds and clicks the visible Edit button (`GraphCanvas.jsx`'s document-level keydown handler); a touch multi-select mode (a real toggle, tap-to-add); a non-drag "Attach to…" target-tap mode plus Detach, for `label`/`text`/`icon`; an overlap-object picker (`onNodeClick`, `nodesAtPoint`); a menu focus-trap/arrow-nav shared by all six kinds' own menus (`useAnnotationMenuKeyNav`); focus-move/-restore generalised to the right-click path too (`useAnnotationEditTrigger.js`); non-drag resize for the kinds that carry a box; and a per-kind designed accessible name (`computeAnnotationAriaLabel`, wired once for every kind via `GraphCanvas.jsx`'s `nodesWithAriaLabels`). Keyboard node selection and arrow-key nudge (ReactFlow defaults), toolbox creation, and a visible, keyboard/tap-reachable Edit entry point on all six kinds now (including `group`), do already work. Every lock/lease/type exception each new control respects is exercised by its own test alongside the mechanism (locked → unlock/duplicate only; `isRemoteLocked` → refuse + `notifyRemoteLockedAttempt`; `vote_dot` excluded from attach; `group` excluded from the overlap picker and from non-drag attach targeting). **Still genuinely open, not fabricated as done:** a real screen reader's actual announcement of any of the above, and real touch/pen hardware behaviour for the new touch-first controls — both deferred to `task-annotation-manual-accessibility-touch-acceptance`, which is why this row is ⚠, not ✅, per the [Downstream closure rule](#downstream-closure-rule)'s own "not merely coded" bar. See [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline) |
 
 ## Downstream closure rule
