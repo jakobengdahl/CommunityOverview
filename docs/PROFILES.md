@@ -132,6 +132,7 @@ Each node type has the following fields:
 | `static` | No | If `true`, nodes of this type cannot be created via the chat. Used for system types |
 | `ui_form` | No | Specialized creation dialog. `"skill"` opens the SKILL.md-compatible form |
 | `context_menu` | No | Array of extra items for the right-click context menu (see below) |
+| `allows_attachments` | No | `true` marks this node type as accepting file attachments. Defaults to `false`. Returned by `get_schema` on every node type, so clients can read it unconditionally. Per [ADR 0008](adr/0008-node-attachment-storage.md) section 7 it gates uploads only — listing, downloading and deleting files already attached stay available, so turning it back off never strands them. The upload, list, download and delete endpoints are a later slice: today the flag is declared and exposed, and nothing reads it yet |
 
 Every node — regardless of its type or its `fields` list — also carries a
 universal `aliases` field: a list of alternative names/synonyms. Aliases are

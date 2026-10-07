@@ -136,6 +136,10 @@ class NodeTypeConfig(BaseModel):
     context_menu: List[Dict[str, Any]] = Field(
         default_factory=list
     )  # Extra right-click menu items
+    # Gates attachment uploads only; listing, download and delete stay
+    # available so turning it off never strands files already attached
+    # (ADR 0008 section 7).
+    allows_attachments: bool = False
 
 
 class RelationshipTypeConfig(BaseModel):
@@ -664,6 +668,7 @@ def get_schema() -> Dict[str, Any]:
                 "ui_form": cfg.ui_form,
                 "labels": cfg.labels,
                 "context_menu": cfg.context_menu,
+                "allows_attachments": cfg.allows_attachments,
             }
             for name, cfg in schema.node_types.items()
         },
