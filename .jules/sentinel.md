@@ -1,0 +1,4 @@
+## 2024-10-08 - Fix authentication bypass via path traversal in FastAPI middleware
+**Vulnerability:** The authentication middleware in `backend/api_host/middleware.py` used `request.url.path.endswith("/stream") and request.url.path.startswith(f"{config.api_prefix}/sessions/")` to bypass authentication for the `/api/sessions/{id}/stream` endpoint.
+**Learning:** Combining `.startswith()` and `.endswith()` for route matching in middleware allows path traversal (e.g., `/api/sessions/hack/stream/bypass`) where an attacker can embed unauthorized paths between the start and end strings, effectively bypassing authentication for protected routes.
+**Prevention:** Use strict regex (`re.match`) with start/end anchors and `re.escape()` for configuration prefixes instead of simple string matching when bypassing authentication for dynamic routes.
