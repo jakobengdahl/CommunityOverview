@@ -33,6 +33,7 @@ const ANNOTATION_TYPE_KEYS = new Set([
   'image',
   'freehand',
   'heatmap',
+  'reference',
 ]);
 
 // Top-level fields where 0 is a real value rather than "unset":

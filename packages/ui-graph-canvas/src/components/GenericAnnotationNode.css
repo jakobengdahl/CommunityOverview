@@ -262,3 +262,203 @@
   text-align: center;
   padding: 4px;
 }
+
+/* ===================== reference (navigational tile) =====================
+   A reference points at another session, an external page or supporting
+   material in the graph (docs/ANNOTATION_CONTRACT.md's "Reference tiles").
+   It must not read as a graph node, which is the whole point of giving it a
+   symbol of its own: a graph node (CustomNode.css) is a pill/rounded box
+   with a type-coloured body and a centred name. So a reference is a flat
+   slab with a square left badge, a dashed-free solid left accent, a
+   left-aligned two-line text block and a deliberately different corner
+   radius — recognisably a card of chrome rather than a piece of the graph. */
+.graph-generic-annotation-node.kind-reference {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px 6px 6px;
+  background: #1f2937;
+  border: 1px solid rgba(148, 163, 184, 0.55);
+  /* A graph node is pill-shaped/rounded; a reference is squared off with one
+     accented edge, so the two are told apart by silhouette alone and not only
+     by colour. */
+  border-radius: 3px;
+  border-left: 4px solid #60a5fa;
+  color: #e2e8f0;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.graph-reference-badge {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  background: rgba(96, 165, 250, 0.18);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.graph-reference-body {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  flex: 1 1 auto;
+  gap: 2px;
+}
+
+.graph-reference-title {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.25;
+  /* A long label is clipped rather than allowed to grow the tile: the box is
+     the author's (it is a resizable kind), so the text must live inside it. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.graph-reference-detail {
+  font-size: 10px;
+  line-height: 1.2;
+  color: rgba(226, 232, 240, 0.7);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.graph-reference-icon {
+  flex: 0 0 auto;
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+.graph-reference-label-input {
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 3px;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 1px 4px;
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.graph-reference-label-input:focus {
+  outline: none;
+  border-color: rgba(255, 255, 255, 0.7);
+}
+
+/* A reference whose target cannot be followed — no target, a url target the
+   renderer refuses to link, or one the host reports unresolvable. Dashed
+   border and a muted accent, plus the reason in the detail line: the tile
+   stays visible and movable (so the author can find and fix or delete it)
+   but reads as dead rather than live, and `cursor: default` matches the fact
+   that double-clicking it does nothing. */
+.graph-generic-annotation-node.kind-reference.is-broken {
+  border-style: dashed;
+  border-left-color: rgba(148, 163, 184, 0.6);
+  background: #272b33;
+  color: rgba(226, 232, 240, 0.75);
+  cursor: default;
+}
+
+.graph-generic-annotation-node.kind-reference.is-broken .graph-reference-badge {
+  background: rgba(148, 163, 184, 0.16);
+}
+
+.graph-generic-annotation-node.kind-reference.is-broken .graph-reference-detail {
+  color: #fca5a5;
+}
+
+/* The keyboard/single-click activation control, shown while selected.
+   Mirrors .annotation-edit-trigger's circular badge treatment (GraphCanvas.css)
+   and sits on the opposite corner so the two never overlap. */
+.graph-reference-open {
+  position: absolute;
+  top: -12px;
+  left: -12px;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  background: #2a2a2a;
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+  z-index: 7;
+}
+
+.graph-reference-open:hover {
+  background: #3a3a3a;
+}
+
+.graph-reference-open:focus-visible {
+  outline: 2px solid #60a5fa;
+  outline-offset: 1px;
+}
+
+/* The property editor's Target section. The target itself is read-only here
+   — see the comment on that section in GenericAnnotationNode.jsx. */
+.context-menu-reference {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 180px;
+}
+
+.context-menu-reference-target {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 6px;
+}
+
+.context-menu-reference-kind {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
+}
+
+.context-menu-reference-value {
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.context-menu-reference-broken {
+  font-size: 10px;
+  color: #fca5a5;
+}
+
+/* Forced-colours: the accent edge and the broken state are both carried by
+   colour above, which a forced-colours mode replaces. Restore the
+   distinction structurally so a reference is still tellable from a graph
+   node, and a broken one from a live one, without any colour at all. */
+@media (forced-colors: active) {
+  .graph-generic-annotation-node.kind-reference {
+    border: 1px solid CanvasText;
+    border-left: 4px solid CanvasText;
+  }
+
+  .graph-generic-annotation-node.kind-reference.is-broken {
+    border-style: dashed;
+    border-left-style: dashed;
+  }
+}

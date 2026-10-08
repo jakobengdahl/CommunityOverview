@@ -40,11 +40,16 @@ own inverse op — see the function's docstring and ``SessionStore.apply_state_o
 from __future__ import annotations
 
 from typing import Any, Dict, FrozenSet, List, Optional
+from urllib.parse import urlsplit
 
 NOTE_TYPE = "note"
 GROUP_TYPE = "group"
 IMAGE_TYPE = "image"
+REFERENCE_TYPE = "reference"
 DEFAULT_NOTE_SIZE = {"w": 160, "h": 96}
+# A reference tile shows a badge, a label and (when present) a preview line,
+# so unlike a note it is wider than tall by default.
+DEFAULT_REFERENCE_SIZE = {"w": 220, "h": 72}
 # A group box has no natural single-member size the way a note does; this is
 # just a usable default footprint for a freshly created, still-empty group —
 # callers passing member ids up front should size it themselves.
@@ -83,6 +88,7 @@ GENERIC_ANNOTATION_TYPES: FrozenSet[str] = frozenset(
         "image",
         "freehand",
         "heatmap",
+        REFERENCE_TYPE,
     }
 )
 ALL_ANNOTATION_TYPES: FrozenSet[str] = GENERIC_ANNOTATION_TYPES | {
@@ -157,6 +163,340 @@ ANNOTATION_SHAPES: FrozenSet[str] = frozenset(
 # packages/ui-graph-canvas/src/utils/annotations.js). No migration was
 # written for a vote_dot already stored with one.
 ATTACHABLE_ANNOTATION_TYPES: FrozenSet[str] = frozenset({"text", "label", "icon"})
+
+# ==================== Reference (navigational link) constants ====================
+
+# The three things a `reference` annotation may point at
+# (docs/ANNOTATION_CONTRACT.md's "Reference tiles"). Mirrors
+# REFERENCE_TARGET_KINDS in
+# packages/ui-graph-canvas/src/utils/annotationModel.js.
+#
+# * `session` — another visualization session, by its session id.
+# * `url` — an external web page, by an http/https URL.
+# * `resource` — supporting material already in the graph, by node id.
+#
+# A reference is *annotation* state: it lives in the session's annotation
+# document and is never written to the main graph, so none of these three
+# introduces a node type, a relationship type or a graph write. A `resource`
+# reference names a node it does not create and does not own.
+REFERENCE_TARGET_KINDS: FrozenSet[str] = frozenset({"session", "url", "resource"})
+
+# The only URL schemes a `url` reference may be persisted with. An allowlist,
+# not a denylist of the schemes that are known to be dangerous today: a
+# reference's target is rendered into an activatable link, so a scheme nobody
+# thought to list must be refused rather than shipped. This is what rejects
+# `javascript:`, `data:`, `file:` and `vbscript:` — and equally the next
+# scheme of that family that gets invented.
+REFERENCE_SAFE_URL_SCHEMES: FrozenSet[str] = frozenset({"http", "https"})
+
+# Field caps. A session's annotation document is session state, not a blob
+# store: without these a reference could carry an arbitrarily large payload
+# that every client then has to download on every open.
+REFERENCE_MAX_TARGET_LENGTH = 2048
+REFERENCE_MAX_LABEL_LENGTH = 200
+REFERENCE_MAX_ICON_LENGTH = 64
+REFERENCE_MAX_PREVIEW_FIELD_LENGTH = 500
+
+# The complete set of `preview` keys a reference may carry, each a string.
+# Deliberately narrow and text-only. A wider free-form preview object would
+# re-open exactly the hole `image_annotation_error` closes for `image`: a
+# key holding a remote URL that every viewer's browser then fetches on open,
+# going around image ingest's format validation, budgets and SSRF checks.
+# Widening this set later is additive and costs nothing; shipping a preview
+# that can hold a remote reference and taking it back is not. Pixel content
+# for a reference is therefore out of scope for v1 — see
+# docs/ANNOTATION_CONTRACT.md's "Reference tiles".
+REFERENCE_PREVIEW_FIELDS: FrozenSet[str] = frozenset({"title", "description", "site"})
+
+
+# The whitespace a reference target may not contain, and the set trimmed from
+# its ends. Spelled out character by character rather than deferring to
+# ``str.isspace()`` because the canvas runs the same gate in JavaScript
+# (``isSafeReferenceUrl`` in
+# packages/ui-graph-canvas/src/utils/annotationModel.js) and the two languages
+# do not mean the same thing by "whitespace": ``str.isspace()`` is true for
+# U+0085 (NEL) where JavaScript's ``\s`` is not, and ``\s`` matches U+FEFF
+# where ``str.isspace()`` does not — and ``str.strip()`` and
+# ``String.prototype.trim()`` split exactly the same way. Round 3 of the review
+# loop measured both: U+0085 mid-target was refused here and accepted there, so
+# a paste minted a tile the server then dropped; U+FEFF mid-target was accepted
+# here and refused there, so a stored tile drew permanently as "Unsafe link —
+# not opened". Both are the failure modes ``reference_url_error``'s own comment
+# says the rule exists to prevent, and two earlier rounds had each fixed one
+# instance of the same class by hand.
+#
+# The set is the union of the two languages' notions, less the C0 separators
+# U+001C-U+001F that ``str.isspace()`` also reports and that
+# ``_has_control_characters`` already refuses before this set is consulted. So
+# each side does refuse everything either language would call whitespace —
+# strictly stricter than either alone, which is the safe direction for a gate
+# — but by two checks rather than by this list alone, which is why the list is
+# not literally the union. It is enumerated in
+# docs/fixtures/reference_url_gate.json, which both sides drive, so a character
+# that stops agreeing fails on the side that moved.
+REFERENCE_WHITESPACE_CHARS: FrozenSet[str] = frozenset(
+    "\u0009\u000a\u000b\u000c\u000d\u0020\u0085\u00a0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+_REFERENCE_WHITESPACE_TRIM = "".join(sorted(REFERENCE_WHITESPACE_CHARS))
+
+
+def _has_control_characters(value: str) -> bool:
+    """Whether *value* contains a C0 control character or DEL.
+
+    A tab or a newline inside a scheme is the standard way an unsafe URL is
+    smuggled past a scheme check: a browser strips them before resolving
+    ``java\tscript:alert(1)``, so a checker that does not see them refuses
+    nothing while the browser happily runs it. Rejecting the whole string
+    rather than stripping it keeps the value this module *validated*
+    byte-identical to the value it stores — a normalising check validates one
+    string and persists another, which is its own class of bug.
+    """
+    return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
+
+
+def reference_url_error(url: Any) -> Optional[str]:
+    """Why *url* may not be a ``url`` reference's target, or ``None``.
+
+    The single scheme gate for the whole stack: every write path that can
+    persist a reference routes through it (the generic MCP
+    create/update tools, a raw session ``annotation_created``/
+    ``annotation_updated`` op via ``session_store._validate_annotation``, and
+    SavedView node metadata via ``saved_view_annotation_error``), so there is
+    one place that decides what a reference may link to rather than one check
+    per entry point.
+
+    Requires an explicit allowlisted scheme *and* a host. A scheme-relative
+    ``//evil.example`` or a bare ``/path`` parses with no scheme at all and is
+    refused for that reason: a reference target is resolved by a browser with
+    the app's own origin as its base, so a relative target is both ambiguous
+    and a way to point an innocuous-looking tile at the app itself.
+
+    Unlike ``image_annotation_error`` there is no "the same value is already
+    stored" exemption. That exemption exists for images because annotations
+    persisted before the ingest rule had to stay movable; nothing unsafe can
+    ever have been persisted as a reference, so an exemption would only ever
+    admit a value that got in by some path this gate does not cover.
+    """
+    if not isinstance(url, str):
+        return "content.target must be a string for a url reference"
+    if _has_control_characters(url):
+        return (
+            "content.target must not contain control characters; a tab or "
+            "newline inside a URL scheme is stripped by the browser and is "
+            "not accepted here"
+        )
+    candidate = url.strip(_REFERENCE_WHITESPACE_TRIM)
+    if not candidate:
+        return "content.target must not be empty for a url reference"
+    try:
+        parts = urlsplit(candidate)
+    except ValueError:
+        return "content.target is not a parseable URL"
+    scheme = parts.scheme.lower()
+    if scheme not in REFERENCE_SAFE_URL_SCHEMES:
+        return (
+            "content.target must be an "
+            f"{'/'.join(sorted(REFERENCE_SAFE_URL_SCHEMES))} URL; "
+            f"the scheme {scheme or '(none)'!r} is not accepted for a url "
+            "reference"
+        )
+    if not parts.hostname:
+        return "content.target must include a host"
+    # The two checks below exist to keep this gate and the renderer's
+    # (``isSafeReferenceUrl`` in
+    # packages/ui-graph-canvas/src/utils/annotationModel.js) deciding the same
+    # thing. ``urlsplit`` is deliberately lenient where the WHATWG ``URL``
+    # constructor is strict, and a disagreement hurts in both directions: a
+    # target this side accepts and the canvas refuses is stored and then drawn
+    # permanently as "Unsafe link — not opened" (a false statement about a
+    # typo, on a tile with no GUI way to repoint it), while a target this side
+    # refuses and the canvas accepts passes the paste gate, lands on the canvas
+    # as a local node, and is then dropped by the server — leaving an unsaved
+    # tile with no explanation.
+    #
+    # Whitespace is refused ANYWHERE in the trimmed target, not just a space
+    # and not just in the authority. Round 2 of the review loop caught the
+    # narrower "no space" rule failing both ways at once: it refused a space in
+    # a path or query (which the canvas happily accepts, so the only human
+    # creation path could produce a tile the server then rejected) while
+    # letting a NON-BREAKING space through in the HOST, which IDNA rejects — so
+    # the canvas drew it permanently broken. Round 3 then found that "every
+    # whitespace character" was still two different rules, because each side
+    # was asking its own language; both now ask
+    # ``REFERENCE_WHITESPACE_CHARS``, whose comment has the measurements. A
+    # real URL carries its spaces percent-encoded, and ``%20`` is accepted.
+    if any(ch in REFERENCE_WHITESPACE_CHARS for ch in candidate):
+        return "content.target must not contain whitespace"
+    try:
+        port = parts.port
+    except ValueError:
+        return "content.target has an invalid port"
+    if port is not None and not 1 <= port <= 65535:
+        return "content.target has an invalid port"
+    return None
+
+
+def _reference_preview_error(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        return "content.preview must be an object"
+    unknown = sorted(set(value) - REFERENCE_PREVIEW_FIELDS)
+    if unknown:
+        return (
+            f"content.preview may only carry {sorted(REFERENCE_PREVIEW_FIELDS)}; "
+            f"unknown field(s) {unknown}"
+        )
+    for key, field in value.items():
+        if field is None:
+            continue
+        if not isinstance(field, str):
+            return f"content.preview.{key} must be a string"
+        if _has_control_characters(field):
+            return f"content.preview.{key} must not contain control characters"
+        if len(field) > REFERENCE_MAX_PREVIEW_FIELD_LENGTH:
+            return (
+                f"content.preview.{key} must be at most "
+                f"{REFERENCE_MAX_PREVIEW_FIELD_LENGTH} characters"
+            )
+    return None
+
+
+def reference_content_error(
+    source: Dict[str, Any], *, require_complete: bool = False
+) -> Optional[str]:
+    """Why *source* is not a valid ``reference`` payload, or ``None``.
+
+    *source* is either the ``content`` dict a builder is about to merge or an
+    already-merged annotation dict — both put payload fields at the top level,
+    the same convention ``_validate_generic_content`` follows.
+
+    Validation is per *present* field, so a partial patch (moving a reference,
+    renaming its label) is judged on what it actually changes. The one
+    cross-field rule is the scheme gate: a payload that sets ``target`` while
+    the resolved target kind is ``url`` must carry a safe URL. "Resolved"
+    matters — a patch that sets only ``target`` on a stored url reference
+    arrives here without a ``target_kind``, so callers pass the stored kind in
+    as a default (see ``reference_annotation_error``).
+
+    *require_complete* additionally demands that both ``target_kind`` and
+    ``target`` are present. Set for a write that stands on its own — a fresh
+    create, a whole stored annotation — and left off for a patch, which is
+    allowed to touch one field. Without it a create carrying only ``target``
+    would skip the scheme gate entirely, because the gate keys off the target
+    kind and there would be none to read: an unsafe URL would get in through
+    the gap between "no kind given" and "kind is not url".
+    """
+    if require_complete:
+        for key in ("target_kind", "target"):
+            if source.get(key) is None:
+                return f"content.{key} is required for a reference annotation"
+    target_kind = source.get("target_kind")
+    if "target_kind" in source:
+        if target_kind not in REFERENCE_TARGET_KINDS:
+            return (
+                f"content.target_kind must be one of {sorted(REFERENCE_TARGET_KINDS)}"
+            )
+    if "target" in source:
+        target = source["target"]
+        if not isinstance(target, str) or not target.strip(_REFERENCE_WHITESPACE_TRIM):
+            # The gate's own set, not ``str.strip()``: a target of nothing but
+            # U+FEFF is not whitespace to Python and would pass here, then trim
+            # to empty on the canvas and draw as a permanently broken tile.
+            return "content.target must be a non-empty string"
+        if len(target) > REFERENCE_MAX_TARGET_LENGTH:
+            return (
+                "content.target must be at most "
+                f"{REFERENCE_MAX_TARGET_LENGTH} characters"
+            )
+        if _has_control_characters(target):
+            return "content.target must not contain control characters"
+        if target_kind == "url":
+            error = reference_url_error(target)
+            if error:
+                return error
+    for key, cap in (
+        ("label", REFERENCE_MAX_LABEL_LENGTH),
+        ("icon", REFERENCE_MAX_ICON_LENGTH),
+    ):
+        if key in source and source[key] is not None:
+            value = source[key]
+            if not isinstance(value, str):
+                return f"content.{key} must be a string"
+            if len(value) > cap:
+                return f"content.{key} must be at most {cap} characters"
+            if _has_control_characters(value):
+                return f"content.{key} must not contain control characters"
+    if "preview" in source:
+        error = _reference_preview_error(source["preview"])
+        if error:
+            return error
+    return None
+
+
+def reference_annotation_error(
+    annotation: Dict[str, Any],
+    existing: Optional[Dict[str, Any]] = None,
+    *,
+    require_complete: bool = False,
+) -> Optional[str]:
+    """Why *annotation* may not be persisted as a ``reference``, or ``None``.
+
+    The enforcement entry point ``session_store`` calls for every annotation
+    op, so a browser's raw op batch is held to the identical rule the MCP
+    tools apply — the generic tools bypassing a hardened path is exactly how
+    the image guard came to be needed.
+
+    *existing* supplies the stored annotation under this id, when there is
+    one. **The whole stored annotation is merged under the patch**, and the
+    result — the annotation as it would be *after* this write — is what gets
+    validated. Not the patch alone, and not one hand-picked field of the
+    stored state.
+
+    That matters because a reference's rules are cross-field: the scheme gate
+    reads ``target`` *and* ``target_kind``, and ``SessionStore`` applies a
+    patch with a shallow ``dict.update``, so either field can arrive while
+    the other stays stored. Resolving only one of them leaves the other
+    unchecked, and a two-step write then slips past a gate that refuses both
+    steps individually:
+
+        created  {target_kind: "resource", target: "javascript:alert(1)"}
+            -> accepted, correctly: a resource target is a node id, not a
+               URL, so it is not held to the scheme rule
+        updated  {target_kind: "url"}
+            -> must be REFUSED, because the annotation this produces is a
+               url reference whose target is "javascript:alert(1)"
+
+    Validating the merged result is what makes that refusal fall out rather
+    than needing to be enumerated, and it is the same shape
+    ``_validate_generic_content`` already used on the MCP path — which is why
+    the MCP tools refused this flip while the raw-op path accepted it. Two
+    gates that disagree are one gate.
+
+    Merging is **not** an exemption. A stored value is never a reason to
+    accept anything: it is only ever re-checked, so a stored annotation that
+    is already bad fails here too (see ``reference_url_error``).
+
+    The type is resolved from *annotation* **or** from *existing*: a patch is
+    allowed to omit ``type``, and reading the type from the patch alone would
+    make every such patch non-reference and therefore unchecked. (The two
+    store call sites canonicalise ``type`` onto the patch before calling, so
+    they were never exposed to that; this keeps the function correct on its
+    own terms for any other caller.)
+    """
+    annotation_kind = annotation_type_of(annotation)
+    if annotation_kind is None and isinstance(existing, dict):
+        annotation_kind = annotation_type_of(existing)
+    if annotation_kind != REFERENCE_TYPE:
+        return None
+    source = (
+        {**existing, **annotation} if isinstance(existing, dict) else dict(annotation)
+    )
+    return reference_content_error(source, require_complete=require_complete)
+
 
 # Semantic default layer at creation (task-annotation-render-direct-
 # manipulation's remaining scope: "semantic default layers - a per-kind
@@ -237,7 +577,9 @@ def _line_endpoint_error(value: Any, *, field: str) -> Optional[str]:
 
 
 def _validate_generic_content(
-    ann_type: Optional[str], source: Dict[str, Any]
+    ann_type: Optional[str],
+    source: Dict[str, Any],
+    existing: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """Type-specific structural validation for a generic annotation's
     payload fields, given either the `content` dict a builder is about to
@@ -257,6 +599,18 @@ def _validate_generic_content(
     """
     if not source:
         return None
+    if ann_type == REFERENCE_TYPE:
+        # A reference is the one generic type whose payload is fully
+        # constrained rather than free-form: its `target` is rendered into an
+        # activatable link, so an unvalidated field here is a navigation
+        # surface, not a decoration that merely draws oddly. *existing*
+        # resolves the target kind of a patch that changes only `target` —
+        # see reference_annotation_error for why that is not an exemption.
+        return reference_annotation_error(
+            {**(existing or {}), **source, "type": REFERENCE_TYPE},
+            existing,
+            require_complete=existing is None,
+        )
     if ann_type == "shape" and "shape" in source:
         shape = source["shape"]
         if not isinstance(shape, str) or not shape.strip():
@@ -695,15 +1049,41 @@ def saved_view_annotation_error(metadata: Dict[str, Any]) -> Optional[str]:
     every image annotation must already be an embedded data URI, with no
     byte-identical-URL exemption. Callers gate this call to nodes of the
     right type themselves — this module has no notion of node types.
+
+    ``reference_annotation_error`` is applied over the same annotations for
+    the same reason: a saved view is opened by a browser that renders a
+    reference's target into an activatable link, so a view carrying an
+    unsafe-scheme reference would hand a viewer a `javascript:` link merely
+    by being opened. A saved-view annotation is a whole stored object rather
+    than a patch, so it is held to the complete-payload rule.
     """
     for annotation in iter_saved_view_annotations(metadata):
         error = image_annotation_error(annotation)
+        if error:
+            return error
+        error = reference_annotation_error(annotation, require_complete=True)
         if error:
             return error
     return None
 
 
 def _sanitize_saved_view_annotation(annotation: Dict[str, Any]) -> Dict[str, Any]:
+    if annotation_type_of(annotation) == REFERENCE_TYPE:
+        # Same defense-in-depth role as the image branch below, for the same
+        # renderer reason: a reference's `target` becomes an activatable link,
+        # so a view that reached storage before the gate existed (or by some
+        # path it does not cover) must not hand a viewer an unsafe link just
+        # by being opened. The target is dropped rather than the whole
+        # annotation: the tile still renders, in its broken-target state,
+        # which is the honest thing to show for a link that cannot be
+        # followed.
+        if annotation.get("target_kind") != "url":
+            return annotation
+        if reference_url_error(annotation.get("target")) is None:
+            return annotation
+        sanitized = dict(annotation)
+        sanitized.pop("target", None)
+        return sanitized
     if annotation_type_of(annotation) != IMAGE_TYPE:
         return annotation
     image = annotation.get("image")
@@ -719,7 +1099,8 @@ def _sanitize_saved_view_annotation(annotation: Dict[str, Any]) -> Dict[str, Any
 
 def sanitize_saved_view_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:
     """Return a copy of SavedView/VisualizationView *metadata* with every
-    non-embedded image annotation URL stripped.
+    non-embedded image annotation URL, and every unsafe-scheme reference
+    target, stripped.
 
     Defense in depth alongside ``saved_view_annotation_error``: a view saved
     before that check existed (or whose metadata reached storage by some
@@ -762,6 +1143,7 @@ def _apply_content(
     content: Optional[Dict[str, Any]],
     *,
     ann_type: Optional[str] = None,
+    existing: Optional[Dict[str, Any]] = None,
 ) -> None:
     if not content:
         return
@@ -771,7 +1153,7 @@ def _apply_content(
             f"content must not set reserved field(s) {sorted(reserved)}; "
             "those are managed by their own arguments"
         )
-    content_error = _validate_generic_content(ann_type, content)
+    content_error = _validate_generic_content(ann_type, content, existing)
     if content_error:
         raise ValueError(content_error)
     target.update(content)
@@ -790,6 +1172,7 @@ def build_annotation(
     z: Optional[float] = None,
     locked: bool = False,
     annotation_id: Optional[str] = None,
+    existing: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build a v1 annotation dict of *type* for the ``annotation_created`` op.
 
@@ -814,6 +1197,12 @@ def build_annotation(
     that omits ``content`` keeps the stored intensity under the store's
     shallow merge, and a default written here would silently reset it. The
     MCP tool fills the default for a fresh create instead.
+
+    Pass *existing* when this build replaces an annotation already stored
+    under the same id (an upsert). Without it a `reference` upsert that
+    re-sends only part of its payload is refused as incomplete, even though
+    the store's shallow merge would have kept the rest — the defect round 2 of
+    the review loop turned up while testing round 1's own fix.
     """
     if type == HEATMAP_TYPE:
         if w is None and h is None:
@@ -822,6 +1211,14 @@ def build_annotation(
             w = h
         elif h is None:
             h = w
+    elif type == REFERENCE_TYPE:
+        # A tile with no box draws nothing, the same reason heatmap defaults
+        # its diameter above. Each side defaults independently so a caller
+        # giving only a width keeps the default height.
+        if w is None:
+            w = DEFAULT_REFERENCE_SIZE["w"]
+        if h is None:
+            h = DEFAULT_REFERENCE_SIZE["h"]
     geometry = {
         "x": x,
         "y": y,
@@ -841,7 +1238,14 @@ def build_annotation(
         annotation["size"] = {"w": geometry["w"], "h": geometry["h"]}
     if style is not None:
         annotation["style"] = dict(style)
-    _apply_content(annotation, content, ann_type=type)
+    # *existing* is the annotation already stored under this id, when this
+    # build is an UPSERT rather than a fresh create. It matters only for a
+    # cross-field type like `reference`: the store applies an upsert with a
+    # shallow merge, so re-sending a subset of the payload is a legitimate
+    # edit, and validating that subset as if it stood alone refuses it for
+    # fields the stored annotation already carries. Omitted — a genuine fresh
+    # create — the payload is required to be complete.
+    _apply_content(annotation, content, ann_type=type, existing=existing)
     if annotation_id is not None:
         annotation["id"] = annotation_id
     return annotation
@@ -967,7 +1371,7 @@ def build_annotation_patch(
         patch["z"] = z
     if locked is not None:
         patch["locked"] = bool(locked)
-    _apply_content(patch, content, ann_type=ann_type)
+    _apply_content(patch, content, ann_type=ann_type, existing=existing)
     return patch
 
 

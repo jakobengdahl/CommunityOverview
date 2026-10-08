@@ -26,6 +26,9 @@ import {
   HEATMAP_MAX_INTENSITY,
   HEATMAP_MIN_INTENSITY,
   normalizeHeatmapIntensity,
+  normalizeReferenceTargetKind,
+  referenceTargetProblem,
+  trimReferenceTarget,
 } from '../utils/annotationModel';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
@@ -51,7 +54,36 @@ const DEFAULT_COLOR = '#94a3b8';
 // `heatmap` is the one editable generic kind that is not rotatable: it is a
 // circle, so a rotation would change nothing. It still needs the editor for
 // its intensity, size, layer and actions.
-const EDITABLE_KINDS = new Set([...ROTATABLE_OVERLAY_KINDS, 'heatmap']);
+// `reference` joins them for the same reason `heatmap` does — it is not
+// rotatable (a tile turned on its side is a worse tile, not an aimed one),
+// but it has a layer, an opacity, a size, a label to rename and the same
+// duplicate/delete actions every other kind offers.
+const EDITABLE_KINDS = new Set([...ROTATABLE_OVERLAY_KINDS, 'heatmap', 'reference']);
+
+// The badge glyph that distinguishes a reference's three target kinds at a
+// glance. Deliberately not from ANNOTATION_ICONS: an `icon` annotation's
+// glyph is content the author chooses, while this one states what kind of
+// thing the tile points at and is not the author's to change — a reference
+// whose badge could be made to look like a session while pointing at a URL
+// is a tile that lies about where it goes. `data.icon` is still the author's
+// and is drawn beside it.
+const REFERENCE_BADGE_GLYPHS = Object.freeze({
+  session: '▣',
+  url: '🔗',
+  resource: '📄',
+});
+const REFERENCE_UNKNOWN_BADGE = '?';
+
+// The target-kind word shown in the property editor's Target section. Props
+// with English defaults, this package's i18n rule — the same shape as
+// REFERENCE_ARIA_TARGET_LABEL_KEYS in utils/annotations.js, kept separate
+// because that one names the *accessible* word (lower-case, read inside a
+// sentence) and this one a heading in the menu.
+const REFERENCE_TARGET_KIND_LABEL_KEYS = Object.freeze({
+  session: 'referenceTargetSession',
+  url: 'referenceTargetUrl',
+  resource: 'referenceTargetResource',
+});
 
 // The resize-handle accent for a heat-map circle — the field's own red, so the
 // handles read as belonging to it even at a level too faint to see.
@@ -230,7 +262,7 @@ function normalizeAngle(deg) {
 // (SIZED_GENERIC_KINDS in utils/annotations.js) and are the only ones
 // resizable in this slice; text/icon/vote_dot render at a fixed intrinsic
 // size, so resizing them has no model-space geometry to change.
-const RESIZABLE_KINDS = new Set(['shape', 'image', 'heatmap']);
+const RESIZABLE_KINDS = new Set(['shape', 'image', 'heatmap', 'reference']);
 const MIN_SIZE = 40;
 
 // Every `content.shape` variant the contract accepts, as the CSS that draws
@@ -387,6 +419,8 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     enterAttachMode,
     beginEditing,
     endEditing,
+    openReference,
+    isReferenceTargetAvailable,
   } = useContext(AnnotationContext);
   // See NoteNode's equivalent comment: another client's live edit lease
   // (task-annotation-exclusive-edit-leases) refuses every mutation below.
@@ -453,6 +487,23 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     handleTextChange,
     handleKeyDown: handleTextKeyDown,
   } = useEditableText(id, data);
+
+  // A reference's editable string is its `label`, and it commits on Enter
+  // because it is one line (the same choice LabelNode makes). It gets its own
+  // hook instance rather than sharing the one above: the two edit different
+  // `data` keys, and a reference never enters the `text`/`shape` caption
+  // editor. Unlike those two kinds it is NOT started by a double-click —
+  // double-clicking a reference opens its target (see the branch below), so
+  // renaming is reached from the property editor instead.
+  const {
+    isEditing: isEditingReferenceLabel,
+    text: referenceLabelDraft,
+    inputRef: referenceLabelInputRef,
+    startEditing: startEditingReferenceLabelIfEditable,
+    commitText: commitReferenceLabel,
+    handleTextChange: handleReferenceLabelChange,
+    handleKeyDown: handleReferenceLabelKeyDown,
+  } = useEditableText(id, data, { commitOnEnter: true, field: 'label' });
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -806,6 +857,47 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     </button>
   );
 
+  // ===================== reference (navigational tile) =====================
+  // Computed unconditionally so the shared property editor below can read the
+  // same values without re-deriving them. Harmless for every other kind:
+  // nothing reads these.
+  const referenceTargetKind = normalizeReferenceTargetKind(data?.target_kind);
+  // `trimReferenceTarget`, not `.trim()`: the gate's whitespace set and
+  // JavaScript's differ on U+0085, and this value decides both what the tile
+  // draws and WHICH STRING the host is asked about. GraphCanvas's own
+  // `referenceHostBroken` trims with the gate set, so a bare `.trim()` here
+  // made the two ask the host different questions about the same tile.
+  const referenceTarget = trimReferenceTarget(data?.target);
+  // Two independent reasons a reference cannot be followed, folded into one
+  // state. `referenceTargetProblem` is what this package can see for itself
+  // (no target, or a url target it refuses to render as a link);
+  // `isReferenceTargetAvailable` is what only the host knows (a session that
+  // is no longer in its index). Either one makes the tile broken — a tile
+  // that is openable in the canvas's opinion but dead in the host's is the
+  // worse of the two failures, because the user finds out by clicking.
+  //
+  // Strictly `=== false`: a host that cannot judge a given target returns
+  // `undefined`, and reading "don't know" as broken would grey out every
+  // reference on every host that resolves no targets at all.
+  const referenceProblem = referenceTargetProblem(data || {});
+  const referenceHostBroken =
+    referenceTargetKind !== null &&
+    referenceTarget !== '' &&
+    isReferenceTargetAvailable?.(referenceTargetKind, referenceTarget) === false;
+  const referenceBroken = Boolean(referenceProblem) || referenceHostBroken;
+  const openReferenceTarget = () => {
+    // A broken reference never navigates. The guard is here rather than only
+    // on the control's `disabled`, because this is also the double-click
+    // path and a `disabled` button says nothing about that one.
+    if (referenceBroken || !referenceTargetKind || !referenceTarget) return;
+    openReference?.({
+      annotationId: id,
+      targetKind: referenceTargetKind,
+      target: referenceTarget,
+      label: typeof data?.label === 'string' ? data.label : '',
+    });
+  };
+
   const currentRotation = data?.rotation ?? 0;
   const menu = contextMenu && (
     <ContextMenuPortal
@@ -859,6 +951,17 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
           : undefined
       }
       onDetach={detach}
+      referenceTargetKind={referenceTargetKind}
+      referenceTarget={referenceTarget}
+      referenceBroken={referenceBroken}
+      onRenameReference={() => {
+        setContextMenu(null);
+        startEditingReferenceLabelIfEditable();
+      }}
+      onOpenReference={() => {
+        setContextMenu(null);
+        openReferenceTarget();
+      }}
     />
   );
 
@@ -1113,6 +1216,106 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     );
   }
 
+  if (kind === 'reference') {
+    const badge = referenceTargetKind
+      ? REFERENCE_BADGE_GLYPHS[referenceTargetKind]
+      : REFERENCE_UNKNOWN_BADGE;
+    const preview = data?.preview || {};
+    const label = (typeof data?.label === 'string' && data.label.trim()) || '';
+    const previewTitle = (typeof preview.title === 'string' && preview.title.trim()) || '';
+    const title =
+      label || previewTitle || referenceTarget || labels.referenceUntitled || 'Reference';
+    // Whether the first line already shows the target. When it does, the
+    // second line must not repeat it: a tile that prints the same URL twice
+    // spends both its lines saying one thing.
+    const titleIsTarget = !label && !previewTitle && Boolean(referenceTarget);
+    // What the second line says. Broken first: the reason it cannot be
+    // followed outranks any preview text, because a user reading the preview
+    // of a dead link has been told the least useful true thing about it.
+    const detail = referenceBroken
+      ? referenceProblem === 'unsafe'
+        ? labels.referenceUnsafeTarget || 'Unsafe link — not opened'
+        : labels.referenceBrokenTarget || 'Target not available'
+      : (typeof preview.site === 'string' && preview.site.trim()) ||
+        (typeof preview.description === 'string' && preview.description.trim()) ||
+        (titleIsTarget ? '' : referenceTarget);
+    // The target is deliberately NEVER rendered into an `href`, for any
+    // target kind, safe scheme or not. The tile reports the activation to the
+    // host, which decides what opening a session / a page / a resource means
+    // in its own shell; a real anchor here would also give the canvas a
+    // middle-click and context-menu "open" path that bypasses both this
+    // component's broken-target guard and the host's own handling.
+    return (
+      <>
+        {resizer}
+        <div
+          className={`graph-generic-annotation-node kind-reference${
+            referenceBroken ? ' is-broken' : ''
+          }${selectedClass}`}
+          style={{ ...rotation, ...opacityStyle }}
+          data-target-kind={referenceTargetKind || 'unknown'}
+          title={referenceBroken ? detail : referenceTarget}
+          onContextMenu={openContextMenu}
+          onDoubleClick={(e) => {
+            // Stop the pane's own double-click handling: a reference's
+            // double-click means "open this", not "create something here".
+            e.stopPropagation();
+            openReferenceTarget();
+          }}
+        >
+          <span className="graph-reference-badge" aria-hidden="true">
+            {badge}
+          </span>
+          <span className="graph-reference-body">
+            {isEditingReferenceLabel ? (
+              <input
+                ref={referenceLabelInputRef}
+                className="graph-reference-label-input nodrag nopan"
+                value={referenceLabelDraft}
+                aria-label={labels.referenceLabel || 'Label'}
+                onChange={handleReferenceLabelChange}
+                onBlur={commitReferenceLabel}
+                onKeyDown={handleReferenceLabelKeyDown}
+                onDoubleClick={(e) => e.stopPropagation()}
+              />
+            ) : (
+              <span className="graph-reference-title">{title}</span>
+            )}
+            {detail && <span className="graph-reference-detail">{detail}</span>}
+          </span>
+          {data?.icon && (
+            <span className="graph-reference-icon" aria-hidden="true">
+              {resolveAnnotationIcon(data.icon).text}
+            </span>
+          )}
+        </div>
+        {/* The keyboard and single-click path to the same activation the
+            double-click above performs. Shown while selected, mirroring
+            `editTrigger`'s own placement, so a keyboard user who focuses the
+            node reaches it by Tab rather than having to produce a
+            double-click gesture (the accessibility audit's "non-drag
+            alternative" rule). `nodrag nopan` for the same reason the edit
+            trigger carries it. */}
+        {selected && !referenceBroken && (
+          <button
+            type="button"
+            className="graph-reference-open nodrag nopan"
+            aria-label={labels.referenceOpen || 'Open target'}
+            onClick={(e) => {
+              e.stopPropagation();
+              openReferenceTarget();
+            }}
+          >
+            ↗
+          </button>
+        )}
+        {editTrigger}
+        {menu}
+        {remoteBadge}
+      </>
+    );
+  }
+
   if (kind === 'image') {
     const url = data.image?.url;
     if (!url) {
@@ -1220,6 +1423,11 @@ function ContextMenuPortal({
   onAttachNearby,
   onEnterAttachMode,
   onDetach,
+  referenceTargetKind,
+  referenceTarget,
+  referenceBroken,
+  onRenameReference,
+  onOpenReference,
 }) {
   // The contextual "Edit" surface's mobile-sheet path
   // (task-annotation-responsive-bottom-toolbox): the container may not have
@@ -1459,6 +1667,53 @@ function ContextMenuPortal({
             </div>
           </AnnotationMenuGroup>
         </>
+      )}
+      {kind === 'reference' && (
+        <AnnotationMenuGroup
+          groupKey="reference"
+          label={gl('referenceTarget', 'Target')}
+          glyph="🔗"
+          open={openGroup === 'reference'}
+          onToggle={toggleGroup}
+        >
+          <div className="context-menu-reference">
+            {/* The target is shown, not edited. Repointing a reference is the
+                one operation on it that can change where a viewer is sent, so
+                in v1 it goes through the validated MCP/API path
+                (`update_annotation`) rather than a free-text field in a
+                canvas menu that would need its own copy of the scheme rule to
+                stay honest. Renaming — which cannot change the destination —
+                is offered right here. See docs/ANNOTATION_CONTRACT.md's
+                "Reference tiles". */}
+            <div className="context-menu-reference-target">
+              <span className="context-menu-reference-kind">
+                {(referenceTargetKind &&
+                  labels[REFERENCE_TARGET_KIND_LABEL_KEYS[referenceTargetKind]]) ||
+                  labels.referenceTargetUnknown ||
+                  'Unknown target'}
+              </span>
+              <span className="context-menu-reference-value" title={referenceTarget}>
+                {referenceTarget || '—'}
+              </span>
+              {referenceBroken && (
+                <span className="context-menu-reference-broken">
+                  {labels.referenceBrokenTarget || 'Target not available'}
+                </span>
+              )}
+            </div>
+            <button
+              type="button"
+              className="context-menu-item"
+              disabled={referenceBroken}
+              onClick={onOpenReference}
+            >
+              {labels.referenceOpen || 'Open target'}
+            </button>
+            <button type="button" className="context-menu-item" onClick={onRenameReference}>
+              {labels.referenceRename || 'Rename'}
+            </button>
+          </div>
+        </AnnotationMenuGroup>
       )}
       {kind === 'shape' && (
         <AnnotationMenuGroup

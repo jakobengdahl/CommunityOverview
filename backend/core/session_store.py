@@ -43,7 +43,7 @@ from .session_activity import (
     prune_activity_log,
     undo_conflict_reason as _undo_conflict_reason,
 )
-from .session_annotations import image_annotation_error
+from .session_annotations import image_annotation_error, reference_annotation_error
 
 # Session IDs use the grouped-digit shape DDDD-DDDD-DDDD-DDDD (four groups,
 # ~10^16 address space) so an unauthenticated caller cannot feasibly enumerate
@@ -63,6 +63,7 @@ _ANNOTATION_TYPES = {
     "image",
     "freehand",
     "heatmap",
+    "reference",
 }
 _LEGACY_ANNOTATION_ALIASES = {"arrow": "line"}
 _DEFAULT_MAX_ANNOTATIONS = 2000
@@ -443,6 +444,18 @@ def _validate_annotation(value: Any, *, require_id: bool) -> Dict[str, Any]:
         raise OpError("annotation update/delete requires a string 'id'")
     if "position" in annotation and annotation["position"] is not None:
         _validate_position(annotation["position"])
+    # The unconditional floor for a `reference`'s payload: applied here, to
+    # every annotation op, rather than alongside the image guard below,
+    # because that guard is skipped for an undo's `trusted_replay` and this
+    # one must not be. A replay carries a whole stored annotation, which is
+    # therefore judged in full — and nothing unsafe can have been stored, so
+    # an unconditional check can never refuse a legitimate replay. No
+    # `existing` is available at this point, so a sparse patch that sets only
+    # `target` is not resolvable against its stored target kind here; that
+    # case is caught by `_require_safe_reference_target` below, which has it.
+    reference_error = reference_annotation_error(annotation)
+    if reference_error:
+        raise OpError(reference_error)
     return annotation
 
 
@@ -470,6 +483,33 @@ def _require_ingested_image(
     image_error = image_annotation_error(annotation, existing)
     if image_error:
         raise OpError(image_error)
+
+
+def _require_safe_reference_target(
+    annotation: Dict[str, Any], existing: Optional[Dict[str, Any]]
+) -> None:
+    """Refuse a write that would point a `reference` annotation at an unsafe
+    URL, in the cases `_validate_annotation`'s unconditional check cannot
+    decide on its own.
+
+    Two of them, both needing the annotation already stored under this id:
+    a sparse patch that sets only `target` (its target kind is on the stored
+    annotation, not in the patch), and a genuine create, which must carry a
+    complete payload rather than a half one whose missing target kind would
+    skip the scheme gate.
+
+    *existing* is never an exemption — unlike `_require_ingested_image`,
+    where re-sending an already-stored URL is deliberately allowed. Nothing
+    unsafe can ever have been persisted as a reference, so admitting a value
+    because it matches a stored one could only ever admit something that got
+    in by a path this gate does not cover. See
+    `session_annotations.reference_url_error`.
+    """
+    error = reference_annotation_error(
+        annotation, existing, require_complete=existing is None
+    )
+    if error:
+        raise OpError(error)
 
 
 def _union(existing: List[str], incoming: List[str]) -> List[str]:
@@ -892,6 +932,7 @@ class SessionStore:
             )
             if not trusted_replay:
                 _require_ingested_image(annotation, existing)
+                _require_safe_reference_target(annotation, existing)
             if existing is not None:
                 # A retried create (lost response, resent batch) carries the same
                 # client-assigned id as the one already applied: upsert so the
@@ -978,6 +1019,7 @@ class SessionStore:
                 )
             if not trusted_replay:
                 _require_ingested_image(incoming, target)
+                _require_safe_reference_target(incoming, target)
 
             # Field-level version check (dec-annotation-field-patches-and-
             # conflicts): computed by *value*, not by key presence, so a

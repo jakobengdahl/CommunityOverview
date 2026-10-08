@@ -151,6 +151,7 @@
       "heatmap": "a heat-map circle",
       "image": "an image",
       "freehand": "a freehand drawing",
+      "reference": "a reference tile",
       "unknown": "an annotation"
     },
     "desc": {
@@ -556,7 +557,25 @@
     "annotation_multi_select_mode": "Select multiple",
     "annotation_overlap_picker_title": "Multiple objects here — choose one",
     "annotation_size": "Size",
-    "annotation_more_actions": "More actions"
+    "annotation_more_actions": "More actions",
+    "reference_untitled": "Reference",
+    "reference_open": "Open target",
+    "reference_rename": "Rename",
+    "reference_label": "Label",
+    "reference_target": "Target",
+    "reference_target_session": "Session",
+    "reference_target_url": "Web page",
+    "reference_target_resource": "Supporting material",
+    "reference_target_unknown": "Unknown target",
+    "reference_broken_target": "Target not available",
+    "reference_unsafe_target": "Unsafe link — not opened",
+    "reference_paste_created": "Added a link to the pasted address",
+    "reference_already_here": "You are already in that session",
+    "aria_kind_reference": "Reference",
+    "aria_kind_reference_session": "session",
+    "aria_kind_reference_url": "web page",
+    "aria_kind_reference_resource": "supporting material",
+    "aria_kind_reference_broken": "broken target"
   },
   "annotation_toolbox": {
     "toggle_expand": "Add annotation",

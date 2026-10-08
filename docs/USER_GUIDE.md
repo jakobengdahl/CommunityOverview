@@ -251,6 +251,64 @@ an empty area of the canvas and choosing one of:
   close to a node or another annotation and it snaps onto it (magnetic), staying attached
   as that target moves. Arrows do not attach to other arrows.
 
+**Reference tiles — links to sessions, web pages and supporting material.** A reference
+tile is a small card you put on the canvas that points at something a reader should be
+able to get to from here: another session, an external web page, or a piece of supporting
+material already in the graph. It is how an overview board leads into the focused boards
+that sit under it.
+
+A tile is deliberately not shaped like a graph node. It is a squared-off card with a
+coloured edge down its left side, a square badge showing what kind of thing it points at
+(a board symbol for a session, a link symbol for a web page, a document symbol for
+supporting material), and one or two lines of text — so you can tell at a glance that it
+is a signpost rather than part of the graph.
+
+**To add one, paste a web address onto the canvas.** Copy an `http` or `https` address,
+click an empty part of the canvas and press Ctrl+V (Cmd+V on a Mac). A tile appears in
+the middle of the view, showing the address. Rename it to something readable from its
+right-click menu's **Target** section (**Rename**). Pasting anything that is not, on its
+own, a web address — a sentence, a note to yourself, an address with an unusual prefix —
+does nothing at all, so copying ordinary text will not litter your board.
+
+Tiles pointing at a **session** or at **supporting material** are added for you by an
+assistant or an agent rather than by hand, because each needs an exact identifier. Ask
+for one in chat ("put a link to the programme overview board on this canvas") and it will
+search for the right session and place the tile.
+
+**To follow a tile, double-click it.** A session tile switches you to that board; a web
+page opens in a new browser tab; supporting material is fetched, added to the canvas and
+brought into focus. If you would rather not double-click, select the tile and use the
+small round **↗** button that appears in its corner, or pick **Open target** from its
+right-click menu — both do exactly the same thing, and both work from the keyboard.
+
+**A tile that cannot be followed says so** — though *when* it says so depends on what is
+wrong with it.
+
+Some problems are visible without going anywhere: an address the app will not open, or a
+session link that is not a valid session id. Those tiles turn dashed and grey straight
+away, their second line tells you why ("Unsafe link — not opened", "Target not
+available"), the **↗** button disappears, and double-clicking does nothing. A screen
+reader says such a tile is broken, so this is never carried by the colour alone.
+
+A session or a piece of supporting material that *has since been deleted* is different:
+nothing on the canvas can tell until it is actually looked up, so the tile stays live and
+the problem is reported when you follow it. You get an error message rather than a dead
+tile. For supporting material you stay where you are; for a session you are taken to that
+board, which opens empty, and told that the link could not be found.
+
+Either way the tile stays put, so you can rename or delete it rather than wondering where
+it went — and if it is pointing at the wrong place rather than a missing one, ask an
+assistant to repoint it, the same way session and supporting-material tiles are created.
+
+The app only ever opens ordinary `http` and `https` web addresses from a tile. Anything
+else is refused when the tile is created, refused again when storing it, and refused a
+third time if it somehow reaches the canvas — which is why a tile with an unusual address
+shows as broken instead of opening.
+
+Everything else works the way the other annotations do: drag to move, drag a corner
+handle (or use the Width/Height fields) to resize, and the same **Layer**, **Opacity**,
+**Duplicate** and **Delete** controls in the right-click menu.
+
 Annotations are part of the session, not the knowledge graph: they are stored with the
 session (so everyone sharing the session sees them) and never change the underlying node
 and edge data. Select an annotation and press **Delete** to remove it.
@@ -272,7 +330,8 @@ A freshly created annotation (from the toolbox, the right-click "add" menu, or a
 drag-and-drop) is selected and focused immediately, so its Edit button is one Tab away
 without having to click or tap to find it first.
 
-For **Text**, **Shape**, **Icon**, **Vote dot**, **Heat map** and **Image** annotations the property
+For **Text**, **Shape**, **Icon**, **Vote dot**, **Heat map**, **Image** and **Reference**
+annotations the property
 menu is a compact row of small icons rather than a tall list of labelled sections. Each
 icon is one property — colour, fill, border, text alignment, text size, font, shape,
 rotation, opacity, size, layer order — and shows what that property is currently set to,
@@ -289,7 +348,8 @@ on.
 Some kinds' menus offer a few more non-drag controls, useful with a keyboard or on a
 device with no fine pointer:
 
-- **Width/Height fields** — Note, Group, Shape, Image and Heat map boxes (the kinds with a resize
+- **Width/Height fields** — Note, Group, Shape, Image, Heat map and Reference boxes (the
+  kinds with a resize
   handle) also get a numeric width and height in their menu, with an **Apply** button, so
   resizing doesn't require dragging a corner handle precisely.
 - **Attach to…** — Label, Text and Icon annotations (the kinds that can snap onto a node
@@ -429,7 +489,8 @@ hiding it entirely. Freehand strokes have had this since drawing shipped; every 
 kind gets it from the same row now too.
 
 Notes, labels, arrows, freehand strokes, text, shapes, icons, voting dots,
-heat-map circles and images all have a **Layer** row in their right-click menu, just
+heat-map circles, images and reference tiles all have a **Layer** row in their right-click
+menu, just
 above Delete. **Bring to
 front** puts the annotation on top of the other annotations and **Send to back** puts it
 underneath, so you can pull a sticky note out from under a transparent-fill shape or tuck
@@ -1183,3 +1244,4 @@ Screenshots for this guide are saved to `docs/images/` in PNG format.
 | `mobile-annotate-sheet.png` | pending | Phone viewport with the Annotate bottom sheet open, showing the expanded annotation toolbox grid |
 | `mobile-session-menu.png` | pending | Phone viewport with the session menu open as a full-width overlay and scrim |
 | `metamodel-explorer.png` | pending | Metamodel explorer network view with a node type selected and its detail panel open |
+| `annotation-reference-tiles.png` | pending | Canvas with reference tiles for a session, a web page and supporting material, plus one in its broken state |
