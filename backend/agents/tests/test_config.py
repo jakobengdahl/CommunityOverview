@@ -270,7 +270,7 @@ class TestAgentWorkspaceDir:
     def test_override_is_absolute(self):
         """A relative override would resolve against the process cwd."""
         with patch.dict(os.environ, {AGENTS_WORKSPACE_ENV_VAR: "ws"}, clear=True):
-            assert os.path.isabs(agent_workspace_dir())
+            assert agent_workspace_dir() == os.path.join(os.getcwd(), "ws")
 
     def test_default_is_per_user_not_merely_outside_the_shared_temp_dir(self):
         """B108: a predictable path any other local user can pre-create - as a
