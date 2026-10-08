@@ -269,12 +269,12 @@ unchanged.
   - Every boot-bound singleton (federation manager, agent registry, event
     subscriptions, sessions directory, history and vector sidecars) stays
     correct by construction.
-  - Nothing about the audit `graph_id` gap counts for this option or against
-    it. One graph per process gives a single answer to compare against if a
-    store identity is ever introduced; a resolver would have resolved the
-    request to one store by the same point. The gap is unpaid under either
-    option — see item 4 — and this bullet is here to say so rather than to
-    claim a benefit.
+  - It leaves the audit `graph_id` gap unpaid. With nothing routing on the
+    declared value, nothing ties it to the serving store, so the field stays
+    caller-declared (item 4). One graph per process does make a later check
+    cheap — there is a single answer to compare against — but cheap is not
+    the same as paid, and the option that would pay it is the one this
+    recommends against.
 - **Against:**
   - It reads against the hosted sentence in
     `CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md`, so that document has to be
@@ -299,8 +299,13 @@ always returns the same store.
     evictable registry bounds memory by resident graphs rather than by owned
     graphs — subject to the connection ceiling below, which it does not
     amortise.
-  - The resolver is the natural place to make the declared `graph_id` and the
-    serving store agree.
+  - **It cures the audit `graph_id` gap by construction**, in the variant
+    where the resolver routes on the declared value: the write lands in the
+    store that value named, so the audit record is true of it with no store
+    identity and no check. That is a real advantage over Option A, which
+    leaves the gap unpaid. It does *not* hold in the other variant B's
+    Against list describes — a second identifier with a mapping between it
+    and the declared value — where the two can still disagree.
 - **Against:**
   - It reverses the owner's standing direction on what open core is for, which
     is not an architectural call.
@@ -394,11 +399,15 @@ owner.
 
 4. **Record the one real gap, and propose no check for it yet.** A request may
    declare a `graph_id`; nothing in the core checks it against anything; it
-   then reaches the audit record as if the store had supplied it. That is a
+   then reaches the audit record alongside a `source` field saying only where
+   the scope inputs came from — a header, an override, the environment or the
+   default — which is honest about provenance and silent about whether the
+   value describes the store that served the write. That is a
    real defect in attribution, and it is worth writing down. What this ADR
    does *not* do is propose the validation, because **no value the core holds
-   derives from the store**, so no predicate built from one can confirm what
-   the field appears to say — which store the write landed in. The candidates
+   both derives from the store and lives in the namespace a request
+   declares**, so no predicate built from one can confirm what the field
+   appears to say — which store the write landed in. The candidates
    below are the ones worth writing down rather than a closed set; the
    argument is about the class, and a reader who finds another should test it
    against the same property rather than against this list being complete.
@@ -455,13 +464,29 @@ owner.
    id naming a store are two namespaces behind one field**, and the core has
    no value of the second kind at all: what distinguishes two shared-backend
    stores is `GRAPH_POSTGRES_SCHEMA`, which is not a graph name and is not
-   what a request declares. That is the property to test any further
-   candidate against: the first three predicates refuse legitimate traffic,
-   and the last two refuse only what something outside the store already
-   said — a hook's allow-list, or an operator's default. None of them reads
-   the store. A check that confirms store identity needs a store identity,
-   which does not exist yet — the second identifier Option B's Against list
-   counts as one of its costs.
+   what a request declares.
+
+   Sorting the five by what they would actually refuse: the first three and
+   the fifth refuse legitimate traffic — the fifth because once the variable
+   is set, every header-declared id that differs from it is refused, which is
+   candidate 1's failure mode with a referent in the right namespace. Only
+   the fourth refuses nothing the core can reason about on its own, and it
+   refuses nothing at all in any configuration this repository ships.
+
+   **The nearest miss is worth naming, because it passes half the test.**
+   `graph_metadata.graph_name` *is* read back out of the store — `GraphStorage`
+   takes it from `load_graph_data()`'s metadata block, `get_graph_name()`
+   surfaces it, and `access.py` already puts it in the same graph-id-keyed
+   map as federation display names, under the key `"local"`. So a store-derived
+   value does exist. It still cannot carry this check: it is not a federation
+   graph id, so it is not in the namespace a request declares; it is the
+   constant `"graph"` under every shipped shared-backend deployment; and it is
+   graph *data*, settable by an import, rather than an identity the store
+   asserts about itself. That is the property to test any further candidate
+   against — derived from the store, in the request's namespace, and not
+   forgeable by the caller — and it is also why a real check needs a store
+   identity that does not exist yet: the second identifier Option B's Against
+   list counts as one of its costs.
 
    So the proposal is: **record the gap here, and do not narrow the field
    until there is something to narrow it against.** Concretely, until then
@@ -471,9 +496,13 @@ owner.
    misleads no one; a check that refuses legitimate traffic to look rigorous
    costs a deployment and buys nothing.
 
-   This gap exists under either option, and closing it is a correctness
-   property of attribution rather than a multi-graph feature — which is why
-   it is recorded as a gap rather than attached to the boundary decision.
+   This gap is unpaid today and stays unpaid under Option A, which is why it
+   is recorded here rather than resolved. It is not neutral between the
+   options, though: Option B's routing variant would cure it by construction,
+   since routing on the declared value makes the value true of the store that
+   served the request. That is credited in Option B's For list, not here,
+   because it is a consequence of the boundary decision rather than a reason
+   to take it.
 
 5. **Do not build a graph resolver until the boundary question is answered.**
    If the owner answers it the other way, Option B becomes the decision, this
@@ -587,10 +616,14 @@ Deliberately left open, because each is the owner's:
       item 4 proposes;
    2. introduce a store-identity identifier so a real check becomes
       possible, which is work this ADR does not scope;
-   3. adopt one of the two non-degenerate predicates item 4 names — the
-      request's own authorization decision, or the configured graph scope id
-      — accepting that each confirms permission or configuration rather than
-      store identity;
+   3. adopt the one predicate that refuses nothing legitimate — validation
+      against the request's own authorization decision — accepting that it
+      confirms permission rather than store identity and is a no-op until a
+      hook is injected. (The configured-graph-scope-id predicate is *not* an
+      equivalent choice here: once the variable is set it refuses every
+      header-declared id that differs from it, so adopting it would break
+      legitimate federation-peer requests. It is named in item 4 for
+      completeness, not offered as an option.);
    4. drop `graph_id` from attribution rather than carry a value nothing can
       confirm.
 
