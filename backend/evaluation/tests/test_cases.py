@@ -233,6 +233,31 @@ class TestShippedCases:
             )
             assert referenced <= present, case.id
 
+    def test_no_expected_node_state_is_already_true_in_the_fixture(self):
+        """
+        An expectation the fixture already satisfies passes against a model
+        that did nothing.
+
+        The sibling test above pins that the node exists; nothing pinned that
+        the expected VALUE differs from the one the fixture ships. A case
+        asking for a summary the node already carries would score
+        `completeness` and `post_write_verification` green on a run where the
+        model answered in prose and called no tools — the same false pass the
+        baseline-snapshot fix removed from the other direction. The validator
+        cannot catch this, because a case is validated before its fixture is
+        loaded, so it is pinned here over the shipped cases.
+        """
+        for case in load_cases():
+            graph = json.loads(case.graph_path().read_text(encoding="utf-8"))
+            nodes = {node["id"]: node for node in graph["nodes"]}
+            for node_id, fields in case.expect.final_node_state.items():
+                for key, want in fields.items():
+                    got = nodes[node_id].get(key)
+                    assert got != want, (
+                        f"{case.id}: {node_id}.{key} already is {want!r} in "
+                        f"{case.graph}, so the expectation passes without a write"
+                    )
+
 
 class TestCaseValidation:
     def _expect(self, **kwargs):

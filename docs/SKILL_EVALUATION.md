@@ -330,14 +330,24 @@ It is not free of model-authored strings altogether, and should not be read as
 if it were: a condition's `detail` explains *why* it failed, so it can quote a
 field value the model wrote or an argument it passed — that is the diagnosis.
 Those quotes are length-bounded, but if a run's inputs are sensitive, read the
-report before pasting it somewhere. The credential is never in it: it is never
-in the transcript to begin with.
+report before pasting it somewhere.
+
+What the report does *not* carry, by construction, is the credential, the
+prompts, or the injected skill text. The one surface that could have carried
+any of them was `run_error`, because an exception message belongs to whoever
+raised it and a provider error can echo the request it failed on — including
+its `Authorization` header. So `run_error` names the stage and the exception
+class (`provider call failed: APIConnectionError`) and never the message. The
+message itself is logged, with the credential, the prompt and the skill text
+taken out of it, which puts the detail in the operator's terminal rather than
+in a file they may commit or paste.
 
 Before comparing two models, check `run_error` on each case. A failed provider
 call is reported as a run error rather than as a case failure — otherwise an
 endpoint that is simply down would read as a model that answered in prose and
 called no tools, which is exactly the conflation this evaluation exists to
-avoid.
+avoid. The exception class is usually enough to tell a down endpoint from a
+crash; when it is not, the run log has the rest.
 
 Also check `tokens.reported`. An OpenAI-compatible endpoint need not report
 usage; when it does not, the figure is `null` and explicitly unreported, never

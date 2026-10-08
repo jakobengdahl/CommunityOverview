@@ -613,6 +613,75 @@ class TestReportsNeverCarryACredential:
         assert len(detail) < 400, len(detail)
         assert detail.count("ZZQQ-written-field-marker") < 10
 
+    @pytest.mark.parametrize(
+        "site",
+        ["provider_build", "chat_path", "fixture_setup"],
+    )
+    def test_no_run_error_carries_the_credential_the_prompt_or_the_skill_text(
+        self, monkeypatch, tmp_path, profile, case_by_id, site
+    ):
+        """
+        `run_error` reaches a report verbatim, and nothing asserted its CONTENT.
+
+        Only that one was set, and what it was prefixed with. Each of the three
+        construction sites wraps an exception message, and an exception can carry
+        whatever the raiser put in it — a resolved credential, the case prompt,
+        or the whole injected skill text, which G2 names explicitly. All three
+        sites are driven here, with every sentinel checked against the rendered
+        report.
+        """
+        from backend.evaluation.cases import load_cases
+        from backend.evaluation.tests.conftest import ScriptedProvider
+
+        monkeypatch.setenv(profile.credential_ref, SENTINEL)
+        case = case_by_id["skill-adherence-ambiguous-name-halts"]
+        graphs_dir = None
+
+        if site == "provider_build":
+
+            def factory(_profile):
+                raise RuntimeError(f"boom {SENTINEL} {PROSE_SENTINEL}")
+
+        elif site == "chat_path":
+
+            def factory(_profile):
+                provider = ScriptedProvider(["x"])
+
+                def explode(*_args, **_kwargs):
+                    raise RuntimeError(f"boom {SENTINEL} {PROSE_SENTINEL}")
+
+                provider.create_completion = explode
+                return provider
+
+        else:  # fixture_setup
+            (tmp_path / case.graph).write_text(
+                json.dumps({"nodes": [{"id": "x"}], "edges": []}), encoding="utf-8"
+            )
+            graphs_dir = tmp_path
+
+            def factory(_profile):
+                return ScriptedProvider(["x"])
+
+        result = run_suite(
+            profile,
+            cases=[case],
+            provider_factory=factory,
+            graphs_dir=graphs_dir,
+        )
+        payload = json.dumps(build_report(result))
+        score = result.scores[0]
+
+        assert score.run_error is not None, f"{site} produced no run_error"
+        assert SENTINEL not in payload, f"{site} leaked the credential"
+        assert PROSE_SENTINEL not in payload, f"{site} leaked model-side text"
+        assert "ACTIVE SKILL INSTRUCTIONS" not in payload, (
+            f"{site} leaked the injected skill text"
+        )
+        assert case.prompt not in payload, f"{site} leaked the case prompt"
+        rendered = json.loads(payload)["cases"][0]["run_error"]
+        assert rendered is None or len(rendered) <= 400, len(rendered)
+        assert len(load_cases()) == 9  # the shipped set is untouched by this probe
+
     def test_the_transcript_never_holds_the_credential(self, monkeypatch, profile):
         from backend.evaluation.tests.conftest import ScriptedProvider
         from backend.evaluation.transcript import RecordingProvider

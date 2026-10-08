@@ -98,6 +98,9 @@ class ProviderCall:
     tools_advertised: List[str]
     usage: TokenUsage = field(default_factory=TokenUsage)
     error: Optional[str] = None
+    error_type: Optional[str] = None
+    """The exception class name alone. ``error`` carries the raiser's message,
+    which can echo request content, so a report quotes this instead."""
     system_prompt: str = ""
     """Kept so skill-injection assertions can be made; excluded from reports."""
 
@@ -192,6 +195,7 @@ class RecordingProvider(LLMProvider):
                     stop_reason=None,
                     tools_advertised=[t.get("name", "") for t in tools or []],
                     error=f"{type(exc).__name__}: {exc}",
+                    error_type=type(exc).__name__,
                     system_prompt=system_prompt,
                 )
             )

@@ -783,10 +783,17 @@ class TestSkillsContext:
         )
         context = build_skills_context([skill])
 
-        assert '<skill name="No Body Skill">' in context
-        assert "Instruction: Does a specific thing" in context
-        assert "Apply when: When that specific thing is asked for" in context
-        assert '<skill name="No Body Skill">\n\n</skill>' not in context
+        # Pinned as the whole block, not as three present-somewhere lines:
+        # that weaker form survived swapping the two labels and survived
+        # closing the element before them, and the order is production's
+        # (ChatPanel.jsx appends Instruction then Apply when, both inside the
+        # element) rather than this harness's choice.
+        assert (
+            '<skill name="No Body Skill">\n'
+            "Instruction: Does a specific thing\n"
+            "Apply when: When that specific thing is asked for\n"
+            "</skill>"
+        ) in context
 
     def test_a_skill_body_carries_its_own_applicability(self):
         """

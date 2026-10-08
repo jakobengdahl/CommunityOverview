@@ -186,8 +186,19 @@ class TestEveryQuotedValueIsBounded:
         assert len(detail) < 1000, f"{site} detail is {len(detail)} chars"
 
     def test_a_schema_error_quoting_a_huge_value_is_bounded(self):
-        tr = transcript([call("search_graph", {"query": self.LONG, "limit": "x"})])
+        """
+        The oversized value has to be the one that violates the schema.
+
+        The previous probe put it in `query` and the type error in `limit`, so
+        jsonschema reported the `limit` error and the detail never quoted the
+        oversized value at all: a 53-character detail passing a 1000-character
+        bound without reaching the branch it names. Asserting the marker is
+        present and the whole value is not keeps it from going vacuous again.
+        """
+        tr = transcript([call("search_graph", {"query": "x", "limit": self.LONG})])
         detail = score_tool_calls_valid(tr, TOOL_DEFS).detail
+        assert "ZZQQ" in detail, "the probe no longer reaches the quoted instance"
+        assert self.LONG not in detail, "the whole instance was quoted"
         assert len(detail) < 1000, len(detail)
 
     def test_an_unresolved_id_detail_is_bounded(self):

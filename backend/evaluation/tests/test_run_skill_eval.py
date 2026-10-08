@@ -415,6 +415,14 @@ class TestNoCodePathReadsACredentialFromAFile:
                         "api_key",
                         "api_key_override",
                         "auth_token",
+                        # Not named for a credential, but each carries one: the
+                        # SDK merges custom headers AFTER its own auth headers,
+                        # so assigning here overrides Authorization outright
+                        # while `api_key` still reads the environment value.
+                        "_custom_headers",
+                        "default_headers",
+                        "headers",
+                        "auth_headers",
                     ):
                         offenders.append(
                             f"{path.name}:{node.lineno}: {ast.unparse(target)}"

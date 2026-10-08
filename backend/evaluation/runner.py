@@ -20,6 +20,7 @@ live as the provider handed to it; the tests hand it a mock.
 
 import json
 import logging
+import os
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -152,6 +153,33 @@ def _split_frontmatter(raw: str) -> tuple:
     return front, parts[2]
 
 
+def _scrub(text: str, secrets: Sequence[Optional[str]]) -> str:
+    """
+    Remove values the log must not carry from an exception message.
+
+    An exception message is the raiser's, and a provider error can echo
+    request content: the resolved credential in an Authorization header, the
+    prompt, the whole injected skill text. The report side of that is closed by
+    construction — ``run_error`` names the stage and the exception class and
+    never the message — but the operator still needs the message to diagnose a
+    failed run, so it goes to the log, with the three values that must never
+    be logged taken out of it first.
+
+    All three are known where the error is handled: the credential from the
+    profile's environment variable (read for the length of this call, not
+    stored), the prompt from the case, and the skill text from what the
+    harness itself rendered. Scrubbing by value is exact; matching on a shape
+    would not be. The length floor keeps a one- or two-character value — a
+    stub credential in a test, an empty prompt — from redacting the whole
+    message into uselessness. Anything else the raiser put in the message is
+    still in the log, which is the operator's terminal and is not committed.
+    """
+    for secret in secrets:
+        if secret and len(secret) > 8 and secret in text:
+            text = text.replace(secret, "<redacted>")
+    return text
+
+
 def run_case(
     case: AcceptanceCase,
     profile: ModelProfile,
@@ -172,6 +200,11 @@ def run_case(
     factory = provider_factory or default_provider_factory
     fixture_graph = json.loads(case.graph_path(graphs_dir).read_text(encoding="utf-8"))
     skills_context = build_skills_context(case.skill_paths(skills_dir))
+    secrets = [
+        os.environ.get(profile.credential_ref) if profile.credential_ref else None,
+        case.prompt,
+        skills_context,
+    ]
 
     try:
         recorder = RecordingProvider(factory(profile))
@@ -180,9 +213,13 @@ def run_case(
         # credentials up front, but a library caller has no such gate and one
         # bad profile must not take the other cases' results down with it.
         transcript = RunTranscript(
-            run_error=f"provider unavailable: {type(exc).__name__}: {exc}"
+            run_error=f"provider unavailable: {type(exc).__name__}"
         )
-        logger.warning("case %s: provider could not be built: %s", case.id, exc)
+        logger.warning(
+            "case %s: provider could not be built: %s",
+            case.id,
+            _scrub(f"{type(exc).__name__}: {exc}", secrets),
+        )
         return score_case(case, transcript, [], fixture_graph)
 
     transcript = recorder.transcript
@@ -196,8 +233,12 @@ def run_case(
         except Exception as exc:
             # A fixture the loader accepted as JSON but the graph layer rejects.
             # Scored as a run error so one bad case does not lose the suite.
-            transcript.run_error = f"fixture setup failed: {type(exc).__name__}: {exc}"
-            logger.warning("case %s could not be set up: %s", case.id, exc)
+            transcript.run_error = f"fixture setup failed: {type(exc).__name__}"
+            logger.warning(
+                "case %s could not be set up: %s",
+                case.id,
+                _scrub(f"{type(exc).__name__}: {exc}", secrets),
+            )
             return score_case(case, transcript, [], fixture_graph)
 
         # The "before" state a completeness expectation is judged against must be
@@ -230,8 +271,12 @@ def run_case(
         except Exception as exc:
             # A refusal, a malformed response, a broken fixture: the case still
             # scores, as a run_error, rather than taking the whole suite down.
-            transcript.run_error = f"{type(exc).__name__}: {exc}"
-            logger.warning("case %s failed to run: %s", case.id, exc)
+            transcript.run_error = type(exc).__name__
+            logger.warning(
+                "case %s failed to run: %s",
+                case.id,
+                _scrub(f"{type(exc).__name__}: {exc}", secrets),
+            )
         finally:
             # Snapshot from memory while the graph is still live, then tear the
             # storage down inside the temp directory. Writes go to a background
@@ -248,7 +293,12 @@ def run_case(
     # problem reported as a model limitation, which is the one conflation this
     # evaluation exists to avoid. The recorded call carries the evidence.
     provider_error = next(
-        (call.error for call in transcript.provider_calls if call.error), None
+        (
+            call.error_type or "error"
+            for call in transcript.provider_calls
+            if call.error
+        ),
+        None,
     )
     if provider_error and not transcript.run_error:
         transcript.run_error = f"provider call failed: {provider_error}"
