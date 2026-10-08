@@ -579,6 +579,44 @@ class TestToolTables:
         empty = sorted(tool for tool, paths in ID_BEARING_ARGS.items() if not paths)
         assert not empty, f"inert ID_BEARING_ARGS entries: {empty}"
 
+    def test_the_verification_caveat_names_the_read_tools_that_exist(self):
+        """
+        The caveat said a read-back can "only" come through two tools.
+
+        find_similar_nodes is advertised AND in DEFAULT_VERIFY_READ_TOOLS, so a
+        case author reading the caveat would have believed a read-back through
+        it does not count. Pinned against the default set rather than a list
+        retyped in prose.
+        """
+        caveat = DIMENSIONS["post_write_verification"].caveat
+        for tool in DEFAULT_VERIFY_READ_TOOLS:
+            assert tool in caveat, (
+                f"{tool} is an accepted read-back tool but the caveat omits it"
+            )
+        assert "get_node_details" in caveat, "the caveat should say why it is excluded"
+
+    def test_the_verification_caveat_mentions_the_presence_only_scope(self):
+        """
+        The behaviour change reached none of its prose surfaces last round.
+
+        A removal-only case is now rejected as mis-specified; a reader of the
+        caveat had no way to know that.
+        """
+        from backend.evaluation.scoring import _PRESENCE_VERIFIABLE_WRITES
+
+        caveat = DIMENSIONS["post_write_verification"].caveat
+        assert "presence" in caveat.lower()
+        for tool in ("add_nodes", "update_node"):
+            assert tool in caveat, tool
+        assert "unarchive" in caveat
+        # And the set the prose describes is the set the code uses.
+        assert _PRESENCE_VERIFIABLE_WRITES == {
+            "add_nodes",
+            "update_node",
+            "unarchive_nodes",
+            "unarchive_edges",
+        }
+
     def test_the_verification_read_tools_exclude_get_node_details(self):
         """
         The subject under test cannot call it.

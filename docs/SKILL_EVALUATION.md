@@ -39,7 +39,7 @@ full caveats.
 |---|---|---|
 | `tool_call_validity` | **full** | Every requested tool was advertised in that run, and its arguments validate against that tool's `input_schema`. |
 | `id_resolution` | **full** | Every node/edge id passed to a write or relationship tool had appeared in an earlier tool result. A *correct* id that was never read back still fails — the model guessed and got lucky. |
-| `post_write_verification` | **full** | After the last successful write, a read tool's result contained the written node's id. |
+| `post_write_verification` | **full** | After the last successful write, a read tool's result contained the written node's id. A *presence* check, so defined only for writes that leave the node readable — see "Adding a case". |
 | `completeness` | **full** | The graph state after the run matches an enumerated expectation: exact field values, or the set of fields that must differ from the fixture. |
 | `unsupported_entity_reference` | **full** | No node the answer cites is one the run never read — a fixture id cited without a tool result returning it, or a token that passes every id disqualifier and matches nothing. Two false-negative classes, both deliberate; see the caveat below. |
 | `latency` | **reported** | Wall-clock time around each provider call, summed. A number to compare, with no pass condition. |
@@ -193,6 +193,17 @@ Two constraints worth knowing:
 - **Completeness must be enumerable.** If you cannot write down what "complete"
   means as field values or changed fields, the request is not a case for this
   harness.
+- **`verify_after_write` is a presence check.** It asks whether a read after the
+  write *returned* the written node, so it is defined only for writes that leave
+  the node readable: `add_nodes`, `update_node`, `unarchive_nodes`,
+  `unarchive_edges`. Verifying a *removal* means reading back and finding the
+  node **absent** — the opposite test — so a case whose writes are deletes or
+  archives is reported as mis-specified rather than as a model failure. If you
+  need that measured, it wants its own condition, not this one.
+- **Fields that cannot evidence a change are refused.** `id`, `created_at` and
+  `updated_at`: the first two never change and the last changes on every write,
+  so a completeness expectation naming one reports something other than whether
+  the requested change was made.
 
 ---
 
@@ -389,9 +400,19 @@ python -m pytest backend/evaluation/ -q
 Every test uses a scripted provider. **No test needs an API key and none makes a
 network call** — a suite that only passes with a real credential cannot run in
 CI, and making a credential necessary to check this harness is the one thing it
-must not do. `backend/evaluation/tests/test_no_credentials.py` pins that
-guarantee, including that the whole shipped suite scores with every provider
-variable cleared from the environment.
+must not do. `backend/evaluation/tests/test_no_credentials.py` pins that,
+including that the whole shipped suite scores with every provider variable
+cleared from the environment.
+
+The no-network half is **enforced**, not merely asserted: an autouse
+`no_network` fixture in `backend/evaluation/tests/conftest.py` fails any test
+that attempts an outbound connection, with no opt-out marker. It had to be
+added, because the claim was false for several rounds — a test meaning to
+substitute the provider factory patched a module attribute that `run_suite` had
+already captured as a default argument, so the real provider was built and the
+suite made 27 outbound connections while documenting that it made none. A
+guarantee about what a suite does *not* do is worth exactly as much as the thing
+that stops it.
 
 Every scorer is tested in both directions. A scorer that only ever returned
 `True` would make every case pass against every model — reporting reliability

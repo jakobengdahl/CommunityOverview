@@ -48,6 +48,62 @@ def profile_file(tmp_path) -> Path:
     return path
 
 
+class TestTheSuiteCannotReachTheNetwork:
+    """
+    G1's egress clause, enforced rather than asserted.
+
+    The conftest `no_network` fixture is the only thing stopping a provider
+    built for real from calling out. It exists because the claim "no test makes
+    a network call" was false for several rounds: a provider substitution that
+    patched a module attribute could not take effect, because `run_suite` had
+    captured the factory as a default argument, and the suite quietly made 27
+    outbound connections while documenting that it made none.
+    """
+
+    def test_the_egress_guard_is_autouse_and_has_no_opt_out(self):
+        from backend.evaluation.tests import conftest
+
+        fixture = conftest.no_network
+        # pytest 9 exposes the decorator's arguments on the fixture definition;
+        # older versions used a `_pytestfixturefunction` attribute. Accept either
+        # rather than pinning this suite to one pytest line.
+        marker = getattr(
+            fixture,
+            "_fixture_function_marker",
+            getattr(fixture, "_pytestfixturefunction", None),
+        )
+        assert marker is not None, "no_network is no longer a fixture"
+        assert marker.autouse is True, (
+            "the egress guard must be autouse; a guard a test can decline is not "
+            "a guarantee"
+        )
+
+    def test_an_outbound_connection_inside_this_suite_fails_the_test(self):
+        """The guard bites, with a message naming the address."""
+        import socket
+
+        with pytest.raises(AssertionError, match="attempted an outbound connection"):
+            socket.socket().connect(("example.invalid", 443))
+
+    def test_the_run_helpers_resolve_their_provider_factory_at_call_time(self):
+        """
+        The late-binding bug that made the substitution inert.
+
+        A function object captured as a default argument cannot be replaced by
+        patching the module attribute, so this must stay None-defaulted.
+        """
+        import inspect
+
+        from backend.evaluation.runner import run_case, run_suite
+
+        for function in (run_case, run_suite):
+            default = inspect.signature(function).parameters["provider_factory"].default
+            assert default is None, (
+                f"{function.__name__} binds its provider factory as a default "
+                "argument, which makes substituting the module attribute inert"
+            )
+
+
 class TestNoWayToPassAKeyAsAnArgument:
     def test_the_parser_exposes_no_credential_bearing_option(self, capsys):
         """
@@ -147,6 +203,18 @@ class TestTheReportDeclaresWhatIsNotScored:
         assert main(["--profiles", str(profile_file), "--out", str(out_file)]) == 0
 
         document = json.loads(out_file.read_text(encoding="utf-8"))
+
+        # This substitution used to be inert, because run_suite had captured
+        # default_provider_factory as a default argument — so every case ran
+        # against the real provider, failed, and this test still passed on
+        # assertions that are true of a suite which never reached a model.
+        # Asserting the run actually happened is what keeps that from recurring.
+        summary = document["reports"][0]["summary"]
+        assert summary["run_errors"] == 0, (
+            "cases never reached the scripted model — the provider substitution "
+            "is not taking effect"
+        )
+        assert summary["passed"] > 0, summary
         assert document["unscored_dimensions"] == ["hallucination"]
         assert document["reports"][0]["summary"]["unscored_dimensions"] == [
             "hallucination"

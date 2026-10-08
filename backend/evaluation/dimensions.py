@@ -117,8 +117,14 @@ DIMENSIONS: Dict[str, Dimension] = {
                 "After the last successful write, a read tool's result must contain "
                 "the written node's id. Checking the result rather than the arguments "
                 "keeps this tool-agnostic — and it has to be, because the assistant "
-                "does not advertise get_node_details, so a read-back can only come "
-                "through search_graph or get_related_nodes."
+                "does not advertise get_node_details, so a read-back comes through "
+                "search_graph, get_related_nodes or find_similar_nodes (the three "
+                "advertised reads; see DEFAULT_VERIFY_READ_TOOLS). Being a PRESENCE "
+                "check, it is defined only for writes that leave the node readable: "
+                "add_nodes, update_node and the unarchive pair. A run whose only "
+                "writes are removals (delete_* / archive_*) is reported as a "
+                "mis-specified case, because verifying a removal means reading back "
+                "and finding the node ABSENT, which is the opposite test."
             ),
         ),
         Dimension(

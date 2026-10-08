@@ -6,6 +6,14 @@ test makes a network call. That is a guarantee of the harness, not a
 convenience — a test suite that only passes with a real credential cannot run in
 CI, and the one thing this harness must never do is make a credential necessary
 to check it.
+
+The ``no_network`` fixture below ENFORCES the second half rather than asserting
+it. It had to be added after the claim turned out to be false: a test that meant
+to substitute the provider factory patched a module attribute that
+``run_suite`` had already captured as a default argument, so the real factory
+ran and the suite made 27 outbound connections while documenting that it made
+none. A guarantee about what the suite does not do is worth only as much as the
+thing that stops it.
 """
 
 import json
@@ -96,6 +104,36 @@ class _Usage:
     def __init__(self, values: Dict[str, int]):
         for key, value in values.items():
             setattr(self, key, value)
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch, request):
+    """
+    Fail any test in this suite that attempts an outbound connection.
+
+    Autouse and unconditional: a test that needs the network does not belong
+    here, so there is deliberately no opt-out marker to reach for. The failure
+    names the address, because the useful question when this fires is which
+    provider got built for real.
+    """
+    import socket
+
+    real_connect = socket.socket.connect
+
+    def refuse(self, address, *args, **kwargs):
+        raise AssertionError(
+            f"{request.node.nodeid} attempted an outbound connection to {address!r}. "
+            "No test in this suite may touch the network — if a provider was built "
+            "for real, the substitution did not take effect (see this module's "
+            "docstring)."
+        )
+
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+    monkeypatch.setattr(socket.socket, "connect_ex", refuse)
+    try:
+        yield
+    finally:
+        socket.socket.connect = real_connect
 
 
 @pytest.fixture(autouse=True)

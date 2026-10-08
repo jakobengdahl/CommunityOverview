@@ -25,6 +25,7 @@ operator-facing version.
 """
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -236,19 +237,26 @@ class TestADotEnvFileIsNotAReliableCredentialSource:
     Pinned because this claim has been documented wrongly three times.
 
     First: nothing but the shell is read. Then: a repo-root `.env` satisfies a
-    `credential_ref`. Then: it never does. The truth is conditional —
-    `load_dotenv()` resolves via `find_dotenv()`, which walks up from the
-    CALLING FILE's directory (`backend/ui/`), so it finds a repo-root `.env`
-    and ignores the cwd entirely. The CLI gates credentials before anything
-    imports the assistant, so it refuses; a library caller refuses only while
-    nothing in the process has imported it yet.
+    `credential_ref`. Then: it never does. Then: `find_dotenv()` walks up from
+    the calling file and ignores the cwd — which is only true for a normal
+    script. `find_dotenv` falls back to `os.getcwd()` whenever `usecwd` is set,
+    under a debugger or coverage (`sys.gettrace()`), when frozen, or when there
+    is no `__main__.__file__` at all — which is exactly `python -c`. The first
+    version of this test used `python -c`, so it passed *because of* the cwd,
+    the mechanism its own docstring named as excluded; it could not have
+    detected that the claim was wrong.
 
-    The earlier tests here planted `.env` under `tmp_path` with the cwd moved
-    there — somewhere `find_dotenv()` never looks — so they could not fail
-    whether the claim held or not, and the round-2 "verified by planting a real
-    .env" rested on the same mislocated file. These run in subprocesses, because
-    import state and a repo-root file are both process-global and neither can be
-    undone inside a test.
+    So the honest statement, and what is pinned below: a repo-root `.env` does
+    reach `os.environ` once the assistant is imported, by the frame walk for a
+    script entry point and by the cwd in the other cases. The CLI refuses
+    regardless, because it gates credentials before any import. A library caller
+    refuses only while nothing in the process has imported the assistant yet.
+    Which is why the operator guidance is "export in your shell", not "`.env`
+    does not work".
+
+    These run in subprocesses, because import state and a repo-root file are both
+    process-global, and the probe is a real `.py` file run from OUTSIDE the
+    repository so the frame walk — not the cwd — is what finds it.
     """
 
     @staticmethod
@@ -272,29 +280,63 @@ class TestADotEnvFileIsNotAReliableCredentialSource:
         finally:
             dotenv.unlink()
 
-    def test_find_dotenv_ignores_the_cwd_and_finds_the_repository_root(self):
+    def test_the_frame_walk_finds_the_repo_root_from_outside_the_repository(
+        self, tmp_path
+    ):
         """
-        The mechanism the earlier tests got wrong, asserted directly.
+        The documented mechanism, isolated from the cwd fallback.
 
-        If this ever reports the cwd, the subprocess tests below would be
-        testable in-process — and the previous tests' premise would have been
-        right after all.
+        Run as a real `.py` file (so `__main__.__file__` exists and
+        `find_dotenv` uses the frame walk) from a cwd OUTSIDE the repository,
+        with a decoy `.env` sitting in that cwd. If the repo-root value wins,
+        the frame walk is what found it. The previous version used `python -c`
+        from inside the repo, which took the cwd branch and so proved the
+        opposite of what it claimed.
         """
-        script = (
-            "import sys; sys.path.insert(0, %r)\n"
+        import subprocess
+
+        (tmp_path / ".env").write_text(
+            "SKILL_EVAL_DOTENV_PROBE=from-the-decoy-cwd\n", encoding="utf-8"
+        )
+        probe = tmp_path / "probe_frame_walk.py"
+        probe.write_text(
+            "import sys\n"
+            f"sys.path.insert(0, {str(REPO_ROOT)!r})\n"
             "from backend.ui import chat_logic  # runs load_dotenv() at import\n"
             "import os\n"
-            "print('FOUND:', os.environ.get('SKILL_EVAL_DOTENV_PROBE'))\n"
-        ) % str(REPO_ROOT)
-        result = self._run(script, "SKILL_EVAL_DOTENV_PROBE=from-repo-root\n")
-        assert "FOUND: from-repo-root" in result.stdout, result.stdout + result.stderr
+            "print('FOUND:', os.environ.get('SKILL_EVAL_DOTENV_PROBE'))\n",
+            encoding="utf-8",
+        )
+
+        dotenv = REPO_ROOT / ".env"
+        if dotenv.exists():
+            pytest.skip("a .env already exists at the repository root")
+        dotenv.write_text("SKILL_EVAL_DOTENV_PROBE=from-repo-root\n", encoding="utf-8")
+        try:
+            result = subprocess.run(
+                [sys.executable, str(probe)],
+                cwd=str(tmp_path),
+                capture_output=True,
+                text=True,
+                timeout=180,
+                # Strip any tracer so find_dotenv cannot take the cwd branch.
+                env={**os.environ, "COVERAGE_PROCESS_START": ""},
+            )
+        finally:
+            dotenv.unlink()
+
+        assert "FOUND: from-repo-root" in result.stdout, (
+            "the frame walk did not reach the repository root; got "
+            f"{result.stdout!r} {result.stderr[-400:]!r}"
+        )
+        assert "from-the-decoy-cwd" not in result.stdout
 
     def test_the_cli_refuses_a_dot_env_credential(self):
         """The reliable half: the gate runs before any import of the assistant."""
         script = (
-            "import sys, json, pathlib; sys.path.insert(0, %r)\n"
+            "import sys, json, pathlib, tempfile; sys.path.insert(0, %r)\n"
             "from scripts.run_skill_eval import main\n"
-            "p = pathlib.Path('probe-profiles.json')\n"
+            "p = pathlib.Path(tempfile.mkdtemp()) / 'probe-profiles.json'\n"
             "p.write_text(json.dumps([{'id':'probe','name':'P','provider':'openai',"
             "'model':'m','default':True,'credential_ref':'SKILL_EVAL_DOTENV_PROBE'}]))\n"
             "try:\n"
@@ -327,10 +369,17 @@ class TestADotEnvFileIsNotAReliableCredentialSource:
             "import backend.ui.chat_logic  # noqa  -- runs load_dotenv()\n"
             "import os\n"
             "print('NOW_IN_ENV:', os.environ.get('SKILL_EVAL_DOTENV_PROBE') is not None)\n"
+            "second = run_case(case, prof)\n"
+            "print('SECOND_REFUSED:',\n"
+            "      'MissingCredentialError' in (second.run_error or ''))\n"
         ) % str(REPO_ROOT)
         result = self._run(script, "SKILL_EVAL_DOTENV_PROBE=from-repo-root\n")
         assert "FRESH_REFUSED: True" in result.stdout, result.stdout + result.stderr
         assert "NOW_IN_ENV: True" in result.stdout, result.stdout + result.stderr
+        # The operative half of the docs' claim, which was asserted only as
+        # "the value is now in the environment": the SECOND call must accept it.
+        # A regression that made it refuse would have passed before.
+        assert "SECOND_REFUSED: False" in result.stdout, result.stdout + result.stderr
 
 
 class TestReportsNeverCarryACredential:

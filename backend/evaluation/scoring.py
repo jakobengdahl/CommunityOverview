@@ -85,13 +85,57 @@ def is_id_shaped(token: str) -> bool:
     return True
 
 
+# Result keys whose values really are entity ids. The prefix vocabulary is
+# built from these, not from every string a result contained: shape cannot tell
+# an id from a tag or a timestamp, and `is_id_shaped` says True for both
+# "open-data-standard" and "2026-10-08T22:39:02.240070+00:00". The timestamp is
+# the one that mattered — every graph result carries created_at/updated_at, so
+# every case donated the prefix "2026", and any date-prefixed slug the model
+# wrote came back as a fabricated node in the dimension whose own docs list a
+# date as a disqualifier.
+_ID_BEARING_RESULT_KEYS = frozenset(
+    {
+        "id",
+        "node_id",
+        "edge_id",
+        "source",
+        "target",
+        "node_ids",
+        "edge_ids",
+        "added_node_ids",
+        "added_edge_ids",
+        "updated_node_ids",
+    }
+)
+
+
+def _ids_in_results(obj: Any) -> Set[str]:
+    """Values found at id-bearing keys anywhere in a decoded tool result."""
+    found: Set[str] = set()
+    stack = [obj]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            for key, value in current.items():
+                if key in _ID_BEARING_RESULT_KEYS:
+                    if isinstance(value, str):
+                        found.add(value)
+                    elif isinstance(value, (list, tuple)):
+                        found |= {v for v in value if isinstance(v, str)}
+                stack.append(value)
+        elif isinstance(current, (list, tuple, set)):
+            stack.extend(current)
+    return found
+
+
 def _id_vocabulary_prefixes(known_ids: Set[str]) -> Set[str]:
     """
     Leading segments of the ids this run has actually seen.
 
-    Only id-shaped values count. Anything hyphenated in a tool result would
-    otherwise qualify, and a node tagged "open-data" is not evidence that
-    "open-" names this graph's ids.
+    Callers pass the fixture's ids plus values found at id-bearing result keys —
+    not every string a result contained. Narrowing by SHAPE was not enough:
+    `is_id_shaped` admits a three-segment tag and, worse, an ISO timestamp, so
+    the vocabulary absorbed "2026" on every single case.
 
     Ids in a graph share a leading segment by convention (``eval-``, ``task-``,
     ``init-``), and a fabricated id is in practice a near-miss of a real one —
@@ -419,7 +463,9 @@ def score_tool_calls_valid(
     problems: List[str] = []
     for index, call in enumerate(transcript.tool_calls):
         if call.name not in advertised:
-            problems.append(f"#{index} {call.name!r}: not advertised in this run")
+            problems.append(
+                f"#{index} {_abbreviate(call.name, 80)}: not advertised in this run"
+            )
             continue
         schema = schemas.get(call.name)
         if not schema:
@@ -439,7 +485,8 @@ def score_tool_calls_valid(
             )
         for name in _undeclared_arguments(call.input, schema):
             problems.append(
-                f"#{index} {call.name}.{name}: not a parameter of this tool"
+                f"#{index} {_abbreviate(call.name, 80)}."
+                f"{_abbreviate(name, 80)}: not a parameter of this tool"
             )
 
     if not transcript.tool_calls:
@@ -464,7 +511,8 @@ def score_required_call_sequence(
     return ConditionResult(
         "required_call_sequence",
         False,
-        f"expected {list(required)} as an ordered subsequence of {actual}",
+        f"expected {list(required)} as an ordered subsequence of "
+        f"{_abbreviate(actual, 300)}",
     )
 
 
@@ -553,6 +601,24 @@ def score_verify_after_write(
         if call.name in _PRESENCE_VERIFIABLE_WRITES
     ]
     if not writes:
+        # Two different situations, and conflating them misattributes one of
+        # them. If the model ATTEMPTED a presence-verifiable write and it
+        # failed, that is the model's doing; only when every write this run
+        # could make is a removal is the case at fault.
+        attempted = sorted(
+            {
+                call.name
+                for call in transcript.tool_calls
+                if call.name in _PRESENCE_VERIFIABLE_WRITES
+            }
+        )
+        if attempted:
+            return ConditionResult(
+                "verify_after_write",
+                False,
+                f"the model's {attempted} write did not succeed, so there was "
+                "nothing to read back",
+            )
         removals = sorted({call.name for _, call in successful})
         return ConditionResult(
             "verify_after_write",
@@ -679,7 +745,10 @@ def score_answer_entities_supported(
     # vocabulary. A UUID is unambiguous on shape alone; a slug must share its
     # leading segment with an id the run has seen, or the model's own dates and
     # version strings get reported as fabricated nodes.
-    prefixes = _id_vocabulary_prefixes(fixture_ids | shown)
+    result_ids: Set[str] = set()
+    for result in transcript.tool_results.values():
+        result_ids |= _ids_in_results(result)
+    prefixes = _id_vocabulary_prefixes(fixture_ids | result_ids)
     cited_tokens = {
         token
         for token in cited_id_tokens(answer)
@@ -697,7 +766,8 @@ def score_answer_entities_supported(
         return ConditionResult(
             "answer_entities_supported",
             False,
-            f"answer cites node(s) no tool result returned: {unsupported}",
+            f"answer cites node(s) no tool result returned: "
+            f"{_abbreviate(unsupported, 300)}",
         )
     checked = cited_tokens | cited_fixture_ids
     if not checked:
@@ -728,7 +798,8 @@ def score_discriminating_first_call(
     return ConditionResult(
         "discriminating_first_call",
         False,
-        f"expected first call {expected!r}, got {actual[0]!r} (sequence {actual})",
+        f"expected first call {expected!r}, got {_abbreviate(actual[0], 80)} "
+        f"(sequence {_abbreviate(actual, 300)})",
     )
 
 

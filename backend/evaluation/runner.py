@@ -155,16 +155,26 @@ def _split_frontmatter(raw: str) -> tuple:
 def run_case(
     case: AcceptanceCase,
     profile: ModelProfile,
-    provider_factory: ProviderFactory = default_provider_factory,
+    provider_factory: Optional[ProviderFactory] = None,
     graphs_dir: Optional[Path] = None,
     skills_dir: Optional[Path] = None,
 ) -> CaseScore:
-    """Run one case against one provider configuration and score it."""
+    """
+    Run one case against one provider configuration and score it.
+
+    ``provider_factory`` defaults to None and is resolved here rather than in
+    the signature. Binding ``default_provider_factory`` as a default argument
+    captured the function object at import, so substituting the module
+    attribute had no effect — and the CLI's own end-to-end test, which cannot
+    pass a factory because ``main()`` does not expose one, silently ran against
+    the real provider and made network calls.
+    """
+    factory = provider_factory or default_provider_factory
     fixture_graph = json.loads(case.graph_path(graphs_dir).read_text(encoding="utf-8"))
     skills_context = build_skills_context(case.skill_paths(skills_dir))
 
     try:
-        recorder = RecordingProvider(provider_factory(profile))
+        recorder = RecordingProvider(factory(profile))
     except Exception as exc:
         # A credential that is unset, or revoked between cases. The CLI checks
         # credentials up front, but a library caller has no such gate and one
@@ -278,11 +288,16 @@ def _shutdown_chat_service(chat_service) -> None:
 def run_suite(
     profile: ModelProfile,
     cases: Optional[Sequence[AcceptanceCase]] = None,
-    provider_factory: ProviderFactory = default_provider_factory,
+    provider_factory: Optional[ProviderFactory] = None,
     graphs_dir: Optional[Path] = None,
     skills_dir: Optional[Path] = None,
 ) -> SuiteResult:
-    """Run every case against one provider configuration."""
+    """
+    Run every case against one provider configuration.
+
+    ``provider_factory`` is resolved per call, not bound in the signature —
+    see run_case for why that distinction mattered.
+    """
     case_list = list(cases) if cases is not None else load_cases()
     scores = [
         run_case(
@@ -335,7 +350,11 @@ def build_report(result: SuiteResult) -> Dict[str, Any]:
                 "case_id": score.case_id,
                 "dimension": score.dimension,
                 "passed": score.passed,
-                "run_error": score.run_error,
+                # Bounded like any other quoted value: a provider exception can
+                # echo request content, and this reaches a report verbatim.
+                "run_error": (
+                    score.run_error[:400] if score.run_error else score.run_error
+                ),
                 "conditions": [
                     {"name": c.name, "passed": c.passed, "detail": c.detail}
                     for c in score.conditions

@@ -48,7 +48,7 @@
         }
       }
     },
-    "notes": "Protocol rule 2 (mandatory verification). A read after the write must return the written node. Note the assistant does not advertise get_node_details to the model, so the read-back can only come through search_graph or get_related_nodes \u2014 a case must not require a tool the model was never offered."
+    "notes": "Protocol rule 2 (mandatory verification). A read after the write must return the written node. Note the assistant does not advertise get_node_details, so the read-back can only come through search_graph, get_related_nodes or find_similar_nodes - a case must not require a tool the model was never offered. This is a PRESENCE check, so it is defined only for writes that leave the node readable; a case whose writes are removals is reported as mis-specified, since verifying a removal means finding the node absent."
   },
   {
     "id": "completeness-full-translation",

@@ -152,6 +152,39 @@ class TestEveryQuotedValueIsBounded:
 
     LONG = "ZZQQ" * 800  # ~3.2 kB of model-written value
 
+    @pytest.mark.parametrize(
+        "site",
+        ["tool_name", "argument_name", "sequence", "first_call", "cited_token"],
+    )
+    def test_every_site_that_quotes_a_name_is_bounded(self, site):
+        """
+        The previous probe put the oversized string in an argument VALUE under a
+        short key, so none of the NAME sites was exercised — and five of them
+        were unbounded, one reaching 5 kB.
+        """
+        huge = "Z" * 2500
+        if site == "tool_name":
+            tr = transcript([call(huge, {}, turn=0)])
+            detail = score_tool_calls_valid(tr, TOOL_DEFS).detail
+        elif site == "argument_name":
+            tr = transcript([call("search_graph", {"query": "x", huge: 1}, turn=0)])
+            detail = score_tool_calls_valid(tr, TOOL_DEFS).detail
+        elif site == "sequence":
+            tr = transcript([call(huge, {}, turn=0)])
+            detail = score_required_call_sequence(tr, ["search_graph"]).detail
+        elif site == "first_call":
+            tr = transcript([call(huge, {}, turn=0)])
+            detail = score_discriminating_first_call(tr, "get_schema").detail
+        else:
+            tr = transcript(
+                results={"r0": {"nodes": [{"id": f"eval-{huge}"}]}},
+                final_text=f"It is eval-{huge}-other.",
+            )
+            detail = score_answer_entities_supported(
+                tr, {"nodes": [{"id": f"eval-{huge}"}]}
+            ).detail
+        assert len(detail) < 1000, f"{site} detail is {len(detail)} chars"
+
     def test_a_schema_error_quoting_a_huge_value_is_bounded(self):
         tr = transcript([call("search_graph", {"query": self.LONG, "limit": "x"})])
         detail = score_tool_calls_valid(tr, TOOL_DEFS).detail
@@ -670,6 +703,43 @@ class TestVerifyAfterWrite:
         )
         assert score_verify_after_write(read_the_new_node, ["search_graph"]).passed
 
+    def test_a_failed_presence_write_blames_the_model_not_the_case(self):
+        """
+        PD5: the inverse of the misattribution the previous fix removed.
+
+        If the model attempts a presence-verifiable write that FAILS and a
+        removal succeeds, the case is correct and the model botched its write —
+        but the detail said the case was mis-specified.
+        """
+        tr = transcript(
+            [
+                call("search_graph", {"query": "x"}, turn=0, tool_use_id="r0"),
+                call(
+                    "update_node",
+                    {"node_id": "eval-node-one", "updates": {}},
+                    turn=1,
+                    tool_use_id="w1",
+                ),
+                call(
+                    "delete_nodes",
+                    {"node_ids": ["eval-node-one"], "confirmed": True},
+                    turn=2,
+                    tool_use_id="w2",
+                ),
+            ],
+            results={
+                "r0": {"nodes": [{"id": "eval-node-one"}]},
+                "w1": {"success": False, "error": "validation failed"},
+                "w2": {"success": True},
+            },
+        )
+        result = score_verify_after_write(tr, ["search_graph"])
+        assert not result.passed
+        assert "did not succeed" in result.detail
+        assert "mis-specified" not in result.detail, (
+            "a failed model write must not be reported as the case's fault"
+        )
+
     def test_a_removal_is_reported_as_a_mis_specified_case_not_a_model_failure(self):
         """
         PD5: this is a PRESENCE check, so it cannot verify a deletion.
@@ -990,6 +1060,61 @@ class TestAnswerEntitiesSupported:
         )
         result = score_answer_entities_supported(tr, fixture)
         assert result.passed, result.detail
+
+    REAL_RESULT = {
+        "nodes": [
+            {
+                "id": "eval-actor-statistics-office",
+                "name": "National Statistics Office",
+                "tags": ["open-data-standard", "high-priority"],
+                "created_at": "2026-10-08T22:39:02.240070+00:00",
+                "updated_at": "2026-10-08T22:39:02.240071+00:00",
+            }
+        ],
+        "total": 1,
+    }
+
+    @pytest.mark.parametrize(
+        "mention,why",
+        [
+            (
+                "I checked the 2026-10-08-snapshot of the register.",
+                "every result carries ISO timestamps, which are id-SHAPED, so the "
+                "vocabulary absorbed the prefix 2026 on every single case",
+            ),
+            (
+                "The office follows an open-source-first policy.",
+                "a THREE-segment tag is id-shaped too, which reopened the exact "
+                "example the previous fix was written against",
+            ),
+        ],
+    )
+    def test_shape_alone_does_not_qualify_a_prefix_donor(self, mention, why):
+        """
+        Narrowing prefix donation by SHAPE was not enough.
+
+        `is_id_shaped` says True for "open-data-standard" and for an ISO
+        timestamp, so a shape test cannot separate an id from a tag or a date.
+        Donors now come from id-bearing result keys instead. Driven with the
+        real search_graph result shape, timestamps included.
+        """
+        fixture = {"nodes": [{"id": "eval-actor-statistics-office"}]}
+        tr = transcript(
+            results={"r0": self.REAL_RESULT},
+            final_text=f"It is eval-actor-statistics-office. {mention}",
+        )
+        result = score_answer_entities_supported(tr, fixture)
+        assert result.passed, f"{why}\n{result.detail}"
+
+    def test_a_fabrication_is_still_caught_against_the_real_result_shape(self):
+        fixture = {"nodes": [{"id": "eval-actor-statistics-office"}]}
+        tr = transcript(
+            results={"r0": self.REAL_RESULT},
+            final_text="It is eval-actor-statistics-bureau.",
+        )
+        result = score_answer_entities_supported(tr, fixture)
+        assert not result.passed
+        assert "eval-actor-statistics-bureau" in result.detail
 
     def test_a_bare_word_in_a_result_does_not_donate_an_id_prefix(self):
         """
