@@ -114,6 +114,34 @@ BANDIT_COMMAND = (
     '| tee -a "$GITHUB_STEP_SUMMARY"'
 )
 
+# The whole `run:` body of the bandit step, one normalised line per entry. The
+# command line alone is not the gate: any other line can redefine what `bandit`
+# means (`function bandit() { command bandit -s B108 "$@"; }`), narrow a second
+# scan into the `status=` line, or append one after a `;`, all while the pinned
+# line stays byte-identical.
+BANDIT_STEP_BODY = [
+    'echo "## bandit (backend + services, medium+ severity)" >> "$GITHUB_STEP_SUMMARY"',
+    "echo '```' >> \"$GITHUB_STEP_SUMMARY\"",
+    BANDIT_COMMAND,
+    'status="${PIPESTATUS[0]}"',
+    "echo '```' >> \"$GITHUB_STEP_SUMMARY\"",
+    'exit "$status"',
+]
+
+# Trees bandit is pointed at, and the in-source suppressions they carry today.
+# A `# nosec` turns a red scan green without touching the workflow, so the set is
+# pinned: adding one has to be done here, in review, with its rule code.
+BANDIT_TARGETS = ("backend", "services")
+EXPECTED_NOSEC = [
+    ("backend/agents/execution/sqlite_store.py", "B608"),
+    ("backend/agents/execution/sqlite_store.py", "B608"),
+    ("backend/agents/governance/store.py", "B608"),
+    ("backend/api_host/config.py", "B104"),
+    ("backend/api_host/server.py", "B104"),
+    ("services/mcp_oauth_gateway/main.py", "B104"),
+]
+NOSEC = re.compile(r"#\s*nosec\b(.*)", re.I)
+
 # Actions the workflow may use. A third-party action can export SHELLOPTS or
 # BASH_ENV through GITHUB_ENV where no `run:` body shows it.
 ALLOWED_ACTIONS = {
@@ -793,12 +821,75 @@ def test_bandit_scan_is_not_narrowed_by_configuration():
             assert not key.upper().startswith("BANDIT"), f"{key} narrows bandit"
 
 
+def _bandit_step():
+    job = _workflow()["jobs"]["bandit"]
+    scans = [
+        s for s in job["steps"] if re.search(r"^\s*bandit\b", s.get("run", ""), re.M)
+    ]
+    assert len(scans) == 1, f"expected one bandit step, found {len(scans)}"
+    return scans[0]
+
+
+def _normalised_body_lines(body):
+    lines = (_normalised(line) for line in body.replace("\\\n", " ").splitlines())
+    return [line for line in lines if line]
+
+
+def test_bandit_step_body_is_pinned_whole():
+    # The command line is pinned above, but a function or alias named `bandit`,
+    # a second narrowed scan, or anything after a `;` leaves it byte-identical.
+    assert _normalised_body_lines(_bandit_step()["run"]) == [
+        _normalised(line) for line in BANDIT_STEP_BODY
+    ]
+
+
+def _scanned_python_files():
+    for target in BANDIT_TARGETS:
+        for root, dirs, files in os.walk(REPO_ROOT / target):
+            dirs[:] = [d for d in dirs if d not in ("tests", "node_modules", ".venv")]
+            for name in files:
+                if name.endswith(".py") and not name.startswith("test_"):
+                    yield Path(root) / name
+
+
+def test_no_bandit_ini_file_can_narrow_the_scan():
+    # bandit reads a `.bandit` file from the trees it walks and takes `skips` and
+    # `tests` from it when the command line does not set them.
+    found = [
+        str(Path(root, name).relative_to(REPO_ROOT))
+        for target in BANDIT_TARGETS
+        for root, _, files in os.walk(REPO_ROOT / target)
+        for name in files
+        if name == ".bandit"
+    ]
+    if (REPO_ROOT / ".bandit").exists():
+        found.append(".bandit")
+    assert not found, f"bandit would read {found}"
+
+
+def test_in_source_nosec_suppressions_are_pinned():
+    found = sorted(
+        (str(path.relative_to(REPO_ROOT)), code)
+        for path in _scanned_python_files()
+        for match in NOSEC.finditer(path.read_text(encoding="utf-8"))
+        for code in (match.group(1).split() or [""])[:1]
+    )
+    assert found == EXPECTED_NOSEC
+
+
 def test_no_step_is_marked_temporarily_reporting_only():
     # Parsed YAML drops comments, so read the raw text. A leftover "Temporary:
     # reporting-only" note would outlive the key it described and mislead.
     text = WORKFLOW.read_text()
     assert "reporting-only until" not in text
-    assert "non-blocking" not in text
+    # Anchored to a `continue-on-error` key's vicinity: a comment elsewhere that
+    # says no scanner is non-blocking any more is legitimate prose.
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if re.match(r"\s*continue-on-error\s*:", line):
+            window = "\n".join(lines[max(0, i - 3) : i + 4]).lower()
+            assert "non-blocking" not in window, f"line {i + 1}: {line.strip()!r}"
+            assert "reporting-only" not in window, f"line {i + 1}: {line.strip()!r}"
 
 
 def test_teed_steps_run_under_the_default_shell_the_test_executes():
