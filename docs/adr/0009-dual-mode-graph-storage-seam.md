@@ -166,9 +166,12 @@ Two consequences matter here, and both are easy to misread:
 Separately, `EventScopeAttribution` (`backend/core/events/models.py`) carries
 `workspace_id`, `workspace_kind` and `graph_id` on mutation events, taken from
 the request. **Nothing reconciles that declared `graph_id` against the store
-the write actually landed in**, because with one resident graph there is
-nothing to reconcile. Any design that makes a process serve several graphs
-turns that from a tautology into an unverified claim in an audit record.
+the write actually landed in.** One resident graph does not make the field
+true — it makes the reconciliation impossible, which is a different thing: the
+value is a caller-supplied string from the federation namespace, so a caller
+can declare anything and it reaches the audit record unexamined. A design that
+makes a process serve several graphs does not create that gap; it removes the
+excuse for it.
 
 ### What the repository already commits to — and the tension
 
@@ -250,18 +253,26 @@ unchanged.
 - **For:**
   - No new seam, no new code on the request path, nothing for the standalone
     mode to lose.
-  - Matches what both storage seams already do: the graph is fixed at boot
-    (`ATTACHMENT_NAMESPACE` per graph, one schema per PostgreSQL graph,
-    `GraphStorage` constructed once in `create_app`). What is fixed is the
-    schema and the file path, not a graph *name* — see the Context bullet on
-    the identity guard.
+  - Matches what the persistence seam does today and what the attachment
+    seam is designed to do: the graph is fixed at boot — one schema per
+    PostgreSQL graph and `GraphStorage` constructed once in `create_app`, with
+    [ADR 0008](0008-node-attachment-storage.md)'s one-namespace-per-graph,
+    read at boot, as the decided shape for the second seam. (That seam is
+    accepted but not built: no `AttachmentStore` or `ATTACHMENT_NAMESPACE`
+    exists in the tree yet, so it is a precedent in design, not in code.)
+    What is fixed is the schema and the file path, not a graph *name* — see
+    the Context bullet on the identity guard.
   - Matches the owner's standing direction, and keeps the shared-store work
     that already landed as the answer to the problem it was built for — many
     instances, one graph.
   - Every boot-bound singleton (federation manager, agent registry, event
     subscriptions, sessions directory, history and vector sidecars) stays
     correct by construction.
-  - The audit `graph_id` stays trivially true: one process, one graph.
+  - It keeps the one case where reconciling the declared `graph_id` against
+    the serving store could ever be cheap: with one graph per process there
+    is a single answer to compare against, if a store identity is ever
+    introduced. (It does not make the field *correct* today — see item 4;
+    that gap is unpaid under either option.)
 - **Against:**
   - It reads against the hosted sentence in
     `CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md`, so that document has to be
@@ -359,8 +370,10 @@ owner.
 
 2. **Promote the unit of storage identity into the backend contract: one
    graph per core runtime, every backend.** This is descriptive of today's
-   code (`create_app`, `_claim_or_check_graph_identity`,
-   `ATTACHMENT_NAMESPACE`), and it is not unstated —
+   code (`create_app` constructs one `GraphStorage`;
+   `_claim_or_check_graph_identity` ties a schema to one claim) and of
+   [ADR 0008](0008-node-attachment-storage.md)'s decided-but-unbuilt
+   attachment namespace, and it is not unstated —
    [`PERSISTENCE_BACKENDS.md`](../PERSISTENCE_BACKENDS.md) already says every
    deployment this repository ships holds one graph per process, and
    [`CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md`](../CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md)
@@ -381,9 +394,9 @@ owner.
    declare a `graph_id`; nothing in the core checks it against anything; it
    then reaches the audit record as if the store had supplied it. That is a
    real defect in attribution, and it is worth writing down. What this ADR
-   does *not* do is propose the validation, because **the core has nothing
-   sound to validate against**, and three candidate predicates each fail on
-   the same fact:
+   does *not* do is propose the validation, because **no predicate available
+   today can confirm what the field appears to say** — which store the write
+   landed in. Four candidates, and why each falls short:
 
    - *"Equals this runtime's graph."* The field's values come from the
      *federation* namespace — `federation_config`'s `graphs[].graph_id` — and
@@ -404,14 +417,30 @@ owner.
      refuse precisely what a hosted layer sends, since that layer's graph
      ids are declared through an injected authorization hook rather than in
      a local federation config.
+   - *"Names a graph the request's own authorization decision admits"* —
+     `decision.graph_access.matches(graph_id=<declared>)`. This one is
+     **not** degenerate, and it deserves naming rather than omitting: under
+     the default hook `matches()` short-circuits to `True`, so it refuses
+     nothing in any configuration this repository ships, and under an
+     injected hook it refuses only ids that hook itself excludes. It needs no
+     new configuration, and the pattern is already in the codebase —
+     `build_export_boundary_summary` calls `matches(graph_id="")` today. What
+     it confirms, though, is *what the caller was permitted to declare*, not
+     which store served the write; and since the admitting set lives entirely
+     in an injected hook outside this repository, the core would be adding a
+     check whose whole behaviour is defined elsewhere. It is the best
+     available answer and still not the property the field appears to
+     promise.
 
    The common cause is that **a graph id naming a federation peer and a graph
    id naming a store are two namespaces behind one field**, and the core has
    no value of the second kind at all: what distinguishes two shared-backend
    stores is `GRAPH_POSTGRES_SCHEMA`, which is not a graph name and is not
-   what a request declares. Any check worth having needs a store-identity
-   notion that does not exist yet — the second identifier Option B's Against
-   list counts as one of its costs.
+   what a request declares. The first three predicates refuse legitimate
+   traffic; the fourth refuses nothing the core can reason about on its own.
+   A check that confirms store identity needs a store identity, which does
+   not exist yet — the second identifier Option B's Against list counts as
+   one of its costs.
 
    So the proposal is: **record the gap here, and do not narrow the field
    until there is something to narrow it against.** Concretely, until then
@@ -460,29 +489,39 @@ If this proposal is accepted:
 
 - **No change to any on-disk or in-database format.** `graph.json`, the
   journal, the embedding and history sidecars, and the PostgreSQL entity
-  tables are all untouched by this proposal. Item 4 adds a refusal on a
-  request path, not a field.
+  tables are all untouched by this proposal. Item 4 proposes no code, so
+  nothing changes on the request path either.
 - **No migration.** Nothing needs rewriting in either direction, and a graph
   moved between backends with `scripts/graph_file_to_postgres.py` is
   unaffected.
 - **No behaviour change, which is now part of the point.** An earlier draft
   of this ADR proposed refusing a contradicting graph scope; item 4 explains
-  why every available predicate refuses legitimate traffic instead, so
+  why no available predicate confirms what the field appears to say, so
   nothing here changes what a request is allowed to declare. The current
   permissiveness is total: the core does not narrow on the value at all
   (narrowing is inert without an injected hook), so the value itself reaches
   only the authorization context and the audit record. Its *presence* is read
-  in two further places, neither of which routes or filters on it: the
-  `has_graph` and `selection_mode` fields of the request-selection summary
-  that REST and MCP expose, and `build_export_boundary_summary`, which turns
-  presence into `scope_kind` and `has_graph_selection` inside the
-  `export_boundary` block of `GET /export` and of the export archive — a
-  block carrying its own `contract_version`. The second is the one a
-  deployment is most likely to depend on, because it is embedded in an
-  exported artifact. The value itself does not escape there: only the public
-  summary, which omits the identifier. Both presence-readers are worth
-  knowing about before anyone proposes narrowing this field later, which is
-  why they are enumerated here rather than left to be rediscovered.
+  in three further places, none of which routes or filters on it:
+
+  - the `has_graph` and `selection_mode` fields of the request-selection
+    summary that REST and MCP expose, per request and from headers;
+  - `build_export_boundary_summary`, which turns presence into `scope_kind`
+    and `has_graph_selection` inside the `export_boundary` block of
+    `GET /export` and of the export archive — a block carrying its own
+    `contract_version`, so this is the reader most likely to be depended on,
+    being embedded in an exported artifact;
+  - `build_startup_diagnostics`, which puts both scope summaries into
+    `request_context_defaults`. That one is sourced from the *environment*
+    rather than from headers and is computed at boot, then logged at startup
+    and served on the startup-diagnostics endpoint, partly on `/info`, and
+    recomputed per request by the deep health probe. It is therefore exactly
+    the reader a boot-time check would collide with.
+
+  The value itself escapes to none of them: each takes the public summary,
+  which omits the identifier. The list is spelled out because each round of
+  review of this ADR found one more of them, and anyone proposing to narrow
+  this field later needs the whole set rather than the two that are easy to
+  find.
 
 ### `config/default/schema_config.json`
 
@@ -521,8 +560,11 @@ Deliberately left open, because each is the owner's:
    refuses legitimate traffic. Three answers are open to the owner: accept
    the field as caller-declared and document it that way (what item 4
    proposes); introduce a store-identity identifier so a real check becomes
-   possible, which is work this ADR does not scope; or drop `graph_id` from
-   attribution rather than carry a value nothing can confirm. The third is
+   possible, which is work this ADR does not scope; adopt the fourth
+   predicate above — validate the declared value against the request's own
+   authorization decision — accepting that it confirms permission rather than
+   store identity and is a no-op until a hook is injected; or drop `graph_id`
+   from attribution rather than carry a value nothing can confirm. The third is
    worth naming because an unconfirmable field in an audit record has a cost
    even when nothing refuses on it, and a consumer has already shipped
    against the field's current shape.
