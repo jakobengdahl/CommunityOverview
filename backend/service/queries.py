@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from backend.core import NodeType, RelationshipType
 from backend.core.storage_search import MATCH_MODE_SUBSTRING, validate_match_mode
+from backend.federation import teleport
 from backend.runtime.authorization import GRAPH_ACTION_READ
 
 from . import access
@@ -296,6 +297,84 @@ def search_graph(
     if action:
         result["action"] = action
     return result
+
+
+def resolve_teleport(
+    storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
+    federation_manager: Optional["FederationManager"],
+    node_id: str,
+    *,
+    session_id: str = "",
+    search_query: str = "",
+    local_gui_url: str = "",
+) -> Dict[str, Any]:
+    """Resolve the canonical route from ``node_id`` to its source graph.
+
+    Looks the node up locally first and then in the federation cache, so the
+    same id resolves whether or not it has been adopted. Authorization is the
+    request's existing graph-access narrowing — this function hands that
+    narrowing to ``teleport.resolve_teleport_target`` and does not decide
+    visibility itself.
+    """
+    decision = access.evaluate_graph_access(
+        hook, action=GRAPH_ACTION_READ, target="resolve_teleport"
+    )
+    if not decision.allowed:
+        return access.build_access_denied_result(
+            action=GRAPH_ACTION_READ, target="resolve_teleport", decision=decision
+        )
+
+    node = storage.get_node(node_id)
+    if node is None and federation_manager is not None:
+        node = federation_manager.get_cached_node(node_id)
+
+    graph_config = None
+    cache_status = ""
+    # Only a found node's own provenance; a missing node skips the lookup block
+    # below regardless, and the resolver reads the graph out of node_id itself.
+    origin_graph_id = access.node_graph_id(node) if node is not None else ""
+    if (
+        origin_graph_id
+        and federation_manager is not None
+        # Every other federation path gates on the global flag — search_graph,
+        # get_graph_stats via access.get_visible_federation_graph_display_names,
+        # and adopt_federated_node, which refuses outright. A cache can be left
+        # healthy from before the flag was turned off, so without this the one
+        # path that ignored it would still route.
+        and federation_manager.enabled
+        # Read nothing about the graph for a caller the narrowing excludes, so
+        # G1's ordering holds at this layer too and not only inside the pure
+        # resolver, which would discard these values anyway.
+        and decision.graph_access.matches(graph_id=origin_graph_id)
+    ):
+        # Both keyed on origin_graph_id, the provenance field the local path
+        # narrows on. Resolving the config from the node's cache entry instead
+        # would report a configured, healthy graph as unavailable for any node
+        # that carries provenance without being cached — an adopted node's
+        # local reference stub (mutations.adopt_federated_node) above all.
+        graph_config = federation_manager.get_graph_config(origin_graph_id)
+        cache_status = federation_manager.get_cache_status(origin_graph_id)
+
+    target = teleport.resolve_teleport_target(
+        node_metadata=(node.metadata if node is not None else None),
+        node_exists=node is not None,
+        graph_access_matches=decision.graph_access.matches,
+        # Passed so the graph id can be read back out of the id itself when the
+        # node is not found and has no metadata to classify it by.
+        node_id=node_id,
+        graph_config=graph_config,
+        cache_status=cache_status,
+        session_id=session_id,
+        search_query=search_query,
+        # This deployment's configured public URL is the only origin compared
+        # against. The request's own base_url is derived from the Host header,
+        # so trusting it would let a caller claim the target's origin and
+        # suppress the UI's cross-deployment confirmation.
+        local_gui_url=local_gui_url,
+        local_graph_name=storage.get_graph_name(),
+    )
+    return target.to_dict()
 
 
 def get_node_details(

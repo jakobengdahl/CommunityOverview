@@ -228,6 +228,137 @@ Even though federation is transparent, users must see provenance:
 - Filter toggles: local only / include external.
 - Search results grouped by source graph.
 - Detail panel shows sync freshness and source links (GUI/MCP/file).
+- An explicit way to open a remote node in its own graph (see "Teleport navigation
+  contract"); implemented in the result list and the node context menu.
+
+## Teleport navigation contract
+
+Federated search puts remote nodes next to local ones; teleport is the
+navigation step back to the graph that owns a node. The contract below is open
+core. Hosted routing and authorization — resolving a tenant-visible route and
+deciding whether a caller may reach a deployment — live in the SaaS layer and
+consume this contract.
+
+### Resolution
+
+`POST /api/federation/teleport` takes a `node_id` (local or federated), plus an
+optional `session_id` and `search_query` to carry along. Resolution lives in
+`backend/federation/teleport.py` and is pure: it reads the provenance the
+federation cache already stamps on a node, the graph's configuration and cache
+health, and the caller's already-evaluated graph-access narrowing. It makes no
+authorization decision of its own.
+
+A node's owning graph is decided by one field, `metadata.origin_graph_id` — the
+same field `access.node_graph_id` narrows graph visibility on. A local node
+carries none, so the local and federated paths classify a node off one piece of
+provenance rather than each keeping its own notion.
+
+The response's `status` is one of:
+
+| `status` | Meaning | `route` |
+|---|---|---|
+| `ok` | Remote, visible, and a route was built | yes |
+| `local` | This graph owns the node; there is nowhere to go | no |
+| `permission_denied` | The caller's narrowing does not admit the source graph | no |
+| `graph_unavailable` | Cannot be opened; `reason` says why (see below) | no |
+| `unknown_node` | No local or cached node by that id | no |
+
+### The four defined behaviours
+
+- **Permission denial.** Visibility is checked before any endpoint or graph field
+  is read, so a denied response carries no route, no endpoint, no graph id, no
+  graph name and no node id, and a single `reason` (`not_visible`) that does not
+  say whether the node was local or remote — a reason that distinguished the two
+  would tell a caller probing ids that a graph they cannot see exists. It is a
+  status the UI renders, not a `403`: the request itself was allowed, only this
+  one graph is not visible. Visibility is decided **before the node is known to
+  exist**, so every id naming a graph the narrowing excludes gets the identical
+  answer — answering "no such node" for an invisible graph while answering
+  "denied" for a visible one would confirm which graphs are configured and
+  synced to anyone able to probe ids.
+
+  That requires a graph id for a node that was not found, which has no metadata
+  to read. A cached federated node's id *is*
+  `federated::<graph_id>::<origin_node_id>`, so the id itself supplies it:
+  `teleport.parse_federated_node_id` reads the graph back out, and
+  `FederationManager._build_cache` composes ids with the matching builder so the
+  format has one owner. A node's own `origin_graph_id` still wins where it has
+  one, which is what makes an adoption reference stub resolve to its source
+  graph. A caller who *may* see the graph can still be told `unknown_node`,
+  which tells them nothing they could not already learn.
+- **Unavailable graph.** A `reason` distinguishes `graph_disabled`,
+  `graph_unreachable`, `no_gui_url_configured`, `gui_url_not_absolute`,
+  `graph_not_configured` and `no_origin_node_id`. The graph *is* named here,
+  because a caller who reaches this state is already entitled to see it.
+  `gui_url_not_absolute` covers a `gui_url` that is not an absolute `http(s)`
+  URL. Without a scheme and host a browser resolves it against the *caller's*
+  own origin, so the user would confirm leaving for another deployment and land
+  back on their own at a bogus path. A scheme such as `javascript:`, `file:` or
+  `data:` is refused for a sharper reason: carrying a host makes it parse as
+  absolute, and the resolved route is handed to `window.open`, so it would run
+  in the caller's origin. `teleport.ROUTE_SCHEMES` is the allowed set, and the
+  browser re-checks the scheme before opening rather than trusting one layer.
+  Refusing all of these also means `cross_deployment` is a real comparison
+  whenever the status is `ok`, rather than an unknown defaulting to `true`.
+  Federation being disabled globally lands here too, as `graph_not_configured`.
+- **Cross-deployment.** `cross_deployment` compares the scheme, host and port of
+  the target `gui_url` against this deployment's own origin, so two graphs served
+  as different paths of one deployment are not reported as a hop. That origin is
+  `COMMUNITYOVERVIEW_PUBLIC_BASE_URL` and nothing else. Nothing derived from the
+  request is used: a request's own host comes from the `Host` header, so a caller
+  could otherwise claim the target's origin and suppress the confirmation. A
+  deployment that has not configured its public URL therefore has no origin to
+  compare and reports **every** hop, which is the safe default — the alternative
+  is trusting the caller. Credentials in a configured URL are not part of an
+  origin, so two URLs differing only in userinfo are the same deployment.
+- **Backlink.** When `COMMUNITYOVERVIEW_PUBLIC_BASE_URL` is set, the response
+  carries a `backlink` to this deployment and the outbound route carries
+  `from_session`. Standalone deployments do not know their own public URL, so no
+  backlink is invented rather than a guessed or `localhost` one being emitted.
+
+### Route parameters
+
+The canonical route is built onto the source graph's configured `gui_url`, and
+its fragment is dropped:
+
+The route **owns** the four parameters below. A parameter already on `gui_url`
+is kept unless it is one of those four: an owned key is **replaced** when the
+route carries a value for it and **removed** when it does not. Replacing rather
+than appending matters because the receiving end reads the first value of a
+repeated parameter, so appending would let a `gui_url` configured with its own
+`node=` shadow the node the route exists to focus. Removing matters because a
+configured `q=` or `node=` must not survive into a route that carries none of
+its own — above all into a backlink, which addresses no node at all. So do not
+configure a default search term on `gui_url` and expect it to survive; it will
+not.
+
+| Parameter | Carries | Consumed by this app on arrival |
+|---|---|---|
+| `node` | The origin node id to focus | Yes — the node is fetched and focused |
+| `from_graph` | The name of the graph the visitor came from | Yes — shown as "Opened from &lt;graph&gt;" |
+| `q` | The search context to preserve | Yes — prefills the search box |
+| `from_session` | The sender's session, to offer a way back | No — carried for the receiving deployment to build a return link; open core does not render a back control |
+
+`from_graph` carries the local graph's *name*, not an id: open core has no graph
+id for itself (local is the empty id), and the name is what the receiving end
+displays.
+
+So the receiving end is the same contract read in reverse for the three
+parameters it acts on, and a route this app hands out is one it can consume.
+
+### UI surfaces
+
+An explicit action, never a change to ordinary navigation:
+
+- The search result list shows a teleport button on a result another graph owns.
+  Selecting the result itself still brings it onto the current canvas.
+- The node context menu shows **Open in source graph** for a node another graph
+  owns. Double-click still opens the node detail dialog.
+
+Both surfaces read provenance through `isFederatedNode` (exported from
+`@community-graph/ui-graph-canvas`) and map a resolved status to its outcome
+through `frontend/web/src/utils/teleport.js`, so one node cannot offer different
+actions in the two places.
 
 ## Security and governance
 
@@ -257,12 +388,20 @@ Even though federation is transparent, users must see provenance:
 - `GET /federation/status` diagnostics endpoint
 - `POST /federation/sync` on-demand sync endpoint
 - Node adoption: `POST /api/federation/adopt` clones a federated node into the local graph
+- Teleport navigation: `POST /api/federation/teleport` resolves the canonical route from a
+  node to the graph that owns it, with permission-denial, unavailable-graph,
+  cross-deployment and backlink behaviour defined (see "Teleport navigation contract")
+- Teleport UI: an explicit action in the search result list and the node context menu,
+  with ordinary selection and double-click behaviour unchanged
+- Inbound `?node=` deep link focuses a node a teleport arrived at
 - Federated event subscriptions (`scope: local_and_federated`)
 
 ### Remaining / future work
 
 - **Phase 4 (MCP federation):** controlled cross-graph writes via MCP connector with scoped credentials
 - **Phase 5 (advanced subscriptions):** live-remote event sources beyond sync-engine events
+- **Hosted teleport routing (SaaS):** tenant-visible route resolution and the authorization
+  decision behind a cross-deployment hop; consumes the open-core contract above
 
 ## Critical acceptance criteria
 
@@ -283,6 +422,7 @@ Even though federation is transparent, users must see provenance:
 - [x] UI labels/filters for provenance and hop count.
 - [x] Sync scheduler with resilience primitives.
 - [x] Federated subscription schema + compatibility migration.
+- [x] Teleport route contract + provenance-driven UI action (open core).
 - [ ] MCP connector with scoped credentials (Phase 4).
 - [ ] Load/failure testing with multiple simulated remote graphs.
 

@@ -102,6 +102,8 @@ function MobileShell({
   onEnterFullscreen,
   suspendEscape,
   onCreateNodeForType,
+  // Teleport a federated search result to the graph that owns it.
+  onTeleportToSourceGraph,
   onCreateAgent,
   onCreateSubscription,
   onSaveView,
@@ -285,7 +287,9 @@ function MobileShell({
                 : t('mobile_nav.annotate_panel_title')
         }
       >
-        {surface.isOpen('search') && <FloatingSearch variant="sheet" />}
+        {surface.isOpen('search') && (
+          <FloatingSearch variant="sheet" onTeleport={onTeleportToSourceGraph} />
+        )}
         {surface.isOpen('create') && (
           <FloatingToolbar
             variant="sheet"

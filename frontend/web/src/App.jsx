@@ -13,6 +13,7 @@ import AppDialogs from './components/AppDialogs';
 import ConfirmDialog from './components/ConfirmDialog';
 import AppInstallPrompt from './components/AppInstallPrompt';
 import * as api from './services/api';
+import { teleportToSourceGraph } from './utils/teleport';
 import * as sessionStore from './services/sessionStore';
 import {
   annotationsToGroups,
@@ -126,6 +127,7 @@ function App() {
     focusNodeId,
     clearFocusNode,
     setFocusNodeId,
+    setGuideSearchInput,
     pendingGroups,
     setPendingGroups,
     pendingAnnotations,
@@ -157,6 +159,14 @@ function App() {
 
   const urlGuideStartedRef = useRef(false);
   const urlViewLoadedRef = useRef(false);
+  const urlFocusNodeLoadedRef = useRef(false);
+  // The saved-view load clears the canvas after its own await, so focusing a
+  // ?node= before it settles can have the node wiped out from under the focus.
+  // Starts settled when there is no ?view= to wait for, which is also why this
+  // is derived at mount rather than set from inside the view effect.
+  const [urlViewSettled, setUrlViewSettled] = useState(
+    () => !new URLSearchParams(window.location.search).get('view')
+  );
   const latestViewport = useRef(null);
   const dialogOpenRef = useRef(false);
   const appRef = useRef(null);
@@ -1060,6 +1070,8 @@ function App() {
         if (result.annotations?.length) setPendingAnnotations(result.annotations);
       } catch (err) {
         console.error('[App] Failed to load view from URL:', err);
+      } finally {
+        setUrlViewSettled(true);
       }
     })();
   }, [
@@ -1075,6 +1087,53 @@ function App() {
     setNotification({ type, message });
     setTimeout(() => setNotification(null), 3000);
   }, []);
+
+  // Arrive from a teleport: ?node=<id> focuses that node, and ?from_graph
+  // names where the visitor came from. This is the receiving half of the
+  // navigation contract whose outbound half handleTeleportToSourceGraph
+  // builds — the parameter names live in backend/federation/teleport.py, so a
+  // route this app hands out is one it can also consume.
+  useEffect(() => {
+    // Waits for ?view= to settle: a saved-view load clears the canvas after its
+    // own await, and a gui_url may legitimately carry both parameters.
+    if (!stats || !urlViewSettled || urlFocusNodeLoadedRef.current) return;
+    const params = new URLSearchParams(window.location.search);
+    const focusId = params.get('node');
+    if (!focusId) return;
+    urlFocusNodeLoadedRef.current = true;
+    const searchContext = params.get('q');
+    const fromGraph = params.get('from_graph');
+    (async () => {
+      try {
+        const result = await api.getNodeDetails(focusId);
+        if (!result?.success || !result.node) {
+          showNotification('info', t('federation.teleport_focus_not_found'));
+          return;
+        }
+        addNodesToVisualization([result.node], result.edges || []);
+        setFocusNodeId(result.node.id);
+        // Carry the sender's search text into the search box so the visitor
+        // lands on the node without losing what they were looking for.
+        if (searchContext) {
+          setGuideSearchInput({ text: searchContext, animated: false });
+        }
+        if (fromGraph) {
+          showNotification('info', t('federation.teleport_returned_from', { graph: fromGraph }));
+        }
+      } catch (err) {
+        console.error('[App] Failed to focus node from URL:', err);
+        showNotification('info', t('federation.teleport_focus_not_found'));
+      }
+    })();
+  }, [
+    stats,
+    urlViewSettled,
+    addNodesToVisualization,
+    setFocusNodeId,
+    setGuideSearchInput,
+    showNotification,
+    t,
+  ]);
 
   useEffect(() => {
     const syncOfflineState = () => setIsOffline(window.navigator?.onLine === false);
@@ -1158,6 +1217,21 @@ function App() {
       setDetailNode,
       showNotification,
     ]
+  );
+
+  // Callback: leave for the graph that owns this node. The status-to-outcome
+  // mapping lives in utils/teleport.js so the canvas context menu and the
+  // search result list answer the four defined behaviours identically.
+  const handleTeleportToSourceGraph = useCallback(
+    (nodeId, _nodeData, { searchQuery = '' } = {}) =>
+      teleportToSourceGraph({
+        nodeId,
+        sessionId,
+        searchQuery,
+        t,
+        showNotification,
+      }),
+    [sessionId, showNotification, t]
   );
 
   // Callback: open the node detail dialog directly on its change-history tab
@@ -2429,6 +2503,7 @@ function App() {
 
   const shellProps = {
     sessionId,
+    onTeleportToSourceGraph: handleTeleportToSourceGraph,
     sessions,
     currentSessionId: sessionId,
     onNewSession: handleNewSession,
@@ -2672,7 +2747,10 @@ function App() {
             annotationAttachToCancel: t('context_menu.annotation_attach_to_cancel'),
             annotationMultiSelectMode: t('context_menu.annotation_multi_select_mode'),
             annotationOverlapPickerTitle: t('context_menu.annotation_overlap_picker_title'),
+            openInSourceGraph: t('context_menu.open_in_source_graph'),
+            openInSourceGraphTooltip: t('federation.teleport_action_tooltip'),
           }}
+          onTeleportToSourceGraph={handleTeleportToSourceGraph}
           annotationToolboxLabels={{
             toggleExpand: t('annotation_toolbox.toggle_expand'),
             toggleCollapse: t('annotation_toolbox.toggle_collapse'),

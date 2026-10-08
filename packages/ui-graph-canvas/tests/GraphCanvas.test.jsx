@@ -84,6 +84,67 @@ describe('GraphCanvas', () => {
     vi.clearAllMocks();
   });
 
+  describe('teleport gate (task-federated-graph-teleport)', () => {
+    // The provenance gate is GraphCanvas's decision to hand the handler down;
+    // ContextMenus only sees whether it got one. A regression that passes
+    // onTeleportToSourceGraph unconditionally would offer "Open in source
+    // graph" on every local node, so the gate needs a test at this level.
+    const localNode = { id: 'local-1', name: 'Local', type: 'Actor', metadata: {} };
+    const federatedNode = {
+      id: 'federated::esam-main::remote-1',
+      name: 'Remote',
+      type: 'Actor',
+      metadata: { origin_graph_id: 'esam-main', origin_graph_name: 'eSam' },
+    };
+
+    function openMenuOn(nodeId, nodes, props = {}) {
+      render(<GraphCanvas nodes={nodes} edges={[]} {...props} />);
+      fireEvent.contextMenu(screen.getByTestId(`node-${nodeId}`));
+    }
+
+    it('offers the action on a node another graph owns', () => {
+      openMenuOn('federated::esam-main::remote-1', [federatedNode], {
+        onTeleportToSourceGraph: vi.fn(),
+      });
+
+      expect(screen.getByRole('button', { name: /open in source graph/i })).toBeTruthy();
+    });
+
+    it('withholds the action on a node this graph owns', () => {
+      openMenuOn('local-1', [localNode], { onTeleportToSourceGraph: vi.fn() });
+
+      expect(screen.queryByRole('button', { name: /open in source graph/i })).toBeNull();
+    });
+
+    it('withholds the action when the host supplies no handler', () => {
+      openMenuOn('federated::esam-main::remote-1', [federatedNode]);
+
+      expect(screen.queryByRole('button', { name: /open in source graph/i })).toBeNull();
+    });
+
+    it('calls the host handler with the node id and its data', () => {
+      const onTeleportToSourceGraph = vi.fn();
+      openMenuOn('federated::esam-main::remote-1', [federatedNode], {
+        onTeleportToSourceGraph,
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: /open in source graph/i }));
+
+      expect(onTeleportToSourceGraph).toHaveBeenCalledTimes(1);
+      expect(onTeleportToSourceGraph.mock.calls[0][0]).toBe('federated::esam-main::remote-1');
+      expect(onTeleportToSourceGraph.mock.calls[0][1].metadata.origin_graph_id).toBe('esam-main');
+    });
+
+    it('uses the host label when one is supplied', () => {
+      openMenuOn('federated::esam-main::remote-1', [federatedNode], {
+        onTeleportToSourceGraph: vi.fn(),
+        contextMenuLabels: { openInSourceGraph: 'Oppna i kallgrafen' },
+      });
+
+      expect(screen.getByRole('button', { name: /oppna i kallgrafen/i })).toBeTruthy();
+    });
+  });
+
   it('renders graph container and react-flow', () => {
     render(<GraphCanvas nodes={sampleNodes} edges={sampleEdges} />);
     expect(screen.getByTestId('react-flow')).toBeInTheDocument();

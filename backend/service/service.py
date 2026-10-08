@@ -210,6 +210,23 @@ class GraphService:
             event_correlation_id=event_correlation_id,
         )
 
+    def resolve_teleport(
+        self,
+        node_id: str,
+        session_id: str = "",
+        search_query: str = "",
+        local_gui_url: str = "",
+    ) -> Dict[str, Any]:
+        return queries.resolve_teleport(
+            self._storage,
+            self._authorization_hook,
+            self._federation_manager,
+            node_id,
+            session_id=session_id,
+            search_query=search_query,
+            local_gui_url=local_gui_url,
+        )
+
     def adopt_federated_node(
         self,
         federated_node_id: str,

@@ -131,6 +131,9 @@ Right-clicking a node opens the context menu:
   node (only offered when it has any), to de-emphasise its relationships without hiding
   the node or the edges' other endpoints.
 - **Expand** — load all nodes directly connected to this node into the canvas
+- **Open in source graph** — only on a node that belongs to a remote graph: open that
+  node in the graph that owns it, in a new tab, so the session you are in stays as it is.
+  See section 6 for what happens when the graph is unavailable or you lack access.
 - **Select all nodes of the same type** — select every node of this node's type across the
   whole visualization, including ones scrolled outside the current viewport
 - **Select related nodes** — select this node together with every node it is directly
@@ -913,6 +916,30 @@ appears next to the minimap in the lower-right corner of the canvas.
 
 Changing the depth only affects your current search and view — it does not change
 what is permanently stored in the local graph.
+
+**Opening a result in the graph that owns it:** a search result from a remote graph
+carries a small "open in source graph" button at the right-hand end of its row, and the
+same action appears as **Open in source graph** when you right-click such a node on the
+canvas. Both open the node in its own graph in a new tab, so the session you were in
+stays open behind it. Going from a search result also carries your current search text
+across; going from the canvas does not, because there is no search in progress there.
+
+Clicking the result itself is unchanged — it still brings the node onto your current
+canvas. Double-clicking a node still opens its detail dialog. Teleport is always an
+explicit, separate action.
+
+Four cases are handled explicitly:
+
+| What you see | What it means |
+|---|---|
+| A confirmation before the tab opens | The source graph runs on a separate installation, so you are leaving this one |
+| "You do not have access to this node's source graph" | Your access does not include that graph. Nothing about it is revealed |
+| "&lt;Graph&gt; cannot be reached right now" | The graph is unknown, offline, disabled, or has no usable address for its interface |
+| "This node is already in the current graph" | The node is local, so there is nowhere to travel to |
+
+Arriving from a teleport, the app focuses the node named in the link, tells you which
+graph you came from, and — when the link carries search text — puts it back in the search
+box.
 
 **Node adoption:** If you want to permanently link a local node to an entity
 from a remote graph, right-click the federated node and choose **Adopt** (if available).
