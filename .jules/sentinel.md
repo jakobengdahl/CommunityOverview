@@ -1,0 +1,4 @@
+## 2026-10-05 - Prevent information disclosure (CWE-209) in Chat Processor
+**Vulnerability:** Raw exception strings (e.g. `str(e)`) were being passed directly to the client when LLM initialization failed or when generic errors occurred during message processing and tool execution in `backend/ui/chat_logic.py`.
+**Learning:** This could expose internal application logic, stack traces, or configuration details to a potentially malicious user. The implementation swallowed most exceptions under a blanket `except Exception as e` and immediately stringified `e` for the user message.
+**Prevention:** Catch generic exceptions and mask them with generic error messages (e.g., 'An internal error occurred'), but preserve the ability to pass expected validation errors (like `ValueError`) for LLM tool self-correction. Always use `logger.error` to record the actual exception string for server-side debugging rather than sending it to the client.
