@@ -76,9 +76,11 @@ different ways.
   process floor of ~50 MB (~61 MB with psycopg imported). A second graph in
   the same process costs a second graph's resident memory **and a second set
   of connections**: `PostgresGraphPersistenceBackend.__init__` builds its own
-  pool and opens its own listening connection on every construction, and
-  nothing shares either across two of them, so a process holding N graphs
-  holds N of both. [`PERSISTENCE_BACKENDS.md`](../PERSISTENCE_BACKENDS.md)
+  pool on every construction, and once change notification is running — which
+  this backend declares, so a server process always starts it — it also holds
+  its own listening connection, opened by `start_change_notification` rather
+  than by the constructor. Nothing shares either across two of them, so a
+  process holding N graphs holds N of both. [`PERSISTENCE_BACKENDS.md`](../PERSISTENCE_BACKENDS.md)
   ("Sizing it: what an instance costs") gives the multiplier as
   `instance_count × (pool_size + 1) × graph_count`, which at the default
   `pool_size` of 4 is 5 server connections per graph held.
@@ -94,11 +96,19 @@ different ways.
   `SESSIONS_DIR`, or a directory derived from the graph path when it is unset
   (`AppConfig.resolve_sessions_dir`), so two instances can share a graph
   without sharing sessions.
-- **A PostgreSQL schema is already claimed by one graph.**
-  `_claim_or_check_graph_identity` writes the graph name into the
-  `graph_metadata` row on first use and raises `GraphIdentityCollision` if a
-  second graph name meets it. The schema is treated as one graph's home, in
-  code, today.
+- **A PostgreSQL schema is treated as one graph's home — but by the schema,
+  not by a graph name.** `_claim_or_check_graph_identity` writes the graph
+  name into the `graph_metadata` row on first use and raises
+  `GraphIdentityCollision` if a second name meets it. The guard is real but
+  cannot fire in a shipped deployment: `graph_name` is a constructor default
+  of `"graph"` and `build_persistence_backend` never passes it, so every
+  server boot claims and compares the same literal. What actually tells two
+  PostgreSQL graphs apart is `GRAPH_POSTGRES_SCHEMA`, which is why
+  [ADR 0008](0008-node-attachment-storage.md) derives its namespace from the
+  schema and says so in as many words: the schema, "not the graph name
+  (always `"graph"` today), is what tells PostgreSQL graphs apart". **There
+  is therefore no store-distinguishing graph identity in the core today**, and
+  item 4 of the proposal below turns on that fact.
 - **Several scopes behind one set of tables is ruled out on the record.**
   [`PERSISTENCE_BACKENDS.md`](../PERSISTENCE_BACKENDS.md) ("Keeping scopes
   apart") measures why: `graph_metadata` holds exactly one row for the whole
@@ -238,8 +248,10 @@ unchanged.
   - No new seam, no new code on the request path, nothing for the standalone
     mode to lose.
   - Matches what both storage seams already do: the graph is fixed at boot
-    (`ATTACHMENT_NAMESPACE` per graph, a PostgreSQL schema claimed by one
-    graph name, `GraphStorage` constructed once in `create_app`).
+    (`ATTACHMENT_NAMESPACE` per graph, one schema per PostgreSQL graph,
+    `GraphStorage` constructed once in `create_app`). What is fixed is the
+    schema and the file path, not a graph *name* — see the Context bullet on
+    the identity guard.
   - Matches the owner's standing direction, and keeps the shared-store work
     that already landed as the answer to the problem it was built for — many
     instances, one graph.
@@ -362,27 +374,38 @@ owner.
    today), that is the shared mode's gap to close, never the file mode's
    feature to drop.
 
-4. **Close the one real gap: bind the runtime's graph identity at boot and
-   refuse a request that contradicts it.** The runtime knows which graph it
-   serves; a request may declare a `graph_id`; nothing compares them, so an
-   unverified identifier reaches the audit record as if the store had supplied
-   it. The proposal is that a declared graph scope be checked against what
-   this runtime can legitimately be asked about, and refused through the
-   existing authorization seam otherwise.
+4. **Close the one real gap: validate a declared graph scope instead of
+   recording it unchecked.** A request may declare a `graph_id`; nothing in
+   the core checks it against anything; it then reaches the audit record as if
+   the store had supplied it. The proposal is that a declared graph scope be
+   checked against what this deployment can legitimately be asked about, and
+   refused through the existing authorization seam otherwise.
 
-   **The predicate is the hard part, and it is not "equals this runtime's
-   graph".** As the Context section establishes, this field's values come from
-   the *federation* namespace — `federation_config`'s `graphs[].graph_id` —
-   and a local node carries no graph id at all, which is why
-   `allow_local_graph` exists. A federation peer id therefore never equals
-   this runtime's own graph name by construction, so a rule written that way
-   would refuse the field's entire legitimate use rather than only
-   contradictory values. The check has to be "this runtime's own graph
-   identity, or a graph id this deployment's federation config declares", and
-   refuse anything else. If that pairing is judged too loose to be worth
-   having, the honest conclusion is that closing this gap needs the second,
-   store-identity identifier this ADR argues for above, and that it should
-   wait for one rather than overload the field further.
+   **The predicate is the hard part, and two tempting versions of it are
+   both wrong.** It is not "equals this runtime's graph": as the Context
+   section establishes, this field's values come from the *federation*
+   namespace — `federation_config`'s `graphs[].graph_id` — and a local node
+   carries no graph id at all, which is why `allow_local_graph` exists. A
+   federation peer id therefore never equals a local graph identity by
+   construction, so a rule written that way would refuse the field's entire
+   legitimate use rather than only contradictory values. Nor can it be
+   "this runtime's own graph identity, or a declared federation graph id",
+   because the first half of that has no referent to compare against: under
+   the shared backend `default_graph_name()` is the constant `"graph"` in
+   every deployment this repository ships, so the test would reduce to
+   "the declared value must be the string `graph`" — a different way of
+   refusing legitimate use.
+
+   What is implementable today is the half that has a referent: **refuse a
+   declared graph id that names no graph this deployment's federation config
+   declares, and admit the rest.** That is a real narrowing of what can reach
+   an audit record — it rules out a typo, a stale id and another deployment's
+   id — and it needs nothing that does not exist. It is deliberately not the
+   whole property: it cannot distinguish *this* store from another store of
+   the same deployment, because nothing in the core can. Doing that needs the
+   store-identity identifier Option B's Against list counts as one of its
+   costs, and the recommendation here is to take the implementable half now
+   and not invent that identifier to reach the rest.
 
    This is wanted under either option — it is a correctness property of
    attribution, not a multi-graph feature — and it is the one piece of work
@@ -412,7 +435,10 @@ If this proposal is accepted:
   That edit is deliberately not made here: it is the decision, and the
   decision is the owner's.
 - Audit attribution gains a property it does not have: an event's `graph_id`
-  either names this runtime's graph or the request was refused.
+  either names a graph this deployment declares or the request was refused.
+  That is weaker than "names the store this write landed in", which the core
+  cannot check today — item 4 says so rather than implying the stronger
+  reading.
 - Nothing changes for an existing standalone deployment. No migration, no new
   dependency, no new required configuration.
 
@@ -430,8 +456,11 @@ If this proposal is accepted:
   `x-communityoverview-graph-id`, to a value the predicate does not admit
   would start being refused where it is currently served. The current
   permissiveness is total: the core does not narrow on the value at all
-  (narrowing is inert without an injected hook), so it reaches the
-  authorization context and the audit record and is otherwise ignored. A
+  (narrowing is inert without an injected hook), so the value itself reaches
+  only the authorization context and the audit record. Its *presence* is read
+  in one more place — the `has_graph` and `selection_mode` fields of the
+  request-selection summary, which REST and MCP both expose — but nothing
+  routes or filters on it. A
   deployment relying on that should be identified before any refusal lands —
   which is the main reason item 4 is worth reviewing on its own rather than
   folding into a larger change, and why its predicate is written out above
@@ -466,11 +495,18 @@ Deliberately left open, because each is the owner's:
    and at what cost, is not this ADR's call. It is the one place where the two
    modes are genuinely unequal in capability.
 4. **If item 4 is implemented, is a contradicting graph scope a refusal or a
-   logged warning?** A refusal is proposed because an unverified identifier in
-   an audit record is worse than a failed request, but a deployment already
-   sending such a value would see behaviour change, so the choice is the
-   owner's to take with that in view.
+   logged warning — and is its implementable half worth shipping alone?** A
+   refusal is proposed because an unverified identifier in an audit record is
+   worse than a failed request, but a deployment already sending such a value
+   would see behaviour change, so the choice is the owner's to take with that
+   in view. The second half of the question is the one item 4 surfaces: the
+   check that can be built today validates a declared graph id against the
+   federation config and cannot tell one store from another, so the owner may
+   reasonably judge it not worth the behaviour change until a store identity
+   exists. Shipping nothing here is a defensible answer; shipping it while
+   describing it as full verification is not.
 5. **Where does per-graph *provisioning* live** — creating, suspending and
-   removing a graph and its store? `EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md`
+   removing a graph and its store?
+   [`EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md`](../EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md)
    already places tenant lifecycle management outside the core. Nothing here
    changes that, and nothing here asks the core to grow it.
