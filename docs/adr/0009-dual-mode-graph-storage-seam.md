@@ -166,12 +166,13 @@ Two consequences matter here, and both are easy to misread:
 Separately, `EventScopeAttribution` (`backend/core/events/models.py`) carries
 `workspace_id`, `workspace_kind` and `graph_id` on mutation events, taken from
 the request. **Nothing reconciles that declared `graph_id` against the store
-the write actually landed in.** One resident graph does not make the field
-true — it makes the reconciliation impossible, which is a different thing: the
-value is a caller-supplied string from the federation namespace, so a caller
-can declare anything and it reaches the audit record unexamined. A design that
-makes a process serve several graphs does not create that gap; it removes the
-excuse for it.
+the write actually landed in.** The reason is not how many graphs a process
+holds: it is that no value in the core derives from the store in the same
+namespace the request declares (item 4 of the proposal works this through).
+The declared value is a caller-supplied string from the federation namespace,
+so a caller can declare anything and it reaches the audit record unexamined —
+and that is true whether the process serves one graph or several. What serving
+several would remove is the excuse for leaving it so.
 
 ### What the repository already commits to — and the tension
 
@@ -268,11 +269,12 @@ unchanged.
   - Every boot-bound singleton (federation manager, agent registry, event
     subscriptions, sessions directory, history and vector sidecars) stays
     correct by construction.
-  - It keeps the one case where reconciling the declared `graph_id` against
-    the serving store could ever be cheap: with one graph per process there
-    is a single answer to compare against, if a store identity is ever
-    introduced. (It does not make the field *correct* today — see item 4;
-    that gap is unpaid under either option.)
+  - Nothing about the audit `graph_id` gap counts for this option or against
+    it. One graph per process gives a single answer to compare against if a
+    store identity is ever introduced; a resolver would have resolved the
+    request to one store by the same point. The gap is unpaid under either
+    option — see item 4 — and this bullet is here to say so rather than to
+    claim a benefit.
 - **Against:**
   - It reads against the hosted sentence in
     `CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md`, so that document has to be
@@ -394,9 +396,12 @@ owner.
    declare a `graph_id`; nothing in the core checks it against anything; it
    then reaches the audit record as if the store had supplied it. That is a
    real defect in attribution, and it is worth writing down. What this ADR
-   does *not* do is propose the validation, because **no predicate available
-   today can confirm what the field appears to say** — which store the write
-   landed in. Four candidates, and why each falls short:
+   does *not* do is propose the validation, because **no value the core holds
+   derives from the store**, so no predicate built from one can confirm what
+   the field appears to say — which store the write landed in. The candidates
+   below are the ones worth writing down rather than a closed set; the
+   argument is about the class, and a reader who finds another should test it
+   against the same property rather than against this list being complete.
 
    - *"Equals this runtime's graph."* The field's values come from the
      *federation* namespace — `federation_config`'s `graphs[].graph_id` — and
@@ -431,16 +436,32 @@ owner.
      check whose whole behaviour is defined elsewhere. It is the best
      available answer and still not the property the field appears to
      promise.
+   - *"Equals this deployment's configured graph scope id, when one is
+     set."* `COMMUNITYOVERVIEW_GRAPH_SCOPE_ID` is the last fallback in the
+     resolution chain — explicit override, then the header, then this — so
+     the core does hold an operator-set value *in the same namespace the
+     request declares*, and unlike the previous candidate its admitting set
+     is this repository's own configuration surface rather than an injected
+     hook. It is a no-op when the variable is unset and non-degenerate when
+     it is. Two things sink it anyway: a header silently overrides the
+     configured value, so the check would be comparing a request against a
+     default it has already displaced; and in a deployment that sets the
+     variable to its own id, refusing anything else refuses a legitimate
+     federation-peer narrowing request — candidate 1's failure mode, now
+     with a referent in the right namespace. It is operator-declared, not
+     store-derived, so it still cannot say which store served the write.
 
    The common cause is that **a graph id naming a federation peer and a graph
    id naming a store are two namespaces behind one field**, and the core has
    no value of the second kind at all: what distinguishes two shared-backend
    stores is `GRAPH_POSTGRES_SCHEMA`, which is not a graph name and is not
-   what a request declares. The first three predicates refuse legitimate
-   traffic; the fourth refuses nothing the core can reason about on its own.
-   A check that confirms store identity needs a store identity, which does
-   not exist yet — the second identifier Option B's Against list counts as
-   one of its costs.
+   what a request declares. That is the property to test any further
+   candidate against: the first three predicates refuse legitimate traffic,
+   and the last two refuse only what something outside the store already
+   said — a hook's allow-list, or an operator's default. None of them reads
+   the store. A check that confirms store identity needs a store identity,
+   which does not exist yet — the second identifier Option B's Against list
+   counts as one of its costs.
 
    So the proposal is: **record the gap here, and do not narrow the field
    until there is something to narrow it against.** Concretely, until then
@@ -513,9 +534,12 @@ If this proposal is accepted:
   - `build_startup_diagnostics`, which puts both scope summaries into
     `request_context_defaults`. That one is sourced from the *environment*
     rather than from headers and is computed at boot, then logged at startup
-    and served on the startup-diagnostics endpoint, partly on `/info`, and
-    recomputed per request by the deep health probe. It is therefore exactly
-    the reader a boot-time check would collide with.
+    and served whole on the startup-diagnostics endpoint. (`/info` serves
+    other parts of the same diagnostics dict and omits
+    `request_context_defaults`.) The deep health probe recomputes it after
+    boot, though not per request — that route caches for five seconds, which
+    its own docstring still describes as per-request. It is therefore the
+    reader a boot-time check would collide with.
 
   The value itself escapes to none of them: each takes the public summary,
   which omits the identifier. The list is spelled out because each round of
@@ -556,18 +580,24 @@ Deliberately left open, because each is the owner's:
    modes are genuinely unequal in capability.
 4. **Does the unverified `graph_id` in attribution need fixing before there
    is a store identity to verify it against?** Item 4 records the gap and
-   declines to propose a check, because every predicate available today
-   refuses legitimate traffic. Three answers are open to the owner: accept
-   the field as caller-declared and document it that way (what item 4
-   proposes); introduce a store-identity identifier so a real check becomes
-   possible, which is work this ADR does not scope; adopt the fourth
-   predicate above — validate the declared value against the request's own
-   authorization decision — accepting that it confirms permission rather than
-   store identity and is a no-op until a hook is injected; or drop `graph_id`
-   from attribution rather than carry a value nothing can confirm. The third is
-   worth naming because an unconfirmable field in an audit record has a cost
-   even when nothing refuses on it, and a consumer has already shipped
-   against the field's current shape.
+   declines to propose a check, because no predicate available today confirms
+   which store the write landed in. Four answers are open to the owner:
+
+   1. accept the field as caller-declared and document it that way — what
+      item 4 proposes;
+   2. introduce a store-identity identifier so a real check becomes
+      possible, which is work this ADR does not scope;
+   3. adopt one of the two non-degenerate predicates item 4 names — the
+      request's own authorization decision, or the configured graph scope id
+      — accepting that each confirms permission or configuration rather than
+      store identity;
+   4. drop `graph_id` from attribution rather than carry a value nothing can
+      confirm.
+
+   The fourth is worth naming because an unconfirmable field in an audit
+   record has a cost even when nothing refuses on it. It is also the most
+   disruptive: a consumer has already shipped against the field's current
+   shape, which is an argument for keeping it.
 5. **Where does per-graph *provisioning* live** — creating, suspending and
    removing a graph and its store?
    [`EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md`](../EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md)
