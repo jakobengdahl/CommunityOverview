@@ -79,8 +79,11 @@ different ways.
   pool on every construction, and once change notification is running — which
   this backend declares, so a server process always starts it — it also holds
   its own listening connection, opened by `start_change_notification` rather
-  than by the constructor. Nothing shares either across two of them, so a
-  process holding N graphs holds N of both. [`PERSISTENCE_BACKENDS.md`](../PERSISTENCE_BACKENDS.md)
+  than by the constructor. (That document's own sentence attributes both to
+  `__init__`; the arithmetic it draws from them is unaffected, because a
+  server process always starts notification, but the constructor is not where
+  the second connection opens.) Nothing shares either across two of them, so
+  a process holding N graphs holds N of both. [`PERSISTENCE_BACKENDS.md`](../PERSISTENCE_BACKENDS.md)
   ("Sizing it: what an instance costs") gives the multiplier as
   `instance_count × (pool_size + 1) × graph_count`, which at the default
   `pool_size` of 4 is 5 server connections per graph held.
@@ -344,7 +347,7 @@ writes through it.
 
 ## Proposal
 
-**Option A**, with one gap closed and the boundary question referred to the
+**Option A**, with one gap recorded and the boundary question referred to the
 owner.
 
 1. **Ratify the existing persistence seam as the dual-mode storage
@@ -360,8 +363,8 @@ owner.
    `ATTACHMENT_NAMESPACE`), and it is not unstated —
    [`PERSISTENCE_BACKENDS.md`](../PERSISTENCE_BACKENDS.md) already says every
    deployment this repository ships holds one graph per process, and
-   `CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md` says a deployment normally
-   serves one graph. But it sits there as an aside inside a capacity-sizing
+   [`CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md`](../CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md)
+   says a deployment normally serves one graph. But it sits there as an aside inside a capacity-sizing
    section, next to the arithmetic for a process that holds several. What is
    proposed is elevating it to a stated property of the seam, where a
    third-party backend author reads the contract rather than the sizing notes.
@@ -374,42 +377,53 @@ owner.
    today), that is the shared mode's gap to close, never the file mode's
    feature to drop.
 
-4. **Close the one real gap: validate a declared graph scope instead of
-   recording it unchecked.** A request may declare a `graph_id`; nothing in
-   the core checks it against anything; it then reaches the audit record as if
-   the store had supplied it. The proposal is that a declared graph scope be
-   checked against what this deployment can legitimately be asked about, and
-   refused through the existing authorization seam otherwise.
+4. **Record the one real gap, and propose no check for it yet.** A request may
+   declare a `graph_id`; nothing in the core checks it against anything; it
+   then reaches the audit record as if the store had supplied it. That is a
+   real defect in attribution, and it is worth writing down. What this ADR
+   does *not* do is propose the validation, because **the core has nothing
+   sound to validate against**, and three candidate predicates each fail on
+   the same fact:
 
-   **The predicate is the hard part, and two tempting versions of it are
-   both wrong.** It is not "equals this runtime's graph": as the Context
-   section establishes, this field's values come from the *federation*
-   namespace — `federation_config`'s `graphs[].graph_id` — and a local node
-   carries no graph id at all, which is why `allow_local_graph` exists. A
-   federation peer id therefore never equals a local graph identity by
-   construction, so a rule written that way would refuse the field's entire
-   legitimate use rather than only contradictory values. Nor can it be
-   "this runtime's own graph identity, or a declared federation graph id",
-   because the first half of that has no referent to compare against: under
-   the shared backend `default_graph_name()` is the constant `"graph"` in
-   every deployment this repository ships, so the test would reduce to
-   "the declared value must be the string `graph`" — a different way of
-   refusing legitimate use.
+   - *"Equals this runtime's graph."* The field's values come from the
+     *federation* namespace — `federation_config`'s `graphs[].graph_id` — and
+     a local node carries no graph id at all, which is why
+     `allow_local_graph` exists. A federation peer id never equals a local
+     graph identity by construction, so this refuses the field's entire
+     legitimate use.
+   - *"Equals this runtime's graph identity, or a declared federation graph
+     id."* The first half has no referent: under the shared backend
+     `default_graph_name()` is the constant `"graph"` in every deployment
+     this repository ships, so the test reduces to "the declared value must
+     be the string `graph`".
+   - *"Names a graph this deployment's federation config declares."*
+     `config/default/federation_config.json` is the only federation config
+     in the repository and ships `enabled: false` with an empty `graphs`
+     list, so the admitted set is empty and this refuses *every* declared
+     value — more refusing than the first two, not less. It would also
+     refuse precisely what a hosted layer sends, since that layer's graph
+     ids are declared through an injected authorization hook rather than in
+     a local federation config.
 
-   What is implementable today is the half that has a referent: **refuse a
-   declared graph id that names no graph this deployment's federation config
-   declares, and admit the rest.** That is a real narrowing of what can reach
-   an audit record — it rules out a typo, a stale id and another deployment's
-   id — and it needs nothing that does not exist. It is deliberately not the
-   whole property: it cannot distinguish *this* store from another store of
-   the same deployment, because nothing in the core can. Doing that needs the
-   store-identity identifier Option B's Against list counts as one of its
-   costs, and the recommendation here is to take the implementable half now
-   and not invent that identifier to reach the rest.
+   The common cause is that **a graph id naming a federation peer and a graph
+   id naming a store are two namespaces behind one field**, and the core has
+   no value of the second kind at all: what distinguishes two shared-backend
+   stores is `GRAPH_POSTGRES_SCHEMA`, which is not a graph name and is not
+   what a request declares. Any check worth having needs a store-identity
+   notion that does not exist yet — the second identifier Option B's Against
+   list counts as one of its costs.
 
-   This is wanted under either option — it is a correctness property of
-   attribution, not a multi-graph feature — and it is the one piece of work
-   this ADR would put in this repository.
+   So the proposal is: **record the gap here, and do not narrow the field
+   until there is something to narrow it against.** Concretely, until then
+   the honest reading of an event's `graph_id` is "what the caller declared",
+   not "which graph this write landed in", and a consumer of the audit trail
+   should treat it that way. Making that explicit costs nothing and
+   misleads no one; a check that refuses legitimate traffic to look rigorous
+   costs a deployment and buys nothing.
+
+   This gap exists under either option, and closing it is a correctness
+   property of attribution rather than a multi-graph feature — which is why
+   it is recorded as a gap rather than attached to the boundary decision.
 
 5. **Do not build a graph resolver until the boundary question is answered.**
    If the owner answers it the other way, Option B becomes the decision, this
@@ -434,11 +448,11 @@ If this proposal is accepted:
   process, is what serves several graphs — or this ADR is the wrong answer.
   That edit is deliberately not made here: it is the decision, and the
   decision is the owner's.
-- Audit attribution gains a property it does not have: an event's `graph_id`
-  either names a graph this deployment declares or the request was refused.
-  That is weaker than "names the store this write landed in", which the core
-  cannot check today — item 4 says so rather than implying the stronger
-  reading.
+- Audit attribution gains no new guarantee, and gains an accurate
+  description: an event's `graph_id` is documented as what the caller
+  declared rather than as which graph the write landed in. Item 4 explains
+  why the core cannot currently promise the stronger reading, so a consumer
+  of the audit trail is not left inferring it.
 - Nothing changes for an existing standalone deployment. No migration, no new
   dependency, no new required configuration.
 
@@ -451,28 +465,35 @@ If this proposal is accepted:
 - **No migration.** Nothing needs rewriting in either direction, and a graph
   moved between backends with `scripts/graph_file_to_postgres.py` is
   unaffected.
-- **One behaviour change to be aware of, and only if item 4 is implemented:** a
-  deployment that sets `COMMUNITYOVERVIEW_GRAPH_SCOPE_ID`, or sends
-  `x-communityoverview-graph-id`, to a value the predicate does not admit
-  would start being refused where it is currently served. The current
+- **No behaviour change, which is now part of the point.** An earlier draft
+  of this ADR proposed refusing a contradicting graph scope; item 4 explains
+  why every available predicate refuses legitimate traffic instead, so
+  nothing here changes what a request is allowed to declare. The current
   permissiveness is total: the core does not narrow on the value at all
   (narrowing is inert without an injected hook), so the value itself reaches
   only the authorization context and the audit record. Its *presence* is read
-  in one more place — the `has_graph` and `selection_mode` fields of the
-  request-selection summary, which REST and MCP both expose — but nothing
-  routes or filters on it. A
-  deployment relying on that should be identified before any refusal lands —
-  which is the main reason item 4 is worth reviewing on its own rather than
-  folding into a larger change, and why its predicate is written out above
-  rather than left to the implementation.
+  in two further places, neither of which routes or filters on it: the
+  `has_graph` and `selection_mode` fields of the request-selection summary
+  that REST and MCP expose, and `build_export_boundary_summary`, which turns
+  presence into `scope_kind` and `has_graph_selection` inside the
+  `export_boundary` block of `GET /export` and of the export archive — a
+  block carrying its own `contract_version`. The second is the one a
+  deployment is most likely to depend on, because it is embedded in an
+  exported artifact. The value itself does not escape there: only the public
+  summary, which omits the identifier. Both presence-readers are worth
+  knowing about before anyone proposes narrowing this field later, which is
+  why they are enumerated here rather than left to be rediscovered.
 
 ### `config/default/schema_config.json`
 
 **No change.** Nothing here adds or renames a node type, a relationship type
 or a required field, so the migration surface that document guards is not
 touched. Nor does anything here change a public REST or MCP contract: item 4
-adds a refusal using the existing authorization-denial shape rather than a new
-endpoint, request field or response field. If a later Option B were chosen,
+proposes no code at all, and the rest of the proposal is documentation plus a
+decision. Were the owner later to want the validation item 4 declines to
+specify, that assessment would have to be made for it then — the existing
+authorization-denial shape would be the place to start, but it is not proposed
+here. If a later Option B were chosen,
 that assessment would have to be made again for it.
 
 ## What this ADR does not decide
@@ -494,17 +515,17 @@ Deliberately left open, because each is the owner's:
    rather than being closed by removing the sidecar, but whether to close it,
    and at what cost, is not this ADR's call. It is the one place where the two
    modes are genuinely unequal in capability.
-4. **If item 4 is implemented, is a contradicting graph scope a refusal or a
-   logged warning — and is its implementable half worth shipping alone?** A
-   refusal is proposed because an unverified identifier in an audit record is
-   worse than a failed request, but a deployment already sending such a value
-   would see behaviour change, so the choice is the owner's to take with that
-   in view. The second half of the question is the one item 4 surfaces: the
-   check that can be built today validates a declared graph id against the
-   federation config and cannot tell one store from another, so the owner may
-   reasonably judge it not worth the behaviour change until a store identity
-   exists. Shipping nothing here is a defensible answer; shipping it while
-   describing it as full verification is not.
+4. **Does the unverified `graph_id` in attribution need fixing before there
+   is a store identity to verify it against?** Item 4 records the gap and
+   declines to propose a check, because every predicate available today
+   refuses legitimate traffic. Three answers are open to the owner: accept
+   the field as caller-declared and document it that way (what item 4
+   proposes); introduce a store-identity identifier so a real check becomes
+   possible, which is work this ADR does not scope; or drop `graph_id` from
+   attribution rather than carry a value nothing can confirm. The third is
+   worth naming because an unconfirmable field in an audit record has a cost
+   even when nothing refuses on it, and a consumer has already shipped
+   against the field's current shape.
 5. **Where does per-graph *provisioning* live** — creating, suspending and
    removing a graph and its store?
    [`EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md`](../EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md)
