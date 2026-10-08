@@ -9,9 +9,11 @@ reliability nobody verified.
 
 import pytest
 
+from backend.evaluation.cases import AcceptanceCase, ExpectedBehaviour
 from backend.evaluation.scoring import (
     ID_TOKEN_RE,
     is_id_shaped,
+    score_case,
     _align,
     ConditionResult,
     score_answer_entities_supported,
@@ -777,10 +779,26 @@ class TestIsIdShaped:
             "eval-initiative-metadata-register",
             "task-compare-skills-openai-open-models",
             "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+            # Upper and mixed case: the only UUIDs that need the UUID branch.
+            # A lowercase one also matches the slug alternative, so covering
+            # only that one made the UUID branch removable unnoticed.
+            "3F2504E0-4F89-11D3-9A0C-0305E82C3301",
+            "3f2504E0-4f89-11d3-9A0c-0305e82c3301",
         ],
     )
     def test_accepts_ids_this_system_writes(self, token):
         assert is_id_shaped(token)
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "3F2504E0-4F89-11D3-9A0C-0305E82C3301",
+            "3f2504E0-4f89-11d3-9A0c-0305e82c3301",
+        ],
+    )
+    def test_the_token_pattern_itself_finds_a_non_lowercase_uuid(self, token):
+        """is_id_shaped never sees a token the pattern did not extract."""
+        assert ID_TOKEN_RE.findall(f"the node {token} is here") == [token]
 
     @pytest.mark.parametrize(
         "token",
@@ -824,6 +842,95 @@ class TestDiscriminatingFirstCall:
 
     def test_no_tool_calls_fails(self):
         assert not score_discriminating_first_call(transcript([]), "get_schema").passed
+
+
+class TestNegativeExpectationsAreWired:
+    """
+    _align has unit tests; its WIRING at each dispatch site had none.
+
+    Every shipped case declares its conditions as `true`, so replacing
+    `_align(actual, expected)` with `actual` at any site changed nothing the
+    suite could see — and _align's own docstring says its purpose is that a
+    suite of only positive cases cannot tell a working scorer from one that
+    always returns True. Driving score_case with negative expectations exercises
+    the wiring without putting an artificial case in the shipped set.
+    """
+
+    def _case(self, **expectation):
+        return AcceptanceCase(
+            id="negative-probe",
+            dimension="id_resolution",
+            prompt="p",
+            graph="metadata-pilot-small.json",
+            expect=ExpectedBehaviour(**expectation),
+            notes=(
+                "probe case asserting that a violated condition is detected, which "
+                "is what keeps a scorer that always returned True from passing"
+            ),
+        )
+
+    def test_a_violated_condition_a_case_expected_to_fail_scores_as_a_pass(self):
+        guessed = transcript(
+            [call("update_node", {"node_id": "eval-node-one", "updates": {}})]
+        )
+        score = score_case(
+            self._case(ids_resolved_from_results=False), guessed, TOOL_DEFS, {}
+        )
+        assert score.passed, [(c.name, c.detail) for c in score.conditions]
+        assert score.dimensions["id_resolution"].passed is True
+
+    def test_a_held_condition_a_case_expected_to_fail_scores_as_a_failure(self):
+        """The mirror: bypassing _align would make this pass."""
+        resolved = transcript(
+            [
+                call("search_graph", {"query": "x"}, turn=0, tool_use_id="r0"),
+                call(
+                    "update_node",
+                    {"node_id": "eval-node-one", "updates": {}},
+                    turn=1,
+                    tool_use_id="w1",
+                ),
+            ],
+            results={"r0": {"nodes": [{"id": "eval-node-one"}]}},
+        )
+        score = score_case(
+            self._case(ids_resolved_from_results=False), resolved, TOOL_DEFS, {}
+        )
+        assert not score.passed
+        assert score.dimensions["id_resolution"].passed is False
+
+    @pytest.mark.parametrize(
+        "field,dimension",
+        [
+            ("tool_calls_valid", "tool_call_validity"),
+            ("verify_after_write", "post_write_verification"),
+            ("answer_entities_supported", "unsupported_entity_reference"),
+        ],
+    )
+    def test_every_polarity_bearing_dispatch_site_honours_the_expectation(
+        self, field, dimension
+    ):
+        """Each site that passes through _align, pinned against a violation."""
+        violating = transcript([], final_text="")
+        case = AcceptanceCase(
+            id="negative-probe",
+            dimension=dimension,
+            prompt="p",
+            graph="metadata-pilot-small.json",
+            expect=ExpectedBehaviour(**{field: False}),
+            notes=(
+                "probe case asserting the harness detects a violation of this "
+                "condition rather than reporting the scorer's raw verdict"
+            ),
+        )
+        if field == "answer_entities_supported":
+            # Note the id itself must be free of function-word segments, or the
+            # prose filter correctly declines to read it as an id at all.
+            violating = transcript(
+                results={}, final_text="See eval-fabricated-node-reference."
+            )
+        score = score_case(case, violating, TOOL_DEFS, {})
+        assert score.passed, [(c.name, c.detail) for c in score.conditions]
 
 
 class TestAlign:

@@ -487,6 +487,31 @@ class TestChatServiceConversation:
         assert result["content"] == "from the injected provider"
         create_from_profile.assert_not_called()
 
+    def test_an_explicit_llm_provider_wins_over_an_api_key_argument(self, chat_service):
+        """
+        api_key must not pull resolution back into play.
+
+        The harness pins one provider; a caller that also passed a key would
+        otherwise silently get a different one built from it, and the run would
+        be reported under the model it was asked to measure.
+        """
+        service, default_llm = chat_service
+        from backend.ui.tests.conftest import MockLLMProvider
+
+        injected = MockLLMProvider()
+        injected.mock_text_response = "from the injected provider"
+
+        result = service.process_message(
+            [{"role": "user", "content": "hello"}],
+            api_key="not-the-key-that-should-be-used",
+            provider="openai",
+            llm_provider=injected,
+        )
+
+        assert result["content"] == "from the injected provider"
+        assert injected.call_count == 1
+        assert default_llm.call_count == 0
+
     def test_omitting_llm_provider_leaves_resolution_unchanged(self, chat_service):
         """The default path must behave exactly as before the parameter existed."""
         service, default_llm = chat_service

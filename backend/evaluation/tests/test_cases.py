@@ -410,6 +410,30 @@ class TestDimensionTable:
             block = output.split(f"{key}  [reported]")[1].split("\n\n")[0]
             assert "no pass condition" in block
 
+    def test_every_dimension_keeps_the_level_the_docs_state(self):
+        """
+        Pins the level, not just the key set.
+
+        Promoting skill_selection or skill_adherence from PARTIAL to FULL made
+        the code contradict the docs table while the whole suite stayed green:
+        the "partially scored dimensions say what is left out" test only
+        inspects dimensions ALREADY marked partial, so a promotion escapes it.
+        A dimension claiming to be scored more mechanically than it is, is the
+        exact overstatement G9 forbids.
+        """
+        assert {key: dim.mechanical.value for key, dim in DIMENSIONS.items()} == {
+            "skill_selection": "partial",
+            "skill_adherence": "partial",
+            "tool_call_validity": "full",
+            "id_resolution": "full",
+            "post_write_verification": "full",
+            "completeness": "full",
+            "hallucination": "none",
+            "unsupported_entity_reference": "full",
+            "latency": "reported",
+            "token_profile": "reported",
+        }
+
     def test_the_covered_dimensions_are_the_ones_the_task_set_out_to_measure(self):
         """Pins the dimension set so a silent removal shows up as a failure."""
         assert set(DIMENSIONS) == {

@@ -126,16 +126,26 @@ class TestRecordingProvider:
         assert recorder.transcript.tool_results["x"] == "not json at all"
 
     def test_the_first_result_for_an_id_wins(self):
-        """History is re-sent every turn; a result must be counted once."""
+        """
+        History is re-sent every turn; a result must be counted once.
+
+        The two payloads differ on purpose: re-sending the identical block makes
+        first-wins and last-wins produce the same value, so the de-duplication
+        could be removed without the assertion noticing — the test's name
+        claimed an invariant it could not distinguish.
+        """
         recorder = RecordingProvider(ScriptedProvider(["a", "b"]))
-        block = {
-            "role": "user",
-            "content": [
-                {"type": "tool_result", "tool_use_id": "x", "content": '{"n": 1}'}
-            ],
-        }
-        recorder.create_completion([block], "sys", [])
-        recorder.create_completion([block], "sys", [])
+
+        def block(payload):
+            return {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "x", "content": payload}
+                ],
+            }
+
+        recorder.create_completion([block('{"n": 1}')], "sys", [])
+        recorder.create_completion([block('{"n": 2}')], "sys", [])
         assert recorder.transcript.tool_results == {"x": {"n": 1}}
 
     def test_records_latency_advertised_tools_and_usage(self):

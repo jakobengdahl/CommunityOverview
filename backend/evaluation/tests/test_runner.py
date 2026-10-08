@@ -155,6 +155,94 @@ class TestRunCaseGoodModel:
         assert inventory.passed and schema.passed
 
 
+class TestEveryDeclaredConditionIsEvaluated:
+    """
+    A dispatch site that silently stops firing is the worst failure here.
+
+    The case still declares its condition, the condition is never evaluated, and
+    the dimension reports `scored: false` instead of failing — so a model that
+    violated it reads as one nothing was checked on. Asserting the condition
+    NAMES, not just the verdict, is what makes that visible: a missing dispatch
+    changes the set, while a passing run looks identical either way.
+    """
+
+    @pytest.mark.parametrize(
+        "case_id,expected",
+        [
+            ("tool-call-validity-read-path", {"tool_calls_valid"}),
+            (
+                "id-resolution-before-write",
+                {
+                    "tool_calls_valid",
+                    "ids_resolved_from_results",
+                    "required_call_sequence",
+                },
+            ),
+            (
+                "post-write-verification",
+                {
+                    "tool_calls_valid",
+                    "ids_resolved_from_results",
+                    "verify_after_write",
+                    "final_node_state",
+                },
+            ),
+            (
+                "completeness-full-translation",
+                {
+                    "tool_calls_valid",
+                    "ids_resolved_from_results",
+                    "final_node_fields_changed",
+                },
+            ),
+            (
+                "skill-adherence-ambiguous-name-halts",
+                {"tool_calls_valid", "required_call_sequence", "forbidden_calls"},
+            ),
+            (
+                "skill-selection-inventory-question",
+                {"tool_calls_valid", "discriminating_first_call"},
+            ),
+            (
+                "unsupported-entity-reference",
+                {"tool_calls_valid", "answer_entities_supported"},
+            ),
+            ("token-profile-multi-step-traversal", {"tool_calls_valid"}),
+        ],
+    )
+    def test_each_shipped_case_evaluates_exactly_what_it_declares(
+        self, profile, case_by_id, case_id, expected
+    ):
+        case = case_by_id[case_id]
+        score = run_case(
+            case,
+            profile,
+            provider_factory=_factory([[("search_graph", {"query": "x"})], "done"]),
+        )
+        assert {c.name for c in score.conditions} == expected
+        assert set(case.expect.declared_conditions()) == expected
+
+    def test_a_dimension_no_condition_covers_is_not_reported_as_passing(
+        self, profile, case_by_id
+    ):
+        """
+        G4's main clause: unscored and passing must never look alike.
+
+        The only coverage was of the deliberately-unscored hallucination row;
+        the "this case declares no condition for this dimension" branch — the
+        one that fires for eight of ten dimensions on every case — had none.
+        """
+        score = run_case(
+            case_by_id["tool-call-validity-read-path"],
+            profile,
+            provider_factory=_factory([[("search_graph", {"query": "x"})], "done"]),
+        )
+        assert score.dimensions["tool_call_validity"].passed is True
+        for key in ("completeness", "id_resolution", "post_write_verification"):
+            assert score.dimensions[key].scored is False, key
+            assert score.dimensions[key].passed is None, key
+
+
 class TestRunCaseBadModel:
     def test_a_guessed_id_fails_even_though_the_write_succeeds(
         self, profile, case_by_id
@@ -295,6 +383,32 @@ class TestRunCaseBadModel:
 
 
 class TestRunCaseRobustness:
+    def test_a_fixture_the_graph_layer_rejects_is_a_run_error_not_a_model_failure(
+        self, profile, case_by_id, tmp_path
+    ):
+        """
+        The same conflation G7 prevents on the provider side.
+
+        Without a run_error the case still fails — every condition fails against
+        an empty transcript — but it fails as if the MODEL had done nothing,
+        when in fact the run never started.
+        """
+        import json
+
+        (tmp_path / "metadata-pilot-small.json").write_text(
+            json.dumps({"nodes": [{"id": "x"}], "edges": []}), encoding="utf-8"
+        )
+        score = run_case(
+            case_by_id["tool-call-validity-read-path"],
+            profile,
+            provider_factory=_factory(["unused"]),
+            graphs_dir=tmp_path,
+        )
+        assert score.run_error is not None, "a rejected fixture must be a run error"
+        assert score.run_error.startswith("fixture setup failed:")
+        assert score.conditions == []
+        assert not score.passed
+
     def test_a_provider_that_cannot_be_built_loses_only_its_own_case(
         self, profile, case_by_id
     ):
@@ -402,6 +516,43 @@ class TestRunCaseRobustness:
         )
         assert second.tool_calls == ["search_graph"]
         assert not second.passed  # it never wrote, so verification cannot hold
+
+
+class TestFixturePathIsolation:
+    def test_each_run_uses_a_graph_path_that_does_not_outlive_it(
+        self, profile, case_by_id, monkeypatch
+    ):
+        """
+        Two suites comparing two providers must not clobber each other.
+
+        A fixed path under the system temp dir still rewrites the fixture per
+        case, so G6's substance held — but two concurrent runs would share one
+        file, which is exactly how someone compares two models.
+        """
+        import backend.evaluation.runner as runner_module
+
+        seen = []
+        original = runner_module._build_chat_service
+
+        def record(graph_file):
+            seen.append(graph_file)
+            return original(graph_file)
+
+        monkeypatch.setattr(runner_module, "_build_chat_service", record)
+
+        case = case_by_id["tool-call-validity-read-path"]
+        for _ in range(2):
+            run_case(
+                case,
+                profile,
+                provider_factory=_factory([[("search_graph", {"query": "x"})], "done"]),
+            )
+
+        assert len(seen) == 2
+        assert seen[0] != seen[1], "two runs shared one graph file"
+        for path in seen:
+            assert not path.exists(), "the run's graph file outlived the run"
+            assert not path.parent.exists(), "the run's temp directory was leaked"
 
 
 class TestCompletenessBaseline:
