@@ -6,8 +6,10 @@
       "name": "National Statistics Office",
       "description": "The national body responsible for producing official statistics.",
       "summary": "National statistics producer",
-      "tags": ["statistics", "government"],
-      "communities": ["eval-community"]
+      "tags": [
+        "statistics",
+        "government"
+      ]
     },
     {
       "id": "eval-initiative-metadata-register",
@@ -15,8 +17,10 @@
       "name": "Metadata Register Modernisation",
       "description": "A programme to modernise the statistical metadata register.",
       "summary": "Modernise the metadata register",
-      "tags": ["metadata", "modernisation"],
-      "communities": ["eval-community"]
+      "tags": [
+        "metadata",
+        "modernisation"
+      ]
     },
     {
       "id": "eval-resource-metadata-handbook",
@@ -24,8 +28,10 @@
       "name": "Metadata Handbook",
       "description": "Guidance on documenting statistical metadata.",
       "summary": "Metadata documentation guidance",
-      "tags": ["metadata", "guidance"],
-      "communities": ["eval-community"]
+      "tags": [
+        "metadata",
+        "guidance"
+      ]
     }
   ],
   "edges": [

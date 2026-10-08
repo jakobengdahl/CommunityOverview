@@ -18,6 +18,7 @@ from backend.evaluation.dimensions import (
     Dimension,
     Mechanical,
     mechanically_scored_dimensions,
+    reported_only_dimensions,
     unscored_dimensions,
 )
 from backend.evaluation.runner import (
@@ -62,6 +63,7 @@ __all__ = [
     "load_cases",
     "load_profiles",
     "mechanically_scored_dimensions",
+    "reported_only_dimensions",
     "run_case",
     "run_suite",
     "score_case",

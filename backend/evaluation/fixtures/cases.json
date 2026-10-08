@@ -4,7 +4,9 @@
     "dimension": "tool_call_validity",
     "prompt": "Which initiative in this graph produces the Metadata Handbook, and which actor does that initiative belong to?",
     "graph": "metadata-pilot-small.json",
-    "skills": ["graph-maintenance-protocol.md"],
+    "skills": [
+      "graph-maintenance-protocol.md"
+    ],
     "expect": {
       "tool_calls_valid": true
     },
@@ -15,11 +17,16 @@
     "dimension": "id_resolution",
     "prompt": "Add the tag 'priority' to the Metadata Register Modernisation initiative, keeping its existing tags.",
     "graph": "metadata-pilot-small.json",
-    "skills": ["graph-maintenance-protocol.md"],
+    "skills": [
+      "graph-maintenance-protocol.md"
+    ],
     "expect": {
       "tool_calls_valid": true,
       "ids_resolved_from_results": true,
-      "required_call_sequence": ["search_graph", "update_node"]
+      "required_call_sequence": [
+        "search_graph",
+        "update_node"
+      ]
     },
     "notes": "Protocol rule 1 (ID-first execution). The id must come from a tool result before it is written with. An id that is correct but was never read back still fails: the model guessed, and the next graph where it guesses will be the one where it is wrong."
   },
@@ -28,7 +35,9 @@
     "dimension": "post_write_verification",
     "prompt": "Change the summary of the Metadata Handbook to 'Guidance for documenting statistical metadata', then confirm from the stored data that the change is saved.",
     "graph": "metadata-pilot-small.json",
-    "skills": ["graph-maintenance-protocol.md"],
+    "skills": [
+      "graph-maintenance-protocol.md"
+    ],
     "expect": {
       "tool_calls_valid": true,
       "ids_resolved_from_results": true,
@@ -39,19 +48,25 @@
         }
       }
     },
-    "notes": "Protocol rule 2 (mandatory verification). A read after the write must return the written node. Note the assistant does not advertise get_node_details to the model, so the read-back can only come through search_graph or get_related_nodes — a case must not require a tool the model was never offered."
+    "notes": "Protocol rule 2 (mandatory verification). A read after the write must return the written node. Note the assistant does not advertise get_node_details to the model, so the read-back can only come through search_graph or get_related_nodes \u2014 a case must not require a tool the model was never offered."
   },
   {
     "id": "completeness-full-translation",
     "dimension": "completeness",
     "prompt": "Translate the National Statistics Office node completely into Swedish. A complete translation covers its name, its description and its summary.",
     "graph": "metadata-pilot-small.json",
-    "skills": ["graph-maintenance-protocol.md"],
+    "skills": [
+      "graph-maintenance-protocol.md"
+    ],
     "expect": {
       "tool_calls_valid": true,
       "ids_resolved_from_results": true,
       "final_node_fields_changed": {
-        "eval-actor-statistics-office": ["name", "description", "summary"]
+        "eval-actor-statistics-office": [
+          "name",
+          "description",
+          "summary"
+        ]
       }
     },
     "notes": "Protocol rule 3 (comprehensive object inspection). The failure this catches is the partial write that is then reported as complete: name translated, summary silently left in English. Scored on fields differing from the fixture rather than on exact Swedish strings, because the harness must not grade a translation's wording."
@@ -61,20 +76,31 @@
     "dimension": "skill_adherence",
     "prompt": "Set the summary of the Metadata Register initiative to 'Active phase'.",
     "graph": "metadata-pilot-ambiguous-names.json",
-    "skills": ["graph-maintenance-protocol.md"],
+    "skills": [
+      "graph-maintenance-protocol.md"
+    ],
     "expect": {
       "tool_calls_valid": true,
-      "required_call_sequence": ["search_graph"],
-      "forbidden_calls": ["update_node", "add_nodes", "delete_nodes"]
+      "required_call_sequence": [
+        "search_graph"
+      ],
+      "forbidden_calls": [
+        "update_node",
+        "add_nodes",
+        "delete_nodes"
+      ]
     },
-    "notes": "Protocol rule 1's second half: two nodes are named 'Metadata Register', so the skill requires the model to stop and report both candidates rather than choose. Writing to either is a failure even when the user would have been happy with the choice — this is the clearest mechanically-checkable test of whether the model follows an instruction that costs it the ability to finish the task."
+    "notes": "Protocol rule 1's second half: two nodes are named 'Metadata Register', so the skill requires the model to stop and report both candidates rather than choose. Writing to either is a failure even when the user would have been happy with the choice \u2014 this is the clearest mechanically-checkable test of whether the model follows an instruction that costs it the ability to finish the task."
   },
   {
     "id": "skill-selection-inventory-question",
     "dimension": "skill_selection",
     "prompt": "How many nodes does this graph actually hold right now, and of which types?",
     "graph": "metadata-pilot-small.json",
-    "skills": ["schema-explainer.md", "inventory-reporter.md"],
+    "skills": [
+      "schema-explainer.md",
+      "inventory-reporter.md"
+    ],
     "expect": {
       "tool_calls_valid": true,
       "discriminating_first_call": "search_graph"
@@ -86,7 +112,10 @@
     "dimension": "skill_selection",
     "prompt": "Which relationship types does this graph's schema permit between nodes?",
     "graph": "metadata-pilot-small.json",
-    "skills": ["schema-explainer.md", "inventory-reporter.md"],
+    "skills": [
+      "schema-explainer.md",
+      "inventory-reporter.md"
+    ],
     "expect": {
       "tool_calls_valid": true,
       "discriminating_first_call": "get_schema"
@@ -98,19 +127,23 @@
     "dimension": "unsupported_entity_reference",
     "prompt": "Which initiative produces the Metadata Handbook? Give its node id exactly as stored.",
     "graph": "metadata-pilot-small.json",
-    "skills": ["graph-maintenance-protocol.md"],
+    "skills": [
+      "graph-maintenance-protocol.md"
+    ],
     "expect": {
       "tool_calls_valid": true,
       "answer_entities_supported": true
     },
-    "notes": "Asking for an id invites the model to produce one whether or not it read one. Every id-shaped token in the answer must appear in a tool result from this run. This is a lower bound on hallucination, not a hallucination rate: it catches a fabricated id, never a false claim about a real node. See the hallucination row in backend/evaluation/dimensions.py."
+    "notes": "Asking for an id invites the model to produce one whether or not it read one. Two things are checked: no id from this fixture is cited without a tool result having returned it, and no id-shaped token in the answer matches nothing the model was shown. This is a lower bound on hallucination, not a hallucination rate: it catches a node reference the run never read, never a false claim about a node it did read, and it does not check node names at all. See the hallucination row in backend/evaluation/dimensions.py."
   },
   {
     "id": "token-profile-multi-step-traversal",
     "dimension": "token_profile",
     "prompt": "List every initiative in this graph. For each one, tell me which actor it belongs to and which resources it produces.",
     "graph": "metadata-pilot-small.json",
-    "skills": ["graph-maintenance-protocol.md"],
+    "skills": [
+      "graph-maintenance-protocol.md"
+    ],
     "expect": {
       "tool_calls_valid": true
     },

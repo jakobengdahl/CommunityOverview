@@ -27,16 +27,55 @@ from backend.evaluation.dimensions import DIMENSIONS, Mechanical
 from backend.evaluation.transcript import RunTranscript, TokenUsage, ToolCall
 
 # An id as this system writes them: a UUID, or a slug of three or more
-# hyphen-separated lowercase segments (``task-compare-skills-openai``). Three is
-# the threshold that keeps ordinary hyphenated prose ("machine-readable data")
-# from being read as an id. Node *names* are deliberately not matched: there is
-# no mechanical way to tell a cited node name from a noun phrase that happens to
-# repeat one, so names are outside what this check claims to cover.
+# hyphen-separated lowercase segments (``task-compare-skills-openai``).
+#
+# Three segments alone is NOT enough to tell an id from prose: "up-to-date",
+# "end-to-end", "state-of-the-art" and "one-size-fits-all" all match the slug
+# shape, and reading one of those as a fabricated node id would report a
+# hallucination that did not happen — the precise failure the hallucination row
+# refuses to risk. So a slug is also rejected when any of its segments is an
+# English function word.
+#
+# That biases the check towards MISSING a real id rather than inventing one: an
+# id whose own segments include such a word (``task-fix-edge-auth-on-sspcloud``)
+# is not flagged. Deliberate, and consistent with this being a strict lower
+# bound — a missed fabrication understates the problem, while a flagged English
+# phrase would be a false accusation a reader cannot distinguish from a real
+# finding. The closed-vocabulary half of the check (fixture ids cited but never
+# read, below) has no such bias and no false positives at all.
+#
+# Node *names* are deliberately not matched: there is no mechanical way to tell
+# a cited node name from a noun phrase that happens to repeat one, so names are
+# outside what this check claims to cover.
 _UUID_RE = (
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
 _SLUG_RE = r"[a-z0-9]+(?:-[a-z0-9]+){2,}"
 ID_TOKEN_RE = re.compile(rf"\b(?:{_UUID_RE}|{_SLUG_RE})\b")
+_UUID_ONLY_RE = re.compile(rf"^{_UUID_RE}$")
+
+# Segments that mark a hyphenated token as English prose rather than an id.
+_PROSE_SEGMENTS = frozenset(
+    """a an and are as at be been but by can do for from had has have if in into
+    is it its may no not of on or per so than that the their then there these
+    this to up via vs was were what when which who will with would all one
+    both each""".split()
+)
+
+
+def is_id_shaped(token: str) -> bool:
+    """Whether a token in an answer looks like an id this system would write."""
+    if _UUID_ONLY_RE.match(token):
+        return True
+    segments = token.split("-")
+    if len(segments) < 3:
+        return False
+    return not any(segment in _PROSE_SEGMENTS for segment in segments)
+
+
+def cited_id_tokens(text: str) -> Set[str]:
+    """Id-shaped tokens cited in a model's answer."""
+    return {token for token in ID_TOKEN_RE.findall(text or "") if is_id_shaped(token)}
 
 
 @dataclass
@@ -148,20 +187,49 @@ def _ids_in_call(call: ToolCall) -> List[str]:
     return ids
 
 
-def _same_call_node_ids(call: ToolCall) -> Set[str]:
+def _same_call_node_references(call: ToolCall) -> Set[str]:
     """
-    Ids add_nodes declares in the same call its edges reference.
+    Node references add_nodes declares in the same call its edges may point at.
 
-    An edge may legitimately point at a node being created alongside it, so
-    those ids are not evidence that the model guessed.
+    An edge may legitimately point at a node being created alongside it, and the
+    advertised add_nodes schema gives no way to do that by id: its ``nodes``
+    item schema has no ``id`` property at all — ids are server-generated — while
+    ``edges[].source``/``target`` are documented as "Source node ID **or
+    name**", and storage resolves a name against the graph. So the reference the
+    model can legitimately use is the NAME it is creating in this same call.
+
+    Collecting only ids here was a defect: every schema-valid create-and-connect
+    call was charged an ID-first failure, and the only way to score a pass was
+    to invent a client-side ``nodes[].id`` — an undeclared nested parameter. A
+    supplied id is still collected, because storage does adopt one when given.
     """
     if call.name != "add_nodes":
         return set()
-    ids: Set[str] = set()
+    references: Set[str] = set()
     for node in _resolve_arg_path(call.input, "nodes[]"):
-        if isinstance(node, dict) and isinstance(node.get("id"), str):
-            ids.add(node["id"])
-    return ids
+        if not isinstance(node, dict):
+            continue
+        for key in ("id", "name"):
+            value = node.get(key)
+            if isinstance(value, str) and value:
+                references.add(value)
+    return references
+
+
+def _was_shown(value: str, shown: Set[str]) -> bool:
+    """
+    Whether the model was shown ``value`` among the strings in ``shown``.
+
+    A result may embed an id inside a longer string (a status message, a URL),
+    and the model read it there just as surely as it would read a bare field, so
+    a substring hit counts. Shared by the ID-first and answer-citation scorers:
+    they asked the same question in two different ways before, so an id seen
+    only inside a message counted as supported in the answer but not as read
+    before a write.
+    """
+    if value in shown:
+        return True
+    return any(value in candidate for candidate in shown)
 
 
 def _ids_known_before(transcript: RunTranscript, turn: int) -> Set[str]:
@@ -198,6 +266,21 @@ def _written_node_ids(transcript: RunTranscript, call: ToolCall) -> Set[str]:
         if isinstance(node, dict) and isinstance(node.get("id"), str):
             ids.add(node["id"])
     return {i for i in ids if i}
+
+
+def _normalise_field(value: Any) -> Any:
+    """
+    Collapse "absent" and "empty" to one value before comparing two graph states.
+
+    A fixture omits fields it does not set; the serializer fills them in with
+    defaults (``subtypes: []``, ``aliases: []``, ``metadata: {}``). Comparing
+    raw values then reads ``None != []`` as a change, so a case naming one of
+    those fields passed on a run in which the model did nothing at all — a
+    scorer passing vacuously, which is the one thing no scorer here may do.
+    """
+    if value is None or value == [] or value == {} or value == "":
+        return None
+    return value
 
 
 def _find_node(graph: Dict[str, Any], node_id: str) -> Optional[Dict[str, Any]]:
@@ -319,10 +402,12 @@ def score_ids_resolved_from_results(transcript: RunTranscript) -> ConditionResul
         ids = _ids_in_call(call)
         if not ids:
             continue
-        known = _ids_known_before(transcript, call.turn) | _same_call_node_ids(call)
+        known = _ids_known_before(transcript, call.turn) | _same_call_node_references(
+            call
+        )
         for value in ids:
             checked += 1
-            if value not in known:
+            if not _was_shown(value, known):
                 unresolved.append(f"{call.name}({value!r}) at turn {call.turn}")
 
     if unresolved:
@@ -419,8 +504,8 @@ def score_final_node_fields_changed(
             problems.append(f"{node_id}: absent from the final graph")
             continue
         for key in fields:
-            was = (before or {}).get(key)
-            now = after.get(key)
+            was = _normalise_field((before or {}).get(key))
+            now = _normalise_field(after.get(key))
             if now == was:
                 problems.append(f"{node_id}.{key}: unchanged ({was!r})")
     if problems:
@@ -431,40 +516,60 @@ def score_final_node_fields_changed(
     )
 
 
-def score_answer_entities_supported(transcript: RunTranscript) -> ConditionResult:
+def score_answer_entities_supported(
+    transcript: RunTranscript, fixture_graph: Optional[Dict[str, Any]] = None
+) -> ConditionResult:
     """
-    No id-shaped token in the final answer is absent from every tool result.
+    No node the final answer cites is one the run never read.
+
+    Two signals, deliberately of different character:
+
+    1. **Closed vocabulary, no false positives.** Any id from the case's own
+       fixture graph that the answer cites but no tool result returned. The
+       answer named a real node the model never looked at.
+    2. **Open vocabulary, biased towards misses.** Any id-shaped token (see
+       ``is_id_shaped``) matching nothing the model was shown. Catches a
+       fabricated id, and is tuned to miss rather than to misfire, because a
+       false accusation here is indistinguishable from a real finding.
 
     This is the narrow, separately-named check behind the
-    ``unsupported_entity_reference`` dimension — not a hallucination rate. See
+    ``unsupported_entity_reference`` dimension — NOT a hallucination rate. See
     that dimension's caveat for what it does and does not catch.
     """
-    cited = set(ID_TOKEN_RE.findall(transcript.final_text or ""))
-    if not cited:
-        return ConditionResult(
-            "answer_entities_supported",
-            True,
-            "the answer cites no id-shaped token (vacuously supported)",
-        )
-    supported: Set[str] = set()
+    shown: Set[str] = set()
     for result in transcript.tool_results.values():
-        supported |= _all_strings(result)
-    # A result may embed an id inside a longer string (a message, a URL), so an
-    # id is supported when it occurs anywhere in what the model was shown.
-    blob = "\n".join(s for s in supported if isinstance(s, str))
+        shown |= _all_strings(result)
+
+    answer = transcript.final_text or ""
+    cited = cited_id_tokens(answer)
+
+    fixture_ids = {
+        node["id"]
+        for node in (fixture_graph or {}).get("nodes") or []
+        if isinstance(node, dict) and isinstance(node.get("id"), str)
+    }
+    cited_fixture_ids = {node_id for node_id in fixture_ids if node_id in answer}
+
     unsupported = sorted(
-        token for token in cited if token not in supported and token not in blob
+        {token for token in cited | cited_fixture_ids if not _was_shown(token, shown)}
     )
     if unsupported:
         return ConditionResult(
             "answer_entities_supported",
             False,
-            f"answer cites id(s) absent from every tool result: {unsupported}",
+            f"answer cites node(s) no tool result returned: {unsupported}",
+        )
+    checked = cited | cited_fixture_ids
+    if not checked:
+        return ConditionResult(
+            "answer_entities_supported",
+            True,
+            "the answer cites no node id (vacuously supported)",
         )
     return ConditionResult(
         "answer_entities_supported",
         True,
-        f"{len(cited)} cited id(s) all supported by a tool result",
+        f"{len(checked)} cited id(s) all returned by a tool result",
     )
 
 
@@ -525,7 +630,7 @@ def _evaluate_conditions(
             )
         )
     if expect.answer_entities_supported is not None:
-        actual = score_answer_entities_supported(transcript)
+        actual = score_answer_entities_supported(transcript, fixture_graph)
         results.append(_align(actual, expect.answer_entities_supported))
     if expect.discriminating_first_call is not None:
         results.append(
@@ -583,13 +688,14 @@ def score_case(
                 note=dim.caveat,
             )
             continue
-        if not dim.measured_by:
-            # Reported-only dimensions (latency, token_profile): the numbers live
-            # on the CaseScore, and there is no pass condition to report.
+        if dim.mechanical is Mechanical.REPORTED:
+            # Latency and tokens: the numbers live on the CaseScore and there is
+            # no pass condition, so `scored` stays False — a reader must not see
+            # a measured-but-unjudged dimension the same way as a passed one.
             dimension_scores[key] = DimensionScore(
                 dimension=key,
                 mechanical=dim.mechanical,
-                scored=True,
+                scored=False,
                 passed=None,
                 note=dim.caveat,
             )

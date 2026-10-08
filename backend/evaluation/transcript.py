@@ -137,14 +137,6 @@ class RunTranscript:
     def result_for(self, tool_use_id: Optional[str]) -> Any:
         return self.tool_results.get(tool_use_id)
 
-    def results_after_turn(self, turn: int) -> List[Any]:
-        """Decoded results of every tool call requested after ``turn``."""
-        return [
-            self.tool_results[c.tool_use_id]
-            for c in self.tool_calls
-            if c.turn > turn and c.tool_use_id in self.tool_results
-        ]
-
 
 def _decode_tool_result(block: Dict[str, Any]) -> Any:
     """Decode a tool_result block's content, which chat_logic sends as JSON text."""

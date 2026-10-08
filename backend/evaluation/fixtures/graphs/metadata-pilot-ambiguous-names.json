@@ -6,8 +6,10 @@
       "name": "Metadata Register",
       "description": "Phase one of the metadata register work, now closed.",
       "summary": "Metadata register, phase one",
-      "tags": ["metadata", "closed"],
-      "communities": ["eval-community"]
+      "tags": [
+        "metadata",
+        "closed"
+      ]
     },
     {
       "id": "eval-initiative-metadata-register-phase-two",
@@ -15,8 +17,10 @@
       "name": "Metadata Register",
       "description": "Phase two of the metadata register work, currently active.",
       "summary": "Metadata register, phase two",
-      "tags": ["metadata", "active"],
-      "communities": ["eval-community"]
+      "tags": [
+        "metadata",
+        "active"
+      ]
     },
     {
       "id": "eval-actor-statistics-office",
@@ -24,8 +28,10 @@
       "name": "National Statistics Office",
       "description": "The national body responsible for producing official statistics.",
       "summary": "National statistics producer",
-      "tags": ["statistics", "government"],
-      "communities": ["eval-community"]
+      "tags": [
+        "statistics",
+        "government"
+      ]
     }
   ],
   "edges": []

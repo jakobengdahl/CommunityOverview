@@ -9,6 +9,7 @@ and points at fixtures that exist.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -25,6 +26,7 @@ from backend.evaluation.dimensions import (
     DIMENSIONS,
     Mechanical,
     mechanically_scored_dimensions,
+    reported_only_dimensions,
     unscored_dimensions,
 )
 
@@ -112,6 +114,24 @@ class TestShippedCases:
             assert graph["nodes"], case.graph
             for node in graph["nodes"]:
                 assert node.get("id") and node.get("type") and node.get("name")
+
+    def test_fixture_nodes_carry_no_field_the_node_model_drops(self):
+        """
+        A fixture is the ground truth a case is judged against.
+
+        A key the model does not have (``communities`` is not a Node field, and
+        the serializer silently drops it) is dead data there: it invites a case
+        to assert on something the system never stores, and it differs between
+        the raw fixture and the graph's own serialization of it.
+        """
+        from backend.core.models import Node
+
+        known = set(Node.model_fields) | {"edges"}
+        for case in load_cases():
+            graph = json.loads(case.graph_path().read_text(encoding="utf-8"))
+            for node in graph["nodes"]:
+                unknown = set(node) - known
+                assert not unknown, f"{case.graph}: node {node['id']} has {unknown}"
 
     def test_a_case_expecting_a_node_state_names_a_node_in_its_own_fixture(self):
         """An expectation about a node the fixture lacks can never pass."""
@@ -221,6 +241,40 @@ class TestCaseValidation:
         with pytest.raises(ValueError, match="duplicate case id"):
             load_cases(cases_file=cases_file, graphs_dir=tmp_path)
 
+    def test_a_case_naming_a_timestamp_as_evidence_of_change_is_rejected(self):
+        """
+        `updated_at` moves on every write, so it would pass for any write at all.
+
+        `id` and `created_at` never move, so a case naming one could never pass.
+        Either way the case reports something other than whether the requested
+        change was made — and the serializer adds all three to every exported
+        node, so they are easy to reach for.
+        """
+        for field in ("updated_at", "created_at", "id"):
+            with pytest.raises(ValidationError, match="cannot evidence"):
+                AcceptanceCase(
+                    id="x",
+                    dimension="completeness",
+                    prompt="p",
+                    graph="metadata-pilot-small.json",
+                    expect=self._expect(
+                        final_node_fields_changed={
+                            "eval-actor-statistics-office": [field]
+                        }
+                    ),
+                )
+
+    def test_a_case_naming_a_real_content_field_is_accepted(self):
+        AcceptanceCase(
+            id="x",
+            dimension="completeness",
+            prompt="p",
+            graph="metadata-pilot-small.json",
+            expect=self._expect(
+                final_node_fields_changed={"eval-actor-statistics-office": ["summary"]}
+            ),
+        )
+
     def test_a_cases_file_that_is_not_an_array_is_rejected(self, tmp_path):
         cases_file = tmp_path / "cases.json"
         cases_file.write_text(json.dumps({"cases": []}))
@@ -266,6 +320,96 @@ class TestDimensionTable:
             unknown = set(dim.measured_by) - fields
             assert not unknown, f"{key} points at non-existent field(s) {unknown}"
 
+    def test_reported_only_dimensions_are_not_called_fully_scored(self):
+        """
+        A measurement with no threshold is not a dimension the harness scores.
+
+        latency and tokens were FULL with no conditions and caveats reading
+        "Reported, never pass/fail" — a reported-only number presented as fully
+        scored, which is the overstatement G9 forbids.
+        """
+        assert reported_only_dimensions() == ["latency", "token_profile"]
+        for key in reported_only_dimensions():
+            assert DIMENSIONS[key].mechanical is Mechanical.REPORTED
+            assert not DIMENSIONS[key].measured_by
+            assert key not in mechanically_scored_dimensions()
+
+    def test_every_dimension_falls_in_exactly_one_class(self):
+        buckets = (
+            set(mechanically_scored_dimensions())
+            | set(reported_only_dimensions())
+            | set(unscored_dimensions())
+        )
+        assert buckets == set(DIMENSIONS)
+        assert len(mechanically_scored_dimensions()) + len(
+            reported_only_dimensions()
+        ) + len(unscored_dimensions()) == len(DIMENSIONS)
+
+    def test_the_markdown_table_in_the_docs_matches_this_table(self):
+        """
+        docs/SKILL_EVALUATION.md claims the two cannot drift. This makes it true.
+
+        Without it the claim was only as good as whoever last edited the doc,
+        and a dimension described there as scored more mechanically than it is
+        is exactly the defect G9 names.
+        """
+        import re
+
+        doc = (
+            Path(__file__).resolve().parents[3] / "docs" / "SKILL_EVALUATION.md"
+        ).read_text(encoding="utf-8")
+
+        rows = re.findall(r"^\| `([a-z_]+)` \| \*\*(.+?)\*\* \|", doc, re.M)
+        assert rows, "no dimension table found in docs/SKILL_EVALUATION.md"
+
+        documented = {key: label for key, label in rows}
+        assert set(documented) == set(DIMENSIONS), (
+            f"doc table and DIMENSIONS disagree on which dimensions exist: "
+            f"only in doc {sorted(set(documented) - set(DIMENSIONS))}, "
+            f"only in code {sorted(set(DIMENSIONS) - set(documented))}"
+        )
+        for key, label in documented.items():
+            expected = {
+                Mechanical.FULL: "full",
+                Mechanical.PARTIAL: "partial",
+                Mechanical.REPORTED: "reported",
+                Mechanical.NONE: "not scored",
+            }[DIMENSIONS[key].mechanical]
+            assert label == expected, (
+                f"doc table says {key!r} is {label!r}, code says {expected!r}"
+            )
+
+    def test_the_cli_does_not_describe_the_unscored_dimension_as_measured(self):
+        """
+        `--dimensions` is where an operator reads what the harness measures.
+
+        Branching on `measured_by` alone put hallucination and the reported-only
+        dimensions in the same bucket, so the one dimension deliberately left
+        unscored printed as "reported per run" — the overstatement G9 forbids,
+        in the output most likely to be quoted.
+        """
+        import io
+        import sys
+
+        sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+        from scripts.run_skill_eval import print_dimensions
+
+        captured = io.StringIO()
+        original = sys.stdout
+        sys.stdout = captured
+        try:
+            print_dimensions()
+        finally:
+            sys.stdout = original
+        output = captured.getvalue()
+
+        hallucination_block = output.split("hallucination  [none]")[1].split("\n\n")[0]
+        assert "deliberately not scored" in hallucination_block
+        assert "reported per run" not in hallucination_block
+        for key in reported_only_dimensions():
+            block = output.split(f"{key}  [reported]")[1].split("\n\n")[0]
+            assert "no pass condition" in block
+
     def test_the_covered_dimensions_are_the_ones_the_task_set_out_to_measure(self):
         """Pins the dimension set so a silent removal shows up as a failure."""
         assert set(DIMENSIONS) == {
@@ -298,6 +442,17 @@ class TestToolTables:
     def test_every_write_tool_has_an_id_argument_table_entry(self):
         """A write whose ids are not extracted would pass ID-first silently."""
         assert set(WRITE_TOOLS) <= set(ID_BEARING_ARGS)
+
+    def test_no_table_entry_is_inert(self):
+        """
+        An entry mapping to no paths is indistinguishable from absence.
+
+        It extracts nothing, so the tool is silently unchecked while the table
+        reads as if it were covered — and the path-validity test below iterates
+        nothing for it.
+        """
+        empty = sorted(tool for tool, paths in ID_BEARING_ARGS.items() if not paths)
+        assert not empty, f"inert ID_BEARING_ARGS entries: {empty}"
 
     def test_the_verification_read_tools_exclude_get_node_details(self):
         """

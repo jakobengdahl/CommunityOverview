@@ -32,6 +32,7 @@ from backend.evaluation import (  # noqa: E402
     load_cases,
     load_profiles,
     run_suite,
+    unscored_dimensions,
 )
 from backend.evaluation.dimensions import Mechanical  # noqa: E402
 
@@ -43,8 +44,10 @@ def print_dimensions() -> None:
         print(f"  {dim.title}")
         if dim.measured_by:
             print(f"  scored from: {', '.join(dim.measured_by)}")
+        elif dim.mechanical is Mechanical.REPORTED:
+            print("  scored from: measured per run, no pass condition")
         else:
-            print("  scored from: reported per run, no pass condition")
+            print("  scored from: NOTHING — deliberately not scored, see below")
         for line in _wrap(dim.caveat, 72):
             print(f"    {line}")
 
@@ -138,16 +141,19 @@ def main(argv=None) -> int:
             file=sys.stderr,
         )
         result = run_suite(profile, cases=cases)
+        errors = (
+            f", {result.run_errors} case(s) never reached the model"
+            if result.run_errors
+            else ""
+        )
         print(
-            f"  {result.passed}/{result.total} passed, "
+            f"  {result.passed}/{result.total} passed{errors}, "
             f"{result.total_latency_ms / 1000:.1f}s of provider time",
             file=sys.stderr,
         )
         reports.append(build_report(result))
 
-    unscored = sorted(
-        key for key, dim in DIMENSIONS.items() if dim.mechanical is Mechanical.NONE
-    )
+    unscored = unscored_dimensions()
     document = {"reports": reports, "unscored_dimensions": unscored}
     payload = json.dumps(document, indent=2)
     if args.out:

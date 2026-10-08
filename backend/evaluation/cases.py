@@ -31,9 +31,14 @@ CASES_FILE = FIXTURES_DIR / "cases.json"
 # that demanded it would fail for a reason that has nothing to do with the model.
 DEFAULT_VERIFY_READ_TOOLS = ("search_graph", "get_related_nodes", "find_similar_nodes")
 
-# Tools whose arguments carry ids the model must have read before using, and the
-# paths those ids sit at. "[]" steps into every element of a list. Writes and
-# relationship operations only — the ID-first rule is about those.
+# Tools whose arguments name an existing node or edge the model must have read
+# before using, and the paths those references sit at. "[]" steps into every
+# element of a list.
+#
+# Not strictly the write tools: mark_nodes modifies no graph data, but naming a
+# node by an id that was never read is the same guess with the same cause, so it
+# belongs here. A tool with no entry is simply not checked — an entry mapping to
+# an empty tuple would be indistinguishable from absence, so there are none.
 ID_BEARING_ARGS: Dict[str, tuple] = {
     "update_node": ("node_id",),
     "delete_nodes": ("node_ids[]",),
@@ -42,10 +47,20 @@ ID_BEARING_ARGS: Dict[str, tuple] = {
     "delete_edges": ("edge_ids[]",),
     "archive_edges": ("edge_ids[]",),
     "unarchive_edges": ("edge_ids[]",),
+    # Endpoints are "node ID or name" per the advertised schema, and may name a
+    # node this same call creates — see _same_call_node_references in scoring.py.
     "add_nodes": ("edges[].source", "edges[].target"),
     "mark_nodes": ("marks[].node_id",),
-    "save_view": (),
 }
+
+# Fields a case may not claim as evidence that a requested change was made,
+# in either completeness expectation. `updated_at` moves on any write, so a
+# "changed" expectation naming it passes for any write at all and an exact-value
+# one can never be predicted; `id` and `created_at` never move, so an exact-value
+# expectation naming one passes without the model doing anything and a "changed"
+# one can never pass. Each way round, the case reports something other than
+# whether the requested change was made.
+NON_EVIDENCE_FIELDS = frozenset({"id", "created_at", "updated_at"})
 
 WRITE_TOOLS = (
     "add_nodes",
@@ -157,6 +172,37 @@ class AcceptanceCase(BaseModel):
         if v not in DIMENSIONS:
             raise ValueError(f"unknown dimension {v!r}; known: {sorted(DIMENSIONS)}")
         return v
+
+    @model_validator(mode="after")
+    def _change_expectations_name_usable_fields(self) -> "AcceptanceCase":
+        """
+        A completeness expectation must name fields a change can be read from.
+
+        `updated_at` changes on every write, so a case naming it would pass for
+        any write at all; `id` and `created_at` never change, so a case naming
+        one could never pass. Either way the case would report something other
+        than whether the requested change was made.
+        """
+        offenders = sorted(
+            {
+                field
+                for fields in self.expect.final_node_fields_changed.values()
+                for field in fields
+                if field in NON_EVIDENCE_FIELDS
+            }
+            | {
+                field
+                for fields in self.expect.final_node_state.values()
+                for field in fields
+                if field in NON_EVIDENCE_FIELDS
+            }
+        )
+        if offenders:
+            raise ValueError(
+                f"a completeness expectation names field(s) {offenders}, which cannot "
+                "evidence a requested change (see NON_EVIDENCE_FIELDS)"
+            )
+        return self
 
     @model_validator(mode="after")
     def _expectation_covers_dimension(self) -> "AcceptanceCase":

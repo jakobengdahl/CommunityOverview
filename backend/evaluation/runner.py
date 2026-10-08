@@ -27,9 +27,13 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from backend.config.model_profiles import ModelProfile, create_provider_from_profile
 from backend.evaluation.cases import AcceptanceCase, load_cases
-from backend.evaluation.dimensions import DIMENSIONS, Mechanical
+from backend.evaluation.dimensions import (
+    DIMENSIONS,
+    reported_only_dimensions,
+    unscored_dimensions,
+)
 from backend.evaluation.scoring import CaseScore, score_case
-from backend.evaluation.transcript import RecordingProvider
+from backend.evaluation.transcript import RecordingProvider, RunTranscript
 from backend.llm.llm_providers import LLMProvider
 
 logger = logging.getLogger(__name__)
@@ -54,6 +58,11 @@ class SuiteResult:
     @property
     def total(self) -> int:
         return len(self.scores)
+
+    @property
+    def run_errors(self) -> int:
+        """Cases that never produced a scorable run (provider or fixture failure)."""
+        return sum(1 for s in self.scores if s.run_error)
 
     @property
     def total_latency_ms(self) -> float:
@@ -138,13 +147,25 @@ def run_case(
     fixture_graph = json.loads(case.graph_path(graphs_dir).read_text(encoding="utf-8"))
     skills_context = build_skills_context(case.skill_paths(skills_dir))
 
-    recorder = RecordingProvider(provider_factory(profile))
+    try:
+        recorder = RecordingProvider(provider_factory(profile))
+    except Exception as exc:
+        # A credential that is unset, or revoked between cases. The CLI checks
+        # credentials up front, but a library caller has no such gate and one
+        # bad profile must not take the other cases' results down with it.
+        transcript = RunTranscript(
+            run_error=f"provider unavailable: {type(exc).__name__}: {exc}"
+        )
+        logger.warning("case %s: provider could not be built: %s", case.id, exc)
+        return score_case(case, transcript, [], fixture_graph)
+
     transcript = recorder.transcript
 
     with tempfile.TemporaryDirectory(prefix="skill-eval-") as tmpdir:
         graph_file = Path(tmpdir) / "graph.json"
         graph_file.write_text(json.dumps(fixture_graph), encoding="utf-8")
 
+        baseline_graph = fixture_graph
         try:
             chat_service, tool_definitions = _build_chat_service(graph_file)
         except Exception as exc:
@@ -153,6 +174,17 @@ def run_case(
             transcript.run_error = f"fixture setup failed: {type(exc).__name__}: {exc}"
             logger.warning("case %s could not be set up: %s", case.id, exc)
             return score_case(case, transcript, [], fixture_graph)
+
+        # The "before" state a completeness expectation is judged against must be
+        # the fixture AS THE GRAPH LAYER SERIALIZES IT, not the raw JSON file.
+        # The two differ in both directions: the serializer adds defaults the
+        # fixture omits (subtypes: [], aliases: {}, metadata: {}) and drops keys
+        # it does not model (communities). Compared against the raw file, either
+        # difference reads as a field the model changed — so a case naming such a
+        # field passed on a run where the model did nothing at all. Snapshotting
+        # through the same serializer that produces the final state removes the
+        # whole class, rather than enumerating the fields it affects.
+        baseline_graph = _snapshot_graph(chat_service) or fixture_graph
 
         try:
             result = chat_service.process_message(
@@ -187,7 +219,7 @@ def run_case(
     if provider_error and not transcript.run_error:
         transcript.run_error = f"provider call failed: {provider_error}"
 
-    return score_case(case, transcript, tool_definitions, fixture_graph)
+    return score_case(case, transcript, tool_definitions, baseline_graph)
 
 
 def _build_chat_service(graph_file: Path):
@@ -309,12 +341,14 @@ def build_report(result: SuiteResult) -> Dict[str, Any]:
         "summary": {
             "cases": result.total,
             "passed": result.passed,
+            # Surfaced beside `passed` on purpose: a run that never reached the
+            # model is not a model that failed, and a reader comparing two
+            # providers on the pass count alone would read an outage as a
+            # quality difference.
+            "run_errors": result.run_errors,
             "total_latency_ms": round(result.total_latency_ms, 1),
-            "unscored_dimensions": [
-                key
-                for key, dim in DIMENSIONS.items()
-                if dim.mechanical is Mechanical.NONE
-            ],
+            "unscored_dimensions": unscored_dimensions(),
+            "reported_only_dimensions": reported_only_dimensions(),
         },
         "dimensions": dimension_rows,
         "cases": cases,

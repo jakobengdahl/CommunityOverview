@@ -10,12 +10,18 @@ the same code.
 
 import json
 
+import pytest
+
 from backend.evaluation.runner import (
     build_report,
     build_skills_context,
     run_case,
     run_suite,
 )
+
+
+def case_row_of(report):
+    return report["cases"][0]
 
 
 def _factory(turns):
@@ -289,6 +295,56 @@ class TestRunCaseBadModel:
 
 
 class TestRunCaseRobustness:
+    def test_a_provider_that_cannot_be_built_loses_only_its_own_case(
+        self, profile, case_by_id
+    ):
+        """
+        A credential unset (or revoked mid-suite) must not take the suite down.
+
+        The CLI checks credentials up front, but a library caller has no such
+        gate, and a MissingCredentialError propagating out of run_suite would
+        discard every case already scored.
+        """
+        from backend.config.model_profiles import MissingCredentialError
+
+        def refuse(_profile):
+            raise MissingCredentialError("EVAL_HARNESS_TEST_KEY is not set")
+
+        result = run_suite(
+            profile,
+            cases=[
+                case_by_id["tool-call-validity-read-path"],
+                case_by_id["unsupported-entity-reference"],
+            ],
+            provider_factory=refuse,
+        )
+        assert result.total == 2
+        assert result.run_errors == 2
+        assert all("provider unavailable" in s.run_error for s in result.scores)
+        assert not any(s.passed for s in result.scores)
+
+    def test_the_report_summary_counts_run_errors_beside_passes(
+        self, profile, case_by_id
+    ):
+        """
+        A provider outage must not read as a quality difference.
+
+        The per-case run_error was always there, but the summary showed only
+        passed/total — so at the level a reader compares two providers, an
+        endpoint that was down looked like a model that failed every case.
+        """
+        from backend.evaluation.tests.conftest import ScriptedProvider
+
+        result = run_suite(
+            profile,
+            cases=[case_by_id["tool-call-validity-read-path"]],
+            provider_factory=lambda _p: ScriptedProvider(["x"], raise_on_turn=0),
+        )
+        summary = build_report(result)["summary"]
+        assert summary["run_errors"] == 1
+        assert summary["passed"] == 0
+        assert summary["reported_only_dimensions"] == ["latency", "token_profile"]
+
     def test_a_provider_that_raises_is_recorded_as_a_run_error_not_a_crash(
         self, profile, case_by_id
     ):
@@ -346,6 +402,58 @@ class TestRunCaseRobustness:
         )
         assert second.tool_calls == ["search_graph"]
         assert not second.passed  # it never wrote, so verification cannot hold
+
+
+class TestCompletenessBaseline:
+    """
+    A model that does nothing must fail every completeness expectation.
+
+    The baseline a change is judged against is the fixture as the graph layer
+    serializes it, not the raw JSON — the two differ in both directions, and
+    either difference read as a change the model made.
+    """
+
+    class _DoesNothing:
+        def create_completion(self, messages, system_prompt, tools, max_tokens=4096):
+            from backend.llm.llm_providers import LLMResponse
+
+            return LLMResponse(
+                content=[{"type": "text", "text": "I did nothing."}],
+                stop_reason="end_turn",
+            )
+
+        def format_tool_definitions(self, tools):
+            return tools
+
+    @pytest.mark.parametrize(
+        "fields,why",
+        [
+            (["subtypes", "aliases", "metadata"], "serializer ADDS these defaults"),
+            (["communities"], "a key neither the fixture nor the Node model has"),
+            (["summary"], "an ordinary content field, present in both"),
+        ],
+    )
+    def test_an_idle_model_fails_whatever_fields_a_case_names(
+        self, profile, fields, why
+    ):
+        from backend.evaluation.cases import AcceptanceCase, ExpectedBehaviour
+
+        case = AcceptanceCase(
+            id="probe",
+            dimension="completeness",
+            prompt="translate this node completely",
+            graph="metadata-pilot-small.json",
+            expect=ExpectedBehaviour(
+                final_node_fields_changed={"eval-actor-statistics-office": fields}
+            ),
+            notes=(
+                "probe case asserting a serializer artefact cannot read as a change "
+                f"the model made: {why}"
+            ),
+        )
+        score = run_case(case, profile, provider_factory=lambda _p: self._DoesNothing())
+        assert not score.passed, f"{fields} passed against a model that did nothing"
+        assert score.dimensions["completeness"].passed is False
 
 
 class TestSkillsContext:
@@ -413,6 +521,9 @@ class TestSuiteAndReport:
         report = build_report(result)
 
         assert report["summary"]["unscored_dimensions"] == ["hallucination"]
+        for key in ("latency", "token_profile"):
+            assert report["dimensions"][key]["mechanically_scored"] == "reported"
+            assert case_row_of(report)["dimensions"][key]["scored"] is False
         assert report["dimensions"]["hallucination"]["mechanically_scored"] == "none"
         case_row = report["cases"][0]
         assert case_row["tool_calls"] == ["search_graph"]

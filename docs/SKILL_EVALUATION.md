@@ -24,10 +24,16 @@ to supply from their own shell.
 
 ## What it measures, and how honestly
 
-Each dimension carries how mechanically it can be scored. The table is
-maintained in code — `backend/evaluation/dimensions.py` — so it cannot drift
-away from what the scorers do, and `python scripts/run_skill_eval.py
---dimensions` prints it with the full caveats.
+Each dimension carries how mechanically it can be scored, in one of four
+classes: **full** (a predicate over the recorded run), **partial** (only part of
+the dimension is a predicate), **reported** (measured objectively but with no
+pass condition — a number you compare, which the harness never passes or fails
+a provider on), and **not scored**.
+
+The table is maintained in code — `backend/evaluation/dimensions.py` — and a
+test parses the table below and compares it against that one, so the two cannot
+drift apart. `python scripts/run_skill_eval.py --dimensions` prints it with the
+full caveats.
 
 | Dimension | Scored | What the score actually means |
 |---|---|---|
@@ -35,9 +41,9 @@ away from what the scorers do, and `python scripts/run_skill_eval.py
 | `id_resolution` | **full** | Every node/edge id passed to a write or relationship tool had appeared in an earlier tool result. A *correct* id that was never read back still fails — the model guessed and got lucky. |
 | `post_write_verification` | **full** | After the last successful write, a read tool's result contained the written node's id. |
 | `completeness` | **full** | The graph state after the run matches an enumerated expectation: exact field values, or the set of fields that must differ from the fixture. |
-| `unsupported_entity_reference` | **full** | No id-shaped token in the final answer is absent from every tool result. See the caveat below. |
-| `latency` | **full** | Wall-clock time around each provider call, summed. Reported, never pass/fail. |
-| `token_profile` | **full** | Prompt and completion tokens as the provider reports them, or explicitly *unreported*. Tokens only — no monetary cost. |
+| `unsupported_entity_reference` | **full** | No node the answer cites is one the run never read — a fixture id cited without a tool result returning it, or an id-shaped token matching nothing. See the caveat below. |
+| `latency` | **reported** | Wall-clock time around each provider call, summed. A number to compare, with no pass condition. |
+| `token_profile` | **reported** | Prompt and completion tokens as the provider reports them, or explicitly *unreported*. A number to compare; tokens only — no monetary cost. |
 | `skill_adherence` | **partial** | Only rules expressible as tool-call-sequence constraints. Prose-level adherence is not scored. |
 | `skill_selection` | **partial** | A proxy: with two skills injected and only one applicable, each mandating a different first call. |
 | `hallucination` | **not scored** | Deliberately. See below. |
@@ -54,12 +60,28 @@ later cannot tell such a number apart from a real measurement. That is worse
 than reporting nothing, because it is actionable while being unfounded.
 
 What *is* implemented is narrower and separately named:
-`unsupported_entity_reference`, the share of id-shaped tokens in the final
-answer that appear in no tool result from the run. It is a **strict lower
-bound** on hallucination: it catches a fabricated id and nothing else. It will
-not catch a false claim about a node that genuinely exists, and it does not
-check node *names* — there is no mechanical way to tell a cited node name from a
-noun phrase that happens to repeat one.
+`unsupported_entity_reference`. It is a **strict lower bound** on hallucination:
+it catches a node reference the run never read, and nothing else. It will not
+catch a false claim about a node that genuinely exists, and it does not check
+node *names* — there is no mechanical way to tell a cited node name from a noun
+phrase that happens to repeat one.
+
+It combines two signals of deliberately different character:
+
+1. **Closed vocabulary, no false positives.** An id from the case's own fixture
+   graph that the answer cites but no tool result returned. The model named a
+   real node it never looked at. Unambiguous.
+2. **Open vocabulary, biased towards misses.** An id-shaped token matching
+   nothing the model was shown. "Id-shaped" is a UUID, or three-or-more
+   hyphenated segments *none of which is an English function word* — because
+   three segments alone also matches `up-to-date`, `end-to-end`,
+   `state-of-the-art` and `one-size-fits-all`, and reporting one of those as a
+   fabricated node id would be a false accusation a reader could not
+   distinguish from a real finding. The cost is a known false negative: an id
+   whose own segments include such a word (`task-fix-edge-auth-on-sspcloud`) is
+   not flagged by this signal. That trade is deliberate and pinned by a test —
+   a missed fabrication understates the problem, which is what a lower bound is
+   for.
 
 **To get a hallucination rate, the methodology decision has to be made first**:
 what classes of false statement count, who adjudicates them, and how
@@ -102,20 +124,31 @@ ones worth measuring.
 
 ## The acceptance cases
 
-One case per measured dimension, in `backend/evaluation/fixtures/cases.json`.
-`latency` and `token_profile` are reported on every case, so they get no case of
-their own; `token-profile-multi-step-traversal` exists to force a multi-turn
-tool-chaining loop so those figures describe realistic agentic work on at least
-one case.
+Nine cases in `backend/evaluation/fixtures/cases.json`, covering every
+pass/fail-scored dimension. `latency` and `token_profile` are measured on every
+case rather than by a case of their own, since neither has a pass condition;
+`token-profile-multi-step-traversal` carries `token_profile` as its nominal
+dimension and exists to force a multi-turn tool-chaining loop, so those two
+numbers describe realistic agentic work on at least one case instead of a single
+round trip. A test asserts that every scored dimension is either some case's
+dimension or one of those two.
 
 A case is a fixture graph, a prompt, the skills to inject, and an expectation
 stated as a predicate over the recorded run. Nothing is scored by reading the
 model's prose.
 
-The four protocol rules the cases exercise — ID-first execution, mandatory
-post-write verification, comprehensive object inspection, discrepancy handling
-— come from the reliability problems seen on a mid-size open model in pilot use.
-They are in `fixtures/skills/graph-maintenance-protocol.md`.
+The protocol rules in `fixtures/skills/graph-maintenance-protocol.md` come from
+the reliability problems seen on a mid-size open model in pilot use. Three of
+the four are exercised by cases: ID-first execution, mandatory post-write
+verification, and comprehensive object inspection.
+
+**Discrepancy handling ships unexercised**, and deliberately so rather than by
+oversight: the rule only triggers "if the user disputes a change you reported",
+and every case is a single user turn (`runner.py` sends one user message, and
+`AcceptanceCase` has no field for a second). Measuring it needs a multi-turn
+case format — a worthwhile extension, but one that changes the case model, so it
+is not smuggled in here. The rule stays in the skill because the model should
+follow it in production; just do not read a passing suite as evidence about it.
 
 ### Adding a case
 
@@ -193,14 +226,42 @@ export SKILL_EVAL_OPENAI_API_KEY=...          # the OpenAI key
 export SKILL_EVAL_OPEN_MODEL_API_KEY=...      # the open-model endpoint's key
 ```
 
-Nothing else is read. There is no fallback to `OPENAI_API_KEY` or
-`ANTHROPIC_API_KEY`: a harness that fell back would attribute one endpoint's
-behaviour to another and bill a key you did not choose. An unset variable is a
-clear error naming the variable, before any case runs.
+The harness reads **only** the variable each profile names. There is no
+fallback to `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`: a harness that fell back
+would attribute one endpoint's behaviour to another and bill a key you did not
+choose. An unset variable is a clear error naming the variable, before any case
+runs.
 
-`.env.example` names these variables with empty values as a reminder. **No file
-in this repository may contain a credential value.** Prefer exporting in the
-shell over a `.env` file, so the value never lands on disk.
+#### Where that variable can come from
+
+Being precise about this, because the loose version of the claim is wrong and
+worth knowing: the harness reads the **process environment**, and that is not
+the same as "the shell only". Importing the assistant calls `load_dotenv()`
+(`backend/ui/chat_logic.py`), which the harness triggers on every case, so an
+untracked `.env` in the repository root **is** loaded into the environment and
+**will** satisfy a `credential_ref`. That is how the application itself is
+configured, and the harness neither adds nor can remove it.
+
+So the guarantee is this, exactly:
+
+- **No file in this repository contains a credential value**, and none may. The
+  `gitleaks` CI job and
+  `backend/evaluation/tests/test_no_credentials.py` both check it, and
+  `ModelProfile` refuses to hold one.
+- **The harness itself never reads a key from a file, never stores one, never
+  logs one, and never defaults one.** It resolves `credential_ref` against
+  `os.environ` at the moment a provider is built.
+- **A `.env` you create is yours to manage.** It is gitignored, it works, and it
+  is still a key at rest on disk. `.env.example` names these variables with
+  empty values purely as a reminder of what to export. **Prefer exporting in
+  your shell**, so the value never lands in a file at all.
+
+One more thing that is read but unused: constructing the assistant reads ambient
+`OPENAI_API_KEY`/`ANTHROPIC_API_KEY` into `ChatProcessor.default_api_key` (you
+will see an `ANTHROPIC_API_KEY not found` log line during a run). The harness
+bypasses that field entirely by injecting its own provider, so it cannot affect
+a measurement — but it is read, and saying "nothing else is read" would be
+false.
 
 ### 3. Run
 

@@ -5,20 +5,25 @@ This table is the harness's contract with its reader. Every dimension the
 evaluation reports comes from here, and each one carries how mechanically it
 can be scored:
 
-- ``FULL``    — the pass condition is a predicate over the recorded run. Two
-                runs of the same case on the same output always score the same,
-                and no human reads the answer to decide.
-- ``PARTIAL`` — only part of the dimension is a predicate. The scored part is
-                stated in ``caveat``; the rest is not reported as a number.
-- ``NONE``    — not scorable without a methodology decision. The harness
-                reports no score for it, deliberately. A metric that looks
-                objective but encodes an unstated judgement is worse than an
-                acknowledged gap, because a reader cannot tell it apart from
-                one that does not.
+- ``FULL``     — the pass condition is a predicate over the recorded run. Two
+                 runs of the same case on the same output always score the same,
+                 and no human reads the answer to decide.
+- ``PARTIAL``  — only part of the dimension is a predicate. The scored part is
+                 stated in ``caveat``; the rest is not reported as a number.
+- ``REPORTED`` — measured objectively but with no pass condition at all: a
+                 number the reader compares across providers. Latency and
+                 tokens are these. They are deliberately NOT ``FULL``: calling
+                 a measurement with no threshold "fully scored" would say the
+                 harness passes or fails a provider on it, which it does not.
+- ``NONE``     — not scorable without a methodology decision. The harness
+                 reports no score for it, deliberately. A metric that looks
+                 objective but encodes an unstated judgement is worse than an
+                 acknowledged gap, because a reader cannot tell it apart from
+                 one that does not.
 
 Keeping this in code rather than only in prose means the docs and the tests can
-both pin it (see backend/evaluation/tests/test_dimensions.py and
-docs/SKILL_EVALUATION.md).
+both pin it (see backend/evaluation/tests/test_cases.py::TestDimensionTable,
+which also pins the table in docs/SKILL_EVALUATION.md against this one).
 """
 
 from dataclasses import dataclass, field
@@ -29,6 +34,7 @@ from typing import Dict, List
 class Mechanical(str, Enum):
     FULL = "full"
     PARTIAL = "partial"
+    REPORTED = "reported"
     NONE = "none"
 
 
@@ -136,10 +142,10 @@ DIMENSIONS: Dict[str, Dimension] = {
                 "anything, and guessing at it would produce a confident figure "
                 "resting on an unstated definition. The one check implemented is "
                 "narrower and separately named in the report: "
-                "unsupported_entity_reference, the share of id-shaped tokens cited in "
-                "the final answer that appear in no tool result from the run. That is "
-                "a strict lower bound on hallucination — it catches a fabricated id, "
-                "never a plausible-but-false claim about a real node."
+                "unsupported_entity_reference, the share of node references in the "
+                "final answer that no tool result returned. That is a strict lower "
+                "bound on hallucination — it catches a node the run never read, never "
+                "a plausible-but-false claim about a node it did read."
             ),
         ),
         Dimension(
@@ -149,18 +155,23 @@ DIMENSIONS: Dict[str, Dimension] = {
             measured_by=["answer_entities_supported"],
             caveat=(
                 "Deliberately not called a hallucination rate, and not a substitute "
-                "for one: it is the share of id-shaped tokens in the final answer that "
-                "appear in no tool result from the run. Node *names* are not checked — "
+                "for one. Two signals: a fixture-graph id the answer cites that no "
+                "tool result returned (closed vocabulary, no false positives), and an "
+                "id-shaped token matching nothing the model was shown (open "
+                "vocabulary, tuned to miss rather than misfire — a slug segment that "
+                "is an English function word disqualifies the token, so 'up-to-date' "
+                "is never read as a fabricated node and an id containing such a "
+                "segment is never flagged). Node *names* are not checked at all: "
                 "there is no mechanical way to tell a cited node name from a noun "
-                "phrase that happens to repeat one — so this catches an invented id "
-                "and nothing else. See the hallucination row for why the broader "
-                "dimension is left unscored."
+                "phrase that repeats one. So this catches a node reference the run "
+                "never read, and nothing else. See the hallucination row for why the "
+                "broader dimension is left unscored."
             ),
         ),
         Dimension(
             key="latency",
             title="Latency",
-            mechanical=Mechanical.FULL,
+            mechanical=Mechanical.REPORTED,
             measured_by=[],
             caveat=(
                 "Wall-clock time around each provider call, summed. Reported, never "
@@ -171,7 +182,7 @@ DIMENSIONS: Dict[str, Dimension] = {
         Dimension(
             key="token_profile",
             title="Token profile",
-            mechanical=Mechanical.FULL,
+            mechanical=Mechanical.REPORTED,
             measured_by=[],
             caveat=(
                 "Prompt and completion tokens as the provider reports them, summed "
@@ -185,11 +196,24 @@ DIMENSIONS: Dict[str, Dimension] = {
 
 
 def mechanically_scored_dimensions() -> List[str]:
-    """Dimension keys the harness scores pass/fail, fully or in part."""
+    """
+    Dimension keys the harness scores pass/fail, fully or in part.
+
+    Excludes the REPORTED dimensions: latency and tokens are measured, but
+    nothing passes or fails on them, so listing them here would overstate what
+    a report says.
+    """
     return [
         key
         for key, dim in DIMENSIONS.items()
         if dim.mechanical in (Mechanical.FULL, Mechanical.PARTIAL)
+    ]
+
+
+def reported_only_dimensions() -> List[str]:
+    """Dimension keys measured as a number, with no pass condition."""
+    return [
+        key for key, dim in DIMENSIONS.items() if dim.mechanical is Mechanical.REPORTED
     ]
 
 

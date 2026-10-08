@@ -11,6 +11,7 @@ import pytest
 
 from backend.evaluation.scoring import (
     ID_TOKEN_RE,
+    is_id_shaped,
     _align,
     ConditionResult,
     score_answer_entities_supported,
@@ -273,6 +274,40 @@ class TestIdsResolvedFromResults:
         )
         assert score_ids_resolved_from_results(tr).passed
 
+    def test_an_edge_may_name_a_node_being_created_in_the_same_call(self):
+        """
+        The schema-valid create-and-connect call.
+
+        add_nodes' `nodes` item schema has NO id property — ids are
+        server-generated — while edges[].source/target are "node ID or name".
+        So the only legitimate way to connect a node being created is by its
+        name. Collecting only ids charged every such call an ID-first failure,
+        and the only passing route was to invent a client-side nodes[].id.
+        """
+        tr = transcript(
+            [
+                call("search_graph", {"query": "Handbook"}, turn=0, tool_use_id="r0"),
+                call(
+                    "add_nodes",
+                    {
+                        "nodes": [{"type": "Resource", "name": "New Handbook"}],
+                        "edges": [
+                            {
+                                "source": "New Handbook",
+                                "target": "eval-resource-metadata-handbook",
+                                "type": "RELATES_TO",
+                            }
+                        ],
+                    },
+                    turn=1,
+                    tool_use_id="w1",
+                ),
+            ],
+            results={"r0": {"nodes": [{"id": "eval-resource-metadata-handbook"}]}},
+        )
+        result = score_ids_resolved_from_results(tr)
+        assert result.passed, result.detail
+
     def test_an_edge_endpoint_that_is_neither_read_nor_created_fails(self):
         tr = transcript(
             [
@@ -307,6 +342,28 @@ class TestIdsResolvedFromResults:
                 ),
             ],
             results={"r0": {"a": {"b": [{"c": ["eval-node-deep"]}]}}},
+        )
+        assert score_ids_resolved_from_results(tr).passed
+
+    def test_an_id_seen_only_inside_a_result_message_counts_as_read(self):
+        """
+        Same rule as the answer-citation scorer: shown is shown.
+
+        The two asked this differently before — an id the model only ever saw
+        inside a status message counted as supported in its answer but not as
+        read before a write.
+        """
+        tr = transcript(
+            [
+                call("search_graph", {"query": "x"}, turn=0, tool_use_id="r0"),
+                call(
+                    "update_node",
+                    {"node_id": "eval-node-one", "updates": {}},
+                    turn=1,
+                    tool_use_id="w1",
+                ),
+            ],
+            results={"r0": {"message": "Found node eval-node-one in the graph"}},
         )
         assert score_ids_resolved_from_results(tr).passed
 
@@ -571,6 +628,46 @@ class TestFinalNodeFieldsChanged:
             tr, self.FIXTURE, {"eval-a": ["name"]}
         ).passed
 
+    def test_a_serializer_default_does_not_count_as_a_change(self):
+        """
+        The vacuous pass: the fixture omits the field, the serializer fills it.
+
+        `None != []` would read as "changed" on a run in which the model did
+        nothing at all, so a case naming subtypes/aliases/metadata passed
+        against an empty transcript.
+        """
+        tr = transcript(
+            final_graph={
+                "nodes": [
+                    {
+                        "id": "eval-a",
+                        "name": "Before",
+                        "description": "Before",
+                        "summary": "Before",
+                        "subtypes": [],
+                        "aliases": [],
+                        "metadata": {},
+                    }
+                ]
+            }
+        )
+        result = score_final_node_fields_changed(
+            tr, self.FIXTURE, {"eval-a": ["subtypes", "aliases", "metadata"]}
+        )
+        assert not result.passed
+        for field in ("subtypes", "aliases", "metadata"):
+            assert field in result.detail
+
+    def test_filling_an_absent_field_does_count_as_a_change(self):
+        """The mirror case: "give this node a summary it lacks" is legitimate."""
+        fixture = {"nodes": [{"id": "eval-a", "name": "N"}]}
+        tr = transcript(
+            final_graph={"nodes": [{"id": "eval-a", "name": "N", "summary": "Added"}]}
+        )
+        assert score_final_node_fields_changed(
+            tr, fixture, {"eval-a": ["summary"]}
+        ).passed
+
 
 class TestAnswerEntitiesSupported:
     def test_a_cited_id_present_in_a_result_passes(self):
@@ -607,11 +704,51 @@ class TestAnswerEntitiesSupported:
         assert score_answer_entities_supported(tr).passed
 
     def test_ordinary_hyphenated_prose_is_not_read_as_an_id(self):
-        """Two-segment words are everywhere in prose; three-plus is the threshold."""
+        """Two-segment words are everywhere in prose."""
         tr = transcript(
             results={}, final_text="This is machine-readable, well-formed data."
         )
         assert score_answer_entities_supported(tr).passed
+
+    @pytest.mark.parametrize(
+        "phrase",
+        ["up-to-date", "end-to-end", "state-of-the-art", "one-size-fits-all"],
+    )
+    def test_multi_segment_english_phrases_are_not_read_as_fabricated_ids(self, phrase):
+        """
+        Three segments alone does not distinguish an id from English.
+
+        "the node is now up-to-date" must not be reported as citing an invented
+        node. A false accusation here is indistinguishable from a real finding,
+        which is exactly what the hallucination row refuses to risk.
+        """
+        tr = transcript(results={}, final_text=f"The node is now {phrase}.")
+        result = score_answer_entities_supported(tr)
+        assert result.passed, result.detail
+
+    def test_a_fixture_id_cited_but_never_read_fails(self):
+        """
+        The closed-vocabulary half: a real node the run never looked at.
+
+        No heuristic involved — the id is in the case's own fixture, so citing
+        it without a tool result having returned it is unambiguous.
+        """
+        fixture = {"nodes": [{"id": "eval-actor-statistics-office"}]}
+        tr = transcript(
+            results={"r0": {"nodes": [{"id": "eval-resource-metadata-handbook"}]}},
+            final_text="It belongs to eval-actor-statistics-office.",
+        )
+        result = score_answer_entities_supported(tr, fixture)
+        assert not result.passed
+        assert "eval-actor-statistics-office" in result.detail
+
+    def test_a_fixture_id_that_was_read_passes(self):
+        fixture = {"nodes": [{"id": "eval-actor-statistics-office"}]}
+        tr = transcript(
+            results={"r0": {"nodes": [{"id": "eval-actor-statistics-office"}]}},
+            final_text="It belongs to eval-actor-statistics-office.",
+        )
+        assert score_answer_entities_supported(tr, fixture).passed
 
 
 class TestIdTokenPattern:
@@ -631,6 +768,43 @@ class TestIdTokenPattern:
     )
     def test_does_not_match_ordinary_prose(self, text):
         assert ID_TOKEN_RE.findall(text) == []
+
+
+class TestIsIdShaped:
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "eval-initiative-metadata-register",
+            "task-compare-skills-openai-open-models",
+            "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+        ],
+    )
+    def test_accepts_ids_this_system_writes(self, token):
+        assert is_id_shaped(token)
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "up-to-date",
+            "end-to-end",
+            "state-of-the-art",
+            "one-size-fits-all",
+            "machine-readable",
+            "metadata",
+        ],
+    )
+    def test_rejects_english_prose(self, token):
+        assert not is_id_shaped(token)
+
+    def test_rejects_a_real_id_containing_a_function_word_segment(self):
+        """
+        The documented false negative, pinned so it stays a known trade.
+
+        An id like task-fix-edge-authentication-on-sspcloud is missed because
+        "on" marks a token as prose. Biasing towards a miss is deliberate: the
+        alternative is reporting an English phrase as a fabricated node.
+        """
+        assert not is_id_shaped("task-fix-edge-authentication-on-sspcloud")
 
 
 class TestDiscriminatingFirstCall:
