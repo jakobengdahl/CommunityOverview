@@ -1,0 +1,625 @@
+"""
+Scoring: turn a recorded run into per-dimension verdicts.
+
+Every scorer here is a pure function of the run transcript, the tool schemas the
+run advertised, and the fixture the run started from. Nothing reads the model's
+prose to form an impression, which is what makes a score reproducible — and what
+limits which dimensions can be scored at all (see
+backend/evaluation/dimensions.py).
+
+A condition a case does not declare is not scored, and its dimension is reported
+as unscored rather than passing by default. An unscored dimension and a passing
+one must never look alike in a report.
+"""
+
+import re
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Sequence, Set
+
+from jsonschema import Draft7Validator
+
+from backend.evaluation.cases import (
+    ID_BEARING_ARGS,
+    WRITE_TOOLS,
+    AcceptanceCase,
+)
+from backend.evaluation.dimensions import DIMENSIONS, Mechanical
+from backend.evaluation.transcript import RunTranscript, TokenUsage, ToolCall
+
+# An id as this system writes them: a UUID, or a slug of three or more
+# hyphen-separated lowercase segments (``task-compare-skills-openai``). Three is
+# the threshold that keeps ordinary hyphenated prose ("machine-readable data")
+# from being read as an id. Node *names* are deliberately not matched: there is
+# no mechanical way to tell a cited node name from a noun phrase that happens to
+# repeat one, so names are outside what this check claims to cover.
+_UUID_RE = (
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+_SLUG_RE = r"[a-z0-9]+(?:-[a-z0-9]+){2,}"
+ID_TOKEN_RE = re.compile(rf"\b(?:{_UUID_RE}|{_SLUG_RE})\b")
+
+
+@dataclass
+class ConditionResult:
+    """Outcome of one declared pass condition."""
+
+    name: str
+    passed: bool
+    detail: str = ""
+
+
+@dataclass
+class DimensionScore:
+    """What the run says about one dimension."""
+
+    dimension: str
+    mechanical: Mechanical
+    scored: bool
+    passed: Optional[bool]
+    conditions: List[ConditionResult] = field(default_factory=list)
+    note: str = ""
+
+
+@dataclass
+class CaseScore:
+    """The full verdict for one case run."""
+
+    case_id: str
+    dimension: str
+    conditions: List[ConditionResult] = field(default_factory=list)
+    dimensions: Dict[str, DimensionScore] = field(default_factory=dict)
+    latency_ms: float = 0.0
+    usage: TokenUsage = field(default_factory=TokenUsage)
+    provider_calls: int = 0
+    tool_calls: List[str] = field(default_factory=list)
+    run_error: Optional[str] = None
+
+    @property
+    def passed(self) -> bool:
+        """True when the run completed and every declared condition held."""
+        if self.run_error:
+            return False
+        return bool(self.conditions) and all(c.passed for c in self.conditions)
+
+
+# --------------------------------------------------------------------------
+# helpers
+# --------------------------------------------------------------------------
+
+
+def _all_strings(obj: Any) -> Set[str]:
+    """
+    Every string anywhere in a decoded tool result.
+
+    The ID-first rule asks whether the model had *seen* an id before using it,
+    so membership in the text it was shown is exactly the right test — stricter
+    key-based extraction would invent false failures whenever a result nests ids
+    somewhere this code did not anticipate.
+    """
+    found: Set[str] = set()
+    stack = [obj]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, str):
+            found.add(current)
+        elif isinstance(current, dict):
+            stack.extend(current.keys())
+            stack.extend(current.values())
+        elif isinstance(current, (list, tuple, set)):
+            stack.extend(current)
+    return found
+
+
+def _resolve_arg_path(args: Any, path: str) -> List[Any]:
+    """
+    Read the values at a dotted path, where ``[]`` fans out over a list.
+
+    ``edges[].source`` over ``{"edges": [{"source": "a"}, {"source": "b"}]}``
+    yields ``["a", "b"]``.
+    """
+    current: List[Any] = [args]
+    for segment in path.split("."):
+        fan_out = segment.endswith("[]")
+        key = segment[:-2] if fan_out else segment
+        nxt: List[Any] = []
+        for item in current:
+            if not isinstance(item, dict) or key not in item:
+                continue
+            value = item[key]
+            if fan_out:
+                if isinstance(value, (list, tuple)):
+                    nxt.extend(value)
+            else:
+                nxt.append(value)
+        current = nxt
+    return current
+
+
+def _ids_in_call(call: ToolCall) -> List[str]:
+    """Ids the call passes to a write or relationship tool."""
+    paths = ID_BEARING_ARGS.get(call.name)
+    if not paths:
+        return []
+    ids: List[str] = []
+    for path in paths:
+        for value in _resolve_arg_path(call.input, path):
+            if isinstance(value, str) and value:
+                ids.append(value)
+    return ids
+
+
+def _same_call_node_ids(call: ToolCall) -> Set[str]:
+    """
+    Ids add_nodes declares in the same call its edges reference.
+
+    An edge may legitimately point at a node being created alongside it, so
+    those ids are not evidence that the model guessed.
+    """
+    if call.name != "add_nodes":
+        return set()
+    ids: Set[str] = set()
+    for node in _resolve_arg_path(call.input, "nodes[]"):
+        if isinstance(node, dict) and isinstance(node.get("id"), str):
+            ids.add(node["id"])
+    return ids
+
+
+def _ids_known_before(transcript: RunTranscript, turn: int) -> Set[str]:
+    """Strings the model had been shown in tool results before ``turn``."""
+    known: Set[str] = set()
+    for call in transcript.tool_calls:
+        if call.turn >= turn:
+            continue
+        if call.tool_use_id in transcript.tool_results:
+            known |= _all_strings(transcript.tool_results[call.tool_use_id])
+    return known
+
+
+def _result_is_error(result: Any) -> bool:
+    """Whether a decoded tool result reports failure."""
+    if isinstance(result, dict):
+        if result.get("error"):
+            return True
+        if result.get("success") is False:
+            return True
+    return False
+
+
+def _written_node_ids(transcript: RunTranscript, call: ToolCall) -> Set[str]:
+    """Node ids a successful write touched, from its arguments and its result."""
+    ids = {i for i in _ids_in_call(call)}
+    result = transcript.result_for(call.tool_use_id)
+    if isinstance(result, dict):
+        for key in ("added_node_ids", "updated_node_ids", "node_ids"):
+            value = result.get(key)
+            if isinstance(value, list):
+                ids |= {v for v in value if isinstance(v, str)}
+        node = result.get("node")
+        if isinstance(node, dict) and isinstance(node.get("id"), str):
+            ids.add(node["id"])
+    return {i for i in ids if i}
+
+
+def _find_node(graph: Dict[str, Any], node_id: str) -> Optional[Dict[str, Any]]:
+    for node in graph.get("nodes") or []:
+        if isinstance(node, dict) and node.get("id") == node_id:
+            return node
+    return None
+
+
+def _is_ordered_subsequence(required: Sequence[str], actual: Sequence[str]) -> bool:
+    it = iter(actual)
+    return all(any(name == seen for seen in it) for name in required)
+
+
+# --------------------------------------------------------------------------
+# condition scorers
+# --------------------------------------------------------------------------
+
+
+def _undeclared_arguments(arguments: Any, schema: Dict[str, Any]) -> List[str]:
+    """
+    Top-level arguments the tool's schema does not declare.
+
+    Checked separately from JSON Schema validation because the tool schemas do
+    not set ``additionalProperties: false``, so a validator accepts an invented
+    parameter. It is a real model error all the same, and a quiet one:
+    chat_logic filters a tool's arguments to the names in its Python signature
+    (backend/ui/chat_logic.py), so an invented name is silently *dropped* and
+    the tool runs with a default instead. The model is then told the call
+    succeeded while the value it chose was discarded, which is precisely the
+    class of failure this dimension exists to surface.
+    """
+    if not isinstance(arguments, dict):
+        return []
+    declared = schema.get("properties")
+    if not isinstance(declared, dict):
+        return []
+    return sorted(name for name in arguments if name not in declared)
+
+
+def score_tool_calls_valid(
+    transcript: RunTranscript, tool_definitions: Sequence[Dict[str, Any]]
+) -> ConditionResult:
+    """Every call names an advertised tool and validates against its schema."""
+    schemas = {
+        t["name"]: t.get("input_schema") or {}
+        for t in tool_definitions
+        if isinstance(t, dict) and "name" in t
+    }
+    advertised = set(
+        name
+        for call in transcript.provider_calls
+        for name in call.tools_advertised
+        if name
+    ) or set(schemas)
+
+    problems: List[str] = []
+    for index, call in enumerate(transcript.tool_calls):
+        if call.name not in advertised:
+            problems.append(f"#{index} {call.name!r}: not advertised in this run")
+            continue
+        schema = schemas.get(call.name)
+        if not schema:
+            problems.append(
+                f"#{index} {call.name!r}: no input_schema to validate against"
+            )
+            continue
+        errors = sorted(
+            Draft7Validator(schema).iter_errors(call.input), key=lambda e: list(e.path)
+        )
+        for error in errors:
+            location = "/".join(str(p) for p in error.path) or "(root)"
+            problems.append(f"#{index} {call.name}.{location}: {error.message}")
+        for name in _undeclared_arguments(call.input, schema):
+            problems.append(
+                f"#{index} {call.name}.{name}: not a parameter of this tool"
+            )
+
+    if not transcript.tool_calls:
+        return ConditionResult(
+            "tool_calls_valid", False, "the model made no tool calls at all"
+        )
+    if problems:
+        return ConditionResult("tool_calls_valid", False, "; ".join(problems))
+    return ConditionResult(
+        "tool_calls_valid", True, f"{len(transcript.tool_calls)} call(s) valid"
+    )
+
+
+def score_required_call_sequence(
+    transcript: RunTranscript, required: Sequence[str]
+) -> ConditionResult:
+    actual = transcript.tool_call_names
+    if _is_ordered_subsequence(required, actual):
+        return ConditionResult(
+            "required_call_sequence", True, f"{list(required)} in order within {actual}"
+        )
+    return ConditionResult(
+        "required_call_sequence",
+        False,
+        f"expected {list(required)} as an ordered subsequence of {actual}",
+    )
+
+
+def score_forbidden_calls(
+    transcript: RunTranscript, forbidden: Sequence[str]
+) -> ConditionResult:
+    hit = [name for name in transcript.tool_call_names if name in set(forbidden)]
+    if hit:
+        return ConditionResult("forbidden_calls", False, f"called {sorted(set(hit))}")
+    return ConditionResult("forbidden_calls", True, f"none of {list(forbidden)} called")
+
+
+def score_ids_resolved_from_results(transcript: RunTranscript) -> ConditionResult:
+    """Every id passed to a write or relationship tool was read back first."""
+    unresolved: List[str] = []
+    checked = 0
+    for call in transcript.tool_calls:
+        ids = _ids_in_call(call)
+        if not ids:
+            continue
+        known = _ids_known_before(transcript, call.turn) | _same_call_node_ids(call)
+        for value in ids:
+            checked += 1
+            if value not in known:
+                unresolved.append(f"{call.name}({value!r}) at turn {call.turn}")
+
+    if unresolved:
+        return ConditionResult(
+            "ids_resolved_from_results",
+            False,
+            f"id(s) used without being read first: {unresolved}",
+        )
+    if checked == 0:
+        return ConditionResult(
+            "ids_resolved_from_results",
+            False,
+            "no write or relationship call carried an id, so the rule was never exercised",
+        )
+    return ConditionResult(
+        "ids_resolved_from_results", True, f"{checked} id reference(s) all read first"
+    )
+
+
+def score_verify_after_write(
+    transcript: RunTranscript, read_tools: Sequence[str]
+) -> ConditionResult:
+    """A read after the last successful write returned the written node."""
+    writes = [
+        (index, call)
+        for index, call in enumerate(transcript.tool_calls)
+        if call.name in WRITE_TOOLS
+        and not _result_is_error(transcript.result_for(call.tool_use_id))
+    ]
+    if not writes:
+        return ConditionResult(
+            "verify_after_write", False, "no successful write occurred in the run"
+        )
+
+    last_index, last_write = writes[-1]
+    written = _written_node_ids(transcript, last_write)
+    if not written:
+        return ConditionResult(
+            "verify_after_write",
+            False,
+            f"could not determine which node {last_write.name} wrote",
+        )
+
+    allowed = set(read_tools)
+    for call in transcript.tool_calls[last_index + 1 :]:
+        if call.name not in allowed:
+            continue
+        seen = _all_strings(transcript.result_for(call.tool_use_id))
+        overlap = written & seen
+        if overlap:
+            return ConditionResult(
+                "verify_after_write",
+                True,
+                f"{call.name} after {last_write.name} returned {sorted(overlap)}",
+            )
+    return ConditionResult(
+        "verify_after_write",
+        False,
+        f"no {sorted(allowed)} call after {last_write.name} returned any of "
+        f"{sorted(written)}",
+    )
+
+
+def score_final_node_state(
+    transcript: RunTranscript, expected: Dict[str, Dict[str, Any]]
+) -> ConditionResult:
+    problems: List[str] = []
+    for node_id, fields in expected.items():
+        node = _find_node(transcript.final_graph, node_id)
+        if node is None:
+            problems.append(f"{node_id}: absent from the final graph")
+            continue
+        for key, want in fields.items():
+            got = node.get(key)
+            if got != want:
+                problems.append(f"{node_id}.{key}: expected {want!r}, got {got!r}")
+    if problems:
+        return ConditionResult("final_node_state", False, "; ".join(problems))
+    return ConditionResult(
+        "final_node_state", True, f"{len(expected)} node state(s) as expected"
+    )
+
+
+def score_final_node_fields_changed(
+    transcript: RunTranscript,
+    fixture_graph: Dict[str, Any],
+    expected: Dict[str, List[str]],
+) -> ConditionResult:
+    problems: List[str] = []
+    for node_id, fields in expected.items():
+        before = _find_node(fixture_graph, node_id)
+        after = _find_node(transcript.final_graph, node_id)
+        if after is None:
+            problems.append(f"{node_id}: absent from the final graph")
+            continue
+        for key in fields:
+            was = (before or {}).get(key)
+            now = after.get(key)
+            if now == was:
+                problems.append(f"{node_id}.{key}: unchanged ({was!r})")
+    if problems:
+        return ConditionResult("final_node_fields_changed", False, "; ".join(problems))
+    changed = sum(len(f) for f in expected.values())
+    return ConditionResult(
+        "final_node_fields_changed", True, f"{changed} field(s) changed as required"
+    )
+
+
+def score_answer_entities_supported(transcript: RunTranscript) -> ConditionResult:
+    """
+    No id-shaped token in the final answer is absent from every tool result.
+
+    This is the narrow, separately-named check behind the
+    ``unsupported_entity_reference`` dimension — not a hallucination rate. See
+    that dimension's caveat for what it does and does not catch.
+    """
+    cited = set(ID_TOKEN_RE.findall(transcript.final_text or ""))
+    if not cited:
+        return ConditionResult(
+            "answer_entities_supported",
+            True,
+            "the answer cites no id-shaped token (vacuously supported)",
+        )
+    supported: Set[str] = set()
+    for result in transcript.tool_results.values():
+        supported |= _all_strings(result)
+    # A result may embed an id inside a longer string (a message, a URL), so an
+    # id is supported when it occurs anywhere in what the model was shown.
+    blob = "\n".join(s for s in supported if isinstance(s, str))
+    unsupported = sorted(
+        token for token in cited if token not in supported and token not in blob
+    )
+    if unsupported:
+        return ConditionResult(
+            "answer_entities_supported",
+            False,
+            f"answer cites id(s) absent from every tool result: {unsupported}",
+        )
+    return ConditionResult(
+        "answer_entities_supported",
+        True,
+        f"{len(cited)} cited id(s) all supported by a tool result",
+    )
+
+
+def score_discriminating_first_call(
+    transcript: RunTranscript, expected: str
+) -> ConditionResult:
+    actual = transcript.tool_call_names
+    if not actual:
+        return ConditionResult(
+            "discriminating_first_call", False, "the model made no tool calls at all"
+        )
+    if actual[0] == expected:
+        return ConditionResult(
+            "discriminating_first_call", True, f"first call was {expected!r}"
+        )
+    return ConditionResult(
+        "discriminating_first_call",
+        False,
+        f"expected first call {expected!r}, got {actual[0]!r} (sequence {actual})",
+    )
+
+
+# --------------------------------------------------------------------------
+# case-level scoring
+# --------------------------------------------------------------------------
+
+
+def _evaluate_conditions(
+    case: AcceptanceCase,
+    transcript: RunTranscript,
+    tool_definitions: Sequence[Dict[str, Any]],
+    fixture_graph: Dict[str, Any],
+) -> List[ConditionResult]:
+    expect = case.expect
+    results: List[ConditionResult] = []
+
+    if expect.tool_calls_valid is not None:
+        actual = score_tool_calls_valid(transcript, tool_definitions)
+        results.append(_align(actual, expect.tool_calls_valid))
+    if expect.required_call_sequence:
+        results.append(
+            score_required_call_sequence(transcript, expect.required_call_sequence)
+        )
+    if expect.forbidden_calls:
+        results.append(score_forbidden_calls(transcript, expect.forbidden_calls))
+    if expect.ids_resolved_from_results is not None:
+        actual = score_ids_resolved_from_results(transcript)
+        results.append(_align(actual, expect.ids_resolved_from_results))
+    if expect.verify_after_write is not None:
+        actual = score_verify_after_write(transcript, expect.verify_read_tools)
+        results.append(_align(actual, expect.verify_after_write))
+    if expect.final_node_state:
+        results.append(score_final_node_state(transcript, expect.final_node_state))
+    if expect.final_node_fields_changed:
+        results.append(
+            score_final_node_fields_changed(
+                transcript, fixture_graph, expect.final_node_fields_changed
+            )
+        )
+    if expect.answer_entities_supported is not None:
+        actual = score_answer_entities_supported(transcript)
+        results.append(_align(actual, expect.answer_entities_supported))
+    if expect.discriminating_first_call is not None:
+        results.append(
+            score_discriminating_first_call(
+                transcript, expect.discriminating_first_call
+            )
+        )
+    return results
+
+
+def _align(result: ConditionResult, expected_outcome: bool) -> ConditionResult:
+    """
+    Reconcile a boolean condition with the polarity the case declared.
+
+    A case may assert that a behaviour must NOT hold — a negative case pinning
+    that the harness detects a violation rather than only that a good model
+    passes. Without this, ``false`` in a fixture would silently read as "do not
+    check", and a suite of only positive cases cannot tell a working scorer from
+    one that always returns True.
+    """
+    if result.passed == expected_outcome:
+        return ConditionResult(result.name, True, result.detail)
+    return ConditionResult(
+        result.name,
+        False,
+        f"expected this condition to be {expected_outcome}; {result.detail}",
+    )
+
+
+def score_case(
+    case: AcceptanceCase,
+    transcript: RunTranscript,
+    tool_definitions: Sequence[Dict[str, Any]],
+    fixture_graph: Optional[Dict[str, Any]] = None,
+) -> CaseScore:
+    """Score one recorded run against its case."""
+    conditions = (
+        []
+        if transcript.run_error
+        else _evaluate_conditions(
+            case, transcript, tool_definitions, fixture_graph or {}
+        )
+    )
+    by_name = {c.name: c for c in conditions}
+
+    dimension_scores: Dict[str, DimensionScore] = {}
+    for key, dim in DIMENSIONS.items():
+        relevant = [by_name[n] for n in dim.measured_by if n in by_name]
+        if dim.mechanical is Mechanical.NONE:
+            dimension_scores[key] = DimensionScore(
+                dimension=key,
+                mechanical=dim.mechanical,
+                scored=False,
+                passed=None,
+                note=dim.caveat,
+            )
+            continue
+        if not dim.measured_by:
+            # Reported-only dimensions (latency, token_profile): the numbers live
+            # on the CaseScore, and there is no pass condition to report.
+            dimension_scores[key] = DimensionScore(
+                dimension=key,
+                mechanical=dim.mechanical,
+                scored=True,
+                passed=None,
+                note=dim.caveat,
+            )
+            continue
+        if not relevant:
+            dimension_scores[key] = DimensionScore(
+                dimension=key,
+                mechanical=dim.mechanical,
+                scored=False,
+                passed=None,
+                note="this case declares no condition for this dimension",
+            )
+            continue
+        dimension_scores[key] = DimensionScore(
+            dimension=key,
+            mechanical=dim.mechanical,
+            scored=True,
+            passed=all(c.passed for c in relevant),
+            conditions=relevant,
+            note=dim.caveat,
+        )
+
+    return CaseScore(
+        case_id=case.id,
+        dimension=case.dimension,
+        conditions=conditions,
+        dimensions=dimension_scores,
+        latency_ms=transcript.total_latency_ms,
+        usage=transcript.total_usage,
+        provider_calls=len(transcript.provider_calls),
+        tool_calls=transcript.tool_call_names,
+        run_error=transcript.run_error,
+    )

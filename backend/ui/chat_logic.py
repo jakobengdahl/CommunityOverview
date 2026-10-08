@@ -1226,6 +1226,7 @@ class ChatProcessor:
         tools_override: Dict[str, Callable] = None,
         visualization_context: str = None,
         tool_allowlist: Optional[List[str]] = None,
+        llm_provider: Optional[LLMProvider] = None,
     ) -> Dict:
         """
         Process a message history, call LLM, handle tools, return final response.
@@ -1252,13 +1253,23 @@ class ChatProcessor:
                 When set, only listed tools are advertised to the LLM and executed;
                 any other tool is blocked server-side. Mirrors the AIAgent
                 tool-permission model (used by the collection kiosk).
+            llm_provider: Optional ready-made LLMProvider to use verbatim,
+                bypassing provider resolution entirely (api_key, provider and
+                model_profile_id are then unused). Used by the evaluation harness
+                (backend/evaluation), which must drive one exact provider/model
+                it was handed and must not inherit whatever LLM_PROVIDER or
+                model_profiles the host happens to have configured — otherwise
+                a measurement silently attributes one model's behaviour to
+                another. Not a request-level override surface: nothing reaches
+                this from an HTTP request.
         """
         try:
-            llm_provider, error = self._resolve_llm_provider(
-                api_key, provider, model_profile_id
-            )
-            if error:
-                return {"content": error, "toolUsed": None, "toolResult": None}
+            if llm_provider is None:
+                llm_provider, error = self._resolve_llm_provider(
+                    api_key, provider, model_profile_id
+                )
+                if error:
+                    return {"content": error, "toolUsed": None, "toolResult": None}
 
             # Build per-request system prompt:
             # 1. expert persona (extra_context) comes first — establishes who the model is

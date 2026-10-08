@@ -1,0 +1,668 @@
+"""
+Tests for the scorers.
+
+Each scorer is tested in both directions. A scorer that only ever returns True
+would make every shipped case pass against every model, which is the one defect
+that would make the whole harness worse than no harness — it would report
+reliability nobody verified.
+"""
+
+import pytest
+
+from backend.evaluation.scoring import (
+    ID_TOKEN_RE,
+    _align,
+    ConditionResult,
+    score_answer_entities_supported,
+    score_discriminating_first_call,
+    score_final_node_fields_changed,
+    score_final_node_state,
+    score_forbidden_calls,
+    score_ids_resolved_from_results,
+    score_required_call_sequence,
+    score_tool_calls_valid,
+    score_verify_after_write,
+)
+from backend.evaluation.transcript import ProviderCall, RunTranscript, ToolCall
+
+SEARCH_SCHEMA = {
+    "name": "search_graph",
+    "input_schema": {
+        "type": "object",
+        "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}},
+        "required": ["query"],
+    },
+}
+UPDATE_SCHEMA = {
+    "name": "update_node",
+    "input_schema": {
+        "type": "object",
+        "properties": {"node_id": {"type": "string"}, "updates": {"type": "object"}},
+        "required": ["node_id", "updates"],
+    },
+}
+TOOL_DEFS = [SEARCH_SCHEMA, UPDATE_SCHEMA]
+
+
+def transcript(
+    calls=(), results=None, final_text="", final_graph=None, advertised=None
+):
+    """Build a transcript directly, so a scorer can be tested without a run."""
+    names = (
+        list(advertised) if advertised is not None else ["search_graph", "update_node"]
+    )
+    tr = RunTranscript(
+        provider_calls=[
+            ProviderCall(
+                turn=0, latency_ms=1.0, stop_reason="tool_use", tools_advertised=names
+            )
+        ],
+        tool_calls=list(calls),
+        tool_results=dict(results or {}),
+        final_text=final_text,
+        final_graph=final_graph or {},
+    )
+    return tr
+
+
+def call(name, arguments, turn=0, tool_use_id=None):
+    return ToolCall(
+        name=name, input=arguments, tool_use_id=tool_use_id or f"c{turn}", turn=turn
+    )
+
+
+class TestToolCallValidity:
+    def test_valid_calls_pass(self):
+        tr = transcript([call("search_graph", {"query": "x", "limit": 5})])
+        assert score_tool_calls_valid(tr, TOOL_DEFS).passed
+
+    def test_a_missing_required_argument_fails(self):
+        tr = transcript([call("search_graph", {"qeury": "x"})])
+        result = score_tool_calls_valid(tr, TOOL_DEFS)
+        assert not result.passed
+        assert "'query' is a required property" in result.detail
+
+    def test_a_wrongly_typed_argument_fails(self):
+        tr = transcript([call("search_graph", {"query": "x", "limit": "five"})])
+        result = score_tool_calls_valid(tr, TOOL_DEFS)
+        assert not result.passed
+        assert "limit" in result.detail
+
+    def test_a_tool_the_run_never_advertised_fails(self):
+        """A model may invent a tool name; the run's own advertised set decides."""
+        tr = transcript([call("get_node_details", {"node_id": "n1"})])
+        result = score_tool_calls_valid(tr, TOOL_DEFS)
+        assert not result.passed
+        assert "not advertised" in result.detail
+
+    def test_making_no_tool_calls_at_all_fails(self):
+        assert not score_tool_calls_valid(transcript([]), TOOL_DEFS).passed
+
+    def test_an_invented_parameter_name_fails(self):
+        """
+        The quiet failure: chat_logic drops arguments it does not recognise.
+
+        The schemas do not set additionalProperties:false, so a validator
+        accepts `max_results`; the assistant then filters it out and runs
+        search_graph with the default limit, reporting success. The model chose
+        a value that was discarded and was never told.
+        """
+        tr = transcript([call("search_graph", {"query": "x", "max_results": 5})])
+        result = score_tool_calls_valid(tr, TOOL_DEFS)
+        assert not result.passed
+        assert "max_results" in result.detail
+        assert "not a parameter of this tool" in result.detail
+
+    def test_declared_optional_parameters_are_accepted(self):
+        tr = transcript([call("search_graph", {"query": "x", "limit": 5})])
+        assert score_tool_calls_valid(tr, TOOL_DEFS).passed
+
+    def test_a_schema_with_no_properties_accepts_any_arguments(self):
+        """A no-argument tool (list_node_types) must not fail on an empty dict."""
+        defs = [{"name": "list_node_types", "input_schema": {"type": "object"}}]
+        tr = transcript([call("list_node_types", {})], advertised=["list_node_types"])
+        assert score_tool_calls_valid(tr, defs).passed
+
+    def test_nested_object_arguments_are_not_checked_for_undeclared_keys(self):
+        """
+        update_node.updates is free-form by design (additionalProperties: true).
+
+        Only top-level parameters are checked; flagging keys inside `updates`
+        would fail every legitimate write.
+        """
+        tr = transcript(
+            [call("update_node", {"node_id": "n", "updates": {"anything": 1}})]
+        )
+        assert score_tool_calls_valid(tr, TOOL_DEFS).passed
+
+
+class TestRequiredCallSequence:
+    def test_an_ordered_subsequence_passes_even_with_calls_in_between(self):
+        tr = transcript(
+            [
+                call("search_graph", {"query": "x"}, turn=0),
+                call("get_schema", {}, turn=1),
+                call("update_node", {"node_id": "n", "updates": {}}, turn=2),
+            ]
+        )
+        assert score_required_call_sequence(tr, ["search_graph", "update_node"]).passed
+
+    def test_the_wrong_order_fails(self):
+        tr = transcript(
+            [
+                call("update_node", {"node_id": "n", "updates": {}}, turn=0),
+                call("search_graph", {"query": "x"}, turn=1),
+            ]
+        )
+        assert not score_required_call_sequence(
+            tr, ["search_graph", "update_node"]
+        ).passed
+
+    def test_a_missing_call_fails(self):
+        tr = transcript([call("search_graph", {"query": "x"})])
+        assert not score_required_call_sequence(
+            tr, ["search_graph", "update_node"]
+        ).passed
+
+
+class TestForbiddenCalls:
+    def test_not_calling_a_forbidden_tool_passes(self):
+        tr = transcript([call("search_graph", {"query": "x"})])
+        assert score_forbidden_calls(tr, ["update_node"]).passed
+
+    def test_calling_a_forbidden_tool_fails(self):
+        tr = transcript(
+            [
+                call("search_graph", {"query": "x"}, turn=0),
+                call("update_node", {"node_id": "n", "updates": {}}, turn=1),
+            ]
+        )
+        result = score_forbidden_calls(tr, ["update_node"])
+        assert not result.passed
+        assert "update_node" in result.detail
+
+
+class TestIdsResolvedFromResults:
+    def test_an_id_read_from_an_earlier_result_passes(self):
+        tr = transcript(
+            [
+                call("search_graph", {"query": "x"}, turn=0, tool_use_id="r0"),
+                call(
+                    "update_node",
+                    {"node_id": "eval-node-one", "updates": {}},
+                    turn=1,
+                    tool_use_id="w1",
+                ),
+            ],
+            results={"r0": {"nodes": [{"id": "eval-node-one"}]}},
+        )
+        assert score_ids_resolved_from_results(tr).passed
+
+    def test_a_correct_id_that_was_never_read_still_fails(self):
+        """
+        The behaviour the ID-first rule exists to catch.
+
+        The id happens to be right, so the write succeeds and the model reports
+        success. It guessed, and on the next graph the guess is wrong — which is
+        precisely why "it worked" must not score as a pass.
+        """
+        tr = transcript(
+            [call("update_node", {"node_id": "eval-node-one", "updates": {}}, turn=0)]
+        )
+        result = score_ids_resolved_from_results(tr)
+        assert not result.passed
+        assert "without being read first" in result.detail
+
+    def test_an_id_from_a_later_result_does_not_count(self):
+        """A result the model had not been shown yet cannot have informed the write."""
+        tr = transcript(
+            [
+                call(
+                    "update_node",
+                    {"node_id": "eval-node-one", "updates": {}},
+                    turn=0,
+                    tool_use_id="w0",
+                ),
+                call("search_graph", {"query": "x"}, turn=1, tool_use_id="r1"),
+            ],
+            results={"r1": {"nodes": [{"id": "eval-node-one"}]}},
+        )
+        assert not score_ids_resolved_from_results(tr).passed
+
+    def test_a_run_with_no_id_bearing_write_does_not_pass_vacuously(self):
+        """Nothing exercised the rule, so there is nothing to credit."""
+        tr = transcript([call("search_graph", {"query": "x"})])
+        result = score_ids_resolved_from_results(tr)
+        assert not result.passed
+        assert "never exercised" in result.detail
+
+    def test_list_valued_id_arguments_are_checked_element_by_element(self):
+        tr = transcript(
+            [
+                call("search_graph", {"query": "x"}, turn=0, tool_use_id="r0"),
+                call(
+                    "delete_nodes",
+                    {"node_ids": ["eval-node-one", "eval-node-invented"]},
+                    turn=1,
+                    tool_use_id="d1",
+                ),
+            ],
+            results={"r0": {"nodes": [{"id": "eval-node-one"}]}},
+        )
+        result = score_ids_resolved_from_results(tr)
+        assert not result.passed
+        assert "eval-node-invented" in result.detail
+
+    def test_an_edge_endpoint_created_in_the_same_add_nodes_call_is_allowed(self):
+        """An edge may point at a node being created beside it."""
+        tr = transcript(
+            [
+                call(
+                    "add_nodes",
+                    {
+                        "nodes": [
+                            {"id": "eval-fresh-node", "name": "New", "type": "Actor"}
+                        ],
+                        "edges": [
+                            {"source": "eval-fresh-node", "target": "eval-fresh-node"}
+                        ],
+                    },
+                    turn=0,
+                )
+            ]
+        )
+        assert score_ids_resolved_from_results(tr).passed
+
+    def test_an_edge_endpoint_that_is_neither_read_nor_created_fails(self):
+        tr = transcript(
+            [
+                call(
+                    "add_nodes",
+                    {
+                        "nodes": [
+                            {"id": "eval-fresh-node", "name": "New", "type": "Actor"}
+                        ],
+                        "edges": [
+                            {"source": "eval-fresh-node", "target": "eval-guessed-node"}
+                        ],
+                    },
+                    turn=0,
+                )
+            ]
+        )
+        result = score_ids_resolved_from_results(tr)
+        assert not result.passed
+        assert "eval-guessed-node" in result.detail
+
+    def test_an_id_nested_deep_in_a_result_still_counts_as_read(self):
+        """Over-strict extraction would invent failures; seen anywhere is seen."""
+        tr = transcript(
+            [
+                call("search_graph", {"query": "x"}, turn=0, tool_use_id="r0"),
+                call(
+                    "update_node",
+                    {"node_id": "eval-node-deep", "updates": {}},
+                    turn=1,
+                    tool_use_id="w1",
+                ),
+            ],
+            results={"r0": {"a": {"b": [{"c": ["eval-node-deep"]}]}}},
+        )
+        assert score_ids_resolved_from_results(tr).passed
+
+
+class TestVerifyAfterWrite:
+    def test_a_read_after_the_write_that_returns_the_node_passes(self):
+        tr = transcript(
+            [
+                call(
+                    "update_node",
+                    {"node_id": "eval-node-one", "updates": {}},
+                    turn=0,
+                    tool_use_id="w0",
+                ),
+                call(
+                    "get_related_nodes",
+                    {"node_id": "eval-node-one"},
+                    turn=1,
+                    tool_use_id="r1",
+                ),
+            ],
+            results={
+                "w0": {"success": True},
+                "r1": {"nodes": [{"id": "eval-node-one"}]},
+            },
+        )
+        assert score_verify_after_write(
+            tr, ["get_related_nodes", "search_graph"]
+        ).passed
+
+    def test_no_read_after_the_write_fails(self):
+        tr = transcript(
+            [
+                call(
+                    "update_node",
+                    {"node_id": "eval-node-one", "updates": {}},
+                    turn=0,
+                    tool_use_id="w0",
+                )
+            ],
+            results={"w0": {"success": True}},
+        )
+        assert not score_verify_after_write(tr, ["get_related_nodes"]).passed
+
+    def test_a_read_before_the_write_does_not_count(self):
+        tr = transcript(
+            [
+                call(
+                    "get_related_nodes",
+                    {"node_id": "eval-node-one"},
+                    turn=0,
+                    tool_use_id="r0",
+                ),
+                call(
+                    "update_node",
+                    {"node_id": "eval-node-one", "updates": {}},
+                    turn=1,
+                    tool_use_id="w1",
+                ),
+            ],
+            results={
+                "r0": {"nodes": [{"id": "eval-node-one"}]},
+                "w1": {"success": True},
+            },
+        )
+        assert not score_verify_after_write(tr, ["get_related_nodes"]).passed
+
+    def test_a_read_that_does_not_return_the_written_node_does_not_count(self):
+        tr = transcript(
+            [
+                call(
+                    "update_node",
+                    {"node_id": "eval-node-one", "updates": {}},
+                    turn=0,
+                    tool_use_id="w0",
+                ),
+                call(
+                    "search_graph",
+                    {"query": "something else"},
+                    turn=1,
+                    tool_use_id="r1",
+                ),
+            ],
+            results={
+                "w0": {"success": True},
+                "r1": {"nodes": [{"id": "eval-node-other"}]},
+            },
+        )
+        assert not score_verify_after_write(tr, ["search_graph"]).passed
+
+    def test_verification_is_measured_from_the_last_write_not_the_first(self):
+        """Verifying write 1 and then writing again unverified is not verified."""
+        tr = transcript(
+            [
+                call(
+                    "update_node",
+                    {"node_id": "eval-a", "updates": {}},
+                    turn=0,
+                    tool_use_id="w0",
+                ),
+                call(
+                    "get_related_nodes", {"node_id": "eval-a"}, turn=1, tool_use_id="r1"
+                ),
+                call(
+                    "update_node",
+                    {"node_id": "eval-b", "updates": {}},
+                    turn=2,
+                    tool_use_id="w2",
+                ),
+            ],
+            results={
+                "w0": {"success": True},
+                "r1": {"nodes": [{"id": "eval-a"}]},
+                "w2": {"success": True},
+            },
+        )
+        assert not score_verify_after_write(tr, ["get_related_nodes"]).passed
+
+    def test_a_failed_write_is_not_the_write_to_verify(self):
+        """An errored write leaves the earlier successful one as the last write."""
+        tr = transcript(
+            [
+                call(
+                    "update_node",
+                    {"node_id": "eval-a", "updates": {}},
+                    turn=0,
+                    tool_use_id="w0",
+                ),
+                call(
+                    "update_node",
+                    {"node_id": "eval-b", "updates": {}},
+                    turn=1,
+                    tool_use_id="w1",
+                ),
+                call(
+                    "get_related_nodes", {"node_id": "eval-a"}, turn=2, tool_use_id="r2"
+                ),
+            ],
+            results={
+                "w0": {"success": True},
+                "w1": {"error": "no such node"},
+                "r2": {"nodes": [{"id": "eval-a"}]},
+            },
+        )
+        assert score_verify_after_write(tr, ["get_related_nodes"]).passed
+
+    def test_a_run_with_no_write_fails_rather_than_passing_vacuously(self):
+        tr = transcript([call("search_graph", {"query": "x"})])
+        result = score_verify_after_write(tr, ["search_graph"])
+        assert not result.passed
+        assert "no successful write" in result.detail
+
+    def test_a_read_through_a_tool_outside_the_allowed_set_does_not_count(self):
+        tr = transcript(
+            [
+                call(
+                    "update_node",
+                    {"node_id": "eval-a", "updates": {}},
+                    turn=0,
+                    tool_use_id="w0",
+                ),
+                call(
+                    "get_related_nodes", {"node_id": "eval-a"}, turn=1, tool_use_id="r1"
+                ),
+            ],
+            results={"w0": {"success": True}, "r1": {"nodes": [{"id": "eval-a"}]}},
+        )
+        assert not score_verify_after_write(tr, ["search_graph"]).passed
+
+    def test_an_added_node_id_comes_from_the_write_result(self):
+        """add_nodes generates ids, so the written id is only in the result."""
+        tr = transcript(
+            [
+                call(
+                    "add_nodes",
+                    {"nodes": [{"name": "N", "type": "Actor"}], "edges": []},
+                    turn=0,
+                    tool_use_id="w0",
+                ),
+                call("search_graph", {"query": "N"}, turn=1, tool_use_id="r1"),
+            ],
+            results={
+                "w0": {"success": True, "added_node_ids": ["generated-id-1234"]},
+                "r1": {"nodes": [{"id": "generated-id-1234"}]},
+            },
+        )
+        assert score_verify_after_write(tr, ["search_graph"]).passed
+
+
+class TestFinalNodeState:
+    GRAPH = {"nodes": [{"id": "eval-a", "name": "After", "summary": "New summary"}]}
+
+    def test_matching_field_values_pass(self):
+        tr = transcript(final_graph=self.GRAPH)
+        assert score_final_node_state(tr, {"eval-a": {"summary": "New summary"}}).passed
+
+    def test_a_differing_value_fails(self):
+        tr = transcript(final_graph=self.GRAPH)
+        result = score_final_node_state(tr, {"eval-a": {"summary": "Something else"}})
+        assert not result.passed
+        assert "expected" in result.detail
+
+    def test_a_missing_node_fails(self):
+        tr = transcript(final_graph=self.GRAPH)
+        result = score_final_node_state(tr, {"eval-missing": {"name": "x"}})
+        assert not result.passed
+        assert "absent from the final graph" in result.detail
+
+
+class TestFinalNodeFieldsChanged:
+    FIXTURE = {
+        "nodes": [
+            {
+                "id": "eval-a",
+                "name": "Before",
+                "description": "Before",
+                "summary": "Before",
+            }
+        ]
+    }
+
+    def test_all_required_fields_changed_passes(self):
+        tr = transcript(
+            final_graph={
+                "nodes": [
+                    {
+                        "id": "eval-a",
+                        "name": "Efter",
+                        "description": "Efter",
+                        "summary": "Efter",
+                    }
+                ]
+            }
+        )
+        assert score_final_node_fields_changed(
+            tr, self.FIXTURE, {"eval-a": ["name", "description", "summary"]}
+        ).passed
+
+    def test_a_partial_change_fails_and_names_the_field_left_behind(self):
+        """The partial write reported as complete — protocol rule 3's failure."""
+        tr = transcript(
+            final_graph={
+                "nodes": [
+                    {
+                        "id": "eval-a",
+                        "name": "Efter",
+                        "description": "Before",
+                        "summary": "Before",
+                    }
+                ]
+            }
+        )
+        result = score_final_node_fields_changed(
+            tr, self.FIXTURE, {"eval-a": ["name", "description", "summary"]}
+        )
+        assert not result.passed
+        assert "description" in result.detail and "summary" in result.detail
+
+    def test_a_deleted_node_fails(self):
+        tr = transcript(final_graph={"nodes": []})
+        assert not score_final_node_fields_changed(
+            tr, self.FIXTURE, {"eval-a": ["name"]}
+        ).passed
+
+
+class TestAnswerEntitiesSupported:
+    def test_a_cited_id_present_in_a_result_passes(self):
+        tr = transcript(
+            results={"r0": {"nodes": [{"id": "eval-initiative-metadata-register"}]}},
+            final_text="It is eval-initiative-metadata-register.",
+        )
+        assert score_answer_entities_supported(tr).passed
+
+    def test_a_fabricated_id_fails(self):
+        tr = transcript(
+            results={"r0": {"nodes": [{"id": "eval-initiative-metadata-register"}]}},
+            final_text="It is eval-initiative-metadata-registry-programme.",
+        )
+        result = score_answer_entities_supported(tr)
+        assert not result.passed
+        assert "eval-initiative-metadata-registry-programme" in result.detail
+
+    def test_an_answer_citing_no_id_passes_and_says_it_was_vacuous(self):
+        tr = transcript(
+            results={"r0": {}}, final_text="The handbook is produced there."
+        )
+        result = score_answer_entities_supported(tr)
+        assert result.passed
+        assert "vacuously" in result.detail
+
+    def test_an_id_embedded_inside_a_longer_result_string_counts_as_supported(self):
+        tr = transcript(
+            results={
+                "r0": {"message": "Updated node eval-resource-metadata-handbook ok"}
+            },
+            final_text="Done: eval-resource-metadata-handbook.",
+        )
+        assert score_answer_entities_supported(tr).passed
+
+    def test_ordinary_hyphenated_prose_is_not_read_as_an_id(self):
+        """Two-segment words are everywhere in prose; three-plus is the threshold."""
+        tr = transcript(
+            results={}, final_text="This is machine-readable, well-formed data."
+        )
+        assert score_answer_entities_supported(tr).passed
+
+
+class TestIdTokenPattern:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "eval-initiative-metadata-register",
+            "task-compare-skills-openai-open-models",
+            "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+        ],
+    )
+    def test_matches_ids_this_system_writes(self, text):
+        assert ID_TOKEN_RE.findall(text) == [text]
+
+    @pytest.mark.parametrize(
+        "text", ["machine-readable", "well-formed", "metadata", "AI-Act"]
+    )
+    def test_does_not_match_ordinary_prose(self, text):
+        assert ID_TOKEN_RE.findall(text) == []
+
+
+class TestDiscriminatingFirstCall:
+    def test_the_expected_first_call_passes(self):
+        tr = transcript([call("search_graph", {"query": ""})])
+        assert score_discriminating_first_call(tr, "search_graph").passed
+
+    def test_a_different_first_call_fails_even_if_the_expected_one_follows(self):
+        """Following the wrong skill first is not selecting the right one."""
+        tr = transcript(
+            [
+                call("get_schema", {}, turn=0),
+                call("search_graph", {"query": ""}, turn=1),
+            ]
+        )
+        assert not score_discriminating_first_call(tr, "search_graph").passed
+
+    def test_no_tool_calls_fails(self):
+        assert not score_discriminating_first_call(transcript([]), "get_schema").passed
+
+
+class TestAlign:
+    def test_a_condition_expected_to_hold_passes_when_it_holds(self):
+        inner = ConditionResult("c", True, "held")
+        assert _align(inner, True).passed
+
+    def test_a_condition_expected_to_fail_passes_when_it_fails(self):
+        """Negative polarity: a case may pin that a violation is detected."""
+        inner = ConditionResult("c", False, "did not hold")
+        aligned = _align(inner, False)
+        assert aligned.passed
+        assert aligned.detail == "did not hold"
+
+    def test_a_condition_expected_to_fail_does_not_pass_when_it_holds(self):
+        assert not _align(ConditionResult("c", True, "held"), False).passed

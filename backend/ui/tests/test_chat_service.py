@@ -422,6 +422,100 @@ class TestChatServiceConversation:
         create_from_profile.assert_called_once()
         assert create_from_profile.call_args.args[0].id == "extractor"
 
+    def test_an_explicit_llm_provider_is_used_verbatim(self, chat_service):
+        """
+        The evaluation harness hands in one exact provider and must get it.
+
+        See ChatProcessor.process_message's llm_provider parameter: the harness
+        measures one named model at one named endpoint, so provider resolution
+        has to be bypassed rather than merely influenced.
+        """
+        service, default_llm = chat_service
+        from backend.ui.tests.conftest import MockLLMProvider
+
+        injected = MockLLMProvider()
+        injected.mock_text_response = "answered by the injected provider"
+
+        result = service.process_message(
+            [{"role": "user", "content": "hello"}], llm_provider=injected
+        )
+
+        assert result["content"] == "answered by the injected provider"
+        assert injected.call_count == 1
+        assert default_llm.call_count == 0
+
+    def test_an_explicit_llm_provider_wins_over_configured_model_profiles(
+        self, chat_service
+    ):
+        """
+        The hazard the parameter exists for.
+
+        Model profiles normally take precedence over everything, so on a host
+        that has them configured the harness would silently measure the host's
+        default model and report the result under the model it was asked to
+        test.
+        """
+        from backend.config.model_profiles import ModelProfile
+        from backend.ui.tests.conftest import MockLLMProvider
+
+        service, _ = chat_service
+        injected = MockLLMProvider()
+        injected.mock_text_response = "from the injected provider"
+
+        host_profile = ModelProfile(
+            id="host-default",
+            name="Host default",
+            provider="openai",
+            model="some-other-model",
+            default=True,
+            credential_ref="HOST_API_KEY",
+        )
+
+        with (
+            patch(
+                "backend.config.config_loader.get_model_profiles",
+                return_value=[host_profile],
+            ),
+            patch(
+                "backend.ui.chat_logic.create_provider_from_profile"
+            ) as create_from_profile,
+        ):
+            result = service.process_message(
+                [{"role": "user", "content": "hello"}], llm_provider=injected
+            )
+
+        assert result["content"] == "from the injected provider"
+        create_from_profile.assert_not_called()
+
+    def test_omitting_llm_provider_leaves_resolution_unchanged(self, chat_service):
+        """The default path must behave exactly as before the parameter existed."""
+        service, default_llm = chat_service
+        default_llm.mock_text_response = "from the resolved provider"
+
+        result = service.process_message([{"role": "user", "content": "hello"}])
+
+        assert result["content"] == "from the resolved provider"
+        assert default_llm.call_count == 1
+
+    def test_an_injected_provider_still_drives_the_tool_loop(self, chat_service):
+        """Injection replaces the provider, not the assistant's tool execution."""
+        service, default_llm = chat_service
+        from backend.ui.tests.conftest import MockLLMProvider
+
+        injected = MockLLMProvider()
+        injected.mock_tool_calls = [
+            {"name": "list_node_types", "input": {}},
+        ]
+        injected.mock_text_response = "listed the types"
+
+        result = service.process_message(
+            [{"role": "user", "content": "what types exist?"}], llm_provider=injected
+        )
+
+        assert result["toolUsed"] == "list_node_types"
+        assert injected.call_count == 2
+        assert default_llm.call_count == 0
+
     def test_get_system_info(self, chat_service):
         """get_system_info should return provider and tools info."""
         service, _ = chat_service
