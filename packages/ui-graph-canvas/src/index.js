@@ -44,6 +44,7 @@ export {
   // hands the string to a browser (`window.open`), rather than keeping a
   // second copy that can drift from this one.
   isSafeReferenceUrl,
+  REFERENCE_WHITESPACE_CLASS,
   trimReferenceTarget,
   REFERENCE_SAFE_URL_SCHEMES,
   REFERENCE_TARGET_KINDS,

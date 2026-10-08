@@ -85,15 +85,21 @@ function renderReference(data, context = {}) {
 
 // Round 4's mutation pass narrowed this side's whitespace class to only the
 // characters some fixture `refuse` case happens to use — 10 of 26 — and BOTH JS
-// suites stayed green. On this side that is the DANGEROUS direction: with
-// U+202F out of the class, `https://trusted.example<U+202F>@evil.example/`
-// passes the gate, and the WHATWG parser folds everything before the `@` into
-// USERINFO — so `hostname` is evil.example while the tile's visible target text
-// reads trusted.example. A tile that lies about where it goes.
+// suites stayed green. What that costs is CROSS-LANGUAGE DISAGREEMENT: the
+// backend keeps refusing all 26, so each dropped character becomes a target the
+// server stores and this side then draws permanently as "Unsafe link — not
+// opened", on a tile with no GUI way to repoint it. Rounds 1-3 each found one
+// instance of that class by hand, which is why the enumeration is pinned rather
+// than sampled.
+//
+// Round 5 corrected the original version of this comment, which claimed the
+// pin also closed userinfo host-spoofing. It does not: see the separate test
+// below.
 //
 // One case per enumerated character, driven off the fixture's own `whitespace`
-// array, so a character dropped here fails its own case rather than hiding
-// behind a refuse list that never mentioned it.
+// array, plus an equality assertion on the class itself — a dropped character
+// fails its own case, and an ADDED one fails the equality, which nothing caught
+// before round 5.
 describe('reference URL gate — the whitespace enumeration itself', () => {
   it.each(urlGate.whitespace)('refuses U+%s inside a path', (code) => {
     const char = String.fromCodePoint(parseInt(code, 16));
@@ -114,9 +120,39 @@ describe('reference URL gate — the whitespace enumeration itself', () => {
     }
   });
 
-  it('refuses a target that hides its real host behind userinfo', () => {
-    // The concrete harm behind this whole describe block: the visible text and
-    // the actual destination must not be able to disagree.
+  it('is exactly the shared enumeration, so an ADDED character fails too', () => {
+    // The backend asserts this equality on its own set; without the same
+    // assertion here, a character added to one side and not the other is caught
+    // by nothing — the very drift the fixture exists to prevent, in the
+    // direction that makes the canvas stricter than the server.
+    const expected = urlGate.whitespace
+      .map((code) => String.fromCodePoint(parseInt(code, 16)))
+      .sort()
+      .join('');
+    const actual = [...Array(0x10000).keys()]
+      .map((cp) => String.fromCodePoint(cp))
+      .filter((ch) => trimReferenceTarget(`${ch}x${ch}`) === 'x')
+      .sort()
+      .join('');
+    expect(actual).toBe(expected);
+  });
+
+  it('does NOT gate userinfo host-spoofing — that is ungated by both sides', () => {
+    // Pinning what is true rather than what the earlier version of this test
+    // claimed. `https://trusted.example@evil.example/` is accepted by this gate
+    // AND by the backend, and the WHATWG parser resolves its hostname to
+    // evil.example. So the whitespace enumeration buys nothing against this
+    // attack: the U+202F variant is refused for the whitespace reason alone,
+    // and the plain form needs no whitespace character at all.
+    //
+    // Asserted so the gap is visible and a future change that DOES close it
+    // fails here loudly rather than silently satisfying a stale promise. The
+    // tile shows `label || preview.title || target`, and `label` is free text,
+    // so visible-text-vs-destination can disagree with no URL trickery either.
+    // Whether to gate userinfo is the owner's call, recorded in the planning
+    // graph; it is round-1 gate code, outside round 4's scope.
+    expect(isSafeReferenceUrl('https://trusted.example@evil.example/')).toBe(true);
+    expect(new URL('https://trusted.example@evil.example/').hostname).toBe('evil.example');
     const spoof = 'https://trusted.example\u202f@evil.example/';
     expect(isSafeReferenceUrl(spoof)).toBe(false);
     expect(referenceTargetProblem({ target_kind: 'url', target: spoof })).toBe('unsafe');

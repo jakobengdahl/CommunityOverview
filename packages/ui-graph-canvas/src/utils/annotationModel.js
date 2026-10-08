@@ -89,7 +89,7 @@ const REFERENCE_EXPLICIT_AUTHORITY = /^https?:\/\/[^/?#]/i;
 // each side still refuses everything either language calls whitespace — by
 // two checks rather than by this class alone. The characters are listed in
 // docs/fixtures/reference_url_gate.json, which both sides drive.
-const REFERENCE_WHITESPACE_CLASS =
+export const REFERENCE_WHITESPACE_CLASS =
   '\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680' +
   '\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff';
 const REFERENCE_WHITESPACE_RE = new RegExp(`[${REFERENCE_WHITESPACE_CLASS}]`, 'u');
