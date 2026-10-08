@@ -8,17 +8,20 @@ endpoint. It is tested rather than asserted in prose because the failure is
 silent: a key pasted into a fixture, or echoed into a report, looks like nothing
 until the repository is public — which this one is.
 
-Stated precisely, because the loose version ("no code path reads a key from a
-file") is false: importing the assistant calls ``load_dotenv()``
-(backend/ui/chat_logic.py), which the harness triggers on every case, so an
-untracked ``.env`` in the repository root does reach ``os.environ`` and will
-satisfy a ``credential_ref``. That is the application's own configuration
-mechanism, pre-existing and not this harness's to remove. What is tested here is
-what the harness is actually responsible for: no credential value is committed,
-the harness resolves ``credential_ref`` against the environment at call time
-with no fallback and no override parameter, nothing it writes carries the value,
-and the suite runs with every provider variable cleared. See
-docs/SKILL_EVALUATION.md for the operator-facing version.
+Stated precisely. The harness resolves ``credential_ref`` against
+``os.environ`` before anything imports the assistant, so the ``load_dotenv()``
+that reads a repo-root ``.env`` has not run yet and a value there does NOT
+satisfy the credential — pinned below, because the opposite was documented at
+one point and it is the claim an operator acts on. ``.env`` does reach
+``os.environ`` later in the process, which is why a flat "nothing else is read"
+would still be false.
+
+What is tested here is what the harness is responsible for: no credential value
+is committed, no code path reads one from a file, it resolves
+``credential_ref`` against the environment at call time with no fallback and no
+override parameter, nothing it writes carries the value, and the suite runs with
+every provider variable cleared. See docs/SKILL_EVALUATION.md for the
+operator-facing version.
 """
 
 import json
@@ -38,8 +41,11 @@ from backend.evaluation.runner import (
     build_report,
     default_provider_factory,
     load_profiles,
+    run_case,
     run_suite,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 EVAL_DIR = Path(__file__).resolve().parent.parent
 # Shaped so the repository scan below does not flag this file: the hyphens stop
@@ -223,6 +229,72 @@ class TestCredentialsComeOnlyFromTheEnvironment:
         )
 
 
+class TestADotEnvFileDoesNotSupplyTheCredential:
+    """
+    Pinned because the documentation got this wrong in both directions.
+
+    First it claimed nothing but the shell is read; then, correcting that, it
+    claimed a repo-root `.env` would satisfy a `credential_ref` and `.env.example`
+    told the operator so. Neither is true: the harness resolves the variable
+    before anything imports the assistant, so `load_dotenv()` has not run. An
+    operator following the wrong version puts a key on disk and still gets the
+    run refused.
+    """
+
+    def test_run_case_refuses_when_only_a_dot_env_carries_the_key(
+        self, monkeypatch, tmp_path, profile, case_by_id
+    ):
+        import os
+
+        monkeypatch.delenv(profile.credential_ref, raising=False)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text(
+            f"{profile.credential_ref}={SENTINEL}\n", encoding="utf-8"
+        )
+
+        score = run_case(case_by_id["tool-call-validity-read-path"], profile)
+
+        assert score.run_error is not None
+        assert "MissingCredentialError" in score.run_error
+        assert profile.credential_ref in score.run_error
+        # And the value never made it into the environment on this path.
+        assert os.environ.get(profile.credential_ref) is None
+
+    def test_the_cli_refuses_when_only_a_dot_env_carries_the_key(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT))
+        from scripts.run_skill_eval import main
+
+        monkeypatch.delenv("SKILL_EVAL_DOTENV_PROBE", raising=False)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text(
+            f"SKILL_EVAL_DOTENV_PROBE={SENTINEL}\n", encoding="utf-8"
+        )
+        profiles = tmp_path / "providers.json"
+        profiles.write_text(
+            json.dumps(
+                [
+                    {
+                        "id": "probe",
+                        "name": "Probe",
+                        "provider": "openai",
+                        "model": "m",
+                        "default": True,
+                        "credential_ref": "SKILL_EVAL_DOTENV_PROBE",
+                    }
+                ]
+            )
+        )
+
+        assert main(["--profiles", str(profiles)]) == 2
+        err = capsys.readouterr().err
+        assert "SKILL_EVAL_DOTENV_PROBE is not set" in err
+        assert SENTINEL not in err
+
+
 class TestReportsNeverCarryACredential:
     def test_a_report_omits_a_credential_the_provider_really_did_receive(
         self, monkeypatch, profile, case_by_id
@@ -337,6 +409,73 @@ class TestReportsNeverCarryACredential:
         assert "Graph Maintenance Protocol" not in payload
         # And the model's own prose stays out too.
         assert PROSE_SENTINEL not in payload
+
+    def test_a_model_written_field_value_reaches_a_report_only_bounded(
+        self, monkeypatch, profile
+    ):
+        """
+        G2's limit, stated honestly and bounded.
+
+        A condition's detail explains why it failed, so it quotes what the model
+        actually wrote — which is the diagnosis, and is model prose. A
+        `description` can hold 2000 characters, so an unbounded repr would put a
+        paragraph of the model's own writing into a report the docs describe as
+        carrying none. The value written here is longer than the bound.
+
+        (`summary` would not do: it caps at 300 characters, so an oversized one
+        is rejected and never reaches the graph at all.)
+        """
+        from backend.evaluation.cases import AcceptanceCase, ExpectedBehaviour
+        from backend.evaluation.runner import run_case
+        from backend.evaluation.tests.conftest import ScriptedProvider
+
+        long_prose = "ZZQQ-written-field-marker " * 40
+        assert 300 < len(long_prose) < 2000
+
+        case = AcceptanceCase(
+            id="bounded-detail-probe",
+            dimension="completeness",
+            prompt="rewrite the description",
+            graph="metadata-pilot-small.json",
+            expect=ExpectedBehaviour(
+                final_node_state={
+                    "eval-resource-metadata-handbook": {
+                        "description": "a value the model will not write"
+                    }
+                }
+            ),
+            notes=(
+                "probe case asserting that a long model-written field value is "
+                "abbreviated before it reaches a report, since a condition detail "
+                "legitimately quotes what the model wrote"
+            ),
+        )
+        provider = ScriptedProvider(
+            [
+                [("search_graph", {"query": "Metadata Handbook"})],
+                [
+                    (
+                        "update_node",
+                        {
+                            "node_id": "eval-resource-metadata-handbook",
+                            "updates": {"description": long_prose},
+                        },
+                    )
+                ],
+                "done",
+            ]
+        )
+        score = run_case(case, profile, provider_factory=lambda _p: provider)
+
+        detail = next(
+            c.detail for c in score.conditions if c.name == "final_node_state"
+        )
+        assert not score.passed
+        # The write landed, so the detail quotes it — abbreviated.
+        assert "ZZQQ-written-field-marker" in detail, detail
+        assert "chars)" in detail, f"the oversized value was not abbreviated: {detail}"
+        assert len(detail) < 400, len(detail)
+        assert detail.count("ZZQQ-written-field-marker") < 10
 
     def test_the_transcript_never_holds_the_credential(self, monkeypatch, profile):
         from backend.evaluation.tests.conftest import ScriptedProvider

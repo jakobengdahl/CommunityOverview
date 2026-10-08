@@ -31,6 +31,53 @@ def _factory(turns):
     return lambda _profile: provider
 
 
+DECLARED_CONDITIONS_PER_CASE = [
+    ("tool-call-validity-read-path", {"tool_calls_valid"}),
+    (
+        "id-resolution-before-write",
+        {
+            "tool_calls_valid",
+            "ids_resolved_from_results",
+            "required_call_sequence",
+        },
+    ),
+    (
+        "post-write-verification",
+        {
+            "tool_calls_valid",
+            "ids_resolved_from_results",
+            "verify_after_write",
+            "final_node_state",
+        },
+    ),
+    (
+        "completeness-full-translation",
+        {
+            "tool_calls_valid",
+            "ids_resolved_from_results",
+            "final_node_fields_changed",
+        },
+    ),
+    (
+        "skill-adherence-ambiguous-name-halts",
+        {"tool_calls_valid", "required_call_sequence", "forbidden_calls"},
+    ),
+    (
+        "skill-selection-inventory-question",
+        {"tool_calls_valid", "discriminating_first_call"},
+    ),
+    (
+        "skill-selection-schema-question",
+        {"tool_calls_valid", "discriminating_first_call"},
+    ),
+    (
+        "unsupported-entity-reference",
+        {"tool_calls_valid", "answer_entities_supported"},
+    ),
+    ("token-profile-multi-step-traversal", {"tool_calls_valid"}),
+]
+
+
 class TestRunCaseGoodModel:
     def test_a_model_following_the_protocol_passes_the_id_resolution_case(
         self, profile, case_by_id
@@ -166,50 +213,7 @@ class TestEveryDeclaredConditionIsEvaluated:
     changes the set, while a passing run looks identical either way.
     """
 
-    @pytest.mark.parametrize(
-        "case_id,expected",
-        [
-            ("tool-call-validity-read-path", {"tool_calls_valid"}),
-            (
-                "id-resolution-before-write",
-                {
-                    "tool_calls_valid",
-                    "ids_resolved_from_results",
-                    "required_call_sequence",
-                },
-            ),
-            (
-                "post-write-verification",
-                {
-                    "tool_calls_valid",
-                    "ids_resolved_from_results",
-                    "verify_after_write",
-                    "final_node_state",
-                },
-            ),
-            (
-                "completeness-full-translation",
-                {
-                    "tool_calls_valid",
-                    "ids_resolved_from_results",
-                    "final_node_fields_changed",
-                },
-            ),
-            (
-                "skill-adherence-ambiguous-name-halts",
-                {"tool_calls_valid", "required_call_sequence", "forbidden_calls"},
-            ),
-            (
-                "skill-selection-inventory-question",
-                {"tool_calls_valid", "discriminating_first_call"},
-            ),
-            (
-                "unsupported-entity-reference",
-                {"tool_calls_valid", "answer_entities_supported"},
-            ),
-            ("token-profile-multi-step-traversal", {"tool_calls_valid"}),
-        ],
-    )
+    @pytest.mark.parametrize("case_id,expected", DECLARED_CONDITIONS_PER_CASE)
     def test_each_shipped_case_evaluates_exactly_what_it_declares(
         self, profile, case_by_id, case_id, expected
     ):
@@ -221,6 +225,19 @@ class TestEveryDeclaredConditionIsEvaluated:
         )
         assert {c.name for c in score.conditions} == expected
         assert set(case.expect.declared_conditions()) == expected
+
+    def test_the_table_above_covers_every_shipped_case(self):
+        """
+        One shipped case was missing from it, silently.
+
+        A case absent from the table is a case whose declared conditions nobody
+        checks are evaluated — the gap this class exists to close, reopened by
+        omission rather than by a code change.
+        """
+        from backend.evaluation.cases import load_cases
+
+        covered = {case_id for case_id, _ in DECLARED_CONDITIONS_PER_CASE}
+        assert covered == {case.id for case in load_cases()}
 
     def test_a_dimension_no_condition_covers_is_not_reported_as_passing(
         self, profile, case_by_id
@@ -608,16 +625,90 @@ class TestCompletenessBaseline:
 
 
 class TestSkillsContext:
-    def test_a_fixture_skill_is_rendered_into_the_production_prompt_shape(self):
+    def test_a_fixture_skill_is_rendered_in_the_chat_path_shape(self):
+        """
+        The shape the chat path receives, not the agent path's.
+
+        This asserted `--- SKILLS ---` and `When to use:` — the AIAgent
+        rendering — while the harness drives `skills_context` on a chat
+        request, which production fills from ChatPanel.jsx in a different
+        shape. So it pinned a prompt no production caller produces, and the
+        assertion could not tell the two apart.
+        """
         from backend.evaluation.cases import SKILLS_DIR
 
         context = build_skills_context([SKILLS_DIR / "graph-maintenance-protocol.md"])
-        assert "--- SKILLS ---" in context
+
+        assert context.startswith("ACTIVE SKILL INSTRUCTIONS")
+        assert "These instructions OVERRIDE your default behavior" in context
         assert '<skill name="Graph Maintenance Protocol">' in context
-        assert "When to use:" in context
+        assert context.rstrip().endswith(
+            "END OF SKILL INSTRUCTIONS. Apply the above to your entire response."
+        )
         assert "ID-first execution" in context
+
+        # The agent path's framing must not appear.
+        assert "--- SKILLS ---" not in context
+        assert "When to use:" not in context
+        assert "Expected tools:" not in context
         # Frontmatter is parsed, not pasted through as body text.
-        assert "---\nid: graph-maintenance-protocol" not in context
+        assert "id: graph-maintenance-protocol" not in context
+
+    def test_the_rendered_shape_still_matches_the_frontend_that_produces_it(self):
+        """
+        Couples this Python rendering to the JSX it mirrors.
+
+        Nothing mechanical ties the two, so if ChatPanel.jsx changes its
+        wrapper this harness would silently keep measuring the old shape. These
+        are the exact strings both sides emit; a change on either side fails
+        here and names the other file.
+        """
+        from pathlib import Path
+
+        jsx = (
+            Path(__file__).resolve().parents[3]
+            / "frontend"
+            / "web"
+            / "src"
+            / "components"
+            / "ChatPanel.jsx"
+        ).read_text(encoding="utf-8")
+
+        markers = [
+            "ACTIVE SKILL INSTRUCTIONS — YOU MUST APPLY THESE TO THIS RESPONSE:",
+            "These instructions OVERRIDE your default behavior and style for this response.",
+            "END OF SKILL INSTRUCTIONS. Apply the above to your entire response.",
+        ]
+        for marker in markers:
+            assert marker in jsx, (
+                f"ChatPanel.jsx no longer emits {marker!r}; "
+                "backend/evaluation/runner.py:build_skills_context mirrors it "
+                "and must be updated together"
+            )
+
+        from backend.evaluation.cases import SKILLS_DIR
+
+        context = build_skills_context([SKILLS_DIR / "schema-explainer.md"])
+        for marker in markers:
+            assert marker in context
+
+    def test_a_skill_body_carries_its_own_applicability(self):
+        """
+        Why the chat-path shape still supports the skill_selection proxy.
+
+        The chat path injects `when_to_use` only when a skill has NO body, so
+        for a real SKILL.md it is never injected. The discriminating pair must
+        therefore state when it applies inside the body, or the proxy measures
+        a signal the model was never given.
+        """
+        from backend.evaluation.cases import SKILLS_DIR
+
+        for name, applies_to in (
+            ("schema-explainer.md", "schema question"),
+            ("inventory-reporter.md", "inventory question"),
+        ):
+            context = build_skills_context([SKILLS_DIR / name])
+            assert applies_to in context, name
 
     def test_no_skills_means_no_injected_context(self):
         assert build_skills_context([]) is None

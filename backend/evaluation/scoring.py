@@ -64,13 +64,47 @@ _PROSE_SEGMENTS = frozenset(
 
 
 def is_id_shaped(token: str) -> bool:
-    """Whether a token in an answer looks like an id this system would write."""
+    """
+    Whether a token in an answer could be an id this system would write.
+
+    Shape only, and shape is not enough on its own — see
+    ``score_answer_entities_supported``, which additionally requires an
+    open-vocabulary candidate to belong to the graph's id vocabulary. A date
+    ("2026-10-08") and a version string ("gpt-4o-mini") both pass this.
+    """
     if _UUID_ONLY_RE.match(token):
         return True
     segments = token.split("-")
     if len(segments) < 3:
         return False
-    return not any(segment in _PROSE_SEGMENTS for segment in segments)
+    if any(segment in _PROSE_SEGMENTS for segment in segments):
+        return False
+    # A date or a numeric sequence: "2026-10-08", "1-2-3".
+    if all(segment.isdigit() for segment in segments):
+        return False
+    return True
+
+
+def _id_vocabulary_prefixes(known_ids: Set[str]) -> Set[str]:
+    """
+    Leading segments of the ids this run has actually seen.
+
+    Ids in a graph share a leading segment by convention (``eval-``, ``task-``,
+    ``init-``), and a fabricated id is in practice a near-miss of a real one —
+    so it shares that segment too. Requiring it is what separates a made-up
+    node from the model's own prose: "2026-10-08", "gpt-4o-mini" and
+    "read-only-mode" are all id-SHAPED, and flagging any of them would be a
+    false accusation that a reader cannot distinguish from a real finding.
+
+    The cost is a fabrication under a prefix the run never saw, which this
+    signal misses. That is the lower bound doing its job; the closed-vocabulary
+    signal has no such gap for ids the fixture does contain.
+    """
+    prefixes = set()
+    for value in known_ids:
+        if "-" in value:
+            prefixes.add(value.split("-", 1)[0])
+    return prefixes
 
 
 def cited_id_tokens(text: str) -> Set[str]:
@@ -253,9 +287,30 @@ def _result_is_error(result: Any) -> bool:
     return False
 
 
+# Writes whose id-bearing arguments name the nodes being written. add_nodes is
+# deliberately absent: its entry in ID_BEARING_ARGS is edges[].source/target,
+# which are references to OTHER nodes the call did not write — and since those
+# may be names, a read-back matching one would be matching a pre-existing node
+# by name. The node add_nodes actually creates is only knowable from its result.
+_WRITES_NAMING_THEIR_OWN_TARGET = frozenset(ID_BEARING_ARGS) - {"add_nodes"}
+
+
 def _written_node_ids(transcript: RunTranscript, call: ToolCall) -> Set[str]:
-    """Node ids a successful write touched, from its arguments and its result."""
-    ids = {i for i in _ids_in_call(call)}
+    """
+    Node ids a successful write created or changed.
+
+    Not the same question as "which ids did this call reference", which is what
+    ID_BEARING_ARGS answers and what this used to reuse. For add_nodes the two
+    are actually disjoint: the referenced ids are the pre-existing endpoints of
+    the new edges, so a model could create a node, read back only the old node
+    its edge pointed at, and pass post-write verification without the written
+    node ever being read — the vacuous pass G3 forbids.
+    """
+    ids = (
+        {i for i in _ids_in_call(call)}
+        if call.name in _WRITES_NAMING_THEIR_OWN_TARGET
+        else set()
+    )
     result = transcript.result_for(call.tool_use_id)
     if isinstance(result, dict):
         for key in ("added_node_ids", "updated_node_ids", "node_ids"):
@@ -266,6 +321,21 @@ def _written_node_ids(transcript: RunTranscript, call: ToolCall) -> Set[str]:
         if isinstance(node, dict) and isinstance(node.get("id"), str):
             ids.add(node["id"])
     return {i for i in ids if i}
+
+
+def _abbreviate(value: Any, limit: int = 120) -> str:
+    """
+    Render a value for a report, bounded.
+
+    A condition's detail reaches build_report, and a field the model wrote can
+    run to 2000 characters, so an unbounded repr would put a paragraph of the
+    model's own writing into a report documented as carrying none of it. The
+    prefix is what diagnosis actually needs.
+    """
+    text = repr(value)
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}… ({len(text)} chars)"
 
 
 def _normalise_field(value: Any) -> Any:
@@ -483,7 +553,9 @@ def score_final_node_state(
         for key, want in fields.items():
             got = node.get(key)
             if got != want:
-                problems.append(f"{node_id}.{key}: expected {want!r}, got {got!r}")
+                problems.append(
+                    f"{node_id}.{key}: expected {want!r}, got {_abbreviate(got)}"
+                )
     if problems:
         return ConditionResult("final_node_state", False, "; ".join(problems))
     return ConditionResult(
@@ -527,10 +599,12 @@ def score_answer_entities_supported(
     1. **Closed vocabulary, no false positives.** Any id from the case's own
        fixture graph that the answer cites but no tool result returned. The
        answer named a real node the model never looked at.
-    2. **Open vocabulary, biased towards misses.** Any id-shaped token (see
-       ``is_id_shaped``) matching nothing the model was shown. Catches a
-       fabricated id, and is tuned to miss rather than to misfire, because a
-       false accusation here is indistinguishable from a real finding.
+    2. **Open vocabulary, biased towards misses.** An id-shaped token (see
+       ``is_id_shaped``) that belongs to this graph's id vocabulary — it shares
+       a leading segment with an id the run has seen — and matches nothing the
+       model was shown. Catches a fabricated id, which in practice is a
+       near-miss of a real one, and is tuned to miss rather than to misfire:
+       a false accusation here is indistinguishable from a real finding.
 
     This is the narrow, separately-named check behind the
     ``unsupported_entity_reference`` dimension — NOT a hallucination rate. See
@@ -541,17 +615,32 @@ def score_answer_entities_supported(
         shown |= _all_strings(result)
 
     answer = transcript.final_text or ""
-    cited = cited_id_tokens(answer)
 
     fixture_ids = {
         node["id"]
         for node in (fixture_graph or {}).get("nodes") or []
         if isinstance(node, dict) and isinstance(node.get("id"), str)
     }
+    # Signal 1, closed vocabulary: a real node of this fixture, cited but unread.
     cited_fixture_ids = {node_id for node_id in fixture_ids if node_id in answer}
 
+    # Signal 2, open vocabulary: an id-shaped token belonging to this graph's id
+    # vocabulary. A UUID is unambiguous on shape alone; a slug must share its
+    # leading segment with an id the run has seen, or the model's own dates and
+    # version strings get reported as fabricated nodes.
+    prefixes = _id_vocabulary_prefixes(fixture_ids | shown)
+    cited_tokens = {
+        token
+        for token in cited_id_tokens(answer)
+        if _UUID_ONLY_RE.match(token) or token.split("-", 1)[0] in prefixes
+    }
+
     unsupported = sorted(
-        {token for token in cited | cited_fixture_ids if not _was_shown(token, shown)}
+        {
+            token
+            for token in cited_tokens | cited_fixture_ids
+            if not _was_shown(token, shown)
+        }
     )
     if unsupported:
         return ConditionResult(
@@ -559,7 +648,7 @@ def score_answer_entities_supported(
             False,
             f"answer cites node(s) no tool result returned: {unsupported}",
         )
-    checked = cited | cited_fixture_ids
+    checked = cited_tokens | cited_fixture_ids
     if not checked:
         return ConditionResult(
             "answer_entities_supported",

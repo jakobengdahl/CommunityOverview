@@ -512,6 +512,75 @@ class TestVerifyAfterWrite:
         )
         assert score_verify_after_write(tr, ["get_related_nodes"]).passed
 
+    def test_reading_back_only_the_node_an_edge_pointed_at_does_not_verify(self):
+        """
+        PD2: `written` must mean "created or changed", not "referenced".
+
+        add_nodes' id-bearing arguments are its edges' endpoints — pre-existing
+        nodes the call did NOT write, and since those may be names, a read-back
+        could match an old node by name. So a model could create a node, read
+        back only the node its new edge pointed at, and pass verification
+        without the written node ever being read.
+        """
+        calls = [
+            call("search_graph", {"query": "Office"}, turn=0, tool_use_id="r0"),
+            call(
+                "add_nodes",
+                {
+                    "nodes": [{"type": "Resource", "name": "New Handbook"}],
+                    "edges": [
+                        {
+                            "source": "New Handbook",
+                            "target": "National Statistics Office",
+                        }
+                    ],
+                },
+                turn=1,
+                tool_use_id="w1",
+            ),
+            call("search_graph", {"query": "Office"}, turn=2, tool_use_id="r2"),
+        ]
+        shared = {
+            "r0": {
+                "nodes": [
+                    {
+                        "id": "eval-actor-statistics-office",
+                        "name": "National Statistics Office",
+                    }
+                ]
+            },
+            "w1": {"success": True, "added_node_ids": ["srv-generated-id-abc"]},
+        }
+
+        read_the_old_node = transcript(
+            calls,
+            results={
+                **shared,
+                "r2": {
+                    "nodes": [
+                        {
+                            "id": "eval-actor-statistics-office",
+                            "name": "National Statistics Office",
+                        }
+                    ]
+                },
+            },
+            advertised=["search_graph", "add_nodes"],
+        )
+        assert not score_verify_after_write(read_the_old_node, ["search_graph"]).passed
+
+        read_the_new_node = transcript(
+            calls,
+            results={
+                **shared,
+                "r2": {
+                    "nodes": [{"id": "srv-generated-id-abc", "name": "New Handbook"}]
+                },
+            },
+            advertised=["search_graph", "add_nodes"],
+        )
+        assert score_verify_after_write(read_the_new_node, ["search_graph"]).passed
+
     def test_a_run_with_no_write_fails_rather_than_passing_vacuously(self):
         tr = transcript([call("search_graph", {"query": "x"})])
         result = score_verify_after_write(tr, ["search_graph"])
@@ -728,6 +797,44 @@ class TestAnswerEntitiesSupported:
         result = score_answer_entities_supported(tr)
         assert result.passed, result.detail
 
+    @pytest.mark.parametrize(
+        "mention",
+        [
+            "I checked this on 2026-10-08.",
+            "Resolved with gpt-4o-mini.",
+            "See the left-hand-side panel.",
+            "The graph is in read-only-mode.",
+            "Counted 1-2-3 nodes.",
+        ],
+    )
+    def test_a_date_version_or_compound_the_model_supplies_is_not_a_node(self, mention):
+        """
+        PD3: shape alone still accused these.
+
+        "2026-10-08" and "gpt-4o-mini" are id-SHAPED — three-plus segments, no
+        function word — so a correct answer that mentioned today's date failed a
+        scored dimension. An open-vocabulary candidate must now also belong to
+        this graph's id vocabulary, which a date does not.
+        """
+        fixture = {"nodes": [{"id": "eval-initiative-metadata-register"}]}
+        tr = transcript(
+            results={"r0": {"nodes": [{"id": "eval-initiative-metadata-register"}]}},
+            final_text=f"Produced by eval-initiative-metadata-register. {mention}",
+        )
+        result = score_answer_entities_supported(tr, fixture)
+        assert result.passed, result.detail
+
+    def test_a_fabricated_id_sharing_the_graphs_prefix_is_still_caught(self):
+        """The realistic fabrication: a near-miss of a real id."""
+        fixture = {"nodes": [{"id": "eval-initiative-metadata-register"}]}
+        tr = transcript(
+            results={"r0": {"nodes": [{"id": "eval-initiative-metadata-register"}]}},
+            final_text="Produced by eval-initiative-metadata-registry-programme.",
+        )
+        result = score_answer_entities_supported(tr, fixture)
+        assert not result.passed
+        assert "eval-initiative-metadata-registry-programme" in result.detail
+
     def test_a_fixture_id_cited_but_never_read_fails(self):
         """
         The closed-vocabulary half: a real node the run never looked at.
@@ -813,6 +920,22 @@ class TestIsIdShaped:
     )
     def test_rejects_english_prose(self, token):
         assert not is_id_shaped(token)
+
+    @pytest.mark.parametrize("token", ["2026-10-08", "1-2-3", "0-0-0"])
+    def test_rejects_an_all_numeric_token(self, token):
+        """A date is not a node id, and a model states today's date freely."""
+        assert not is_id_shaped(token)
+
+    @pytest.mark.parametrize("token", ["gpt-4o-mini", "left-hand-side"])
+    def test_a_token_that_is_shaped_like_an_id_but_is_not_one(self, token):
+        """
+        Shape is deliberately not the whole test.
+
+        These pass the shape check, which is why the scorer also requires an
+        open-vocabulary candidate to share a leading segment with an id the run
+        has seen — see score_answer_entities_supported.
+        """
+        assert is_id_shaped(token)
 
     def test_rejects_a_real_id_containing_a_function_word_segment(self):
         """
@@ -923,13 +1046,19 @@ class TestNegativeExpectationsAreWired:
                 "condition rather than reporting the scorer's raw verdict"
             ),
         )
+        fixture = {}
         if field == "answer_entities_supported":
-            # Note the id itself must be free of function-word segments, or the
-            # prose filter correctly declines to read it as an id at all.
+            # The id must be free of function-word segments, AND the run must
+            # have seen some id sharing its leading segment — otherwise the
+            # token is correctly not treated as a node reference at all.
+            fixture = {"nodes": [{"id": "eval-initiative-metadata-register"}]}
             violating = transcript(
-                results={}, final_text="See eval-fabricated-node-reference."
+                results={
+                    "r0": {"nodes": [{"id": "eval-initiative-metadata-register"}]}
+                },
+                final_text="See eval-fabricated-node-reference.",
             )
-        score = score_case(case, violating, TOOL_DEFS, {})
+        score = score_case(case, violating, TOOL_DEFS, fixture)
         assert score.passed, [(c.name, c.detail) for c in score.conditions]
 
 

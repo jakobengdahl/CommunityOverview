@@ -223,20 +223,24 @@ class TestNoCodePathReadsACredentialFromAFile:
         assert not offenders, f"a file's contents reach a credential at {offenders}"
 
     def test_a_key_file_planted_beside_the_harness_is_not_picked_up(
-        self, monkeypatch, profile
+        self, monkeypatch, tmp_path, profile
     ):
         """
-        The behavioural half: a credential sitting right next to the code, in
-        the most obvious place anyone would put one, must not satisfy a profile.
+        The behavioural half: a credential sitting in the most obvious place
+        anyone would put one must not satisfy a profile.
+
+        Written under tmp_path with the cwd moved there, not into the
+        repository: an interrupted run would otherwise leave a key-shaped file
+        in a public checkout, which is the very thing this file exists to
+        prevent.
         """
         from backend.config.model_profiles import MissingCredentialError
         from backend.evaluation.runner import default_provider_factory
 
-        key_file = Path(__file__).resolve().parent.parent / ".eval_key"
-        key_file.write_text(SENTINEL, encoding="utf-8")
-        try:
-            monkeypatch.delenv(profile.credential_ref, raising=False)
-            with pytest.raises(MissingCredentialError, match=profile.credential_ref):
-                default_provider_factory(profile)
-        finally:
-            key_file.unlink()
+        monkeypatch.chdir(tmp_path)
+        for name in (".eval_key", ".env", "api_key.txt"):
+            (tmp_path / name).write_text(SENTINEL, encoding="utf-8")
+
+        monkeypatch.delenv(profile.credential_ref, raising=False)
+        with pytest.raises(MissingCredentialError, match=profile.credential_ref):
+            default_provider_factory(profile)

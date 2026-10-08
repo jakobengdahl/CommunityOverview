@@ -105,6 +105,14 @@ would pass it without reading either skill. They therefore come in pairs,
 sharing the same injected skills and expecting different first calls, and the
 pairing is pinned by a test.
 
+One detail matters for writing such a pair. The chat path injects a skill's
+**body only** — it falls back to `when_to_use` just for a skill that has no
+body, which no real SKILL.md is. So a fixture skill has to state when it
+applies *inside its body*, or the proxy measures a signal the model was never
+given. The shipped pair does (`schema-explainer.md` says "for a schema
+question", `inventory-reporter.md` says "for an inventory question"), and a test
+pins it.
+
 ### Why `skill_adherence` is partial
 
 A SKILL.md rule is scored only when it can be written as a constraint on the
@@ -232,36 +240,40 @@ would attribute one endpoint's behaviour to another and bill a key you did not
 choose. An unset variable is a clear error naming the variable, before any case
 runs.
 
-#### Where that variable can come from
+#### A `.env` file will not work — export in your shell
 
-Being precise about this, because the loose version of the claim is wrong and
-worth knowing: the harness reads the **process environment**, and that is not
-the same as "the shell only". Importing the assistant calls `load_dotenv()`
-(`backend/ui/chat_logic.py`), which the harness triggers on every case, so an
-untracked `.env` in the repository root **is** loaded into the environment and
-**will** satisfy a `credential_ref`. That is how the application itself is
-configured, and the harness neither adds nor can remove it.
+**Putting the key in `.env` does not work, by either entry point.** The harness
+resolves `credential_ref` against `os.environ` *before* anything imports the
+assistant, so the `load_dotenv()` that the application uses to read `.env`
+(`backend/ui/chat_logic.py`) has not run yet:
 
-So the guarantee is this, exactly:
+- the CLI calls `check_credentials()` first and exits with
+  `environment variable … is not set`;
+- `run_case()` builds the provider before it builds the assistant, so an unset
+  variable becomes `run_error: provider unavailable: MissingCredentialError`.
+
+`.env` does reach `os.environ` later in the process, once a case has built the
+assistant, so it can still influence *other* ambient settings — which is why
+"nothing besides `credential_ref` is ever read" would be too strong a claim to
+make. It just cannot supply the credential the harness asked for.
+
+So, exactly:
 
 - **No file in this repository contains a credential value**, and none may. The
-  `gitleaks` CI job and
-  `backend/evaluation/tests/test_no_credentials.py` both check it, and
-  `ModelProfile` refuses to hold one.
-- **The harness itself never reads a key from a file, never stores one, never
-  logs one, and never defaults one.** It resolves `credential_ref` against
-  `os.environ` at the moment a provider is built.
-- **A `.env` you create is yours to manage.** It is gitignored, it works, and it
-  is still a key at rest on disk. `.env.example` names these variables with
-  empty values purely as a reminder of what to export. **Prefer exporting in
-  your shell**, so the value never lands in a file at all.
+  `gitleaks` CI job and `backend/evaluation/tests/test_no_credentials.py` both
+  check it, and `ModelProfile` refuses to hold one.
+- **The harness never reads a key from a file, never stores one, never logs one,
+  and never defaults one.** It resolves `credential_ref` against `os.environ` at
+  the moment a provider is built.
+- **Export in your shell.** `.env.example` names these variables with empty
+  values purely as a reminder of what to export; a value there will not be
+  picked up, and would be a key at rest on disk for no benefit.
 
-One more thing that is read but unused: constructing the assistant reads ambient
-`OPENAI_API_KEY`/`ANTHROPIC_API_KEY` into `ChatProcessor.default_api_key` (you
-will see an `ANTHROPIC_API_KEY not found` log line during a run). The harness
-bypasses that field entirely by injecting its own provider, so it cannot affect
-a measurement — but it is read, and saying "nothing else is read" would be
-false.
+One thing that is read but cannot affect a measurement: constructing the
+assistant reads ambient `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` into
+`ChatProcessor.default_api_key`. The harness bypasses that field entirely by
+injecting its own provider — but it is read, so a flat "nothing else is read"
+would be false.
 
 ### 3. Run
 
@@ -286,7 +298,14 @@ lands in shell history and in the process table.
 
 The report carries per-case scores, the tool-call sequence, provider-call count,
 latency and tokens. It deliberately **excludes** the prompts, the system prompt
-and the model's prose, which is what makes it safe to paste into an issue.
+(including the injected skill text) and the assistant's answer text.
+
+It is not free of model-authored strings altogether, and should not be read as
+if it were: a condition's `detail` explains *why* it failed, so it can quote a
+field value the model wrote or an argument it passed — that is the diagnosis.
+Those quotes are length-bounded, but if a run's inputs are sensitive, read the
+report before pasting it somewhere. The credential is never in it: it is never
+in the transcript to begin with.
 
 Before comparing two models, check `run_error` on each case. A failed provider
 call is reported as a run error rather than as a case failure — otherwise an
@@ -331,6 +350,14 @@ harness records there rather than instrumenting the assistant:
 case runs against its own copy of its fixture graph in a temporary directory,
 through the real `ChatService` — the product's system prompt, tool definitions
 and tool-execution loop, with only the provider replaced.
+
+Skill injection mirrors the **chat** path, which is the one the harness drives:
+`build_skills_context` reproduces the wrapper that
+`frontend/web/src/components/ChatPanel.jsx` builds for `skills_context`, not
+`backend.agents.prompts.build_skills_section`, which is the AIAgent path and has
+a different shape. Nothing mechanically couples the Python to the JSX, so a test
+asserts the marker strings still appear in both and names the other file if one
+side changes.
 
 `ChatProcessor.process_message` accepts an optional `llm_provider` that bypasses
 provider resolution. The harness needs it: profiles configured on the host would

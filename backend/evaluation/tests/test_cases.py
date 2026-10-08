@@ -32,8 +32,35 @@ from backend.evaluation.dimensions import (
 
 
 class TestShippedCases:
-    def test_the_case_set_loads(self):
-        assert len(load_cases()) >= 8
+    def test_the_case_set_is_the_size_the_docs_state(self):
+        """
+        Exact, not a lower bound.
+
+        docs/SKILL_EVALUATION.md says "Nine cases"; a tenth would make the doc
+        quietly wrong, which is the same drift the dimension-table test exists
+        to stop.
+        """
+        import re
+        from pathlib import Path
+
+        cases = load_cases()
+        assert len(cases) == 9
+
+        doc = (
+            Path(__file__).resolve().parents[3] / "docs" / "SKILL_EVALUATION.md"
+        ).read_text(encoding="utf-8")
+        stated = re.search(r"^([A-Z][a-z]+) cases in `backend", doc, re.M)
+        assert stated, "the docs no longer state the case count in the expected form"
+        words = {
+            "Eight": 8,
+            "Nine": 9,
+            "Ten": 10,
+            "Eleven": 11,
+            "Twelve": 12,
+        }
+        assert words.get(stated.group(1)) == len(cases), (
+            f"docs say {stated.group(1)!r} cases, the set has {len(cases)}"
+        )
 
     def test_every_case_declares_at_least_one_pass_condition(self):
         for case in load_cases():

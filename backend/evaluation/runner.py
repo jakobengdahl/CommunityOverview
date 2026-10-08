@@ -81,36 +81,41 @@ def default_provider_factory(profile: ModelProfile) -> LLMProvider:
 
 def build_skills_context(skill_paths: Sequence[Path]) -> Optional[str]:
     """
-    Render fixture SKILL.md files into the exact prompt shape the product uses.
+    Render fixture SKILL.md files the way the chat path receives them.
 
-    Goes through SkillDefinition/build_skills_section rather than pasting the
-    markdown in raw, so what the model is asked to follow during an evaluation
-    is byte-identical in structure to what it is given in production. Fixtures
-    are read from disk — the harness never fetches a skill over the network,
-    which also keeps the suite runnable with no egress beyond the provider.
+    This mirrors ``buildSkillsContext`` in
+    ``frontend/web/src/components/ChatPanel.jsx`` — the only production caller
+    that fills ``skills_context`` on a chat request, which is the parameter this
+    harness drives. That shape is a header, one ``<skill name="…">`` block
+    holding the SKILL.md **body only**, and a footer.
+
+    It is deliberately NOT ``backend.agents.prompts.build_skills_section``,
+    which is the AIAgent path: that one fences the set with ``--- SKILLS ---``
+    and prefixes each skill with ``When to use:``, ``Description:`` and
+    ``Expected tools:`` lines. Rendering the agent shape while driving the chat
+    path would measure a prompt no production caller produces — and would hand
+    the model a ``when_to_use`` line that the chat path does not inject at all
+    whenever a skill has a body, which is every real SKILL.md. A skill fixture
+    must therefore state its own applicability inside its body; the frontmatter
+    is parsed for the name and otherwise not injected, exactly as in production.
+
+    Fixtures are read from disk — the harness never fetches a skill over the
+    network, which keeps the suite runnable with no egress beyond the provider.
     """
-    from backend.agents.prompts import build_skills_section
-    from backend.skills.loader import SkillDefinition
-
     if not skill_paths:
         return None
 
-    definitions = []
+    parts = [
+        "ACTIVE SKILL INSTRUCTIONS — YOU MUST APPLY THESE TO THIS RESPONSE:",
+        "The user has selected the following skills. These instructions OVERRIDE "
+        "your default behavior and style for this response. Apply them precisely.",
+    ]
     for path in skill_paths:
-        raw = path.read_text(encoding="utf-8")
-        front, body = _split_frontmatter(raw)
-        definitions.append(
-            SkillDefinition(
-                id=front.get("id") or path.stem,
-                name=front.get("name") or path.stem,
-                description=front.get("description", ""),
-                content=body.strip(),
-                when_to_use=front.get("when-to-use") or front.get("when_to_use"),
-                allowed_tools=_split_list(front.get("allowed-tools")),
-                source_url=str(path),
-            )
-        )
-    return build_skills_section(definitions)
+        front, body = _split_frontmatter(path.read_text(encoding="utf-8"))
+        name = front.get("name") or path.stem
+        parts.append(f'<skill name="{name}">\n{body.strip()}\n</skill>')
+    parts.append("END OF SKILL INSTRUCTIONS. Apply the above to your entire response.")
+    return "\n\n".join(parts)
 
 
 def _split_frontmatter(raw: str) -> tuple:
@@ -128,12 +133,6 @@ def _split_frontmatter(raw: str) -> tuple:
         key, _, value = line.partition(":")
         front[key.strip()] = value.strip().strip("\"'")
     return front, parts[2]
-
-
-def _split_list(value: Optional[str]) -> List[str]:
-    if not value:
-        return []
-    return [item.strip() for item in value.strip("[]").split(",") if item.strip()]
 
 
 def run_case(
@@ -165,7 +164,6 @@ def run_case(
         graph_file = Path(tmpdir) / "graph.json"
         graph_file.write_text(json.dumps(fixture_graph), encoding="utf-8")
 
-        baseline_graph = fixture_graph
         try:
             chat_service, tool_definitions = _build_chat_service(graph_file)
         except Exception as exc:
@@ -178,13 +176,22 @@ def run_case(
         # The "before" state a completeness expectation is judged against must be
         # the fixture AS THE GRAPH LAYER SERIALIZES IT, not the raw JSON file.
         # The two differ in both directions: the serializer adds defaults the
-        # fixture omits (subtypes: [], aliases: {}, metadata: {}) and drops keys
+        # fixture omits (subtypes: [], aliases: [], metadata: {}) and drops keys
         # it does not model (communities). Compared against the raw file, either
         # difference reads as a field the model changed — so a case naming such a
         # field passed on a run where the model did nothing at all. Snapshotting
         # through the same serializer that produces the final state removes the
         # whole class, rather than enumerating the fields it affects.
-        baseline_graph = _snapshot_graph(chat_service) or fixture_graph
+        baseline_graph = _snapshot_graph(chat_service)
+        if not baseline_graph:
+            # Falling back to the raw fixture here would quietly restore the
+            # baseline whose shape mismatch was the completeness defect in the
+            # first place, so a case would score against it without anyone
+            # knowing. Without a trustworthy baseline there is no measurement.
+            _shutdown_chat_service(chat_service)
+            transcript.run_error = "could not snapshot the fixture graph as a baseline"
+            logger.warning("case %s: baseline snapshot failed", case.id)
+            return score_case(case, transcript, tool_definitions, {})
 
         try:
             result = chat_service.process_message(

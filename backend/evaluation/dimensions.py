@@ -64,7 +64,11 @@ DIMENSIONS: Dict[str, Dimension] = {
                 "applicable skill mandates a distinctive first tool call and the other "
                 "mandates a different one, so the first call discriminates. This "
                 "measures whether the model applies the right injected skill, not "
-                "whether a retrieval step picked the right skill to inject."
+                "whether a retrieval step picked the right skill to inject. Note the "
+                "chat path injects a skill's BODY only — it passes when_to_use solely "
+                "as a fallback for a skill that has no body — so a fixture skill must "
+                "state when it applies inside its body, and the discrimination the "
+                "model gets is the one production would give it."
             ),
         ),
         Dimension(
