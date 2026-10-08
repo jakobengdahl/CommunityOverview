@@ -179,13 +179,19 @@ def build_route(
 ) -> str:
     """Build the canonical route into ``gui_url`` focused on ``origin_node_id``.
 
-    Query parameters already on ``gui_url`` are kept, but a teleport parameter
-    *replaces* one of the same name rather than being appended after it: the
-    receiving end reads the first value of a repeated parameter, so appending
-    would let a ``gui_url`` configured with its own ``node=`` shadow the node
-    this route exists to focus. Mirrors ``config_loader.build_session_url``,
-    which merges the same way. The fragment is dropped because it is not part
-    of the addressing contract.
+    A query parameter already on ``gui_url`` is kept unless it is one of the
+    four this builder owns (see ``owned`` below): an owned key is *replaced*
+    when the route carries a value for it and *removed* when it does not.
+    Replacing rather than appending matters because the receiving end reads the
+    first value of a repeated parameter, so appending would let a ``gui_url``
+    configured with its own ``node=`` shadow the node this route exists to
+    focus. Removing matters because an inherited ``node=`` would otherwise
+    survive into a backlink that addresses no node at all — so do not configure
+    a default ``node=`` or ``q=`` on ``gui_url`` and expect it to survive a
+    teleport. This is deliberately stricter than
+    ``config_loader.build_session_url``, which overwrites ``session`` and
+    leaves every other configured parameter alone. The fragment is dropped
+    because it is not part of the addressing contract.
     """
     base = _normalize(gui_url)
     if not base:
