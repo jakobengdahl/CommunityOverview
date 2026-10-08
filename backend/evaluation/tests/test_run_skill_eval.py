@@ -203,9 +203,21 @@ class TestNoCodePathReadsACredentialFromAFile:
         assert not offenders, f"harness writes to os.environ at {offenders}"
 
     def test_no_module_passes_a_file_read_as_a_credential(self):
+        """
+        Keyword AND positional.
+
+        This inspected `node.keywords` only, so
+        `create_provider_from_profile(profile, keyfile.read_text())` — whose
+        second positional parameter IS `api_key_override`, documented to take
+        precedence over `credential_ref` — was invisible to it.
+        """
         import ast
 
         readers = ("read_text", "read_bytes", "readline", "read")
+
+        def reads_a_file(source: str) -> bool:
+            return any(f".{reader}(" in source for reader in readers)
+
         offenders = []
         for path in self.SCANNED:
             if "tests" in path.parts:
@@ -218,9 +230,94 @@ class TestNoCodePathReadsACredentialFromAFile:
                     if keyword.arg not in ("api_key", "api_key_override", "credential"):
                         continue
                     source = ast.unparse(keyword.value)
-                    if any(f".{reader}(" in source for reader in readers):
+                    if reads_a_file(source):
                         offenders.append(f"{path.name}:{node.lineno}: {source}")
+                # Any positional argument of a provider constructor.
+                callee = ast.unparse(node.func)
+                if callee.endswith(
+                    (
+                        "create_provider_from_profile",
+                        "create_provider",
+                        "OpenAI",
+                        "Anthropic",
+                    )
+                ):
+                    for argument in node.args:
+                        source = ast.unparse(argument)
+                        if reads_a_file(source):
+                            offenders.append(f"{path.name}:{node.lineno}: {source}")
         assert not offenders, f"a file's contents reach a credential at {offenders}"
+
+    def test_no_module_supplies_an_api_key_override_at_all(self):
+        """
+        Positional or keyword, from a file or anywhere else.
+
+        The mechanism, not one filename: `api_key_override` is the documented
+        way to beat `credential_ref`, so the harness must never pass a second
+        argument to `create_provider_from_profile` by any route.
+        """
+        import ast
+
+        offenders = []
+        for path in self.SCANNED:
+            if "tests" in path.parts:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                if not ast.unparse(node.func).endswith("create_provider_from_profile"):
+                    continue
+                if len(node.args) > 1 or any(
+                    kw.arg == "api_key_override" for kw in node.keywords
+                ):
+                    offenders.append(f"{path.name}:{node.lineno}")
+        assert not offenders, f"api_key_override supplied at {offenders}"
+
+    def test_the_harness_never_overrides_the_profiles_credential_at_runtime(
+        self, monkeypatch, tmp_path
+    ):
+        """
+        The behavioural half, asserting the mechanism rather than a filename.
+
+        The previous version planted exactly `backend/evaluation/.eval_key`, so
+        a code path reading any other name slipped through. This records every
+        provider construction the harness performs and asserts none of them
+        carried an override.
+        """
+        import backend.evaluation.runner as runner_module
+        from backend.evaluation import load_cases
+        from backend.evaluation.tests.conftest import ScriptedProvider
+
+        monkeypatch.chdir(tmp_path)
+        for name in (".eval_key", ".eval_credential", ".env", "api_key.txt", "key"):
+            (tmp_path / name).write_text(SENTINEL, encoding="utf-8")
+
+        calls = []
+
+        def record(profile, api_key_override=None, *args, **kwargs):
+            calls.append(api_key_override)
+            return ScriptedProvider([[("search_graph", {"query": "x"})], "done"])
+
+        monkeypatch.setattr(
+            runner_module, "create_provider_from_profile", record, raising=True
+        )
+        monkeypatch.setenv("EVAL_HARNESS_TEST_KEY", SENTINEL)
+
+        from backend.config.model_profiles import ModelProfile
+
+        profile = ModelProfile(
+            id="probe",
+            name="Probe",
+            provider="openai",
+            model="m",
+            default=True,
+            credential_ref="EVAL_HARNESS_TEST_KEY",
+        )
+        runner_module.run_case(load_cases()[0], profile)
+
+        assert calls, "no provider was constructed, so nothing was asserted"
+        assert all(override is None for override in calls), calls
 
     def test_a_key_file_planted_beside_the_harness_is_not_picked_up(
         self, monkeypatch, tmp_path, profile

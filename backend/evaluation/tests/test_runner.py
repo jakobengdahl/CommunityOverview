@@ -596,9 +596,15 @@ class TestCompletenessBaseline:
     @pytest.mark.parametrize(
         "fields,why",
         [
+            # None vs [] / {} — collapsed by _normalise_field.
             (["subtypes", "aliases", "metadata"], "serializer ADDS these defaults"),
-            (["communities"], "a key neither the fixture nor the Node model has"),
+            # None vs False — NOT collapsed by _normalise_field, so this row is
+            # the one that actually requires the snapshot baseline. With the raw
+            # fixture as the baseline it is a verified vacuous pass, and the
+            # rows above would not have noticed.
+            (["archived"], "a serializer default _normalise_field does not collapse"),
             (["summary"], "an ordinary content field, present in both"),
+            (["communities"], "a key neither the fixture nor the Node model has"),
         ],
     )
     def test_an_idle_model_fails_whatever_fields_a_case_names(
@@ -751,6 +757,22 @@ class TestSuiteAndReport:
         assert result.total == 2
         assert result.profile_id == profile.id
         assert result.model == profile.model
+
+    def test_run_suite_defaults_to_the_shipped_case_set(self, profile):
+        """
+        The `cases=None` path, which every other test bypasses.
+
+        Truncating `load_cases()` inside `run_suite` was undetectable, so the
+        default an operator actually gets had no coverage.
+        """
+        from backend.evaluation.cases import load_cases
+
+        result = run_suite(
+            profile,
+            provider_factory=_factory([[("search_graph", {"query": "x"})], "done"]),
+        )
+        assert result.total == len(load_cases())
+        assert {s.case_id for s in result.scores} == {c.id for c in load_cases()}
 
     def test_the_report_carries_scores_and_the_unscored_dimension(
         self, profile, case_by_id

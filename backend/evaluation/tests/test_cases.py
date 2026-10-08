@@ -142,6 +142,46 @@ class TestShippedCases:
             for node in graph["nodes"]:
                 assert node.get("id") and node.get("type") and node.get("name")
 
+    def test_the_ambiguous_fixture_is_actually_ambiguous(self):
+        """
+        `skill-adherence-ambiguous-name-halts` exists because of this ambiguity.
+
+        Renaming either node so the two no longer share a name was undetectable:
+        the case would then ask a model to halt on nothing and score it as
+        failing adherence, while the test covering it still passed because its
+        scripted model writes, which is forbidden either way.
+        """
+        case = next(
+            c for c in load_cases() if c.id == "skill-adherence-ambiguous-name-halts"
+        )
+        graph = json.loads(case.graph_path().read_text(encoding="utf-8"))
+        names = [node["name"] for node in graph["nodes"]]
+        duplicated = {name for name in names if names.count(name) > 1}
+        assert duplicated, (
+            f"{case.graph} has no duplicated node name, so the case it backs "
+            "asks the model to halt on an ambiguity that is not there"
+        )
+        assert any(name in case.prompt for name in duplicated), case.prompt
+
+    def test_the_id_resolution_case_requires_a_read_before_its_write(self):
+        """
+        Its sequence IS the ID-first rule; trimming it was undetectable.
+
+        The dispatch test asserts condition names, not their contents, and
+        nothing else read the sequence — so ["search_graph", "update_node"]
+        could become ["update_node"] and the case would stop testing the thing
+        it is named for.
+        """
+        case = next(c for c in load_cases() if c.id == "id-resolution-before-write")
+        sequence = case.expect.required_call_sequence
+        assert len(sequence) >= 2, sequence
+        write_positions = [i for i, name in enumerate(sequence) if name in WRITE_TOOLS]
+        assert write_positions, f"{sequence} contains no write"
+        assert write_positions[0] > 0, (
+            f"{sequence} lets the write come first, so it no longer requires a "
+            "read before the write"
+        )
+
     def test_fixture_nodes_carry_no_field_the_node_model_drops(self):
         """
         A fixture is the ground truth a case is judged against.
@@ -268,28 +308,39 @@ class TestCaseValidation:
         with pytest.raises(ValueError, match="duplicate case id"):
             load_cases(cases_file=cases_file, graphs_dir=tmp_path)
 
-    def test_a_case_naming_a_timestamp_as_evidence_of_change_is_rejected(self):
+    @pytest.mark.parametrize("field", ["updated_at", "created_at", "id"])
+    @pytest.mark.parametrize(
+        "expectation", ["final_node_fields_changed", "final_node_state"]
+    )
+    def test_a_case_naming_a_timestamp_as_evidence_of_change_is_rejected(
+        self, field, expectation
+    ):
         """
         `updated_at` moves on every write, so it would pass for any write at all.
 
-        `id` and `created_at` never move, so a case naming one could never pass.
-        Either way the case reports something other than whether the requested
-        change was made — and the serializer adds all three to every exported
-        node, so they are easy to reach for.
+        `id` and `created_at` never move, so a "changed" expectation naming one
+        could never pass, while an exact-value expectation naming one passes
+        without the model doing anything. Either way the case reports something
+        other than whether the requested change was made — and the serializer
+        adds all three to every exported node, so they are easy to reach for.
+
+        Parametrised over BOTH expectation fields: only the "changed" half was
+        exercised, so the exact-value half the validator's own docstring
+        motivates could be deleted with the suite green.
         """
-        for field in ("updated_at", "created_at", "id"):
-            with pytest.raises(ValidationError, match="cannot evidence"):
-                AcceptanceCase(
-                    id="x",
-                    dimension="completeness",
-                    prompt="p",
-                    graph="metadata-pilot-small.json",
-                    expect=self._expect(
-                        final_node_fields_changed={
-                            "eval-actor-statistics-office": [field]
-                        }
-                    ),
-                )
+        value = (
+            {"eval-actor-statistics-office": [field]}
+            if expectation == "final_node_fields_changed"
+            else {"eval-actor-statistics-office": {field: "anything"}}
+        )
+        with pytest.raises(ValidationError, match="cannot evidence"):
+            AcceptanceCase(
+                id="x",
+                dimension="completeness",
+                prompt="p",
+                graph="metadata-pilot-small.json",
+                expect=self._expect(**{expectation: value}),
+            )
 
     def test_a_case_naming_a_real_content_field_is_accepted(self):
         AcceptanceCase(

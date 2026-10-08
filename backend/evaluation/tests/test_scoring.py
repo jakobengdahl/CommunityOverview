@@ -12,6 +12,8 @@ import pytest
 from backend.evaluation.cases import AcceptanceCase, ExpectedBehaviour
 from backend.evaluation.scoring import (
     ID_TOKEN_RE,
+    CaseScore,
+    _normalise_field,
     is_id_shaped,
     score_case,
     _align,
@@ -842,14 +844,29 @@ class TestAnswerEntitiesSupported:
         No heuristic involved — the id is in the case's own fixture, so citing
         it without a tool result having returned it is unambiguous.
         """
-        fixture = {"nodes": [{"id": "eval-actor-statistics-office"}]}
+        # The id must be one the OPEN half cannot see, or this passes without
+        # the closed half existing: "on" is a function-word segment, so
+        # is_id_shaped rejects it and only the fixture vocabulary can catch it.
+        unreachable_by_shape = "task-fix-edge-authentication-on-sspcloud"
+        assert not is_id_shaped(unreachable_by_shape), "premise of this test"
+
+        fixture = {"nodes": [{"id": unreachable_by_shape}]}
         tr = transcript(
             results={"r0": {"nodes": [{"id": "eval-resource-metadata-handbook"}]}},
-            final_text="It belongs to eval-actor-statistics-office.",
+            final_text=f"It belongs to {unreachable_by_shape}.",
         )
         result = score_answer_entities_supported(tr, fixture)
         assert not result.passed
-        assert "eval-actor-statistics-office" in result.detail
+        assert unreachable_by_shape in result.detail
+
+    def test_without_a_fixture_graph_the_closed_half_cannot_help(self):
+        """The same citation goes unnoticed, which is what makes the half load-bearing."""
+        unreachable_by_shape = "task-fix-edge-authentication-on-sspcloud"
+        tr = transcript(
+            results={"r0": {"nodes": [{"id": "eval-resource-metadata-handbook"}]}},
+            final_text=f"It belongs to {unreachable_by_shape}.",
+        )
+        assert score_answer_entities_supported(tr, None).passed
 
     def test_a_fixture_id_that_was_read_passes(self):
         fixture = {"nodes": [{"id": "eval-actor-statistics-office"}]}
@@ -1060,6 +1077,53 @@ class TestNegativeExpectationsAreWired:
             )
         score = score_case(case, violating, TOOL_DEFS, fixture)
         assert score.passed, [(c.name, c.detail) for c in score.conditions]
+
+
+class TestCaseScorePassedGuards:
+    """
+    Two guards that covered each other, so each could be deleted unnoticed.
+
+    score_case sets conditions=[] on a run error, so the truthiness guard hid a
+    missing run_error check and the run_error check hid a missing truthiness
+    guard. Drop both and a run that never happened reads as a pass. Asserted on
+    CaseScore directly, where neither can stand in for the other.
+    """
+
+    def test_a_score_with_no_conditions_has_not_passed(self):
+        assert CaseScore(case_id="x", dimension="completeness").passed is False
+
+    def test_a_score_with_a_run_error_has_not_passed_even_if_conditions_held(self):
+        score = CaseScore(
+            case_id="x",
+            dimension="completeness",
+            conditions=[ConditionResult("c", True, "held")],
+            run_error="the provider was unreachable",
+        )
+        assert score.passed is False
+
+    def test_a_score_with_held_conditions_and_no_error_has_passed(self):
+        score = CaseScore(
+            case_id="x",
+            dimension="completeness",
+            conditions=[ConditionResult("c", True, "held")],
+        )
+        assert score.passed is True
+
+
+class TestNormaliseFieldBoundary:
+    """
+    Where "empty" stops. The same function's gap produced the `archived`
+    vacuous pass, so the boundary is pinned in both directions.
+    """
+
+    @pytest.mark.parametrize("value", [None, [], {}, ""])
+    def test_absent_and_empty_collapse_together(self, value):
+        assert _normalise_field(value) is None
+
+    @pytest.mark.parametrize("value", [0, 0.0, False, [0], {"a": 0}, "0"])
+    def test_a_real_value_that_merely_looks_empty_is_preserved(self, value):
+        """Collapsing 0 or False would turn a genuine change into "unchanged"."""
+        assert _normalise_field(value) is not None
 
 
 class TestAlign:
