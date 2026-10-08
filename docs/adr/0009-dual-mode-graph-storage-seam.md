@@ -70,12 +70,18 @@ different ways.
   `FederationManager` event callbacks, `setup_events`, the `GraphService`, the
   `AgentRegistry`, and the agent delivery callback. Nothing in that wiring is
   parameterised by a graph.
-- **That residency has a measured price.**
+- **That residency has a measured price, and it is not only memory.**
   [`CAPACITY.md`](../CAPACITY.md) puts the marginal cost at ~10,069 B per node
   and its 1.7 edges for the file backend (~9,180 B for PostgreSQL), over a
   process floor of ~50 MB (~61 MB with psycopg imported). A second graph in
-  the same process costs a second graph's resident memory, not a second
-  connection.
+  the same process costs a second graph's resident memory **and a second set
+  of connections**: `PostgresGraphPersistenceBackend.__init__` builds its own
+  pool and opens its own listening connection on every construction, and
+  nothing shares either across two of them, so a process holding N graphs
+  holds N of both. [`PERSISTENCE_BACKENDS.md`](../PERSISTENCE_BACKENDS.md)
+  ("Sizing it: what an instance costs") gives the multiplier as
+  `instance_count × (pool_size + 1) × graph_count`, which at the default
+  `pool_size` of 4 is 5 server connections per graph held.
 - **Two sidecars exist for the file backend alone.** `GraphStorage` builds the
   embedding sidecar and the history sidecar only when the backend is a
   `FileGraphPersistenceBackend` (`_init_embedding_sidecar`,
@@ -126,9 +132,17 @@ it actually left in the code:
 Two consequences matter here, and both are easy to misread:
 
 1. **Graph-scope narrowing is a visibility filter over one store, not a store
-   selector.** It decides which nodes of the single resident graph a request
-   may see. No code path uses `graph_id` to choose where a read or a write
-   goes.
+   selector — and in this repository it is inert.** When enabled it decides
+   which nodes of the single resident graph a request may see. No code path
+   uses `graph_id` to choose where a read or a write goes. And nothing in the
+   core switches it on: `DefaultGraphAuthorizationHook` returns the default
+   `GraphAccessNarrowing`, whose `enabled` is `False`, and `matches()`
+   short-circuits to `True` while it is; no production code constructs one
+   with `enabled=True`, and `GraphService` defaults to that hook. So
+   `include_graph_ids` can only arrive from an injected hook, which lives
+   outside this repository. What the core does with a request's declared
+   `graph_id` today is put it in the authorization context for a hook to
+   consider, and record it in attribution — nothing else.
 2. **`graph_id` already names something else.** `metadata.origin_graph_id` is
    stamped by `FederationManager` from `federation_config`'s
    `graphs[].graph_id` onto *cached federated* nodes; a local node carries
@@ -199,10 +213,13 @@ the two seams disagreeing about what a graph is.
   in the project's planning records and stated in this repository's prose, and
   it is a commercial boundary as much as a technical one. An ADR cannot move
   it; it can only say what follows either way.
-- **The in-memory model is the real ceiling, not the backend.** Shared storage
-  removed the "many instances, one graph" limit. "Many graphs, one process" is
-  bounded by resident memory per graph, and would be a read-path change, not a
-  backend swap.
+- **Two ceilings bound "many graphs, one process", and the backend is not the
+  one that was removed.** Shared storage removed the "many instances, one
+  graph" limit. What bounds the other direction is resident memory per graph
+  *and* connections per graph — and the connection ceiling is the one that
+  fails a boot rather than slowing a process, because an instance that cannot
+  get a connection does not start. Either way it would be a read-path and
+  lifecycle change, not a backend swap.
 - **Reversibility is asymmetric.** Adding a per-request store selector later
   is a change to boot wiring. Removing one after the hosted layer depends on
   it is not.
@@ -236,7 +253,8 @@ unchanged.
     amended or the hosted layer has to accept a core runtime per graph.
   - The hosted layer pays per-graph process overhead (~50–61 MB floor each)
     and per-graph operational surface. For many small graphs that is the
-    expensive shape.
+    expensive shape. (Connections are not a differentiator: at
+    `pool_size + 1` per graph held they cost the same under either option.)
   - It leaves the property enforced nowhere: two prose sentences and no check.
 
 ### Option B — A graph-resolver seam above the persistence seam
@@ -249,8 +267,10 @@ always returns the same store.
 - **For:**
   - Delivers literally what the hosted target sentence describes: several
     graphs on the same runtime instances.
-  - Amortises the process floor across graphs, and a lazy, evictable registry
-    bounds memory by resident graphs rather than by owned graphs.
+  - Amortises the process floor (~50–61 MB) across graphs, and a lazy,
+    evictable registry bounds memory by resident graphs rather than by owned
+    graphs — subject to the connection ceiling below, which it does not
+    amortise.
   - The resolver is the natural place to make the declared `graph_id` and the
     serving store agree.
 - **Against:**
@@ -261,9 +281,24 @@ always returns the same store.
     the agent registry and its workers, event subscriptions and webhook
     delivery, the sessions directory, the history and vector sidecars. Several
     of those are stateful and keyed by nothing today.
-  - Resident memory is the ceiling (~10 kB per node), so a registry needs
+  - Resident memory is one ceiling (~10 kB per node), so a registry needs
     eviction, and eviction interacts with the single background writer thread
     and the journal/checkpoint lineage each `GraphStorage` owns.
+  - **It amortises the process floor but not the connections, and the
+    connection ceiling is the one that refuses rather than degrades.** Each
+    graph held costs `pool_size + 1` server connections — 5 at the default
+    pool size — so the budget is
+    `instance_count × (pool_size + 1) × graph_count`
+    ([`PERSISTENCE_BACKENDS.md`](../PERSISTENCE_BACKENDS.md), "Sizing it:
+    what an instance costs"), and against a stock server's 97 available
+    connections five instances holding four graphs each is already 100. In
+    fairness to this option that cost is per graph *held*, so Option A pays
+    the same total for the same graphs; what Option B saves is the process
+    floor, not the connections. The consequence specific to a registry is
+    that holding graphs lazily only helps if eviction also closes the pool,
+    and an instance that cannot get a connection fails to boot rather than
+    running slowly — so the saving is in the resource that degrades and the
+    risk is in the resource that refuses.
   - It overloads the request `graph_id`, which currently means a federation
     peer, with "which store", or introduces a second identifier and a mapping
     between them.
@@ -307,12 +342,17 @@ owner.
    `GraphStorage` itself. No new abstraction layer is introduced for shared
    storage, because the shared backend already sits behind this one.
 
-2. **State the unit of storage identity: one graph per core runtime, every
-   backend.** This is descriptive of today's code
-   (`create_app`, `_claim_or_check_graph_identity`,
-   `ATTACHMENT_NAMESPACE`), and it is what a third-party backend author needs
-   told, so it belongs in `PERSISTENCE_BACKENDS.md` rather than only in
-   runtime-enablement prose.
+2. **Promote the unit of storage identity into the backend contract: one
+   graph per core runtime, every backend.** This is descriptive of today's
+   code (`create_app`, `_claim_or_check_graph_identity`,
+   `ATTACHMENT_NAMESPACE`), and it is not unstated —
+   [`PERSISTENCE_BACKENDS.md`](../PERSISTENCE_BACKENDS.md) already says every
+   deployment this repository ships holds one graph per process, and
+   `CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md` says a deployment normally
+   serves one graph. But it sits there as an aside inside a capacity-sizing
+   section, next to the arithmetic for a process that holds several. What is
+   proposed is elevating it to a stated property of the seam, where a
+   third-party backend author reads the contract rather than the sizing notes.
 
 3. **Protect file-only explicitly rather than by accident.** Two properties
    are the test of "still first-class", and both are checkable: a clone with
@@ -324,12 +364,28 @@ owner.
 
 4. **Close the one real gap: bind the runtime's graph identity at boot and
    refuse a request that contradicts it.** The runtime knows which graph it
-   serves; a request may declare a `graph_id`; nothing compares them. The
-   proposal is that a declared graph scope that does not name this runtime's
-   graph is refused through the existing authorization seam, rather than
-   served and then recorded in an audit event as if it had come from the graph
-   it names. This is wanted under either option — it is a correctness property
-   of attribution, not a multi-graph feature — and it is the one piece of work
+   serves; a request may declare a `graph_id`; nothing compares them, so an
+   unverified identifier reaches the audit record as if the store had supplied
+   it. The proposal is that a declared graph scope be checked against what
+   this runtime can legitimately be asked about, and refused through the
+   existing authorization seam otherwise.
+
+   **The predicate is the hard part, and it is not "equals this runtime's
+   graph".** As the Context section establishes, this field's values come from
+   the *federation* namespace — `federation_config`'s `graphs[].graph_id` —
+   and a local node carries no graph id at all, which is why
+   `allow_local_graph` exists. A federation peer id therefore never equals
+   this runtime's own graph name by construction, so a rule written that way
+   would refuse the field's entire legitimate use rather than only
+   contradictory values. The check has to be "this runtime's own graph
+   identity, or a graph id this deployment's federation config declares", and
+   refuse anything else. If that pairing is judged too loose to be worth
+   having, the honest conclusion is that closing this gap needs the second,
+   store-identity identifier this ADR argues for above, and that it should
+   wait for one rather than overload the field further.
+
+   This is wanted under either option — it is a correctness property of
+   attribution, not a multi-graph feature — and it is the one piece of work
    this ADR would put in this repository.
 
 5. **Do not build a graph resolver until the boundary question is answered.**
@@ -370,14 +426,16 @@ If this proposal is accepted:
   moved between backends with `scripts/graph_file_to_postgres.py` is
   unaffected.
 - **One behaviour change to be aware of, and only if item 4 is implemented:** a
-  deployment that already sets `COMMUNITYOVERVIEW_GRAPH_SCOPE_ID`, or sends
-  `x-communityoverview-graph-id`, to a value that is *not* this runtime's
-  graph would start being refused where it is currently served. Today such a
-  request is served and its narrowing is applied against federation graph ids,
-  so the value is already expected to name a federation peer rather than a
-  store; a deployment relying on the current permissiveness should be
-  identified before the refusal lands. This is the main reason item 4 is worth
-  reviewing on its own rather than folding into a larger change.
+  deployment that sets `COMMUNITYOVERVIEW_GRAPH_SCOPE_ID`, or sends
+  `x-communityoverview-graph-id`, to a value the predicate does not admit
+  would start being refused where it is currently served. The current
+  permissiveness is total: the core does not narrow on the value at all
+  (narrowing is inert without an injected hook), so it reaches the
+  authorization context and the audit record and is otherwise ignored. A
+  deployment relying on that should be identified before any refusal lands —
+  which is the main reason item 4 is worth reviewing on its own rather than
+  folding into a larger change, and why its predicate is written out above
+  rather than left to the implementation.
 
 ### `config/default/schema_config.json`
 
