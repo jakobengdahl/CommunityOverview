@@ -426,6 +426,46 @@ class TestRunCaseRobustness:
         assert score.conditions == []
         assert not score.passed
 
+    def test_an_unusable_baseline_is_a_run_error_not_a_silent_fallback(
+        self, profile, case_by_id, monkeypatch
+    ):
+        """
+        G7's third clause, which had no test at all.
+
+        Four separate mutations of this branch survived — including collapsing
+        it back to `_snapshot_graph(...) or fixture_graph`, the exact fallback
+        whose removal was the point of the round-2 fix. Without a trustworthy
+        baseline there is no measurement, so it must be a run error rather than
+        a comparison against the shape that produced the vacuous pass.
+        """
+        import backend.evaluation.runner as runner_module
+
+        real_build = runner_module._build_chat_service
+
+        def build_with_a_broken_export(graph_file):
+            chat_service, tool_definitions = real_build(graph_file)
+
+            def explode():
+                raise RuntimeError("export is unavailable")
+
+            chat_service.graph_service.export_graph = explode
+            return chat_service, tool_definitions
+
+        monkeypatch.setattr(
+            runner_module, "_build_chat_service", build_with_a_broken_export
+        )
+
+        score = run_case(
+            case_by_id["completeness-full-translation"],
+            profile,
+            provider_factory=_factory([[("search_graph", {"query": "x"})], "done"]),
+        )
+
+        assert score.run_error is not None
+        assert "baseline" in score.run_error
+        assert score.conditions == []
+        assert not score.passed
+
     def test_a_provider_that_cannot_be_built_loses_only_its_own_case(
         self, profile, case_by_id
     ):

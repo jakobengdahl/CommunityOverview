@@ -448,6 +448,56 @@ class TestReportsNeverCarryACredential:
         # And the model's own prose stays out too.
         assert PROSE_SENTINEL not in payload
 
+    def test_no_condition_detail_carries_the_answer_or_an_unbounded_argument(
+        self, profile
+    ):
+        """
+        Finding 3: the existing assertion ran on a case that produces none of
+        these details.
+
+        It drove `tool-call-validity-read-path`, which declares only
+        `tool_calls_valid` and makes valid calls — so the three details that can
+        quote model-written content were never generated, and
+        `PROSE_SENTINEL not in payload` could not fire for them. This case
+        declares `answer_entities_supported` AND makes a schema-invalid call
+        with an oversized argument, so all of them are produced.
+        """
+        from backend.evaluation.cases import AcceptanceCase, ExpectedBehaviour
+        from backend.evaluation.tests.conftest import ScriptedProvider
+
+        huge = "ZZQQ" * 800
+        case = AcceptanceCase(
+            id="detail-bound-probe",
+            dimension="unsupported_entity_reference",
+            prompt="which initiative produces the Metadata Handbook?",
+            graph="metadata-pilot-small.json",
+            expect=ExpectedBehaviour(
+                tool_calls_valid=True, answer_entities_supported=True
+            ),
+            notes=(
+                "probe case producing every condition detail that can quote "
+                "model-written content, so a report can be checked for it"
+            ),
+        )
+        provider = ScriptedProvider(
+            [
+                # Schema-invalid, with an oversized value in the arguments.
+                [("search_graph", {"qeury": huge, "limit": "not-an-int"})],
+                f"{PROSE_SENTINEL} it is eval-initiative-metadata-registry-programme.",
+            ]
+        )
+        result = run_suite(profile, cases=[case], provider_factory=lambda _p: provider)
+        payload = json.dumps(build_report(result))
+        score = result.scores[0]
+
+        assert not score.passed, "the probe must actually fail to make details"
+        assert PROSE_SENTINEL not in payload, "the model's answer reached a report"
+        for condition in score.conditions:
+            assert len(condition.detail) < 1200, (
+                f"{condition.name} detail is {len(condition.detail)} chars"
+            )
+            assert huge not in condition.detail
+
     def test_a_model_written_field_value_reaches_a_report_only_bounded(
         self, monkeypatch, profile
     ):

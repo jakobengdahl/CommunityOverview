@@ -128,7 +128,7 @@ class TestTheReportDeclaresWhatIsNotScored:
             assert key in out
 
     def test_a_written_report_names_the_unscored_dimension(
-        self, monkeypatch, profile_file, tmp_path
+        self, monkeypatch, profile_file, tmp_path, capsys
     ):
         """
         What an operator keeps. A report that stopped declaring hallucination
@@ -152,6 +152,11 @@ class TestTheReportDeclaresWhatIsNotScored:
             "hallucination"
         ]
         assert SENTINEL not in out_file.read_text(encoding="utf-8")
+        # The SUCCESS path's stderr — what lands in a CI log. Only the refusal
+        # path was asserted, and it returns before the progress line is printed.
+        streams = capsys.readouterr()
+        assert SENTINEL not in streams.err
+        assert SENTINEL not in streams.out
 
     def test_an_unknown_profile_id_is_rejected_before_any_run(
         self, monkeypatch, profile_file
@@ -213,10 +218,15 @@ class TestNoCodePathReadsACredentialFromAFile:
         """
         import ast
 
+        # `json.load(open(...))` matched none of the `.read*(` forms, which is
+        # how the proven leak got its secret in the first place.
         readers = ("read_text", "read_bytes", "readline", "read")
+        openers = ("open(", "json.load(", "json.loads(", "loadtxt(", "load(")
 
         def reads_a_file(source: str) -> bool:
-            return any(f".{reader}(" in source for reader in readers)
+            return any(f".{reader}(" in source for reader in readers) or any(
+                opener in source for opener in openers
+            )
 
         offenders = []
         for path in self.SCANNED:
@@ -273,6 +283,75 @@ class TestNoCodePathReadsACredentialFromAFile:
                 ):
                     offenders.append(f"{path.name}:{node.lineno}")
         assert not offenders, f"api_key_override supplied at {offenders}"
+
+    def test_the_built_providers_outgoing_credential_is_the_environment_value(
+        self, monkeypatch, tmp_path
+    ):
+        """
+        The outcome, not the inputs — which is what G1 actually claims.
+
+        The guards below all check an *input* to the construction: no override
+        argument, no file read flowing into one, no key-shaped literal. None of
+        them sees `provider.client.api_key = <file contents>` AFTER the
+        provider is built, and the SDK client's attribute is writable. That
+        route was proven to put a file-sourced key on the wire with the whole
+        suite green. Asserting what the provider ends up holding closes the
+        class rather than the instance.
+        """
+        from backend.config.model_profiles import ModelProfile
+        from backend.evaluation.runner import default_provider_factory
+
+        monkeypatch.chdir(tmp_path)
+        for name in ("eval_credentials.json", ".eval_key", ".env"):
+            (tmp_path / name).write_text(
+                '{"key": "FILE-SOURCED-KEY"}', encoding="utf-8"
+            )
+        monkeypatch.setenv("SKILL_EVAL_OUTCOME_PROBE", "ENV-SOURCED-KEY")
+
+        profile = ModelProfile(
+            id="probe",
+            name="Probe",
+            provider="openai",
+            model="m",
+            default=True,
+            credential_ref="SKILL_EVAL_OUTCOME_PROBE",
+        )
+        provider = default_provider_factory(profile)
+
+        # Whatever the provider will send must be exactly the environment value.
+        assert provider.client.api_key == "ENV-SOURCED-KEY"
+        assert getattr(provider, "api_key", None) in (None, "ENV-SOURCED-KEY")
+
+    def test_no_module_assigns_a_credential_onto_a_built_provider(self):
+        """
+        The static half of the same hole: assignment, not argument passing.
+
+        The scans below look at call arguments. `provider.client.api_key = …`
+        is an assignment to an attribute, so none of them sees it.
+        """
+        import ast
+
+        offenders = []
+        for path in self.SCANNED:
+            if "tests" in path.parts:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    continue
+                targets = (
+                    node.targets if isinstance(node, ast.Assign) else [node.target]
+                )
+                for target in targets:
+                    if isinstance(target, ast.Attribute) and target.attr in (
+                        "api_key",
+                        "api_key_override",
+                        "auth_token",
+                    ):
+                        offenders.append(
+                            f"{path.name}:{node.lineno}: {ast.unparse(target)}"
+                        )
+        assert not offenders, f"credential assigned onto an object at {offenders}"
 
     def test_the_harness_never_overrides_the_profiles_credential_at_runtime(
         self, monkeypatch, tmp_path

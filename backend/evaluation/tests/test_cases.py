@@ -163,6 +163,29 @@ class TestShippedCases:
         )
         assert any(name in case.prompt for name in duplicated), case.prompt
 
+    def test_a_prompt_asking_about_a_relationship_has_that_relationship(self):
+        """
+        A third fixture premise, of the same class as the two already pinned.
+
+        Two cases prompt "which initiative PRODUCES the Metadata Handbook".
+        Retyping that edge to RELATES_TO was undetectable, and the question then
+        has no answer — both cases would measure nothing while scoring the model
+        on it.
+        """
+        for case in load_cases():
+            graph = json.loads(case.graph_path().read_text(encoding="utf-8"))
+            edge_types = {edge.get("type") for edge in graph.get("edges") or []}
+            for word, relationship in (
+                ("produces", "PRODUCES"),
+                ("belong", "BELONGS_TO"),
+            ):
+                if word in case.prompt.lower():
+                    assert relationship in edge_types, (
+                        f"case {case.id!r} asks about {word!r} but {case.graph} "
+                        f"has no {relationship} edge (types present: "
+                        f"{sorted(t for t in edge_types if t)})"
+                    )
+
     def test_the_id_resolution_case_requires_a_read_before_its_write(self):
         """
         Its sequence IS the ID-first rule; trimming it was undetectable.

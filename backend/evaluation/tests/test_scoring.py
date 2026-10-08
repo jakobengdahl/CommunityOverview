@@ -363,6 +363,42 @@ class TestIdsResolvedFromResults:
         result = score_ids_resolved_from_results(tr)
         assert result.passed, result.detail
 
+    @pytest.mark.parametrize("field", ["type", "description", "summary"])
+    def test_an_edge_endpoint_matching_a_same_call_nodes_other_field_still_fails(
+        self, field
+    ):
+        """
+        Only `id` and `name` identify a node being created in the same call.
+
+        Accepting every string in the node dict would let an edge endpoint that
+        happens to equal the new node's `type` ("Initiative") pass the ID-first
+        check — widening exactly the allowance the function is careful to bound.
+        """
+        node = {
+            "type": "Initiative",
+            "name": "New Thing",
+            "description": "D",
+            "summary": "S",
+        }
+        tr = transcript(
+            [
+                call("search_graph", {"query": "x"}, turn=0, tool_use_id="r0"),
+                call(
+                    "add_nodes",
+                    {
+                        "nodes": [node],
+                        "edges": [{"source": node[field], "target": "eval-node-one"}],
+                    },
+                    turn=1,
+                    tool_use_id="w1",
+                ),
+            ],
+            results={"r0": {"nodes": [{"id": "eval-node-one"}]}},
+        )
+        result = score_ids_resolved_from_results(tr)
+        assert not result.passed, f"{field} was accepted as a node reference"
+        assert node[field] in result.detail
+
     def test_an_edge_endpoint_that_is_neither_read_nor_created_fails(self):
         tr = transcript(
             [
@@ -955,6 +991,24 @@ class TestAnswerEntitiesSupported:
         result = score_answer_entities_supported(tr, fixture)
         assert result.passed, result.detail
 
+    def test_a_bare_word_in_a_result_does_not_donate_an_id_prefix(self):
+        """
+        `_all_strings` collects dict KEYS too — "id", "type", "name", "source".
+
+        Without the hyphen guard those bare words donate prefixes, and a prose
+        phrase like "the id-first-rule" is reported as a fabricated node. The
+        reviewer classed this as outside the stated guarantees because widening
+        can only make the scorer stricter; it is pinned anyway, because a false
+        accusation is the failure this signal has now been corrected for twice.
+        """
+        fixture = {"nodes": [{"id": "eval-actor-statistics-office"}]}
+        tr = transcript(
+            results={"r0": {"nodes": [{"id": "eval-actor-statistics-office"}]}},
+            final_text="We applied the id-first-rule and the type-safe-path.",
+        )
+        result = score_answer_entities_supported(tr, fixture)
+        assert result.passed, result.detail
+
     def test_an_ordinary_hyphenated_tag_does_not_make_prose_look_like_a_node(self):
         """
         PD1: the vocabulary was built from every string a result contained.
@@ -990,6 +1044,35 @@ class TestAnswerEntitiesSupported:
         )
         result = score_answer_entities_supported(tr, fixture)
         assert result.passed, result.detail
+
+    def test_a_fabricated_uuid_is_caught_and_not_passed_vacuously(self):
+        """
+        A UUID needs the scorer's own escape, which nothing covered.
+
+        A UUID's leading segment is eight hex characters and is never an
+        id-vocabulary prefix, so without the explicit escape it is filtered out
+        of the candidates, `checked` comes back empty, and the scorer returns
+        PASS with "cites no node id (vacuously supported)" — the whole
+        open-vocabulary half dead for UUID ids.
+        """
+        fabricated = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+        fixture = {"nodes": [{"id": "eval-initiative-metadata-register"}]}
+        tr = transcript(
+            results={"r0": {"nodes": [{"id": "eval-initiative-metadata-register"}]}},
+            final_text=f"It is node {fabricated}.",
+        )
+        result = score_answer_entities_supported(tr, fixture)
+        assert not result.passed, result.detail
+        assert fabricated in result.detail
+        assert "vacuously" not in result.detail
+
+    def test_a_uuid_the_run_did_return_passes(self):
+        real = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+        tr = transcript(
+            results={"r0": {"nodes": [{"id": real}]}},
+            final_text=f"It is node {real}.",
+        )
+        assert score_answer_entities_supported(tr, {"nodes": [{"id": real}]}).passed
 
     def test_a_fabricated_id_sharing_the_graphs_prefix_is_still_caught(self):
         """The realistic fabrication: a near-miss of a real id."""
