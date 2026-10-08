@@ -41,7 +41,7 @@ full caveats.
 | `id_resolution` | **full** | Every node/edge id passed to a write or relationship tool had appeared in an earlier tool result. A *correct* id that was never read back still fails — the model guessed and got lucky. |
 | `post_write_verification` | **full** | After the last successful write, a read tool's result contained the written node's id. |
 | `completeness` | **full** | The graph state after the run matches an enumerated expectation: exact field values, or the set of fields that must differ from the fixture. |
-| `unsupported_entity_reference` | **full** | No node the answer cites is one the run never read — a fixture id cited without a tool result returning it, or an id-shaped token matching nothing. See the caveat below. |
+| `unsupported_entity_reference` | **full** | No node the answer cites is one the run never read — a fixture id cited without a tool result returning it, or a token that passes every id disqualifier and matches nothing. Two false-negative classes, both deliberate; see the caveat below. |
 | `latency` | **reported** | Wall-clock time around each provider call, summed. A number to compare, with no pass condition. |
 | `token_profile` | **reported** | Prompt and completion tokens as the provider reports them, or explicitly *unreported*. A number to compare; tokens only — no monetary cost. |
 | `skill_adherence` | **partial** | Only rules expressible as tool-call-sequence constraints. Prose-level adherence is not scored. |
@@ -71,17 +71,30 @@ It combines two signals of deliberately different character:
 1. **Closed vocabulary, no false positives.** An id from the case's own fixture
    graph that the answer cites but no tool result returned. The model named a
    real node it never looked at. Unambiguous.
-2. **Open vocabulary, biased towards misses.** An id-shaped token matching
-   nothing the model was shown. "Id-shaped" is a UUID, or three-or-more
-   hyphenated segments *none of which is an English function word* — because
-   three segments alone also matches `up-to-date`, `end-to-end`,
-   `state-of-the-art` and `one-size-fits-all`, and reporting one of those as a
-   fabricated node id would be a false accusation a reader could not
-   distinguish from a real finding. The cost is a known false negative: an id
-   whose own segments include such a word (`task-fix-edge-auth-on-sspcloud`) is
-   not flagged by this signal. That trade is deliberate and pinned by a test —
-   a missed fabrication understates the problem, which is what a lower bound is
-   for.
+2. **Open vocabulary, biased towards misses.** A token that survives every
+   disqualifier below and still matches nothing the model was shown. A UUID
+   qualifies on shape alone; anything else must:
+
+   - have **three or more** hyphenated segments;
+   - have **no segment that is an English function word** — three segments
+     alone also matches `up-to-date`, `end-to-end`, `state-of-the-art` and
+     `one-size-fits-all`;
+   - **not be entirely numeric** — `2026-10-08` is a date, and a model states
+     today's date freely;
+   - **share its leading segment with an id the run has actually seen** —
+     otherwise `gpt-4o-mini`, `left-hand-side` and `read-only-mode` all qualify
+     on shape. Only id-shaped values donate a prefix, so an ordinary tag such
+     as `open-data` does not make `open-source-first` look like a node.
+
+   Reporting any of those as a fabricated node id would be a false accusation a
+   reader could not distinguish from a real finding, which is why each
+   disqualifier is there — and each one buys a false negative. **Two classes are
+   missed, and the second is the larger:** an id whose own segments include a
+   function word (`task-fix-edge-auth-on-sspcloud`), and a fabrication under a
+   leading segment the run never saw. Both are deliberate: a missed fabrication
+   understates the problem, which is what a lower bound is for, while a false
+   accusation would corrupt the measurement. The first is pinned by a test; the
+   second is a property of the prefix rule.
 
 **To get a hallucination rate, the methodology decision has to be made first**:
 what classes of false statement count, who adjudicates them, and how
@@ -240,34 +253,36 @@ would attribute one endpoint's behaviour to another and bill a key you did not
 choose. An unset variable is a clear error naming the variable, before any case
 runs.
 
-#### A `.env` file will not work — export in your shell
+#### Export in your shell — a `.env` is unreliable here, not merely discouraged
 
-**Putting the key in `.env` does not work, by either entry point.** The harness
-resolves `credential_ref` against `os.environ` *before* anything imports the
-assistant, so the `load_dotenv()` that the application uses to read `.env`
-(`backend/ui/chat_logic.py`) has not run yet:
+**Via the CLI, a key in `.env` does not work.** `check_credentials()` gates every
+profile before anything imports the assistant, so the `load_dotenv()` that reads
+`.env` (`backend/ui/chat_logic.py`) has not run, and you get
+`environment variable … is not set` with exit 2.
 
-- the CLI calls `check_credentials()` first and exits with
-  `environment variable … is not set`;
-- `run_case()` builds the provider before it builds the assistant, so an unset
-  variable becomes `run_error: provider unavailable: MissingCredentialError`.
+**Via `run_case()`/`run_suite()` as a library, whether it works depends on
+process state** — which is worse than a flat no. The provider is built before
+the assistant, so in a fresh process the first case refuses. But importing the
+assistant runs `load_dotenv()` once, and from then on the repo-root `.env` *is*
+in `os.environ`, so a later case or a second profile in that same process will
+accept it. Same input, different answer depending on what ran first.
 
-`.env` does reach `os.environ` later in the process, once a case has built the
-assistant, so it can still influence *other* ambient settings — which is why
-"nothing besides `credential_ref` is ever read" would be too strong a claim to
-make. It just cannot supply the credential the harness asked for.
-
-So, exactly:
+This file has stated this wrongly twice — first that nothing but the shell is
+read, then that `.env` simply works — so to be exact:
 
 - **No file in this repository contains a credential value**, and none may. The
   `gitleaks` CI job and `backend/evaluation/tests/test_no_credentials.py` both
   check it, and `ModelProfile` refuses to hold one.
 - **The harness never reads a key from a file, never stores one, never logs one,
   and never defaults one.** It resolves `credential_ref` against `os.environ` at
-  the moment a provider is built.
-- **Export in your shell.** `.env.example` names these variables with empty
-  values purely as a reminder of what to export; a value there will not be
-  picked up, and would be a key at rest on disk for no benefit.
+  the moment a provider is built, and passes no `api_key_override` by any route.
+- **`os.environ` is not the same as your shell.** `load_dotenv()` is the
+  application's own configuration mechanism and the harness neither adds nor can
+  remove it. A repo-root `.env` reaches `os.environ` once the assistant is
+  imported.
+- **So export in your shell.** `.env.example` names these variables with empty
+  values purely as a reminder of what to export. A value in `.env` is a key at
+  rest on disk whose effect here depends on import order — the worst of both.
 
 One thing that is read but cannot affect a measurement: constructing the
 assistant reads ambient `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` into

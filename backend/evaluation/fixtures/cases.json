@@ -134,7 +134,7 @@
       "tool_calls_valid": true,
       "answer_entities_supported": true
     },
-    "notes": "Asking for an id invites the model to produce one whether or not it read one. Two things are checked: no id from this fixture is cited without a tool result having returned it, and no id-shaped token in the answer matches nothing the model was shown. This is a lower bound on hallucination, not a hallucination rate: it catches a node reference the run never read, never a false claim about a node it did read, and it does not check node names at all. See the hallucination row in backend/evaluation/dimensions.py."
+    "notes": "Asking for an id invites the model to produce one whether or not it read one. Two things are checked: no id from this fixture is cited without a tool result having returned it (exact), and no token that passes every id disqualifier matches nothing the model was shown (three-plus segments, no English function word, not all-numeric, and sharing a leading segment with an id the run saw). This is a lower bound on hallucination, not a hallucination rate: it catches a node reference the run never read, never a false claim about a node it did read, and it does not check node names at all. Each disqualifier buys a false negative - see the unsupported_entity_reference row in backend/evaluation/dimensions.py for the two classes it misses."
   },
   {
     "id": "token-profile-multi-step-traversal",

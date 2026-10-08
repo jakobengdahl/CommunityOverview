@@ -45,6 +45,8 @@ from backend.evaluation.runner import (
     run_suite,
 )
 
+import sys
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 EVAL_DIR = Path(__file__).resolve().parent.parent
@@ -229,70 +231,106 @@ class TestCredentialsComeOnlyFromTheEnvironment:
         )
 
 
-class TestADotEnvFileDoesNotSupplyTheCredential:
+class TestADotEnvFileIsNotAReliableCredentialSource:
     """
-    Pinned because the documentation got this wrong in both directions.
+    Pinned because this claim has been documented wrongly three times.
 
-    First it claimed nothing but the shell is read; then, correcting that, it
-    claimed a repo-root `.env` would satisfy a `credential_ref` and `.env.example`
-    told the operator so. Neither is true: the harness resolves the variable
-    before anything imports the assistant, so `load_dotenv()` has not run. An
-    operator following the wrong version puts a key on disk and still gets the
-    run refused.
+    First: nothing but the shell is read. Then: a repo-root `.env` satisfies a
+    `credential_ref`. Then: it never does. The truth is conditional —
+    `load_dotenv()` resolves via `find_dotenv()`, which walks up from the
+    CALLING FILE's directory (`backend/ui/`), so it finds a repo-root `.env`
+    and ignores the cwd entirely. The CLI gates credentials before anything
+    imports the assistant, so it refuses; a library caller refuses only while
+    nothing in the process has imported it yet.
+
+    The earlier tests here planted `.env` under `tmp_path` with the cwd moved
+    there — somewhere `find_dotenv()` never looks — so they could not fail
+    whether the claim held or not, and the round-2 "verified by planting a real
+    .env" rested on the same mislocated file. These run in subprocesses, because
+    import state and a repo-root file are both process-global and neither can be
+    undone inside a test.
     """
 
-    def test_run_case_refuses_when_only_a_dot_env_carries_the_key(
-        self, monkeypatch, tmp_path, profile, case_by_id
-    ):
-        import os
+    @staticmethod
+    def _run(script: str, env_body: str):
+        """Run a script with a real repo-root .env present, then remove it."""
+        import subprocess
 
-        monkeypatch.delenv(profile.credential_ref, raising=False)
-        monkeypatch.chdir(tmp_path)
-        (tmp_path / ".env").write_text(
-            f"{profile.credential_ref}={SENTINEL}\n", encoding="utf-8"
-        )
-
-        score = run_case(case_by_id["tool-call-validity-read-path"], profile)
-
-        assert score.run_error is not None
-        assert "MissingCredentialError" in score.run_error
-        assert profile.credential_ref in score.run_error
-        # And the value never made it into the environment on this path.
-        assert os.environ.get(profile.credential_ref) is None
-
-    def test_the_cli_refuses_when_only_a_dot_env_carries_the_key(
-        self, monkeypatch, tmp_path, capsys
-    ):
-        import sys
-
-        sys.path.insert(0, str(REPO_ROOT))
-        from scripts.run_skill_eval import main
-
-        monkeypatch.delenv("SKILL_EVAL_DOTENV_PROBE", raising=False)
-        monkeypatch.chdir(tmp_path)
-        (tmp_path / ".env").write_text(
-            f"SKILL_EVAL_DOTENV_PROBE={SENTINEL}\n", encoding="utf-8"
-        )
-        profiles = tmp_path / "providers.json"
-        profiles.write_text(
-            json.dumps(
-                [
-                    {
-                        "id": "probe",
-                        "name": "Probe",
-                        "provider": "openai",
-                        "model": "m",
-                        "default": True,
-                        "credential_ref": "SKILL_EVAL_DOTENV_PROBE",
-                    }
-                ]
+        dotenv = REPO_ROOT / ".env"
+        pre_existing = dotenv.exists()
+        if pre_existing:  # never clobber a developer's own file
+            pytest.skip("a .env already exists at the repository root")
+        dotenv.write_text(env_body, encoding="utf-8")
+        try:
+            return subprocess.run(
+                [sys.executable, "-c", script],
+                cwd=str(REPO_ROOT),
+                capture_output=True,
+                text=True,
+                timeout=180,
             )
-        )
+        finally:
+            dotenv.unlink()
 
-        assert main(["--profiles", str(profiles)]) == 2
-        err = capsys.readouterr().err
-        assert "SKILL_EVAL_DOTENV_PROBE is not set" in err
-        assert SENTINEL not in err
+    def test_find_dotenv_ignores_the_cwd_and_finds_the_repository_root(self):
+        """
+        The mechanism the earlier tests got wrong, asserted directly.
+
+        If this ever reports the cwd, the subprocess tests below would be
+        testable in-process — and the previous tests' premise would have been
+        right after all.
+        """
+        script = (
+            "import sys; sys.path.insert(0, %r)\n"
+            "from backend.ui import chat_logic  # runs load_dotenv() at import\n"
+            "import os\n"
+            "print('FOUND:', os.environ.get('SKILL_EVAL_DOTENV_PROBE'))\n"
+        ) % str(REPO_ROOT)
+        result = self._run(script, "SKILL_EVAL_DOTENV_PROBE=from-repo-root\n")
+        assert "FOUND: from-repo-root" in result.stdout, result.stdout + result.stderr
+
+    def test_the_cli_refuses_a_dot_env_credential(self):
+        """The reliable half: the gate runs before any import of the assistant."""
+        script = (
+            "import sys, json, pathlib; sys.path.insert(0, %r)\n"
+            "from scripts.run_skill_eval import main\n"
+            "p = pathlib.Path('probe-profiles.json')\n"
+            "p.write_text(json.dumps([{'id':'probe','name':'P','provider':'openai',"
+            "'model':'m','default':True,'credential_ref':'SKILL_EVAL_DOTENV_PROBE'}]))\n"
+            "try:\n"
+            "    print('EXIT:', main(['--profiles', str(p)]))\n"
+            "finally:\n"
+            "    p.unlink()\n"
+        ) % str(REPO_ROOT)
+        result = self._run(script, "SKILL_EVAL_DOTENV_PROBE=from-repo-root\n")
+        assert "EXIT: 2" in result.stdout, result.stdout + result.stderr
+        assert "SKILL_EVAL_DOTENV_PROBE is not set" in result.stderr
+
+    def test_a_library_caller_refuses_until_the_assistant_has_been_imported(self):
+        """
+        The conditional half, both sides.
+
+        In a fresh process the first case refuses, because the provider is built
+        before the assistant. Once something has imported the assistant,
+        `load_dotenv()` has run and the same call accepts the `.env` value. That
+        asymmetry is the reason the docs tell the operator to export instead.
+        """
+        script = (
+            "import sys; sys.path.insert(0, %r)\n"
+            "from backend.config.model_profiles import ModelProfile\n"
+            "from backend.evaluation import load_cases, run_case\n"
+            "prof = ModelProfile(id='p', name='P', provider='openai', model='m',\n"
+            "                    default=True, credential_ref='SKILL_EVAL_DOTENV_PROBE')\n"
+            "case = load_cases()[0]\n"
+            "first = run_case(case, prof)\n"
+            "print('FRESH_REFUSED:', 'MissingCredentialError' in (first.run_error or ''))\n"
+            "import backend.ui.chat_logic  # noqa  -- runs load_dotenv()\n"
+            "import os\n"
+            "print('NOW_IN_ENV:', os.environ.get('SKILL_EVAL_DOTENV_PROBE') is not None)\n"
+        ) % str(REPO_ROOT)
+        result = self._run(script, "SKILL_EVAL_DOTENV_PROBE=from-repo-root\n")
+        assert "FRESH_REFUSED: True" in result.stdout, result.stdout + result.stderr
+        assert "NOW_IN_ENV: True" in result.stdout, result.stdout + result.stderr
 
 
 class TestReportsNeverCarryACredential:
@@ -426,7 +464,6 @@ class TestReportsNeverCarryACredential:
         is rejected and never reaches the graph at all.)
         """
         from backend.evaluation.cases import AcceptanceCase, ExpectedBehaviour
-        from backend.evaluation.runner import run_case
         from backend.evaluation.tests.conftest import ScriptedProvider
 
         long_prose = "ZZQQ-written-field-marker " * 40

@@ -141,6 +141,45 @@ class TestToolCallValidity:
         assert score_tool_calls_valid(tr, TOOL_DEFS).passed
 
 
+class TestEveryQuotedValueIsBounded:
+    """
+    PD2: the docs say a quoted argument is bounded too, and it was not.
+
+    `_abbreviate` was applied at one of the sites that quote model-written
+    content. jsonschema's message embeds the offending instance, and the
+    ID-first detail quoted the raw argument — both reach a report.
+    """
+
+    LONG = "ZZQQ" * 800  # ~3.2 kB of model-written value
+
+    def test_a_schema_error_quoting_a_huge_value_is_bounded(self):
+        tr = transcript([call("search_graph", {"query": self.LONG, "limit": "x"})])
+        detail = score_tool_calls_valid(tr, TOOL_DEFS).detail
+        assert len(detail) < 1000, len(detail)
+
+    def test_an_unresolved_id_detail_is_bounded(self):
+        tr = transcript(
+            [call("update_node", {"node_id": self.LONG, "updates": {}}, turn=0)]
+        )
+        detail = score_ids_resolved_from_results(tr).detail
+        assert len(detail) < 1000, len(detail)
+
+    def test_a_written_id_detail_is_bounded(self):
+        tr = transcript(
+            [
+                call(
+                    "update_node",
+                    {"node_id": self.LONG, "updates": {}},
+                    turn=0,
+                    tool_use_id="w0",
+                )
+            ],
+            results={"w0": {"success": True}},
+        )
+        detail = score_verify_after_write(tr, ["search_graph"]).detail
+        assert len(detail) < 1000, len(detail)
+
+
 class TestRequiredCallSequence:
     def test_an_ordered_subsequence_passes_even_with_calls_in_between(self):
         tr = transcript(
@@ -174,6 +213,18 @@ class TestForbiddenCalls:
     def test_not_calling_a_forbidden_tool_passes(self):
         tr = transcript([call("search_graph", {"query": "x"})])
         assert score_forbidden_calls(tr, ["update_node"]).passed
+
+    def test_making_no_tool_calls_at_all_is_not_restraint(self):
+        """
+        TD2: the one scorer of its family that could pass vacuously.
+
+        Its three siblings each refuse this explicitly. A case declaring only
+        forbidden_calls would have scored skill_adherence as passed against a
+        model that did nothing whatsoever.
+        """
+        result = score_forbidden_calls(transcript([]), ["update_node"])
+        assert not result.passed
+        assert "no tool calls at all" in result.detail
 
     def test_calling_a_forbidden_tool_fails(self):
         tr = transcript(
@@ -583,6 +634,84 @@ class TestVerifyAfterWrite:
         )
         assert score_verify_after_write(read_the_new_node, ["search_graph"]).passed
 
+    def test_a_removal_is_reported_as_a_mis_specified_case_not_a_model_failure(self):
+        """
+        PD5: this is a PRESENCE check, so it cannot verify a deletion.
+
+        A model that deletes a node and then reads back to confirm it is gone
+        has verified correctly — and was scored as having failed, with a detail
+        that read like the model's fault. The dimension is defined only for
+        writes that leave the node readable, and a case pointing it at a removal
+        now says so.
+        """
+        tr = transcript(
+            [
+                call("search_graph", {"query": "x"}, turn=0, tool_use_id="r0"),
+                call(
+                    "delete_nodes",
+                    {"node_ids": ["eval-node-one"], "confirmed": True},
+                    turn=1,
+                    tool_use_id="w1",
+                ),
+                call("search_graph", {"query": "x"}, turn=2, tool_use_id="r2"),
+            ],
+            results={
+                "r0": {"nodes": [{"id": "eval-node-one"}]},
+                "w1": {"success": True},
+                "r2": {"nodes": [], "total": 0},
+            },
+        )
+        result = score_verify_after_write(tr, ["search_graph"])
+        assert not result.passed
+        assert "mis-specified" in result.detail
+        assert "delete_nodes" in result.detail
+
+    @pytest.mark.parametrize(
+        "tool,arguments",
+        [
+            ("archive_nodes", {"node_ids": ["eval-node-one"]}),
+            ("delete_edges", {"edge_ids": ["eval-edge-one"], "confirmed": True}),
+        ],
+    )
+    def test_every_removal_tool_is_treated_the_same_way(self, tool, arguments):
+        tr = transcript(
+            [
+                call("search_graph", {"query": "x"}, turn=0, tool_use_id="r0"),
+                call(tool, arguments, turn=1, tool_use_id="w1"),
+            ],
+            results={
+                "r0": {
+                    "nodes": [{"id": "eval-node-one"}],
+                    "edges": [{"id": "eval-edge-one"}],
+                },
+                "w1": {"success": True},
+            },
+        )
+        result = score_verify_after_write(tr, ["search_graph"])
+        assert not result.passed
+        assert "mis-specified" in result.detail
+
+    def test_an_unarchive_is_still_presence_verifiable(self):
+        """It leaves the node readable again, so the presence check applies."""
+        tr = transcript(
+            [
+                call("search_graph", {"query": "x"}, turn=0, tool_use_id="r0"),
+                call(
+                    "unarchive_nodes",
+                    {"node_ids": ["eval-node-one"]},
+                    turn=1,
+                    tool_use_id="w1",
+                ),
+                call("search_graph", {"query": "x"}, turn=2, tool_use_id="r2"),
+            ],
+            results={
+                "r0": {"nodes": [{"id": "eval-node-one"}]},
+                "w1": {"success": True},
+                "r2": {"nodes": [{"id": "eval-node-one"}]},
+            },
+        )
+        assert score_verify_after_write(tr, ["search_graph"]).passed
+
     def test_a_run_with_no_write_fails_rather_than_passing_vacuously(self):
         tr = transcript([call("search_graph", {"query": "x"})])
         result = score_verify_after_write(tr, ["search_graph"])
@@ -822,6 +951,42 @@ class TestAnswerEntitiesSupported:
         tr = transcript(
             results={"r0": {"nodes": [{"id": "eval-initiative-metadata-register"}]}},
             final_text=f"Produced by eval-initiative-metadata-register. {mention}",
+        )
+        result = score_answer_entities_supported(tr, fixture)
+        assert result.passed, result.detail
+
+    def test_an_ordinary_hyphenated_tag_does_not_make_prose_look_like_a_node(self):
+        """
+        PD1: the vocabulary was built from every string a result contained.
+
+        A node tagged "open-data" donated the prefix "open", and the answer's
+        "open-source-first" was then reported as a fabricated node — the false
+        accusation the vocabulary rule exists to prevent, moved one step out
+        rather than removed. Only id-shaped values may donate a prefix.
+        """
+        fixture = {
+            "nodes": [
+                {
+                    "id": "eval-actor-statistics-office",
+                    "tags": ["open-data", "high-priority"],
+                }
+            ]
+        }
+        tr = transcript(
+            results={
+                "r0": {
+                    "nodes": [
+                        {
+                            "id": "eval-actor-statistics-office",
+                            "tags": ["open-data", "high-priority"],
+                        }
+                    ]
+                }
+            },
+            final_text=(
+                "The office runs an open-source-first programme and a "
+                "high-trust-low-cost model."
+            ),
         )
         result = score_answer_entities_supported(tr, fixture)
         assert result.passed, result.detail

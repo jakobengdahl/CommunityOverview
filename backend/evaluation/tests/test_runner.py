@@ -660,7 +660,9 @@ class TestSkillsContext:
         # Frontmatter is parsed, not pasted through as body text.
         assert "id: graph-maintenance-protocol" not in context
 
-    def test_the_rendered_shape_still_matches_the_frontend_that_produces_it(self):
+    def test_the_rendered_shape_still_matches_the_frontend_that_produces_it(
+        self, tmp_path
+    ):
         """
         Couples this Python rendering to the JSX it mirrors.
 
@@ -684,6 +686,13 @@ class TestSkillsContext:
             "ACTIVE SKILL INSTRUCTIONS — YOU MUST APPLY THESE TO THIS RESPONSE:",
             "These instructions OVERRIDE your default behavior and style for this response.",
             "END OF SKILL INSTRUCTIONS. Apply the above to your entire response.",
+            # The block the skill text actually goes in — the part the round-2
+            # fix was about, and the one the header/footer markers did not pin.
+            '<skill name="',
+            "</skill>",
+            # The body-less fallback branch's two labels.
+            "Instruction: ",
+            "Apply when: ",
         ]
         for marker in markers:
             assert marker in jsx, (
@@ -692,11 +701,52 @@ class TestSkillsContext:
                 "and must be updated together"
             )
 
+        # And this side emits them too — split by branch, since the fallback
+        # labels appear only for a skill with no body.
         from backend.evaluation.cases import SKILLS_DIR
 
-        context = build_skills_context([SKILLS_DIR / "schema-explainer.md"])
+        with_body = build_skills_context([SKILLS_DIR / "schema-explainer.md"])
         for marker in markers:
-            assert marker in context
+            if marker in ("Instruction: ", "Apply when: "):
+                assert marker not in with_body, (
+                    f"{marker!r} is production's body-less fallback and must not "
+                    "appear for a skill that has a body"
+                )
+            else:
+                assert marker in with_body, marker
+
+        body_less = tmp_path / "frontmatter-only.md"
+        body_less.write_text(
+            "---\nname: N\ndescription: D\nwhen-to-use: W\n---\n", encoding="utf-8"
+        )
+        fallback = build_skills_context([body_less])
+        for marker in markers:
+            assert marker in fallback, marker
+
+    def test_a_body_less_skill_falls_back_the_way_production_does(self, tmp_path):
+        """
+        Production's other branch, which the harness used to render as empty.
+
+        ChatPanel.jsx emits `Instruction:`/`Apply when:` for a skill with no
+        body — and that is the ONLY branch in which `when_to_use` is injected,
+        which is what the skill_selection proxy turns on. The docstring claimed
+        "exactly as in production" while this input produced an empty block.
+        """
+        skill = tmp_path / "frontmatter-only.md"
+        skill.write_text(
+            "---\n"
+            "name: No Body Skill\n"
+            "description: Does a specific thing\n"
+            "when-to-use: When that specific thing is asked for\n"
+            "---\n",
+            encoding="utf-8",
+        )
+        context = build_skills_context([skill])
+
+        assert '<skill name="No Body Skill">' in context
+        assert "Instruction: Does a specific thing" in context
+        assert "Apply when: When that specific thing is asked for" in context
+        assert '<skill name="No Body Skill">\n\n</skill>' not in context
 
     def test_a_skill_body_carries_its_own_applicability(self):
         """

@@ -96,8 +96,10 @@ def build_skills_context(skill_paths: Sequence[Path]) -> Optional[str]:
     path would measure a prompt no production caller produces — and would hand
     the model a ``when_to_use`` line that the chat path does not inject at all
     whenever a skill has a body, which is every real SKILL.md. A skill fixture
-    must therefore state its own applicability inside its body; the frontmatter
-    is parsed for the name and otherwise not injected, exactly as in production.
+    must therefore state its own applicability inside its body; for a skill WITH
+    a body the frontmatter is parsed for the name and otherwise not injected,
+    and the body-less fallback branch (description + when_to_use) is mirrored
+    too, so both of production's branches are reproduced.
 
     Fixtures are read from disk — the harness never fetches a skill over the
     network, which keeps the suite runnable with no egress beyond the provider.
@@ -113,7 +115,22 @@ def build_skills_context(skill_paths: Sequence[Path]) -> Optional[str]:
     for path in skill_paths:
         front, body = _split_frontmatter(path.read_text(encoding="utf-8"))
         name = front.get("name") or path.stem
-        parts.append(f'<skill name="{name}">\n{body.strip()}\n</skill>')
+        if body.strip():
+            block = f'<skill name="{name}">\n{body.strip()}\n</skill>'
+        else:
+            # The JSX's fallback branch, for a skill with no body. Mirrored so
+            # "exactly as in production" is true for this input too — and it is
+            # the branch that decides whether when_to_use is injected at all,
+            # which is what the skill_selection proxy turns on.
+            lines = [f'<skill name="{name}">']
+            if front.get("description"):
+                lines.append(f"Instruction: {front['description']}")
+            when_to_use = front.get("when-to-use") or front.get("when_to_use")
+            if when_to_use:
+                lines.append(f"Apply when: {when_to_use}")
+            lines.append("</skill>")
+            block = "\n".join(lines)
+        parts.append(block)
     parts.append("END OF SKILL INSTRUCTIONS. Apply the above to your entire response.")
     return "\n\n".join(parts)
 
@@ -290,11 +307,16 @@ def build_report(result: SuiteResult) -> Dict[str, Any]:
     """
     Render a suite result as a JSON-serializable report.
 
-    Carries scores, the tool-call sequence, latency and tokens — never the
-    prompts, the system prompt or the model's prose. Keeping those out is what
-    makes it safe to commit or paste a report: nothing a run was configured with
-    can leak through it, and the credential was never in the transcript to
+    Carries scores, the tool-call sequence, latency and tokens. It never carries
+    the prompts, the system prompt (including the injected skill text), or the
+    assistant's answer text, and the credential was never in the transcript to
     begin with.
+
+    It is not free of model-authored strings altogether: a condition's ``detail``
+    explains why it failed, so it can quote a field value the model wrote or an
+    argument it passed. Those quotes are bounded (see ``_abbreviate`` in
+    scoring.py) but they are there, which is why this does not claim a report
+    carries nothing a run produced. See docs/SKILL_EVALUATION.md.
     """
     dimension_rows = {
         key: {

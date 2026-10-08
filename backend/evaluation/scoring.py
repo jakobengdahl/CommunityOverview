@@ -89,6 +89,10 @@ def _id_vocabulary_prefixes(known_ids: Set[str]) -> Set[str]:
     """
     Leading segments of the ids this run has actually seen.
 
+    Only id-shaped values count. Anything hyphenated in a tool result would
+    otherwise qualify, and a node tagged "open-data" is not evidence that
+    "open-" names this graph's ids.
+
     Ids in a graph share a leading segment by convention (``eval-``, ``task-``,
     ``init-``), and a fabricated id is in practice a near-miss of a real one —
     so it shares that segment too. Requiring it is what separates a made-up
@@ -102,7 +106,12 @@ def _id_vocabulary_prefixes(known_ids: Set[str]) -> Set[str]:
     """
     prefixes = set()
     for value in known_ids:
-        if "-" in value:
+        # Only values that are themselves ids may donate a prefix. Built from
+        # every string a result contained, an ordinary two-segment tag like
+        # "open-data" donated "open", and the answer's "open-source-first" was
+        # then reported as a fabricated node — the false accusation this signal
+        # exists to avoid, moved one step out rather than removed.
+        if is_id_shaped(value):
             prefixes.add(value.split("-", 1)[0])
     return prefixes
 
@@ -423,7 +432,11 @@ def score_tool_calls_valid(
         )
         for error in errors:
             location = "/".join(str(p) for p in error.path) or "(root)"
-            problems.append(f"#{index} {call.name}.{location}: {error.message}")
+            # jsonschema's message embeds the offending instance, which is a
+            # value the model wrote, so it is bounded like any other quote.
+            problems.append(
+                f"#{index} {call.name}.{location}: {_abbreviate(error.message, 200)}"
+            )
         for name in _undeclared_arguments(call.input, schema):
             problems.append(
                 f"#{index} {call.name}.{name}: not a parameter of this tool"
@@ -461,6 +474,15 @@ def score_forbidden_calls(
     hit = [name for name in transcript.tool_call_names if name in set(forbidden)]
     if hit:
         return ConditionResult("forbidden_calls", False, f"called {sorted(set(hit))}")
+    if not transcript.tool_calls:
+        # Its three siblings all refuse this; this one did not. A model that
+        # called nothing at all has not demonstrated restraint, and crediting
+        # it would be a scorer passing vacuously.
+        return ConditionResult(
+            "forbidden_calls",
+            False,
+            "the model made no tool calls at all, so it avoided nothing",
+        )
     return ConditionResult("forbidden_calls", True, f"none of {list(forbidden)} called")
 
 
@@ -478,7 +500,9 @@ def score_ids_resolved_from_results(transcript: RunTranscript) -> ConditionResul
         for value in ids:
             checked += 1
             if not _was_shown(value, known):
-                unresolved.append(f"{call.name}({value!r}) at turn {call.turn}")
+                unresolved.append(
+                    f"{call.name}({_abbreviate(value, 80)}) at turn {call.turn}"
+                )
 
     if unresolved:
         return ConditionResult(
@@ -497,19 +521,46 @@ def score_ids_resolved_from_results(transcript: RunTranscript) -> ConditionResul
     )
 
 
+# Writes that leave the node readable afterwards, so "a read returned it" is
+# the verification. A removal (delete_*, archive_*) leaves it absent or hidden,
+# and this scorer is a PRESENCE check — pointing it at one asks the model to
+# read back a node that is supposed to be gone, and scores a correct
+# verification as a failure. Those cases are rejected with a detail that names
+# the case as mis-specified rather than blaming the model.
+_PRESENCE_VERIFIABLE_WRITES = frozenset(
+    {"add_nodes", "update_node", "unarchive_nodes", "unarchive_edges"}
+)
+
+
 def score_verify_after_write(
     transcript: RunTranscript, read_tools: Sequence[str]
 ) -> ConditionResult:
     """A read after the last successful write returned the written node."""
-    writes = [
+    successful = [
         (index, call)
         for index, call in enumerate(transcript.tool_calls)
         if call.name in WRITE_TOOLS
         and not _result_is_error(transcript.result_for(call.tool_use_id))
     ]
-    if not writes:
+    if not successful:
         return ConditionResult(
             "verify_after_write", False, "no successful write occurred in the run"
+        )
+
+    writes = [
+        (index, call)
+        for index, call in successful
+        if call.name in _PRESENCE_VERIFIABLE_WRITES
+    ]
+    if not writes:
+        removals = sorted({call.name for _, call in successful})
+        return ConditionResult(
+            "verify_after_write",
+            False,
+            f"this run's only writes were {removals}, which remove or hide a node; "
+            "post_write_verification is a presence check and is not defined for "
+            "them, so this case is mis-specified rather than the model at fault "
+            "(see docs/SKILL_EVALUATION.md, 'Adding a case')",
         )
 
     last_index, last_write = writes[-1]
@@ -537,7 +588,7 @@ def score_verify_after_write(
         "verify_after_write",
         False,
         f"no {sorted(allowed)} call after {last_write.name} returned any of "
-        f"{sorted(written)}",
+        f"{_abbreviate(sorted(written), 200)}",
     )
 
 
