@@ -25,3 +25,4 @@ ADRs carry only the technical decision.
 | [0006](0006-graph-import-replace-mode.md) | Graph import: REPLACE mode over the ExecutionStore seam | Accepted |
 | [0007](0007-vector-aware-export-archive.md) | Vector-aware export/import archive | Accepted |
 | [0008](0008-node-attachment-storage.md) | Node attachment storage layer and metadata index | Accepted |
+| [0009](0009-dual-mode-graph-storage-seam.md) | Dual-mode graph storage: ratify the seam, keep one graph per runtime | Proposed |
