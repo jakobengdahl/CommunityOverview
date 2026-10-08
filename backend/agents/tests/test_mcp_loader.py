@@ -653,12 +653,36 @@ class TestMCPLoaderLifecycle:
         assert "error" in result
         assert "not private" in result["error"]
 
+    @pytest.mark.parametrize("mode", [0o702, 0o707])
+    def test_execute_fs_tool_refuses_a_root_only_others_can_write(
+        self, tmp_path, monkeypatch, mode
+    ):
+        """The other-writable bit on its own: 0o777 also sets the group bit, so a
+        mask narrowed to the group bit would still refuse it and pass unnoticed."""
+        root = tmp_path / "other-writable-workspace"
+        root.mkdir()
+        os.chmod(root, mode)
+        monkeypatch.setenv(AGENTS_WORKSPACE_ENV_VAR, str(root))
+
+        result = MCPLoader([])._execute_fs_tool("read_file", {"path": "a.txt"})
+
+        assert "error" in result
+        assert "not private" in result["error"]
+
+    @pytest.mark.parametrize("foreign_uid", ["root", "next"])
     def test_execute_fs_tool_refuses_a_workspace_root_owned_by_someone_else(
-        self, tmp_path, monkeypatch
+        self, tmp_path, monkeypatch, foreign_uid
     ):
         """A directory another local user owns lets them choose where the agent
         reads and writes, which is the half of the race the symlink check
-        does not cover."""
+        does not cover. Root counts as someone else too: a root-owned directory
+        is not the service user's, whoever the service user is."""
+        if foreign_uid == "root":
+            # Whoever runs the suite, the service user is not uid 0 here.
+            monkeypatch.setattr(os, "geteuid", lambda: 1000)
+            other_uid = 0
+        else:
+            other_uid = os.geteuid() + 1
         root = tmp_path / "foreign-workspace"
         root.mkdir(mode=0o700)
         monkeypatch.setenv(AGENTS_WORKSPACE_ENV_VAR, str(root))
@@ -668,7 +692,7 @@ class TestMCPLoaderLifecycle:
             info = real_stat(path, *args, **kwargs)
             if os.path.abspath(path) == os.path.abspath(str(root)):
                 fields = list(info)
-                fields[4] = info.st_uid + 1
+                fields[4] = other_uid
                 return os.stat_result(fields)
             return info
 
@@ -677,6 +701,37 @@ class TestMCPLoaderLifecycle:
 
         assert "error" in result
         assert "not private" in result["error"]
+
+    def test_execute_fs_tool_refuses_a_root_whose_owner_cannot_be_checked(
+        self, tmp_path, monkeypatch
+    ):
+        """Fail closed: if the root cannot be stat'ed after it was created, its
+        owner and mode are unknown and it must not be used.
+
+        The stat is armed only once makedirs has returned, because makedirs
+        itself stats an existing root and would swallow the failure first."""
+        root = tmp_path / "unverifiable-workspace"
+        root.mkdir(mode=0o700)
+        monkeypatch.setenv(AGENTS_WORKSPACE_ENV_VAR, str(root))
+        real_makedirs, real_stat = os.makedirs, os.stat
+        armed = []
+
+        def makedirs_then_arm(*args, **kwargs):
+            real_makedirs(*args, **kwargs)
+            armed.append(True)
+
+        def stat_failing_once_armed(path, *args, **kwargs):
+            if armed and os.path.abspath(path) == os.path.abspath(str(root)):
+                raise PermissionError(13, "Permission denied")
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "makedirs", makedirs_then_arm)
+        monkeypatch.setattr(os, "stat", stat_failing_once_armed)
+        result = MCPLoader([])._execute_fs_tool("read_file", {"path": "a.txt"})
+
+        assert "error" in result
+        assert "not private" in result["error"]
+        assert "cannot stat it" in result["error"]
 
     def test_execute_fs_tool_reports_an_unusable_workspace_as_an_error(
         self, tmp_path, monkeypatch
