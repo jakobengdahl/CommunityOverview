@@ -8,13 +8,20 @@ must look like an environment variable name, and options carrying a
 secret-looking key are rejected. The credential itself is never stored by this
 module, never written to a report, and never defaulted to anything.
 
-It is read from the environment twice per case, both times for the length of
-one expression: once inside the provider constructor, and once at the top of
-``run_case`` to build the scrub list that keeps it out of the log (see
-``_scrub``). The second read happens whether or not the provider is real — a
-mock factory never touches a credential, and the read is unconditional — so
-with the variable unset it yields ``None`` and scrubs nothing, which is the
-correct behaviour rather than a special case.
+It is read from the environment twice per case: once inside the provider
+constructor, and once at the top of ``run_case`` to build the scrub list that
+keeps it out of the log (see ``_scrub``). The second value is held in a local
+for the rest of that call — it has to be, because the sites that need to redact
+it run at the end — and is dropped when the call returns. It is never written
+to a file, a report or module state, which is what "never stored" means here;
+``test_no_harness_module_state_holds_the_credential_after_a_run`` pins the last
+of those, since caching it in a module global would also silently ignore a
+rotation.
+
+That second read does not depend on the provider being real: a mock factory
+never touches a credential and the read happens anyway. It is conditional only
+on the profile naming a variable, and with that variable unset it yields
+``None`` and scrubs nothing, which is correct rather than a special case.
 
 Each case runs against its own fixture graph in a temporary file, through the
 real ChatService — the same system prompt, tool definitions and tool-execution
@@ -178,11 +185,18 @@ def _scrub(text: str, secrets: Sequence[Optional[str]]) -> str:
     harness itself rendered. Scrubbing by value is exact; matching on a shape
     would not be. The length floor keeps a one- or two-character value — a
     stub credential in a test, an empty prompt — from redacting the whole
-    message into uselessness: below the floor a value is likelier to occur in
-    unrelated text than to be the thing being hidden, and no credential this
-    harness accepts is that short. Eight is a threshold, not a measurement —
-    a 3-to-8-character prompt or credential is also left alone, which is
-    stated here because the floor is a judgement rather than a derivation.
+    message into uselessness: a two-character value occurs all over an
+    ordinary error string, and redacting every occurrence would leave nothing
+    to read.
+
+    Eight is a judgement, and it buys an exposure rather than closing one: a
+    credential of eight characters or fewer is NOT redacted, and nothing stops
+    one being that short — ``resolve_credential`` accepts any non-empty value,
+    which is realistic for a locally hosted model behind a custom endpoint.
+    The report does not depend on this (it carries no message at all), so the
+    exposure is bounded to the run log; it is stated plainly rather than
+    excused, because the alternative — a floor of one — makes the log
+    unreadable, and the honest trade is worth naming.
 
     The match is an exact substring, which closes the credential: it is a
     single opaque token and an SDK that echoes a header echoes it verbatim. It
@@ -406,6 +420,18 @@ def run_suite(
     )
 
 
+def _truncate(text: str, limit: int) -> str:
+    """
+    Bound a model-chosen string that is reported as itself, not quoted.
+
+    ``scoring._abbreviate`` is the wrong tool here: it ``repr()``s its input,
+    which is right when the value is being quoted INTO a sentence and wrong for
+    a field whose whole content is the value — every tool name in the report
+    would arrive wrapped in quotes.
+    """
+    return text if len(text) <= limit else f"{text[:limit]}… ({len(text)} chars)"
+
+
 def build_report(result: SuiteResult) -> Dict[str, Any]:
     """
     Render a suite result as a JSON-serializable report.
@@ -464,7 +490,12 @@ def build_report(result: SuiteResult) -> Dict[str, Any]:
                     }
                     for key, d in score.dimensions.items()
                 },
-                "tool_calls": score.tool_calls,
+                # A tool name is model-chosen: the model can ask for a tool
+                # that does not exist, under any string it likes. `scoring`
+                # already treats it that way when it quotes one into a
+                # condition detail (`_abbreviate(call.name, 80)`); this row
+                # emitted it raw, and `--out` writes the report to a file.
+                "tool_calls": [_truncate(name, 80) for name in score.tool_calls],
                 "provider_calls": score.provider_calls,
                 "latency_ms": round(score.latency_ms, 1),
                 "tokens": {

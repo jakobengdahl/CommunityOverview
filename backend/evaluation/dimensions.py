@@ -162,7 +162,7 @@ DIMENSIONS: Dict[str, Dimension] = {
             key="unsupported_entity_reference",
             title="Unsupported entity references in the answer",
             mechanical=Mechanical.FULL,
-            measured_by=["answer_entities_supported", "answer_cites_ids"],
+            measured_by=["answer_entities_supported"],
             caveat=(
                 "Deliberately not called a hallucination rate, and not a substitute "
                 "for one. Two signals. CLOSED vocabulary: a fixture-graph id the "

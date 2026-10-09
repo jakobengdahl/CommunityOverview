@@ -27,8 +27,6 @@ operator-facing version.
 import json
 import os
 import re
-import shutil
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -499,6 +497,30 @@ class TestReportsNeverCarryACredential:
         # And the model's own prose stays out too.
         assert PROSE_SENTINEL not in payload
 
+        # The PROMPT, which this test is named for and never checked. Adding a
+        # one-line `"prompt": score.prompt` to the case row left the suite
+        # green: the only `case.prompt not in payload` assertion ran on the
+        # run-error sites, and round 5's leaf-bound walk bounds how LONG a
+        # string may be, never which content may appear.
+        case = case_by_id["tool-call-validity-read-path"]
+        assert case.prompt not in payload
+
+        # So the durable half is an allowlist: a new field in the case row has
+        # to be added here deliberately, rather than inheriting whatever the
+        # scorer happens to carry.
+        assert set(build_report(result)["cases"][0]) == {
+            "case_id",
+            "dimension",
+            "passed",
+            "run_error",
+            "conditions",
+            "dimensions",
+            "latency_ms",
+            "tokens",
+            "provider_calls",
+            "tool_calls",
+        }
+
     def test_every_string_in_a_rendered_report_is_bounded_wherever_it_sits(
         self, profile
     ):
@@ -532,7 +554,14 @@ class TestReportsNeverCarryACredential:
         )
         provider = ScriptedProvider(
             [
-                [("search_graph", {"qeury": huge, "limit": "not-an-int"})],
+                # An oversized tool NAME, not just an oversized argument. The
+                # first version of this probe asked for `search_graph` and
+                # `update_node`, so the one report field that is a raw
+                # model-chosen string — the tool-call row — was never
+                # oversized under it, and a 3200-character name reached the
+                # report (and a file, via `--out`) with this test green. A
+                # probe for "every string leaf" has to make every leaf big.
+                [(huge, {"qeury": huge, "limit": "not-an-int"})],
                 [("update_node", {"node_id": huge, "updates": {"summary": huge}})],
                 f"{PROSE_SENTINEL} it is eval-{huge}-other.",
             ]
@@ -550,60 +579,128 @@ class TestReportsNeverCarryACredential:
                 for index, item in enumerate(value):
                     yield from leaves(item, f"{path}[{index}]")
 
+        # The `dimensions` block is harness-authored prose — the caveats from
+        # `dimensions.py`, repeated verbatim in every report. The longest is
+        # 1167 characters, so a 1200-char bound over all leaves sat 33
+        # characters from reporting a leak on an ordinary edit to that prose,
+        # and the predictable response would have been to raise the bound.
+        # Excluding it lets the rest be bounded at the limit `_abbreviate`
+        # actually enforces instead of three times it.
         oversized = [
-            (path, len(text)) for path, text in leaves(report) if len(text) >= 1200
+            (path, len(text))
+            for path, text in leaves(report)
+            if len(text) >= 500 and ".dimensions." not in path
         ]
         assert not oversized, f"unbounded string(s) in the report: {oversized}"
         assert huge not in json.dumps(report), "the whole oversized value survived"
+
+        static = {
+            text
+            for path, text in leaves(report)
+            if ".dimensions." in path and len(text) >= 500
+        }
+        assert static, (
+            "the exclusion above no longer matches anything, so it is hiding "
+            "nothing and should be removed"
+        )
+        assert not any(huge[:40] in text for text in static), (
+            "model-written content reached a dimension caveat"
+        )
 
         for path, text in leaves(report):
             if path.endswith(".run_error"):
                 assert len(text) <= 400, f"{path} is {len(text)} chars"
 
-    def test_running_a_case_writes_no_file_outside_its_own_temporary_graph(
-        self, profile, case_by_id
+    def test_running_a_case_writes_no_file_but_its_own_temporary_graph(
+        self, monkeypatch, profile, case_by_id
     ):
         """
-        G2's second clause — "no file the harness writes" — had no test.
+        G2's second clause — "no file the harness writes" — pinned by path.
 
-        Adding a `write_text` of the prompt, the whole injected skill text and
-        the answer into the working directory left the suite green: the
-        isolation tests pin that the run's temporary graph does not outlive the
-        run, and nothing pinned that no OTHER file appears. Additive
-        instrumentation is exactly how a debug dump ships by accident.
+        Watching one directory was not enough. The first version chdir'd into a
+        fresh `mkdtemp()` and walked only that, so a dump to
+        `tempfile.gettempdir()`, `Path.home()` or any absolute path was
+        invisible — and a mutation writing the prompt and the whole injected
+        skill text to `/tmp/skill-eval-debug.json` passed it. So this hooks the
+        write instead of the location: every path opened for writing during the
+        run must be the run's own fixture graph, wherever it is.
         """
+        import builtins
+        import io
+        import pathlib
+
         from backend.evaluation.tests.conftest import ScriptedProvider
 
         case = case_by_id["skill-adherence-ambiguous-name-halts"]
-        workdir = Path(tempfile.mkdtemp())
-        before = set(workdir.rglob("*"))
-        cwd = os.getcwd()
-        try:
-            os.chdir(workdir)
-            run_suite(
-                profile,
-                cases=[case],
-                provider_factory=lambda _p: ScriptedProvider(
-                    [f"{PROSE_SENTINEL} two nodes share that name, so I stopped."]
-                ),
-            )
-        finally:
-            os.chdir(cwd)
+        written = []
 
-        created = sorted(
-            str(p.relative_to(workdir)) for p in set(workdir.rglob("*")) - before
+        def note(path, mode=""):
+            if any(flag in str(mode) for flag in ("w", "a", "x", "+")):
+                written.append(str(path))
+
+        def wrap_open(real):
+            def wrapper(file, mode="r", *args, **kwargs):
+                note(file, mode)
+                return real(file, mode, *args, **kwargs)
+
+            return wrapper
+
+        def wrap_path_write(real, name):
+            def wrapper(self, *args, **kwargs):
+                written.append(str(self))
+                return real(self, *args, **kwargs)
+
+            return wrapper
+
+        # Record the directories THIS RUN creates, so "its own temporary
+        # graph" is a set of real paths rather than a guess at a prefix. The
+        # first attempt excluded anything under the system temp dir, which
+        # swallowed the very mutation it was written for: a dump straight into
+        # the temp ROOT. A write is clean only inside a directory the run made.
+        import tempfile as tempfile_module
+
+        owned = []
+        real_tempdir = tempfile_module.TemporaryDirectory
+
+        class RecordingTemporaryDirectory(real_tempdir):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                owned.append(Path(self.name).resolve())
+
+        monkeypatch.setattr(
+            tempfile_module, "TemporaryDirectory", RecordingTemporaryDirectory
         )
-        for path in set(workdir.rglob("*")) - before:
-            if path.is_file():
-                text = path.read_text(encoding="utf-8", errors="replace")
-                for marker in (
-                    PROSE_SENTINEL,
-                    case.prompt,
-                    "ACTIVE SKILL INSTRUCTIONS",
-                ):
-                    assert marker not in text, f"{path.name} carries {marker[:40]!r}"
-        shutil.rmtree(workdir, ignore_errors=True)
-        assert not created, f"the run left file(s) behind: {created}"
+        monkeypatch.setattr(builtins, "open", wrap_open(builtins.open))
+        monkeypatch.setattr(io, "open", wrap_open(io.open))
+        monkeypatch.setattr(
+            pathlib.Path,
+            "write_text",
+            wrap_path_write(pathlib.Path.write_text, "write_text"),
+        )
+        monkeypatch.setattr(
+            pathlib.Path,
+            "write_bytes",
+            wrap_path_write(pathlib.Path.write_bytes, "write_bytes"),
+        )
+
+        run_suite(
+            profile,
+            cases=[case],
+            provider_factory=lambda _p: ScriptedProvider(
+                [f"{PROSE_SENTINEL} two nodes share that name, so I stopped."]
+            ),
+        )
+        monkeypatch.undo()
+
+        assert owned, "the run created no temporary directory, so this proves nothing"
+        assert written, "the write hook never fired, so this proves nothing"
+
+        stray = []
+        for path in written:
+            resolved = Path(path).resolve()
+            if not any(resolved.is_relative_to(directory) for directory in owned):
+                stray.append(str(resolved))
+        assert not stray, f"the run wrote outside the directory it created: {stray}"
 
     def test_no_condition_detail_carries_the_answer_or_an_unbounded_argument(
         self, profile
@@ -806,6 +903,57 @@ class TestReportsNeverCarryACredential:
         assert case.prompt not in ours, f"{site} logged the prompt"
         assert "ACTIVE SKILL INSTRUCTIONS" not in ours, f"{site} logged the skill text"
         assert "<redacted>" in ours, f"{site} redacted nothing"
+
+    def test_no_harness_module_state_holds_the_credential_after_a_run(
+        self, monkeypatch, profile, case_by_id
+    ):
+        """
+        G1 says "never stored", and nothing inspected harness module state.
+
+        Caching the resolved value in a module-level dict survived the whole
+        suite. The credential then lives in process memory for as long as the
+        interpreter does — and a rotation mid-suite is silently ignored, so the
+        cache is a correctness bug as well as an exposure. Asserted by looking
+        at the module rather than inferring from behaviour: the value is either
+        reachable from module state or it is not.
+        """
+        from backend.evaluation.tests.conftest import ScriptedProvider
+        import backend.evaluation.runner as runner_module
+        import backend.evaluation.scoring as scoring_module
+        import backend.evaluation.transcript as transcript_module
+
+        monkeypatch.setenv(profile.credential_ref, SENTINEL)
+        run_suite(
+            profile,
+            cases=[case_by_id["skill-adherence-ambiguous-name-halts"]],
+            provider_factory=lambda _p: ScriptedProvider(
+                ["two nodes share that name, so I stopped."]
+            ),
+        )
+
+        def reachable(value, depth=0):
+            if depth > 3:
+                return False
+            if isinstance(value, str):
+                return SENTINEL in value
+            if isinstance(value, dict):
+                return any(
+                    reachable(item, depth + 1)
+                    for item in list(value.keys()) + list(value.values())
+                )
+            if isinstance(value, (list, tuple, set, frozenset)):
+                return any(reachable(item, depth + 1) for item in value)
+            return False
+
+        for module in (runner_module, scoring_module, transcript_module):
+            holders = [
+                name
+                for name, value in vars(module).items()
+                if not name.startswith("__") and reachable(value)
+            ]
+            assert not holders, (
+                f"{module.__name__} module state holds the credential: {holders}"
+            )
 
     @pytest.mark.parametrize(
         ("length", "redacted"),

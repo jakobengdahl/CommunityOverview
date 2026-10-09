@@ -109,31 +109,71 @@ class _Usage:
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch, request):
     """
-    Fail any test in this suite that attempts an outbound connection.
+    Fail any test in this suite that attempts outbound traffic.
 
     Autouse and unconditional: a test that needs the network does not belong
     here, so there is deliberately no opt-out marker to reach for. The failure
-    names the address, because the useful question when this fires is which
+    names the destination, because the useful question when this fires is which
     provider got built for real.
+
+    Connection-oriented egress was all this covered, while the module docstring
+    claimed the suite makes none at all. A mutation sending statsd-shaped
+    telemetry with `sendto` — connectionless, so it never calls `connect` —
+    left the suite green and the datagram really did leave the machine. The
+    send methods are hooked too, and `getaddrinfo`, which catches a resolve
+    before any socket exists and gives a clearer failure than a refused send.
+
+    What this cannot see is a child process: `subprocess.run(["curl", …])`
+    opens its own sockets in its own interpreter. Three tests here do shell
+    out deliberately (the `.env` probes), so banning that outright is not an
+    option, and the claim is therefore about this process.
     """
     import socket
 
-    real_connect = socket.socket.connect
+    saved = {
+        name: getattr(socket.socket, name)
+        for name in (
+            "connect",
+            "connect_ex",
+            "sendto",
+            "sendmsg",
+            "sendall",
+            "send",
+        )
+        if hasattr(socket.socket, name)
+    }
+    real_getaddrinfo = socket.getaddrinfo
 
-    def refuse(self, address, *args, **kwargs):
+    def refuse_socket(name):
+        def refuse(self, *args, **kwargs):
+            destination = args[1] if name in ("sendto", "sendmsg") else args[0:1]
+            raise AssertionError(
+                f"{request.node.nodeid} attempted outbound traffic via "
+                f"{name}() to {destination!r}. No test in this suite may touch "
+                "the network — if a provider was built for real, the "
+                "substitution did not take effect (see this module's "
+                "docstring)."
+            )
+
+        return refuse
+
+    def refuse_resolve(host, *args, **kwargs):
+        if host in (None, "", "localhost", "127.0.0.1", "::1"):
+            return real_getaddrinfo(host, *args, **kwargs)
         raise AssertionError(
-            f"{request.node.nodeid} attempted an outbound connection to {address!r}. "
-            "No test in this suite may touch the network — if a provider was built "
-            "for real, the substitution did not take effect (see this module's "
-            "docstring)."
+            f"{request.node.nodeid} attempted to resolve {host!r}. No test in "
+            "this suite may touch the network."
         )
 
-    monkeypatch.setattr(socket.socket, "connect", refuse)
-    monkeypatch.setattr(socket.socket, "connect_ex", refuse)
+    for name in saved:
+        monkeypatch.setattr(socket.socket, name, refuse_socket(name))
+    monkeypatch.setattr(socket, "getaddrinfo", refuse_resolve)
     try:
         yield
     finally:
-        socket.socket.connect = real_connect
+        for name, original in saved.items():
+            setattr(socket.socket, name, original)
+        socket.getaddrinfo = real_getaddrinfo
 
 
 @pytest.fixture(autouse=True)

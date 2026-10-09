@@ -989,6 +989,37 @@ class TestFinalNodeFieldsChanged:
         ).passed
 
 
+class TestNoScorerReadsTheModelsProseForAnImpression:
+    """
+    The module docstring's central claim, which no test pinned.
+
+    Crediting `verify_after_write` when the answer merely SAYS the write was
+    verified survived the whole suite — and the shipped case then passed
+    end-to-end with no read-back at all, on a model that wrote and then
+    announced "Confirmed: the change is saved." That is a scorer grading a
+    claim instead of a behaviour, which is the one thing `dimensions.py` calls
+    unmechanical and refuses to ship.
+    """
+
+    def test_an_answer_claiming_verification_without_a_read_still_fails(self):
+        tr = transcript(
+            [
+                call(
+                    "update_node",
+                    {"node_id": "eval-resource-metadata-handbook", "updates": {}},
+                    turn=0,
+                )
+            ],
+            results={"r0": {"id": "eval-resource-metadata-handbook"}},
+            final_text="Confirmed: the change is saved and I verified it.",
+        )
+        result = score_verify_after_write(
+            tr, ["search_graph", "get_related_nodes", "find_similar_nodes"]
+        )
+        assert not result.passed
+        assert "verified" not in result.detail.lower().replace("verify", "")
+
+
 class TestAnswerCitesIds:
     """
     The positive half of the entity check, which the pure negative cannot be.
@@ -1031,6 +1062,25 @@ class TestAnswerCitesIds:
         assert not score_answer_cites_ids(
             tr, ["eval-initiative-metadata-register"]
         ).passed
+
+    def test_an_id_the_run_only_READ_does_not_satisfy_the_condition(self):
+        """
+        It reads the answer and nothing else — which is the whole point.
+
+        A mutation widened the haystack to the tool results as well, and every
+        test here built a transcript with empty results, so none could see it.
+        The shipped case then passed with the model reading the node and then
+        declining to answer: `answer_entities_supported` vacuously supported,
+        `answer_cites_ids` satisfied from the result it had read — exactly the
+        vacuous pass this condition was added to close, restored.
+        """
+        tr = transcript(
+            results={"r0": {"nodes": [{"id": "eval-initiative-metadata-register"}]}},
+            final_text="I read the graph but cannot say which one it is.",
+        )
+        result = score_answer_cites_ids(tr, ["eval-initiative-metadata-register"])
+        assert not result.passed
+        assert "eval-initiative-metadata-register" in result.detail
 
     def test_a_bounded_detail_when_many_ids_are_missing(self):
         result = score_answer_cites_ids(

@@ -233,6 +233,30 @@ class TestShippedCases:
             )
             assert referenced <= present, case.id
 
+    def test_every_id_an_answer_must_cite_exists_in_the_cases_fixture(self):
+        """
+        A typo'd id makes the case permanently red and blames the model.
+
+        Its sibling expectations are cross-checked against the fixture;
+        `answer_cites_ids` was not. An id that no node has can never be stated
+        by a correct answer, so the case reports a model failure for what is a
+        harness error — the integration-versus-model conflation this whole
+        harness exists to avoid.
+        """
+        checked = 0
+        for case in load_cases():
+            if not case.expect.answer_cites_ids:
+                continue
+            graph = json.loads(case.graph_path().read_text(encoding="utf-8"))
+            present = {node["id"] for node in graph["nodes"]}
+            for node_id in case.expect.answer_cites_ids:
+                assert node_id in present, (
+                    f"{case.id} expects the answer to cite {node_id!r}, which "
+                    f"is not a node in {case.graph}"
+                )
+                checked += 1
+        assert checked, "no shipped case declares answer_cites_ids any more"
+
     def test_no_expected_node_state_is_already_true_in_the_fixture(self):
         """
         An expectation the fixture already satisfies passes against a model
@@ -435,15 +459,42 @@ class TestDimensionTable:
     def test_the_narrow_entity_check_is_named_separately_from_hallucination(self):
         narrow = DIMENSIONS["unsupported_entity_reference"]
         assert narrow.mechanical is Mechanical.FULL
-        # Both halves: the negative (nothing unsupported is cited) and the
-        # positive (the id asked for is stated). The negative alone passes an
-        # answer that cites nothing, which is correct for the condition and a
-        # false green for a case whose prompt asks for an id.
-        assert narrow.measured_by == [
-            "answer_entities_supported",
-            "answer_cites_ids",
-        ]
+        # The negative only, deliberately. `answer_cites_ids` is the positive
+        # half and a case asking for an id declares it too — but listing it
+        # here widened the "any of" intersection in
+        # `_expectation_covers_dimension`, so a case could claim to measure
+        # this dimension while declaring only the positive half and nothing
+        # checked for a fabricated reference. It stayed scored and passed.
+        #
+        # `CaseScore.passed` is every declared condition, so the case still
+        # fails on a non-answer; this list is what the DIMENSION reports, and
+        # the dimension is the negative check the row and caveat describe.
+        assert narrow.measured_by == ["answer_entities_supported"]
         assert "not called a hallucination rate" in narrow.caveat
+
+    def test_the_positive_half_alone_cannot_claim_the_entity_dimension(self):
+        """
+        Listing `answer_cites_ids` in `measured_by` re-opened the hole the
+        coverage validator exists to close.
+
+        `_expectation_covers_dimension` demands a case declare at least ONE of
+        its dimension's conditions, so adding a second widened the choice: a
+        case could claim `unsupported_entity_reference` while declaring only
+        that the answer states an id, and the dimension reported scored and
+        passed on a run whose answer cited a fabricated reference — nothing had
+        looked. Pinned from the rejecting side so the one-line change cannot
+        come back.
+        """
+        with pytest.raises(ValidationError, match="declares none of its conditions"):
+            AcceptanceCase(
+                id="x",
+                dimension="unsupported_entity_reference",
+                prompt="p",
+                graph="metadata-pilot-small.json",
+                expect=ExpectedBehaviour(
+                    answer_cites_ids=["eval-initiative-metadata-register"]
+                ),
+            )
 
     def test_every_dimension_states_its_caveat(self):
         for key, dim in DIMENSIONS.items():

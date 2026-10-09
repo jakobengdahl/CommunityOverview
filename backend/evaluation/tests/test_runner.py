@@ -516,15 +516,28 @@ class TestRunCaseRobustness:
         assert summary["passed"] == 0
         assert summary["reported_only_dimensions"] == ["latency", "token_profile"]
 
+    @pytest.mark.parametrize("raise_on_turn", [0, 1])
     def test_a_provider_that_raises_is_recorded_as_a_run_error_not_a_crash(
-        self, profile, case_by_id
+        self, profile, case_by_id, raise_on_turn
     ):
+        """
+        Parametrised over the turn, because only turn 0 was ever driven.
+
+        A rate-limit or a dropped connection after the first tool round is the
+        common real shape, and narrowing the aggregation to
+        `provider_calls[:1]` left the suite green while such a run reported
+        `run_errors=0` and scored as a model that did the wrong thing — the
+        integration-versus-model conflation the aggregation exists to prevent.
+        """
         from backend.evaluation.tests.conftest import ScriptedProvider
 
         score = run_case(
-            case_by_id["tool-call-validity-read-path"],
+            case_by_id["id-resolution-before-write"],
             profile,
-            provider_factory=lambda _p: ScriptedProvider(["x"], raise_on_turn=0),
+            provider_factory=lambda _p: ScriptedProvider(
+                [[("search_graph", {"query": "x"})], "x"],
+                raise_on_turn=raise_on_turn,
+            ),
         )
         assert score.run_error is not None
         assert not score.passed
@@ -873,6 +886,22 @@ class TestSkillsContext:
         )
         prompt = provider.received_system_prompts[0]
         assert "Schema Explainer" in prompt and "Inventory Reporter" in prompt
+
+        # Both BODIES whole, not just both names. Asserting the names let a
+        # mutation truncate every skill after the first to 60 characters with
+        # the suite green — and these two cases are the only shipped ones with
+        # two skills, on the dimension that exists to measure choosing between
+        # them, so `skill_selection` would have been scored against a model
+        # given one skill's rules and a fragment of the other's. The one-skill
+        # render is pinned whole for the same reason; multiplicity is where
+        # that pin does not reach.
+        case = case_by_id["skill-selection-schema-question"]
+        for path in case.skill_paths():
+            body = path.read_text(encoding="utf-8").split("---", 2)[2].strip()
+            assert len(body) > 200, f"{path.name} too small to detect truncation"
+            assert f"\n{body}\n</skill>" in prompt, (
+                f"{path.name}'s body is not in the prompt whole"
+            )
 
 
 class TestSuiteAndReport:

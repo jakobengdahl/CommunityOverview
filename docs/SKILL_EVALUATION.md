@@ -31,9 +31,11 @@ pass condition — a number you compare, which the harness never passes or fails
 a provider on), and **not scored**.
 
 The table is maintained in code — `backend/evaluation/dimensions.py` — and a
-test parses the table below and compares it against that one, so the two cannot
-drift apart. `python scripts/run_skill_eval.py --dimensions` prints it with the
-full caveats.
+test parses the table below and compares its **dimension names and scored
+classes** against that one, so a dimension cannot be added, renamed or
+reclassified in one place only. The third column is prose and is not compared,
+so a description here can still fall behind the code; `python
+scripts/run_skill_eval.py --dimensions` prints the authoritative caveats.
 
 | Dimension | Scored | What the score actually means |
 |---|---|---|

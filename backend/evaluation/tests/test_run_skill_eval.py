@@ -78,12 +78,45 @@ class TestTheSuiteCannotReachTheNetwork:
             "a guarantee"
         )
 
-    def test_an_outbound_connection_inside_this_suite_fails_the_test(self):
-        """The guard bites, with a message naming the address."""
+    @pytest.mark.parametrize(
+        "method", ["connect", "connect_ex", "sendto", "sendall", "send"]
+    )
+    def test_outbound_traffic_inside_this_suite_fails_the_test(self, method):
+        """
+        The guard bites on each method, with a message naming the destination.
+
+        One probe on `connect` was not enough: the guard patched only the
+        connection-oriented calls, so connectionless egress — a `sendto` of
+        statsd-shaped telemetry, which never calls `connect` — left the suite
+        green while the datagram really left the machine. A probe per guarded
+        method means a future narrowing of the guard fails here.
+        """
         import socket
 
-        with pytest.raises(AssertionError, match="attempted an outbound connection"):
-            socket.socket().connect(("example.invalid", 443))
+        payload = b"x"
+        address = ("192.0.2.1", 8125)
+        with pytest.raises(AssertionError, match="attempted outbound traffic"):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            if method in ("connect", "connect_ex"):
+                getattr(sock, method)(address)
+            elif method == "sendto":
+                sock.sendto(payload, address)
+            else:
+                getattr(sock, method)(payload)
+
+    def test_resolving_a_hostname_inside_this_suite_fails_the_test(self):
+        """
+        Caught before a socket exists, which gives a clearer failure.
+
+        Localhost stays resolvable: the fixture graph's storage and the test
+        HTTP stubs are local, and breaking those would say nothing about
+        egress.
+        """
+        import socket
+
+        with pytest.raises(AssertionError, match="attempted to resolve"):
+            socket.getaddrinfo("example.invalid", 443)
+        assert socket.getaddrinfo("127.0.0.1", 0)
 
     def test_the_run_helpers_resolve_their_provider_factory_at_call_time(self):
         """
@@ -394,13 +427,7 @@ class TestNoCodePathReadsACredentialFromAFile:
         # environment value. This test plants `.eval_key` and chdirs to it, so
         # it EXECUTED that leak and passed. The header is what actually goes
         # out, and asserting it closes the class instead of one attribute.
-        from openai._models import FinalRequestOptions
-
-        request = provider.client._build_request(
-            FinalRequestOptions(method="post", url="/chat/completions", json_data={})
-        )
-        assert request.headers.get("authorization") == "Bearer ENV-SOURCED-KEY"
-        assert "FILE-SOURCED-KEY" not in str(request.headers)
+        self.assert_request_carries_only(provider, "ENV-SOURCED-KEY")
         assert provider.client.api_key == "ENV-SOURCED-KEY"
         assert getattr(provider, "api_key", None) in (None, "ENV-SOURCED-KEY")
 
@@ -408,70 +435,96 @@ class TestNoCodePathReadsACredentialFromAFile:
         self, monkeypatch, tmp_path
     ):
         """
-        The invariant, rather than another banned spelling.
+        The whole outgoing request, and every read entry point.
 
-        Two mutations put a file-sourced key on the wire past every guard here.
-        Both wrote `Authorization` into the SDK client's custom headers, which
-        the SDK merges AFTER the auth header it derives from `api_key`; the
-        second reached the dict through a local variable, so the static scan saw
-        an `ast.Subscript` on an `ast.Name` and had nothing to match, and the
-        outcome assertion still held because `api_key` kept the environment
-        value. Enumerating spellings loses that race — the leak needs a repo
-        file, so this forbids the read instead.
+        Three mutations put a file-sourced key on the wire past the guards
+        here. The first two wrote `Authorization` into the SDK client's custom
+        headers, which the SDK merges AFTER the auth header it derives from
+        `api_key`, one of them through a local variable so the static scan saw
+        an `ast.Subscript` on an `ast.Name` and had nothing to match. The third
+        went around headers entirely: `client._custom_query["api_key"]`, which
+        the SDK merges into the request URL, read via `os.open`/`os.read`,
+        which this guard did not hook. Every assertion was on headers, so the
+        key travelled in the query string with the suite green.
 
-        Scoped to the repository tree: the SDK legitimately reads a CA bundle
-        and its own package data from site-packages.
+        Hence two independent checks, both over outcomes rather than
+        spellings: nothing inside the repository is read while a provider is
+        built, and the built request — url, headers and body — carries the
+        environment value and no other.
+
+        The second is the load-bearing one. The read guard hooks six entry
+        points (`builtins.open`, `io.open`, `os.open`, `Path.open`,
+        `Path.read_text`, `Path.read_bytes`), which is not the same as every
+        way to read a file — a child process or `mmap` walks past it — so it is
+        a net, not a proof. Anything that reaches the wire, however it was
+        read, has to pass through the request.
+
+        Site-packages is excluded by path segment, not by assuming it sits
+        outside the tree: `.gitignore` names `venv/` and `.venv/`, so a
+        developer following that layout has the SDK's own package data
+        resolving inside the repo, and importlib.metadata reads two
+        `dist-info/METADATA` files while building a client.
         """
         import builtins
+        import io
+        import os as os_module
         import pathlib
 
         from backend.config.model_profiles import ModelProfile
         from backend.evaluation.runner import default_provider_factory
 
         repo = pathlib.Path(__file__).resolve().parents[3]
-        real_open = builtins.open
-        real_read_text = pathlib.Path.read_text
-        real_read_bytes = pathlib.Path.read_bytes
         reads = []
+        excluded = ("site-packages", "dist-packages", "node_modules", ".git")
 
         def guard(path):
             try:
                 resolved = pathlib.Path(path).resolve()
             except (OSError, ValueError, TypeError):
                 return
-            if resolved.is_relative_to(repo) and resolved.is_file():
-                reads.append(str(resolved.relative_to(repo)))
+            if not resolved.is_relative_to(repo) or not resolved.is_file():
+                return
+            if any(part in excluded for part in resolved.parts):
+                return
+            reads.append(str(resolved.relative_to(repo)))
 
-        def open_(file, *args, **kwargs):
-            guard(file)
-            return real_open(file, *args, **kwargs)
+        originals = {
+            (builtins, "open"): builtins.open,
+            (io, "open"): io.open,
+            (os_module, "open"): os_module.open,
+            (pathlib.Path, "open"): pathlib.Path.open,
+            (pathlib.Path, "read_text"): pathlib.Path.read_text,
+            (pathlib.Path, "read_bytes"): pathlib.Path.read_bytes,
+        }
 
-        def read_text(self, *args, **kwargs):
-            guard(self)
-            return real_read_text(self, *args, **kwargs)
+        def wrap(real, path_is_self):
+            def wrapper(*args, **kwargs):
+                if args:
+                    guard(args[0])
+                return real(*args, **kwargs)
 
-        def read_bytes(self, *args, **kwargs):
-            guard(self)
-            return real_read_bytes(self, *args, **kwargs)
+            return wrapper
 
-        # Plant one everywhere a leak has been tried, so a read that does
-        # happen has something to find and the failure names the file.
         planted = []
-        for candidate in (
-            repo / "backend" / "evaluation" / "fixtures" / ".eval_endpoint_token",
-            repo / ".eval_key",
-            repo / "backend" / "evaluation" / ".eval_key",
-        ):
-            if not candidate.exists():
-                candidate.write_text("FILE-SOURCED-KEY", encoding="utf-8")
-                planted.append(candidate)
-
-        monkeypatch.setattr(builtins, "open", open_)
-        monkeypatch.setattr(pathlib.Path, "read_text", read_text)
-        monkeypatch.setattr(pathlib.Path, "read_bytes", read_bytes)
-        monkeypatch.setenv("SKILL_EVAL_FS_PROBE", "ENV-SOURCED-KEY")
-
         try:
+            # Plant one everywhere a leak has been tried, so a read that does
+            # happen has something to find and the failure names the file.
+            # Inside the try: a failure on the second write must still clean up
+            # the first, or a file called `.eval_key` holding something that
+            # looks like a key is left in the working tree.
+            for candidate in (
+                repo / "backend" / "evaluation" / "fixtures" / ".eval_endpoint_token",
+                repo / ".eval_key",
+                repo / "backend" / "evaluation" / ".eval_key",
+            ):
+                if not candidate.exists():
+                    candidate.write_text("FILE-SOURCED-KEY", encoding="utf-8")
+                    planted.append(candidate)
+
+            for (target, name), real in originals.items():
+                monkeypatch.setattr(target, name, wrap(real, target is pathlib.Path))
+            monkeypatch.setenv("SKILL_EVAL_FS_PROBE", "ENV-SOURCED-KEY")
+
             provider = default_provider_factory(
                 ModelProfile(
                     id="probe",
@@ -488,14 +541,45 @@ class TestNoCodePathReadsACredentialFromAFile:
                 candidate.unlink(missing_ok=True)
 
         assert not reads, f"building a provider read repository file(s): {reads}"
+        self.assert_request_carries_only(provider, "ENV-SOURCED-KEY")
 
+    @staticmethod
+    def assert_request_carries_only(provider, expected_key):
+        """
+        Assert the built request carries `expected_key` and no other credential.
+
+        Over the whole request, because a leak does not have to use a header:
+        `_custom_query` rides in the URL, and a body parameter would ride in
+        the content. Asserting on `request.headers` alone let a file-sourced
+        key through in the query string.
+        """
         from openai._models import FinalRequestOptions
 
-        request = provider.client._build_request(
+        client = provider.client
+        request = client._build_request(
             FinalRequestOptions(method="post", url="/chat/completions", json_data={})
         )
-        assert request.headers.get("authorization") == "Bearer ENV-SOURCED-KEY"
-        assert "FILE-SOURCED-KEY" not in str(request.headers)
+        whole = "\n".join(
+            (
+                str(request.url),
+                str(request.headers),
+                request.read().decode("utf-8", "replace"),
+            )
+        )
+        assert request.headers.get("authorization") == f"Bearer {expected_key}"
+        assert "FILE-SOURCED-KEY" not in whole, (
+            "a file-sourced credential reached the outgoing request"
+        )
+        for marker in ("api_key", "api-key", "apikey", "token", "secret"):
+            for segment in str(request.url.query, "utf-8").split("&"):
+                assert not segment.lower().startswith(marker), (
+                    f"the request URL carries a credential-shaped query "
+                    f"parameter: {segment.split('=')[0]}"
+                )
+        assert not client._custom_query, (
+            f"the client carries custom query parameters: "
+            f"{sorted(client._custom_query)}"
+        )
 
     def test_no_module_assigns_a_credential_onto_a_built_provider(self):
         """
