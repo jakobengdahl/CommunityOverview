@@ -29,10 +29,39 @@ GH_OPTS_WITH_VALUE = {"-t", "--title", "-b", "--body", "-B", "--base", "-H", "--
                       "-r", "--reviewer", "-a", "--assignee", "-l", "--label", "-m", "--milestone",
                       "-p", "--project", "-T", "--template", "-R", "--repo"}
 
+def strip_comments(cmd):
+    """Drop bash comments (an unquoted # that starts a word) to end of line.
+
+    shlex either treats # inside a word as a comment or, with commenters off,
+    chokes on an apostrophe inside a real comment; neither is bash."""
+    out, quote, i, at_word_start = [], None, 0, True
+    while i < len(cmd):
+        c = cmd[i]
+        if quote:
+            out.append(c)
+            if c == "\\" and quote == "\"" and i + 1 < len(cmd):
+                out.append(cmd[i + 1]); i += 1
+            elif c == quote:
+                quote = None
+        elif c in "\"\x27":
+            quote = c; out.append(c); at_word_start = False
+        elif c == "\\" and i + 1 < len(cmd):
+            out.append(c); out.append(cmd[i + 1]); i += 1; at_word_start = False
+        elif c == "#" and at_word_start:
+            while i < len(cmd) and cmd[i] != "\n":
+                i += 1
+            continue
+        else:
+            out.append(c)
+            at_word_start = c in " \t\n;&|()"
+        i += 1
+    return "".join(out)
+
 def tokenize(cmd):
-    lex = shlex.shlex(cmd.replace("\r", "\n").replace("\n", " ; "), posix=True, punctuation_chars=True)
+    cmd = strip_comments(cmd.replace("\r", "\n"))
+    lex = shlex.shlex(cmd.replace("\n", " ; "), posix=True, punctuation_chars=True)
     lex.whitespace_split = True
-    lex.commenters = ""          # "a#b" is a word in bash, and a comment must not eat the next line
+    lex.commenters = ""          # comments are gone; "a#b" stays one word as in bash
     return list(lex)
 
 def segments(tokens):
@@ -68,7 +97,13 @@ def git_push_target(seg, here):
             base, rest = resolve(opt[2:], base), rest[1:]
         else:
             rest = rest[1:]
-    return base if rest and rest[0] == "push" else None
+    if not rest or rest[0] != "push":
+        return None
+    # Pushing a deletion or tags carries no HEAD commits, so there is nothing
+    # to format-check; only a branch push is judged.
+    if any(a in ("--delete", "-d", "--tags", "--prune", "--mirror") for a in rest[1:]):
+        return None
+    return base
 
 def gh_draft(seg):
     args, i = seg[1:], 0

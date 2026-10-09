@@ -143,6 +143,11 @@ class TestPushFormatting:
         repo = make_repo(tmp_path)
         commit(repo, "backend/bad.py", "def  f( x ):\n  return   x\n", "bad")
         commit(repo, "backend/bad.py", "def f(x):\n    return x\n", "fixed")
+        # A tracked file made bad in the working tree, staged and unstaged, and
+        # an untracked bad file: none of them is in the push.
+        (repo / "backend" / "ok.py").write_text("x  =  1\n")
+        git(repo, "add", "backend/ok.py")
+        (repo / "backend" / "bad.py").write_text("def  g( ):  pass\n")
         (repo / "backend" / "scratch.py").write_text("y  =  2\n")
         assert run_hook("git push", repo).returncode == 0
 
@@ -157,6 +162,8 @@ class TestPushFormatting:
             "GIT_SSH_COMMAND=ssh git -C {repo} push",
             "if true; then git -C {repo} push; fi",
             "git -C {repo} status # check\ngit -C {repo} push",
+            "# it's fine\ngit -C {repo} push",
+            "git -C {repo} push # don't forget",
             "bash -c 'cd {repo} && git push'",
             "cd {repo} && git -c core.pager=cat push",
         ],
@@ -167,6 +174,19 @@ class TestPushFormatting:
         command = template.format(repo=f'"{repo}"')
         result = run_hook(command, tmp_path)  # cwd is NOT the repo
         assert result.returncode == 2, (command, result.stderr)
+        # Blocked for the right reason, not because the hook found no ruff.
+        assert "backend/bad.py would be reformatted" in result.stderr, result.stderr
+
+    def test_a_deletion_or_tag_push_carries_no_commits_to_check(self, tmp_path):
+        repo = make_repo(tmp_path)
+        commit(repo, "backend/bad.py", "def  f( x ):\n  return   x\n")
+        assert run_hook("git push origin --delete old", repo).returncode == 0
+        assert run_hook("git push --tags", repo).returncode == 0
+
+    def test_a_separator_inside_a_comment_is_not_a_push(self, tmp_path):
+        repo = make_repo(tmp_path)
+        commit(repo, "backend/bad.py", "def  f( x ):\n  return   x\n")
+        assert run_hook("git status # build && git push", repo).returncode == 0
 
     def test_a_push_run_from_the_cwd_with_a_space_in_its_path_is_checked(
         self, tmp_path
