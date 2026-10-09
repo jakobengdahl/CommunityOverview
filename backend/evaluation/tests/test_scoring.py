@@ -29,6 +29,8 @@ from backend.evaluation.scoring import (
     score_tool_calls_valid,
     score_verify_after_write,
 )
+from backend.evaluation.cases import DEFAULT_VERIFY_READ_TOOLS, WRITE_TOOLS
+from backend.evaluation.scoring import _join_problems
 from backend.evaluation.transcript import ProviderCall, RunTranscript, ToolCall
 
 SEARCH_SCHEMA = {
@@ -989,6 +991,41 @@ class TestFinalNodeFieldsChanged:
         ).passed
 
 
+class TestAWriteIsNeverItsOwnVerification:
+    """
+    Widening the read-tool allowlist to include the write tools survived.
+
+    `allowed = set(read_tools) | set(WRITE_TOOLS)` then passed the shipped
+    `post-write-verification` case on a model that wrote, archived the same
+    node, and said "Saved and archived." No read ran after the write at all,
+    and the presence check reported green on a node the run had just archived.
+    Every bad-model probe ended in prose, so nothing drove a post-write call
+    that was itself a write.
+    """
+
+    def test_the_default_read_tools_are_disjoint_from_the_write_tools(self):
+        assert not set(DEFAULT_VERIFY_READ_TOOLS) & set(WRITE_TOOLS)
+
+    def test_a_second_write_does_not_count_as_reading_back(self):
+        node = "eval-resource-metadata-handbook"
+        tr = transcript(
+            [
+                call(
+                    "update_node",
+                    {"node_id": node, "updates": {"summary": "x"}},
+                    turn=0,
+                ),
+                call("archive_nodes", {"node_ids": [node]}, turn=1),
+            ],
+            results={"r0": {"id": node}, "r1": {"archived_node_ids": [node]}},
+            final_text="Saved and archived.",
+        )
+        result = score_verify_after_write(tr, list(DEFAULT_VERIFY_READ_TOOLS))
+        assert not result.passed, (
+            f"a write after a write was credited as the read-back: {result.detail}"
+        )
+
+
 class TestNoScorerReadsTheModelsProseForAnImpression:
     """
     The module docstring's central claim, which no test pinned.
@@ -1033,6 +1070,18 @@ class TestNoScorerReadsTheModelsProseForAnImpression:
                 forbidden_calls=["update_node", "archive_nodes"],
                 verify_after_write=True,
                 discriminating_first_call="search_graph",
+                # The three the first version of this probe left out, which
+                # made the docstring's "every condition that is not defined
+                # over the answer" false and left a third of the property
+                # unguarded: a prose fallback in any of these would have
+                # survived.
+                ids_resolved_from_results=True,
+                final_node_state={
+                    "eval-resource-metadata-handbook": {"summary": "a real summary"}
+                },
+                final_node_fields_changed={
+                    "eval-resource-metadata-handbook": ["summary"]
+                },
             ),
             notes=(
                 "probe declaring every condition that is not defined over the "
@@ -1049,6 +1098,15 @@ class TestNoScorerReadsTheModelsProseForAnImpression:
         loud = {
             c.name: c.passed for c in score_case(case, claimed, [], fixture).conditions
         }
+        # The probe must cover every condition that is NOT defined over the
+        # answer, or the property is asserted over a subset while claiming the
+        # module. Derived from the model so a newly added condition fails here
+        # until it is either declared or named as answer-defined.
+        every = set(ExpectedBehaviour.model_fields) - {"verify_read_tools"}
+        assert set(quiet) | self.ANSWER_DEFINED >= every, (
+            "conditions outside this probe: "
+            f"{sorted(every - set(quiet) - self.ANSWER_DEFINED)}"
+        )
         assert quiet, "the probe declared no condition"
         for name, verdict in quiet.items():
             if name in self.ANSWER_DEFINED:
@@ -1080,6 +1138,70 @@ class TestNoScorerReadsTheModelsProseForAnImpression:
         # never fail, since the replace cannot touch "verified" and the scorer
         # never interpolates `final_text` at all.
         assert "search_graph" in result.detail and "update_node" in result.detail
+
+
+class TestJoinProblems:
+    """
+    The joined detail's own bound, which no test covered.
+
+    `_join_problems` existed to stop a detail growing with the NUMBER of
+    problems — model-controlled, one per tool call — and nothing asserted it
+    held. Raising its limit from 400 to 4000 left the suite green, because the
+    report-side probe generates two or three problems and never the five that
+    produced the original overrun.
+    """
+
+    @pytest.mark.parametrize("count", [1, 2, 5, 12, 40])
+    @pytest.mark.parametrize("size", [10, 130, 196, 198, 900])
+    def test_the_result_never_exceeds_the_limit(self, count, size):
+        result = _join_problems(["x" * size] * count)
+        assert len(result) <= 400, f"{count}x{size} gave {len(result)}"
+
+    def test_one_oversized_problem_still_leaves_content(self):
+        """
+        Appending the suffix after the budget was spent overran the limit, and
+        breaking on the first problem left a detail that was only "; and N
+        more" — reachable from case-authored text, not just from a model.
+        """
+        result = _join_problems(["y" * 5000, "second", "third"])
+        assert len(result) <= 400
+        assert result.startswith("y")
+        assert result.endswith("and 2 more")
+
+    def test_everything_fits_when_it_fits(self):
+        result = _join_problems(["one", "two"])
+        assert result == "one; two"
+        assert "more" not in result
+
+
+class TestFinalNodeStateIsNotSatisfiedByAnIdleModel:
+    """
+    The mirror of the pin its sibling already has.
+
+    `score_final_node_fields_changed` is guarded three ways against crediting
+    a serializer default as a change. `score_final_node_state` had no such
+    coverage, because the only shipped case declaring it names a field the
+    fixture already fills — so normalising the comparison "for consistency"
+    (`got = _normalise_field(node.get(key)); if got is not None and got !=
+    want`) passed a case asking the model to fill an EMPTY field on a run
+    where the model wrote nothing. "Fill in the field that is empty" is the
+    most natural completeness case there is, so this is live for the next case
+    added rather than hypothetical.
+    """
+
+    @pytest.mark.parametrize("fixture_value", ["", None])
+    def test_an_empty_or_absent_field_is_not_already_as_expected(self, fixture_value):
+        node = {"id": "eval-resource-metadata-handbook"}
+        if fixture_value is not None:
+            node["summary"] = fixture_value
+        tr = transcript([], final_text="I did nothing at all.")
+        tr.final_graph = {"nodes": [dict(node)], "edges": []}
+
+        result = score_final_node_state(
+            tr, {"eval-resource-metadata-handbook": {"summary": "a real summary"}}
+        )
+        assert not result.passed
+        assert "summary" in result.detail
 
 
 class TestAnswerCitesIds:

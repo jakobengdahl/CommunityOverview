@@ -9,7 +9,9 @@ guarantee until someone edits the file.
 """
 
 import json
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -78,6 +80,7 @@ class TestTheSuiteCannotReachTheNetwork:
             "a guarantee"
         )
 
+    @pytest.mark.expects_egress_attempt
     @pytest.mark.parametrize(
         "route",
         [
@@ -141,6 +144,7 @@ class TestTheSuiteCannotReachTheNetwork:
                     address
                 )
 
+    @pytest.mark.expects_egress_attempt
     def test_a_connected_send_is_unreachable_because_connect_is_refused(self):
         """
         Why `send`/`sendall` need no probe of their own under the audit guard.
@@ -157,19 +161,86 @@ class TestTheSuiteCannotReachTheNetwork:
         with pytest.raises(OSError):
             sock.sendall(b"x")
 
-    def test_resolving_a_hostname_inside_this_suite_fails_the_test(self):
+    def test_importing_the_harness_makes_no_outbound_call(self):
         """
-        Caught before a socket exists, which gives a clearer failure.
+        Import-time egress, which no in-process guard can cover.
 
-        Localhost stays resolvable: the fixture graph's storage and the test
-        HTTP stubs are local, and breaking those would say nothing about
-        egress.
+        The egress guard is registered when `conftest.py` is imported — but
+        importing that module requires its parent package first, and
+        `backend/evaluation/__init__.py` imports the runner, so any module body
+        in this package runs before a hook could exist. Moving the
+        registration earlier cannot fix that; the guard simply starts after the
+        package is in `sys.modules`.
+
+        So it is checked where it is checkable: a child process that installs
+        the hook FIRST and then imports every module in the package. A
+        reachability check or a version ping at module level — an ordinary
+        real-world shape — is caught here, and G3 is a claim about the suite,
+        not about each test body.
+        """
+        script = (
+            "import sys\n"
+            f"sys.path.insert(0, {str(REPO_ROOT)!r})\n"
+            "calls = []\n"
+            "def hook(event, args):\n"
+            "    if event.startswith('socket.') and event not in "
+            "('socket.__new__', 'socket.gethostname'):\n"
+            "        calls.append((event, repr(args[1:2])))\n"
+            "sys.addaudithook(hook)\n"
+            "import importlib, pkgutil\n"
+            "import backend.evaluation as pkg\n"
+            "for info in pkgutil.iter_modules(pkg.__path__):\n"
+            "    if info.name == 'tests':\n"
+            "        continue\n"
+            "    importlib.import_module('backend.evaluation.' + info.name)\n"
+            "import scripts.run_skill_eval  # noqa\n"
+            "print('SOCKET_EVENTS:', calls)\n"
+        )
+        probe = Path(tempfile.mkdtemp()) / "import_egress_probe.py"
+        probe.write_text(script, encoding="utf-8")
+        try:
+            result = subprocess.run(
+                [sys.executable, str(probe)],
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+        finally:
+            probe.unlink(missing_ok=True)
+
+        assert "SOCKET_EVENTS: []" in result.stdout, (
+            "importing the harness touched a socket:\n"
+            f"{result.stdout}\n{result.stderr[-600:]}"
+        )
+
+    @pytest.mark.expects_egress_attempt
+    def test_resolving_a_hostname_inside_this_suite_fails_the_test(self):
+        """Caught before a socket exists, which gives a clearer failure."""
+        import socket
+
+        with pytest.raises(AssertionError, match="attempted outbound traffic"):
+            socket.getaddrinfo("example.invalid", 443)
+
+    @pytest.mark.expects_egress_attempt
+    def test_loopback_is_refused_too_because_a_proxy_routes_through_it(self):
+        """
+        The allowance that made the guard decorative.
+
+        `HTTPS_PROXY` is `http://127.0.0.1:<port>` in the environment this
+        harness is developed in, so a provider request goes to loopback and an
+        allowance for loopback is an allowance for everywhere. A plain external
+        `httpx.get` returned a response with the guard silent, and `run_case`
+        with no factory made six loopback connections and passed. Nothing in
+        this suite needs loopback — there are no local test stubs, and a spy
+        over the whole suite recorded no loopback connection — so it is
+        refused, and pinned refused.
         """
         import socket
 
-        with pytest.raises(AssertionError, match="attempted to resolve"):
-            socket.getaddrinfo("example.invalid", 443)
-        assert socket.getaddrinfo("127.0.0.1", 0)
+        with pytest.raises(AssertionError, match="loopback included"):
+            socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect(
+                ("127.0.0.1", 38993)
+            )
 
     def test_the_run_helpers_resolve_their_provider_factory_at_call_time(self):
         """
@@ -563,6 +634,18 @@ class TestNoCodePathReadsACredentialFromAFile:
                 candidate.unlink(missing_ok=True)
 
         reads = [path for path, mode in accesses if mode == "r"]
+
+        # Positive control. `assert not reads` passes just as well when the
+        # watcher never fired, and nothing in the repository is legitimately
+        # opened while a provider is built — so without this, a guard that had
+        # silently stopped working would read as a guarantee. Proven by
+        # reading one of the planted files through the same mechanism.
+        with record_file_access(repo) as control:
+            (repo / "pyproject.toml").read_text(encoding="utf-8")
+        assert [path for path, mode in control if mode == "r"], (
+            "the file-access watcher did not fire on a known read, so the "
+            "assertion above proves nothing"
+        )
         assert not reads, f"building a provider read repository file(s): {reads}"
         self.assert_request_carries_only(provider, "ENV-SOURCED-KEY")
 
@@ -612,25 +695,41 @@ class TestNoCodePathReadsACredentialFromAFile:
             )
         ]
 
-        class CapturingTransport(httpx.BaseTransport):
-            """A minimal sync transport; `MockTransport` differs across these."""
+        # Captured at the TRANSPORT CLASS, not by swapping the client's
+        # transport. Swapping it deleted exactly what needed observing: a
+        # transport wrapper that stamps `Authorization` at send time, reading
+        # the repo file then, is removed by a test that replaces the transport
+        # before sending — and every other assertion here stays true, because
+        # `api_key` is untouched, no event hook is registered and
+        # `_custom_query` is empty. Patching the class means whatever wrapper
+        # chain the client holds still runs, and the request that arrives at
+        # the bottom is the one the endpoint would have seen. It also covers
+        # proxy mounts, which are transports of the same class — with
+        # HTTPS_PROXY set, as in the session this is developed in, httpx routes
+        # through `_mounts` and never consults `_transport` at all.
+        real_handle = httpx.HTTPTransport.handle_request
 
-            def handle_request(self, request):
-                captured.append(request)
-                return httpx.Response(200, content=b"{}", request=request)
+        def capture(self, request):
+            captured.append(request)
+            return httpx.Response(200, content=b"{}", request=request)
 
-        # Both the default transport and any proxy mounts: with HTTPS_PROXY set
-        # — as it is in the cloud session this harness is developed in — httpx
-        # routes through `_mounts` and never consults `_transport`, so swapping
-        # only the latter sent the probe at the real proxy.
-        transport, mounts = inner._transport, dict(inner._mounts)
-        inner._transport = CapturingTransport()
-        inner._mounts = {}
+        httpx.HTTPTransport.handle_request = capture
         try:
             inner.send(built)
         finally:
-            inner._transport = transport
-            inner._mounts = mounts
+            httpx.HTTPTransport.handle_request = real_handle
+
+        # And structurally: the chain must be httpx's own transports. This is
+        # the analogue of the no-event-hooks assertion — a wrapper is visible
+        # as a type even when what it does is invisible to a single request.
+        httpx_root = httpx.__name__.split(".")[0]
+        chain = [inner._transport, *inner._mounts.values()]
+        foreign = [
+            f"{type(t).__module__}.{type(t).__name__}"
+            for t in chain
+            if t is not None and type(t).__module__.split(".")[0] != httpx_root
+        ]
+        assert not foreign, f"the client's transport chain is wrapped: {foreign}"
 
         assert captured, "the request was never sent, so hooks never ran"
         request = captured[0]

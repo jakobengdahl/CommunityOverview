@@ -16,7 +16,7 @@ to supply from their own shell.
 | | |
 |---|---|
 | Code | `backend/evaluation/` |
-| Tests | `backend/evaluation/tests/` (provider always mocked) |
+| Tests | `backend/evaluation/tests/` (no test calls a real endpoint) |
 | Cases and fixtures | `backend/evaluation/fixtures/` |
 | Entry point | `scripts/run_skill_eval.py` |
 
@@ -431,22 +431,48 @@ parameter from an HTTP request.
 python -m pytest backend/evaluation/ -q
 ```
 
-Every test uses a scripted provider. **No test needs an API key and none makes a
-network call** — a suite that only passes with a real credential cannot run in
+Nearly every test uses a scripted provider; a handful build the real SDK client
+to check what it would send, substituting the transport rather than the
+provider. **No test needs an API key and none calls a real endpoint** — a suite
+that only passes with a real credential cannot run in
 CI, and making a credential necessary to check this harness is the one thing it
 must not do. `backend/evaluation/tests/test_no_credentials.py` pins that,
 including that the whole shipped suite scores with every provider variable
 cleared from the environment.
 
-The no-network half is **enforced**, not merely asserted: an autouse
-`no_network` fixture in `backend/evaluation/tests/conftest.py` fails any test
-that attempts an outbound connection, with no opt-out marker. It had to be
-added, because the claim was false for several rounds — a test meaning to
-substitute the provider factory patched a module attribute that `run_suite` had
-already captured as a default argument, so the real provider was built and the
-suite made 27 outbound connections while documenting that it made none. A
-guarantee about what a suite does *not* do is worth exactly as much as the thing
-that stops it.
+The no-network half is **enforced**, not merely asserted, in two parts that
+each cover a gap the other leaves. A `sys.addaudithook` registered when
+`backend/evaluation/tests/conftest.py` is imported refuses the socket audit
+events, which aborts the call — that is what stops a packet. The autouse
+`no_network` fixture then asserts in teardown that nothing was refused, which
+is what fails the test: the guard raises `AssertionError`, and the chat path
+catches every exception and turns it into a `run_error`, so on the raise alone
+an egress attempt became a green test with its failure message rewritten as
+`APIConnectionError`.
+
+Loopback is refused too. `HTTPS_PROXY` points at `127.0.0.1` in many
+development environments, so a provider request goes to loopback and an
+allowance for loopback is an allowance for everywhere — with one, an ordinary
+external request completed and the guard stayed silent. Nothing in this suite
+needs loopback; the only tests that trip the guard are its own probes, which
+carry an `expects_egress_attempt` marker and assert on it themselves.
+
+Two limits, stated because the guarantee is only worth what it rests on. A
+child process has its own interpreter and its own hooks, so the three `.env`
+probes that shell out are covered by the fact that none of them sends a
+request, not by the guard; a separate test imports every module in the package
+in a child process with a hook installed first, because a module body runs
+before any hook in this package could exist. And `mmap` raises its own audit
+event rather than `open`, so a file-backed mapping is caught via the `open`
+that produced its descriptor rather than directly.
+
+This was all added after the fact, because the claim was false for several
+rounds: first a test meaning to substitute the provider factory patched a
+module attribute that `run_suite` had already captured as a default argument,
+so the real provider was built and the suite made 27 outbound connections while
+documenting that it made none; then one `.env` probe ran a whole case in a
+child process and issued real HTTP. A guarantee about what a suite does *not*
+do is worth exactly as much as the thing that stops it.
 
 Every scorer is tested in both directions. A scorer that only ever returned
 `True` would make every case pass against every model — reporting reliability

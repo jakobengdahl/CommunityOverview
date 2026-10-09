@@ -391,14 +391,25 @@ def _join_problems(problems: Sequence[str], limit: int = 400) -> str:
     joined = "; ".join(problems)
     if len(joined) <= limit:
         return joined
+
+    # The suffix is reserved from the budget, not appended after it is spent:
+    # doing the latter overran the one parameter this function exists for, by
+    # up to the suffix's own length. And at least one problem is always kept,
+    # truncated if it alone exceeds the budget — otherwise a single long
+    # problem returned a detail that was nothing but "; and N more", which is
+    # reachable from case-authored text, not only from a model.
+    suffix_room = len(f"; and {len(problems)} more")
+    budget = max(limit - suffix_room, 1)
     kept: List[str] = []
     used = 0
     for problem in problems:
-        if used + len(problem) + 2 > limit:
+        if kept and used + len(problem) + 2 > budget:
             break
-        kept.append(problem)
-        used += len(problem) + 2
+        kept.append(problem if len(problem) <= budget else problem[:budget])
+        used += len(kept[-1]) + 2
     remaining = len(problems) - len(kept)
+    if not remaining:
+        return "; ".join(kept)
     return "; ".join(kept) + f"; and {remaining} more"
 
 

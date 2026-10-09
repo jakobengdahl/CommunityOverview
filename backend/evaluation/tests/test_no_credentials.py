@@ -352,10 +352,12 @@ class TestADotEnvFileIsNotAReliableCredentialSource:
         """
         The conditional half, both sides.
 
-        In a fresh process the first case refuses, because the provider is built
-        before the assistant. Once something has imported the assistant,
-        `load_dotenv()` has run and the same call accepts the `.env` value. That
+        In a fresh process the provider build refuses, because it happens
+        before the assistant is imported. Once something has imported the
+        assistant, `load_dotenv()` has run and the same build succeeds. That
         asymmetry is the reason the docs tell the operator to export instead.
+        (It drove a whole `run_case` until round 7; that made a real HTTP
+        request, and resolution is what the claim was ever about.)
         """
         # `default_provider_factory`, not `run_case`. The claim is about where
         # the credential is RESOLVED, and resolution happens in the provider
@@ -372,25 +374,34 @@ class TestADotEnvFileIsNotAReliableCredentialSource:
             "from backend.evaluation.runner import default_provider_factory\n"
             "prof = ModelProfile(id='p', name='P', provider='openai', model='m',\n"
             "                    default=True, credential_ref='SKILL_EVAL_DOTENV_PROBE')\n"
-            "def refused():\n"
+            # Reports the outcome, not a boolean: `'MissingCredentialError' in
+            # ...` was true of a refusal and false of ANY other outcome,
+            # including an ImportError, so the second assertion read "did not
+            # refuse for want of a credential" rather than "accepted the value".
+            "def outcome():\n"
             "    try:\n"
             "        default_provider_factory(prof)\n"
             "    except Exception as exc:\n"
-            "        return type(exc).__name__ == 'MissingCredentialError'\n"
-            "    return False\n"
-            "print('FRESH_REFUSED:', refused())\n"
+            "        return type(exc).__name__\n"
+            "    return 'built'\n"
+            "print('FRESH:', outcome())\n"
             "import backend.ui.chat_logic  # noqa  -- runs load_dotenv()\n"
             "import os\n"
             "print('NOW_IN_ENV:', os.environ.get('SKILL_EVAL_DOTENV_PROBE') is not None)\n"
-            "print('SECOND_REFUSED:', refused())\n"
+            "print('SECOND:', outcome())\n"
         ) % str(REPO_ROOT)
         result = self._run(script, "SKILL_EVAL_DOTENV_PROBE=from-repo-root\n")
-        assert "FRESH_REFUSED: True" in result.stdout, result.stdout + result.stderr
+        assert "FRESH: MissingCredentialError" in result.stdout, (
+            result.stdout + result.stderr
+        )
         assert "NOW_IN_ENV: True" in result.stdout, result.stdout + result.stderr
         # The operative half of the docs' claim, which was asserted only as
         # "the value is now in the environment": the SECOND call must accept it.
         # A regression that made it refuse would have passed before.
-        assert "SECOND_REFUSED: False" in result.stdout, result.stdout + result.stderr
+        # The provider was BUILT, not merely "did not refuse for want of a
+        # credential" — which is what the docs claim and what the previous
+        # boolean could not distinguish from an unrelated exception.
+        assert "SECOND: built" in result.stdout, result.stdout + result.stderr
 
 
 class TestReportsNeverCarryACredential:
@@ -519,7 +530,27 @@ class TestReportsNeverCarryACredential:
         # So the durable half is an allowlist: a new field in the case row has
         # to be added here deliberately, rather than inheriting whatever the
         # scorer happens to carry.
-        assert set(build_report(result)["cases"][0]) == {
+        #
+        # Nested too. A top-level key set alone let a field be added INSIDE an
+        # allowed key: `cases[N].dimensions` is per-run territory, and a
+        # `tool_arguments` entry there carried 450 characters of raw model
+        # arguments per tool call — under the per-leaf bound, under the
+        # rendered-size margin, and inside a key the allowlist already
+        # permitted.
+        from backend.evaluation.dimensions import DIMENSIONS
+
+        row = build_report(result)["cases"][0]
+        assert set(row["dimensions"]) == set(DIMENSIONS), (
+            "the per-case dimensions block has keys that are not dimensions: "
+            f"{set(row['dimensions']) - set(DIMENSIONS)}"
+        )
+        for key, dimension in row["dimensions"].items():
+            assert set(dimension) == {
+                "scored",
+                "passed",
+                "mechanically_scored",
+            }, f"cases[].dimensions.{key} carries unexpected fields: {set(dimension)}"
+        assert set(row) == {
             "case_id",
             "dimension",
             "passed",
@@ -586,39 +617,43 @@ class TestReportsNeverCarryACredential:
             elif isinstance(value, dict):
                 for key, item in value.items():
                     # Keys too: a map whose KEYS carry the content was
-                    # invisible to a walk that only descended into values.
+                    # invisible to a walk that only descended into values. No
+                    # report field has model-controlled keys today, so this arm
+                    # catches nothing now — it is here so that adding such a
+                    # field does not also need someone to remember this walk.
                     yield f"{path}.<key>", key
                     yield from leaves(item, f"{path}.{key}")
             elif isinstance(value, (list, tuple)):
                 for index, item in enumerate(value):
                     yield from leaves(item, f"{path}[{index}]")
 
-        # The `dimensions` block is harness-authored prose — the caveats from
-        # `dimensions.py`, repeated verbatim in every report. The longest is
-        # 1167 characters, so a 1200-char bound over all leaves sat 33
-        # characters from reporting a leak on an ordinary edit to that prose,
-        # and the predictable response would have been to raise the bound.
-        # Excluding it lets the rest be bounded at the limit `_abbreviate`
-        # actually enforces instead of three times it.
+        # Harness-authored prose is exempt — the caveats from `dimensions.py`,
+        # repeated verbatim in every report. The longest is 1167 characters, so
+        # a 1200-char bound over all leaves sat 33 characters from reporting a
+        # leak on an ordinary edit to that prose, and the predictable response
+        # would have been to raise the bound.
+        #
+        # Exempt BY VALUE, not by path. A `".dimensions." not in path` test
+        # also matched `report.cases[N].dimensions.*`, which is per-run
+        # territory, so the very field this test's docstring says it closed —
+        # raw model arguments in the case row — was re-opened by moving it one
+        # level down, 450 characters per tool call per case. The caveats are a
+        # known finite set, so membership in that set is the exemption.
+        from backend.evaluation.dimensions import DIMENSIONS
+
+        caveats = {dimension.caveat for dimension in DIMENSIONS.values()}
         oversized = [
             (path, len(text))
             for path, text in leaves(report)
-            if len(text) >= 500 and ".dimensions." not in path
+            if len(text) >= 500 and text not in caveats
         ]
         assert not oversized, f"unbounded string(s) in the report: {oversized}"
         assert huge not in json.dumps(report), "the whole oversized value survived"
 
-        static = {
-            text
-            for path, text in leaves(report)
-            if ".dimensions." in path and len(text) >= 500
-        }
-        assert static, (
-            "the exclusion above no longer matches anything, so it is hiding "
+        exempted = {text for _, text in leaves(report) if text in caveats}
+        assert exempted, (
+            "no caveat appears in the report, so the exemption above is hiding "
             "nothing and should be removed"
-        )
-        assert not any(huge[:40] in text for text in static), (
-            "model-written content reached a dimension caveat"
         )
 
         for path, text in leaves(report):
@@ -645,7 +680,12 @@ class TestReportsNeverCarryACredential:
             )
         )
         rendered = json.dumps(report)
-        assert len(rendered) - len(baseline) < 2000, (
+        # 300, not 2000. The measured delta between these two runs is about
+        # -18 characters, so a 2000 threshold left ~2018 of headroom — enough
+        # for a chunked value of ~1900 characters, which is the smuggling
+        # route this check exists to close. 300 is still an order of magnitude
+        # above the observed noise.
+        assert len(rendered) - len(baseline) < 300, (
             f"the oversized run rendered {len(rendered) - len(baseline)} more "
             "characters than the same run with small values, so model-written "
             "content is reaching the report in bulk"
@@ -732,11 +772,12 @@ class TestReportsNeverCarryACredential:
         these details.
 
         It drove `tool-call-validity-read-path`, which declares only
-        `tool_calls_valid` and makes valid calls — so the three details that can
+        `tool_calls_valid` and makes valid calls — so the details that can
         quote model-written content were never generated, and
         `PROSE_SENTINEL not in payload` could not fire for them. This case
         declares `answer_entities_supported` AND makes a schema-invalid call
-        with an oversized argument, so all of them are produced.
+        with an oversized argument, so two of them are produced; the
+        `final_node_state` quote is covered by its own test below.
         """
         from backend.evaluation.cases import AcceptanceCase, ExpectedBehaviour
         from backend.evaluation.tests.conftest import ScriptedProvider
@@ -925,6 +966,45 @@ class TestReportsNeverCarryACredential:
         assert case.prompt not in ours, f"{site} logged the prompt"
         assert "ACTIVE SKILL INSTRUCTIONS" not in ours, f"{site} logged the skill text"
         assert "<redacted>" in ours, f"{site} redacted nothing"
+
+    def test_the_provider_seam_is_not_reachable_from_an_http_request(self):
+        """
+        The seam this PR adds to `process_message` must stay harness-only.
+
+        `llm_provider` lets a caller hand in a provider object, which is the
+        whole point for the harness and would be a remote code path if a
+        request body could set it. It is unreachable today because the REST
+        handler forwards explicit keyword arguments and `ChatRequest` has no
+        such field — and nothing pinned either half, so a refactor to
+        `**request.model_dump()` would open it silently.
+        """
+        import ast
+        import inspect
+
+        from backend.ui import rest_api
+
+        source = inspect.getsource(rest_api)
+        tree = ast.parse(source)
+        forwarding = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            target = ast.unparse(node.func)
+            if not target.endswith("process_message"):
+                continue
+            for keyword in node.keywords:
+                if keyword.arg is None:
+                    forwarding.append(f"**{ast.unparse(keyword.value)}")
+                elif keyword.arg == "llm_provider":
+                    forwarding.append("llm_provider=")
+        assert not forwarding, (
+            "the REST chat handler forwards unpacked or explicit provider "
+            f"arguments into process_message: {forwarding}"
+        )
+
+        model = getattr(rest_api, "ChatRequest", None)
+        if model is not None and hasattr(model, "model_fields"):
+            assert "llm_provider" not in model.model_fields
 
     def test_no_harness_module_state_holds_the_credential_after_a_run(
         self, monkeypatch, profile, case_by_id

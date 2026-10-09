@@ -131,10 +131,20 @@ class _Usage:
 # `_socket.socket(...).sendto(...)` had real, unpatched methods).
 #
 # An audit hook is not an enumeration. The events fire from the C layer, so
-# `open` covers `builtins.open`, `io.open`, `os.open`, `Path.open` and `mmap`
-# alike, and the socket events cannot be sidestepped by importing a different
-# module. A hook cannot be removed once installed, so one permanent hook
-# dispatches to whatever watchers are currently registered.
+# `open` covers `builtins.open`, `io.open`, `os.open` and `Path.open` alike,
+# and the socket events cannot be sidestepped by importing a different module.
+# A hook cannot be removed once installed, so one permanent hook dispatches to
+# whatever watchers are currently registered.
+#
+# `mmap` is NOT that event — it raises `mmap.__new__`, which nothing here
+# watches. A file-backed mapping still has to come from an `open` or `os.open`
+# that this decoder sees, so the net holds for it by a step of reasoning rather
+# than directly; saying otherwise was the kind of unstated inference the move
+# to audit events was meant to remove.
+#
+# The dispatcher is permanent; what it dispatches to is not. Watchers register
+# per test, because a refusal installed for the whole process applied to every
+# other suite in the repository too.
 #
 # What this still cannot see is a child process: it has its own interpreter and
 # its own hooks. Three tests here shell out deliberately (the `.env` probes),
@@ -178,6 +188,14 @@ def audit_open_target(args: tuple):
     stop it.
 
     Both forms are consulted, so neither spelling can be the one that slips.
+
+    And the path is decoded, not passed to ``Path`` raw: a ``bytes`` path makes
+    ``Path()`` raise ``TypeError``, which the except below swallowed into
+    ``None`` — so both guards were blind to ``open(b"...", "wb")``, and the
+    write guard's positive control still passed because the run's own
+    ``graph.json`` uses a ``str`` path. That was the fourth appearance of the
+    same shape: the event layer stopped being an enumeration and the decoder
+    reintroduced one, over path types.
     """
     if not args:
         return None
@@ -193,7 +211,7 @@ def audit_open_target(args: tuple):
             flags & (os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC)
         )
     try:
-        return Path(path).resolve(), writing
+        return Path(os.fsdecode(path)).resolve(), writing
     except (OSError, ValueError, TypeError):
         return None
 
@@ -227,62 +245,118 @@ def record_file_access(root: Path, exclude=("site-packages", "dist-packages", ".
         yield seen
 
 
-@pytest.fixture(autouse=True)
-def no_network(monkeypatch, request):
-    """
-    Fail any test in this suite that attempts outbound traffic.
-
-    Autouse and unconditional: a test that needs the network does not belong
-    here, so there is deliberately no opt-out marker to reach for.
-
-    Driven by audit events rather than by patched methods. Patching
-    `socket.socket.{connect,sendto,…}` covered neither `_socket.socket`, the C
-    base class, nor a connected `send` whose destination came from an earlier
-    `connect` — and computing a "destination" per method to name in the failure
-    was wrong for four of the six it hooked, naming a flags integer or the
-    outbound payload itself. The audit events carry the real arguments, and
-    `socket.connect` is unavoidable before any connected send, so blocking it
-    plus the connectionless sends plus resolution covers the process.
-
-    Localhost stays reachable: the fixture graph's storage is local, and
-    breaking it would say nothing about egress.
-    """
-    blocked = {
+_BLOCKED_EGRESS = frozenset(
+    {
         "socket.connect",
         "socket.connect_ex",
         "socket.sendto",
         "socket.sendmsg",
         "socket.bind",
     }
-    local = {None, "", "localhost", "127.0.0.1", "::1", "0.0.0.0"}
+)
 
-    def is_local(address):
-        if isinstance(address, (tuple, list)) and address:
-            return address[0] in local
-        return address in local
+# Whatever is running right now, for the failure message. A list rather than a
+# fixture value because the watcher below is registered at IMPORT time, not per
+# test: a module body runs during collection, before any fixture.
+_CURRENT_NODE = ["(import or collection time)"]
 
-    def watcher(event, args):
-        if event == "socket.getaddrinfo":
-            if args and not is_local(args[0]):
-                raise AssertionError(
-                    f"{request.node.nodeid} attempted to resolve {args[0]!r}. "
-                    "No test in this suite may touch the network."
-                )
-            return
-        if event not in blocked:
-            return
-        address = args[1] if len(args) > 1 else None
-        if is_local(address):
-            return
-        raise AssertionError(
-            f"{request.node.nodeid} attempted outbound traffic ({event}) to "
-            f"{address!r}. No test in this suite may touch the network — if a "
-            "provider was built for real, the substitution did not take effect "
-            "(see the audit-hook note in this module)."
-        )
+# Violations seen during the current test, asserted in the fixture's teardown.
+#
+# The raise alone is not enough. Every path the watcher can fire on inside
+# `run_case` is wrapped in `except Exception`: `RecordingProvider` re-raises,
+# `ChatProcessor.process_message` catches everything and returns the message as
+# the assistant's reply, and `run_case` turns that into a `run_error`. So a
+# test could attempt egress, have the guard fire, and still pass green with the
+# carefully worded failure message rewritten as `APIConnectionError`. The raise
+# aborts the syscall — which is what keeps the packet from leaving — and this
+# list is what fails the test.
+_VIOLATIONS: List[str] = []
 
-    with watch_audit(watcher):
-        yield
+
+def _refuse_egress(event: str, args: tuple) -> None:
+    """
+    Refuse any outbound traffic, loopback included.
+
+    Loopback is NOT allowed, which an earlier version of this guard got wrong
+    in the most consequential way available: `HTTPS_PROXY` is set to
+    `http://127.0.0.1:<port>` in the environment this harness is developed in,
+    so every provider request goes to loopback, and allowing loopback meant the
+    guard never saw a real destination at all. A plain `httpx.get` to an
+    external host returned a response with the guard silent, and `run_case`
+    with no provider factory made six loopback connections and passed.
+
+    The allowance was justified in two places by "the test HTTP stubs are
+    local". There are no test HTTP stubs — no `http.server`, no `TestClient`,
+    no bind anywhere in this suite but the guard's own probe — and a spy over
+    the whole suite recorded no loopback connection at all. So nothing is lost
+    by refusing it, and what was lost by allowing it was the guarantee.
+    """
+    if event == "socket.getaddrinfo":
+        if not args:
+            return
+        target = f"resolve {args[0]!r}"
+    elif event in _BLOCKED_EGRESS:
+        target = f"{event} to {args[1]!r}" if len(args) > 1 else event
+    else:
+        return
+
+    message = (
+        f"{_CURRENT_NODE[0]} attempted outbound traffic ({target}). No test in "
+        "this suite may touch the network, loopback included — a proxy makes "
+        "loopback the route to everywhere. If a provider was built for real, "
+        "the substitution did not take effect."
+    )
+    _VIOLATIONS.append(message)
+    raise AssertionError(message)
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "expects_egress_attempt: this test deliberately trips the egress guard "
+        "and asserts on it itself, so the guard's own teardown check stands down",
+    )
+
+
+@pytest.fixture(autouse=True)
+def no_network(request):
+    """
+    Refuse outbound traffic, and fail the test that attempted it.
+
+    Two parts, because neither works alone. The watcher raises, which aborts
+    the syscall — that is what stops the packet. This fixture then asserts in
+    teardown that nothing was recorded, which is what fails the test: the
+    raise travels through code written to swallow every exception, so on its
+    own it turns an egress attempt into a `run_error` and a green test.
+
+    Registered per test, not at import. Registering it at import covered this
+    package's own module bodies — but `sys.addaudithook` cannot be removed, so
+    the refusal then applied to every test in the repository for the rest of
+    the pytest process, and `pytest backend/ -q` went from 9 pre-existing
+    failures to 18 as unrelated suites lost loopback. Import-time egress from
+    this package is checked instead by
+    `test_importing_the_harness_makes_no_outbound_call`, which imports every
+    module here in a child process with a hook installed first — the only place
+    that question can be asked without the answer leaking into other suites.
+
+    Autouse and unconditional: a test that needs the network does not belong
+    here, so there is deliberately no opt-out marker to reach for. The one
+    marker that exists, `expects_egress_attempt`, is for the guard's own probes,
+    which trip it on purpose and assert on it themselves.
+    """
+    previous = _CURRENT_NODE[0]
+    _CURRENT_NODE[0] = request.node.nodeid
+    del _VIOLATIONS[:]
+    try:
+        with watch_audit(_refuse_egress):
+            yield
+    finally:
+        _CURRENT_NODE[0] = previous
+        seen = list(_VIOLATIONS)
+        del _VIOLATIONS[:]
+        if request.node.get_closest_marker("expects_egress_attempt"):
+            return
+        assert not seen, "outbound traffic was attempted:\n" + "\n".join(seen)
 
 
 @pytest.fixture(autouse=True)
