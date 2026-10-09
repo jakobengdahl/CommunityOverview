@@ -29,7 +29,12 @@ dist/
 *~
 
 # Claude Code
-.claude/
+# Claude Code's per-user state stays local; the shared hooks and project
+# settings that bind every session in this repo are tracked.
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
+.claude/settings.local.json
 
 # OS
 .DS_Store
