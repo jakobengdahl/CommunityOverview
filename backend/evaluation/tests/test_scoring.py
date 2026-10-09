@@ -188,6 +188,49 @@ class TestEveryQuotedValueIsBounded:
             ).detail
         assert len(detail) < 1000, f"{site} detail is {len(detail)} chars"
 
+    @pytest.mark.parametrize("count", [1, 5, 60])
+    def test_a_detail_with_many_entries_is_bounded_too(self, count):
+        """
+        Per-entry bounds are not a bounded detail, and the count is the
+        model's.
+
+        Each unresolved id is capped at 80 characters and nothing capped how
+        many there could be — one per reference the model failed to resolve.
+        Five guessed edge endpoints gave 537 characters, past the 500-character
+        leaf invariant this suite asserts of every report string; 60 gave 6037,
+        which is also 60 × 80 characters of free-form model text reconstructable
+        from the file `--out` writes. The probes for this family only ever made
+        one entry.
+        """
+        edges = [
+            {
+                "source": f"guessed-source-node-{index:03d}",
+                "target": f"guessed-target-node-{index:03d}",
+            }
+            for index in range(count)
+        ]
+        tr = transcript([call("add_nodes", {"nodes": [], "edges": edges}, turn=0)])
+        detail = score_ids_resolved_from_results(tr).detail
+        assert len(detail) < 500, f"{count} entries gave {len(detail)} chars"
+
+    def test_the_passing_path_bounds_its_quoted_list_as_the_failing_one_does(self):
+        """
+        Two scorers abbreviated on failure and interpolated raw on success.
+
+        `score_required_call_sequence` quoted the whole model-chosen tool-call
+        list, and its own failure path five lines below already abbreviated it;
+        the parametrised bound probe reached only the failure path.
+        """
+        tr = transcript(
+            [
+                call("search_graph", {"query": "x"}, turn=0),
+                call("Z" * 3000, {}, turn=1),
+            ]
+        )
+        result = score_required_call_sequence(tr, ["search_graph"])
+        assert result.passed, "this probe must reach the PASS path"
+        assert len(result.detail) < 500, len(result.detail)
+
     def test_a_schema_error_quoting_a_huge_value_is_bounded(self):
         """
         The oversized value has to be the one that violates the schema.

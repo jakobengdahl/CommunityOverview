@@ -543,7 +543,9 @@ def score_required_call_sequence(
     actual = transcript.tool_call_names
     if _is_ordered_subsequence(required, actual):
         return ConditionResult(
-            "required_call_sequence", True, f"{list(required)} in order within {actual}"
+            "required_call_sequence",
+            True,
+            f"{list(required)} in order within {_abbreviate(actual, 300)}",
         )
     return ConditionResult(
         "required_call_sequence",
@@ -593,7 +595,15 @@ def score_ids_resolved_from_results(transcript: RunTranscript) -> ConditionResul
         return ConditionResult(
             "ids_resolved_from_results",
             False,
-            f"id(s) used without being read first: {unresolved}",
+            # Bounded in TOTAL, not just per entry. Each id is capped at 80
+            # characters, and nothing capped how many: one entry per
+            # unresolved reference, so five guessed edge endpoints — ordinary
+            # behaviour, and the exact failure this dimension exists to catch
+            # — already put a 537-character string in the report, past the
+            # 500-character leaf invariant the suite asserts. 60 of them gave
+            # 6037. That is the reason `_join_problems` exists, at the one
+            # scorer it was not applied to.
+            f"id(s) used without being read first: {_abbreviate(unresolved, 300)}",
         )
     if checked == 0:
         return ConditionResult(
@@ -685,7 +695,8 @@ def score_verify_after_write(
             return ConditionResult(
                 "verify_after_write",
                 True,
-                f"{call.name} after {last_write.name} returned {sorted(overlap)}",
+                f"{call.name} after {last_write.name} returned "
+                f"{_abbreviate(sorted(overlap), 200)}",
             )
     return ConditionResult(
         "verify_after_write",

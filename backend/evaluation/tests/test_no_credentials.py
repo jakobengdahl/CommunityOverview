@@ -744,6 +744,13 @@ class TestReportsNeverCarryACredential:
         )
 
         case = case_by_id["skill-adherence-ambiguous-name-halts"]
+        # Set, because otherwise the credential arm of the content check below
+        # compares against a value no code could have written. Round 9's
+        # commit message said this guard reads "the credential, the prompt, the
+        # skill text and the answer"; the credential arm did not exist, and
+        # adding it without this line would have been worse than leaving it
+        # out — a guard that reads as four and checks three.
+        monkeypatch.setenv(profile.credential_ref, SENTINEL)
 
         owned = []
         real_tempdir = tempfile_module.TemporaryDirectory
@@ -758,6 +765,8 @@ class TestReportsNeverCarryACredential:
         )
 
         writes = []
+        bodies = []
+        pending = []
 
         def watcher(event, args):
             if event != "open":
@@ -768,12 +777,38 @@ class TestReportsNeverCarryACredential:
             resolved, writing = decoded
             if writing:
                 writes.append(resolved)
+                pending.append(resolved)
+
+        def drain():
+            """Read what has been written, while the files still exist."""
+            for path in list(pending):
+                try:
+                    bodies.append(
+                        (str(path), path.read_text(encoding="utf-8", errors="replace"))
+                    )
+                except OSError:
+                    continue
+                finally:
+                    pending.remove(path)
+
+        class DrainingProvider(ScriptedProvider):
+            """Reads what has been written so far, from inside the run.
+
+            The provider CALL is the drain point: the factory runs before the
+            fixture graph is written, and after `run_suite` returns every
+            owned directory is gone — which is why reading afterwards captured
+            nothing at all.
+            """
+
+            def create_completion(self, *args, **kwargs):
+                drain()
+                return super().create_completion(*args, **kwargs)
 
         with watch_audit(watcher):
             run_suite(
                 profile,
                 cases=[case],
-                provider_factory=lambda _p: ScriptedProvider(
+                provider_factory=lambda _p: DrainingProvider(
                     [f"{PROSE_SENTINEL} two nodes share that name, so I stopped."]
                 ),
             )
@@ -797,20 +832,25 @@ class TestReportsNeverCarryACredential:
         assert not surviving, f"temporary director(ies) outlived the run: {surviving}"
 
         # And content, not just location. A path guard says where a file may
-        # be; G2 is about what may be in one. Read before the directories go,
-        # which is why this list is captured during the run.
+        # be; G2 is about what may be in one.
+        #
+        # Read DURING the run, from `bodies` captured by the watcher. Reading
+        # here could not work and did not: the two assertions above require
+        # every owned directory to be gone and every write to be inside one,
+        # so every `read_text` raised `FileNotFoundError` into an
+        # `except OSError: continue` and the value assertion never executed
+        # once. Capturing the path list during the run is not the same as
+        # reading the bytes during it.
         skills = build_skills_context(case.skill_paths()) or ""
-        for path in writes:
-            try:
-                body = path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
+        assert bodies, "no file content was captured, so this proves nothing"
+        for path, body in bodies:
             for label, value in (
+                ("the credential", SENTINEL),
                 ("the prompt", case.prompt),
                 ("the skill text", skills),
                 ("the answer", PROSE_SENTINEL),
             ):
-                assert value not in body, f"{path.name} carries {label}"
+                assert value not in body, f"{path} carries {label}"
 
     def test_no_condition_detail_carries_the_answer_or_an_unbounded_argument(
         self, profile
