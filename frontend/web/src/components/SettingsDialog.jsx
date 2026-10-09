@@ -74,6 +74,7 @@ function SettingsDialog({ stats, onExportGraph, onClose }) {
             className="settings-dialog-close"
             onClick={onClose}
             aria-label={t('settings.close')}
+            title={t('settings.close')}
           >
             <X size={20} />
           </button>
