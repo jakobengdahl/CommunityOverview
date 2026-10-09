@@ -1,0 +1,51 @@
+{
+  "nodes": [
+    {
+      "id": "eval-actor-statistics-office",
+      "type": "Actor",
+      "name": "National Statistics Office",
+      "description": "The national body responsible for producing official statistics.",
+      "summary": "National statistics producer",
+      "tags": [
+        "statistics",
+        "government"
+      ]
+    },
+    {
+      "id": "eval-initiative-metadata-register",
+      "type": "Initiative",
+      "name": "Metadata Register Modernisation",
+      "description": "A programme to modernise the statistical metadata register.",
+      "summary": "Modernise the metadata register",
+      "tags": [
+        "metadata",
+        "modernisation"
+      ]
+    },
+    {
+      "id": "eval-resource-metadata-handbook",
+      "type": "Resource",
+      "name": "Metadata Handbook",
+      "description": "Guidance on documenting statistical metadata.",
+      "summary": "Metadata documentation guidance",
+      "tags": [
+        "metadata",
+        "guidance"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "id": "eval-edge-office-owns-register",
+      "source": "eval-initiative-metadata-register",
+      "target": "eval-actor-statistics-office",
+      "type": "BELONGS_TO"
+    },
+    {
+      "id": "eval-edge-register-produces-handbook",
+      "source": "eval-initiative-metadata-register",
+      "target": "eval-resource-metadata-handbook",
+      "type": "PRODUCES"
+    }
+  ]
+}

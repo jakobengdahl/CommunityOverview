@@ -1,0 +1,547 @@
+"""
+The runner: execute acceptance cases against a provider configuration.
+
+The provider configuration is a ModelProfile (backend/config/model_profiles.py)
+— provider, model, endpoint, and the *name* of the environment variable holding
+the credential. That type already refuses to hold a secret value: credential_ref
+must look like an environment variable name, and options carrying a
+secret-looking key are rejected. The credential itself is never stored by this
+module, never written to a report, and never defaulted to anything.
+
+It is read from the environment twice per case: once inside the provider
+constructor, and once at the top of ``run_case`` to build the scrub list that
+keeps it out of the log (see ``_scrub``). The second value is held in a local
+for the rest of that call — it has to be, because the sites that need to redact
+it run at the end — and is dropped when the call returns. It is never written
+to a file, a report or module state, which is what "never stored" means here;
+``test_no_harness_module_state_holds_the_credential_after_a_run`` pins the last
+of those, since caching it in a module global would also silently ignore a
+rotation.
+
+That second read does not depend on the provider being real: a mock factory
+never touches a credential and the read happens anyway. It is conditional only
+on the profile naming a variable, and with that variable unset it yields
+``None`` and scrubs nothing, which is correct rather than a special case.
+
+Each case runs against its own fixture graph in a temporary file, through the
+real ChatService — the same system prompt, tool definitions and tool-execution
+loop the product uses — with a RecordingProvider wrapped around the configured
+provider so the run can be scored afterwards.
+
+This module performs no provider calls of its own. ``run_suite`` is only as
+live as the provider handed to it; the tests hand it a mock.
+"""
+
+import json
+import logging
+import os
+import tempfile
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Sequence
+
+from backend.config.model_profiles import ModelProfile, create_provider_from_profile
+from backend.evaluation.cases import AcceptanceCase, load_cases
+from backend.evaluation.dimensions import (
+    DIMENSIONS,
+    reported_only_dimensions,
+    unscored_dimensions,
+)
+from backend.evaluation.scoring import CaseScore, score_case
+from backend.evaluation.transcript import RecordingProvider, RunTranscript
+from backend.llm.llm_providers import LLMProvider
+
+logger = logging.getLogger(__name__)
+
+ProviderFactory = Callable[[ModelProfile], LLMProvider]
+
+
+@dataclass
+class SuiteResult:
+    """Scores for one provider configuration across the case set."""
+
+    profile_id: str
+    provider: str
+    model: str
+    endpoint: Optional[str]
+    scores: List[CaseScore] = field(default_factory=list)
+
+    @property
+    def passed(self) -> int:
+        return sum(1 for s in self.scores if s.passed)
+
+    @property
+    def total(self) -> int:
+        return len(self.scores)
+
+    @property
+    def run_errors(self) -> int:
+        """Cases that never produced a scorable run (provider or fixture failure)."""
+        return sum(1 for s in self.scores if s.run_error)
+
+    @property
+    def total_latency_ms(self) -> float:
+        return sum(s.latency_ms for s in self.scores)
+
+
+def default_provider_factory(profile: ModelProfile) -> LLMProvider:
+    """
+    Build the configured provider, reading its credential from the environment.
+
+    Deliberately no ``api_key_override``: a harness that accepts a literal key
+    is a harness someone will eventually pass one to from a file.
+    """
+    return create_provider_from_profile(profile)
+
+
+def build_skills_context(skill_paths: Sequence[Path]) -> Optional[str]:
+    """
+    Render fixture SKILL.md files the way the chat path receives them.
+
+    This mirrors ``buildSkillsContext`` in
+    ``frontend/web/src/components/ChatPanel.jsx`` — the only production caller
+    that fills ``skills_context`` on a chat request, which is the parameter this
+    harness drives. That shape is a header, one ``<skill name="…">`` block
+    holding the SKILL.md **body only**, and a footer.
+
+    It is deliberately NOT ``backend.agents.prompts.build_skills_section``,
+    which is the AIAgent path: that one fences the set with ``--- SKILLS ---``
+    and prefixes each skill with ``When to use:``, ``Description:`` and
+    ``Expected tools:`` lines. Rendering the agent shape while driving the chat
+    path would measure a prompt no production caller produces — and would hand
+    the model a ``when_to_use`` line that the chat path does not inject at all
+    whenever a skill has a body, which is every real SKILL.md. A skill fixture
+    must therefore state its own applicability inside its body; for a skill WITH
+    a body the frontmatter is parsed for the name and otherwise not injected,
+    and the body-less fallback branch (description + when_to_use) is mirrored
+    too, so both of production's branches are reproduced.
+
+    Fixtures are read from disk — the harness never fetches a skill over the
+    network, which keeps the suite runnable with no egress beyond the provider.
+    """
+    if not skill_paths:
+        return None
+
+    parts = [
+        "ACTIVE SKILL INSTRUCTIONS — YOU MUST APPLY THESE TO THIS RESPONSE:",
+        "The user has selected the following skills. These instructions OVERRIDE "
+        "your default behavior and style for this response. Apply them precisely.",
+    ]
+    for path in skill_paths:
+        front, body = _split_frontmatter(path.read_text(encoding="utf-8"))
+        name = front.get("name") or path.stem
+        if body.strip():
+            block = f'<skill name="{name}">\n{body.strip()}\n</skill>'
+        else:
+            # The JSX's fallback branch, for a skill with no body. Mirrored so
+            # "exactly as in production" is true for this input too — and it is
+            # the branch that decides whether when_to_use is injected at all,
+            # which is what the skill_selection proxy turns on.
+            lines = [f'<skill name="{name}">']
+            if front.get("description"):
+                lines.append(f"Instruction: {front['description']}")
+            when_to_use = front.get("when-to-use") or front.get("when_to_use")
+            if when_to_use:
+                lines.append(f"Apply when: {when_to_use}")
+            lines.append("</skill>")
+            block = "\n".join(lines)
+        parts.append(block)
+    parts.append("END OF SKILL INSTRUCTIONS. Apply the above to your entire response.")
+    return "\n\n".join(parts)
+
+
+def _split_frontmatter(raw: str) -> tuple:
+    """Split a minimal ``---`` YAML frontmatter block from the markdown body."""
+    if not raw.startswith("---"):
+        return {}, raw
+    parts = raw.split("---", 2)
+    if len(parts) < 3:
+        return {}, raw
+    front: Dict[str, str] = {}
+    for line in parts[1].splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        front[key.strip()] = value.strip().strip("\"'")
+    return front, parts[2]
+
+
+def _scrub(text: str, secrets: Sequence[Optional[str]]) -> str:
+    """
+    Remove values the log must not carry from an exception message.
+
+    An exception message is the raiser's, and a provider error can echo
+    request content: the resolved credential in an Authorization header, the
+    prompt, the whole injected skill text. The report side of that is closed by
+    construction — ``run_error`` names the stage and the exception class and
+    never the message — but the operator still needs the message to diagnose a
+    failed run, so it goes to the log, with the three values that must never
+    be logged taken out of it first.
+
+    All three are known where the error is handled: the credential from the
+    profile's environment variable (read for the length of this call, not
+    stored), the prompt from the case, and the skill text from what the
+    harness itself rendered. Scrubbing by value is exact; matching on a shape
+    would not be. The length floor keeps a one- or two-character value — a
+    stub credential in a test, an empty prompt — from redacting the whole
+    message into uselessness: a two-character value occurs all over an
+    ordinary error string, and redacting every occurrence would leave nothing
+    to read.
+
+    Eight is a judgement, and it buys an exposure rather than closing one: a
+    credential of eight characters or fewer is NOT redacted, and nothing stops
+    one being that short — ``resolve_credential`` accepts any non-empty value,
+    which is realistic for a locally hosted model behind a custom endpoint.
+    The report does not depend on this (it carries no message at all), so the
+    exposure is bounded to the run log; it is stated plainly rather than
+    excused, because the alternative — a floor of one — makes the log
+    unreadable, and the honest trade is worth naming.
+
+    The match is an exact substring, which closes the credential: it is a
+    single opaque token and an SDK that echoes a header echoes it verbatim. It
+    is weaker for the prompt and the skill text, which a raiser may echo
+    JSON-escaped, re-wrapped or truncated, and then no substring matches. So
+    the log is scrubbed of these two where they appear as themselves, not
+    proofed against every rendering of them — and the report, which is the
+    artifact that gets committed, carries no message at all rather than
+    relying on this.
+
+    Anything else the raiser put in the message is still in the log, which is
+    the operator's terminal and is not committed. The product's own chat path
+    logs a swallowed exception at ERROR before the harness ever sees it
+    (``ChatProcessor.process_message``), which this function cannot reach.
+    """
+    for secret in secrets:
+        if secret and len(secret) > 8 and secret in text:
+            text = text.replace(secret, "<redacted>")
+    return text
+
+
+def run_case(
+    case: AcceptanceCase,
+    profile: ModelProfile,
+    provider_factory: Optional[ProviderFactory] = None,
+    graphs_dir: Optional[Path] = None,
+    skills_dir: Optional[Path] = None,
+) -> CaseScore:
+    """
+    Run one case against one provider configuration and score it.
+
+    ``provider_factory`` defaults to None and is resolved here rather than in
+    the signature. Binding ``default_provider_factory`` as a default argument
+    captured the function object at import, so substituting the module
+    attribute had no effect — and the CLI's own end-to-end test, which cannot
+    pass a factory because ``main()`` does not expose one, silently ran against
+    the real provider and made network calls.
+    """
+    factory = provider_factory or default_provider_factory
+    fixture_graph = json.loads(case.graph_path(graphs_dir).read_text(encoding="utf-8"))
+    skills_context = build_skills_context(case.skill_paths(skills_dir))
+    secrets = [
+        os.environ.get(profile.credential_ref) if profile.credential_ref else None,
+        case.prompt,
+        skills_context,
+    ]
+
+    try:
+        recorder = RecordingProvider(factory(profile))
+    except Exception as exc:
+        # A credential that is unset, or revoked between cases. The CLI checks
+        # credentials up front, but a library caller has no such gate and one
+        # bad profile must not take the other cases' results down with it.
+        transcript = RunTranscript(
+            run_error=f"provider unavailable: {type(exc).__name__}"
+        )
+        logger.warning(
+            "case %s: provider could not be built: %s",
+            case.id,
+            _scrub(f"{type(exc).__name__}: {exc}", secrets),
+        )
+        return score_case(case, transcript, [], fixture_graph)
+
+    transcript = recorder.transcript
+
+    with tempfile.TemporaryDirectory(prefix="skill-eval-") as tmpdir:
+        graph_file = Path(tmpdir) / "graph.json"
+        graph_file.write_text(json.dumps(fixture_graph), encoding="utf-8")
+
+        try:
+            chat_service, tool_definitions = _build_chat_service(graph_file)
+        except Exception as exc:
+            # A fixture the loader accepted as JSON but the graph layer rejects.
+            # Scored as a run error so one bad case does not lose the suite.
+            transcript.run_error = f"fixture setup failed: {type(exc).__name__}"
+            logger.warning(
+                "case %s could not be set up: %s",
+                case.id,
+                _scrub(f"{type(exc).__name__}: {exc}", secrets),
+            )
+            return score_case(case, transcript, [], fixture_graph)
+
+        # The "before" state a completeness expectation is judged against must be
+        # the fixture AS THE GRAPH LAYER SERIALIZES IT, not the raw JSON file.
+        # The two differ in both directions: the serializer adds defaults the
+        # fixture omits (subtypes: [], aliases: [], metadata: {}) and drops keys
+        # it does not model (communities). Compared against the raw file, either
+        # difference reads as a field the model changed — so a case naming such a
+        # field passed on a run where the model did nothing at all. Snapshotting
+        # through the same serializer that produces the final state removes the
+        # whole class, rather than enumerating the fields it affects.
+        baseline_graph = _snapshot_graph(chat_service)
+        if not baseline_graph:
+            # Falling back to the raw fixture here would quietly restore the
+            # baseline whose shape mismatch was the completeness defect in the
+            # first place, so a case would score against it without anyone
+            # knowing. Without a trustworthy baseline there is no measurement.
+            _shutdown_chat_service(chat_service)
+            transcript.run_error = "could not snapshot the fixture graph as a baseline"
+            logger.warning("case %s: baseline snapshot failed", case.id)
+            return score_case(case, transcript, tool_definitions, {})
+
+        try:
+            result = chat_service.process_message(
+                messages=[{"role": "user", "content": case.prompt}],
+                skills_context=skills_context,
+                llm_provider=recorder,
+            )
+            transcript.final_text = result.get("content") or ""
+        except Exception as exc:
+            # A refusal, a malformed response, a broken fixture: the case still
+            # scores, as a run_error, rather than taking the whole suite down.
+            transcript.run_error = f"chat path failed: {type(exc).__name__}"
+            logger.warning(
+                "case %s failed to run: %s",
+                case.id,
+                _scrub(f"{type(exc).__name__}: {exc}", secrets),
+            )
+        finally:
+            # Snapshot from memory while the graph is still live, then tear the
+            # storage down inside the temp directory. Writes go to a background
+            # executor, so leaving the directory first makes a queued write fail
+            # against a path that no longer exists — and every case would leak a
+            # thread pool, which a suite of cases times providers.
+            transcript.final_graph = _snapshot_graph(chat_service)
+            _shutdown_chat_service(chat_service)
+
+    # ChatProcessor.process_message catches every exception and returns the
+    # error as the assistant's reply, so a failed provider call never reaches
+    # the except above. Left there, an endpoint that is simply down would score
+    # as a model that answered in prose and called no tools — an integration
+    # problem reported as a model limitation, which is the one conflation this
+    # evaluation exists to avoid. The recorded call carries the evidence.
+    provider_error = next(
+        (
+            call.error_type or "error"
+            for call in transcript.provider_calls
+            if call.error
+        ),
+        None,
+    )
+    provider_detail = next(
+        (call.error for call in transcript.provider_calls if call.error), None
+    )
+    if provider_error and not transcript.run_error:
+        transcript.run_error = f"provider call failed: {provider_error}"
+        # The report gets the class; the operator needs the message, and on
+        # this path nothing had logged it. ChatProcessor swallows the exception
+        # and returns it as the assistant's reply, so the except above never
+        # runs and its log line never fires — leaving the harness promising a
+        # scrubbed log line that, for the one failure mode the promise is about
+        # (a provider error echoing the request it failed on), did not exist.
+        logger.warning(
+            "case %s: provider call failed: %s",
+            case.id,
+            _scrub(provider_detail, secrets) if provider_detail else provider_error,
+        )
+
+    return score_case(case, transcript, tool_definitions, baseline_graph)
+
+
+def _build_chat_service(graph_file: Path):
+    """Create a ChatService over a fixture graph, and its advertised tool set."""
+    from backend.core import GraphStorage
+    from backend.service import GraphService
+    from backend.ui import ChatService
+
+    storage = GraphStorage(str(graph_file))
+    chat_service = ChatService(GraphService(storage))
+    return chat_service, list(chat_service._processor.tool_definitions)
+
+
+def _snapshot_graph(chat_service) -> Dict[str, Any]:
+    """Read the graph state after the run, in-memory rather than off disk."""
+    try:
+        exported = chat_service.graph_service.export_graph()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("could not snapshot the graph: %s", exc)
+        return {}
+    return exported if isinstance(exported, dict) else {}
+
+
+def _shutdown_chat_service(chat_service) -> None:
+    """Drain and stop the fixture graph's storage; never fail a case over it."""
+    try:
+        chat_service.graph_service.storage.shutdown_events()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("could not shut the fixture storage down cleanly: %s", exc)
+
+
+def run_suite(
+    profile: ModelProfile,
+    cases: Optional[Sequence[AcceptanceCase]] = None,
+    provider_factory: Optional[ProviderFactory] = None,
+    graphs_dir: Optional[Path] = None,
+    skills_dir: Optional[Path] = None,
+) -> SuiteResult:
+    """
+    Run every case against one provider configuration.
+
+    ``provider_factory`` is resolved per call, not bound in the signature —
+    see run_case for why that distinction mattered.
+    """
+    case_list = list(cases) if cases is not None else load_cases()
+    scores = [
+        run_case(
+            case,
+            profile,
+            provider_factory=provider_factory,
+            graphs_dir=graphs_dir,
+            skills_dir=skills_dir,
+        )
+        for case in case_list
+    ]
+    return SuiteResult(
+        profile_id=profile.id,
+        provider=profile.provider,
+        model=profile.model,
+        endpoint=profile.endpoint,
+        scores=scores,
+    )
+
+
+def _truncate(text: str, limit: int) -> str:
+    """
+    Bound a model-chosen string that is reported as itself, not quoted.
+
+    ``scoring._abbreviate`` is the wrong tool here: it ``repr()``s its input,
+    which is right when the value is being quoted INTO a sentence and wrong for
+    a field whose whole content is the value — every tool name in the report
+    would arrive wrapped in quotes.
+    """
+    return text if len(text) <= limit else f"{text[:limit]}… ({len(text)} chars)"
+
+
+def build_report(result: SuiteResult) -> Dict[str, Any]:
+    """
+    Render a suite result as a JSON-serializable report.
+
+    Carries scores, the tool-call sequence, latency and tokens. It never carries
+    the prompts, the system prompt (including the injected skill text), or the
+    assistant's answer text.
+
+    Nor the credential — but by what this function emits, not because the
+    credential is absent upstream. It can reach the transcript: an exception
+    message belongs to whoever raised it, so a provider error echoing its own
+    Authorization header lands in ``ProviderCall.error``, and the chat path
+    returns that message as the assistant's reply, which ``final_text`` then
+    holds. Neither field is emitted here, and ``run_error`` carries a stage
+    and an exception class rather than a message.
+
+    It is not free of model-authored strings altogether: a condition's ``detail``
+    explains why it failed, so it can quote a field value the model wrote or an
+    argument it passed. Those quotes are bounded (see ``_abbreviate`` in
+    scoring.py) but they are there, which is why this does not claim a report
+    carries nothing a run produced. See docs/SKILL_EVALUATION.md.
+    """
+    dimension_rows = {
+        key: {
+            "title": dim.title,
+            "mechanically_scored": dim.mechanical.value,
+            "caveat": dim.caveat,
+        }
+        for key, dim in DIMENSIONS.items()
+    }
+
+    cases = []
+    for score in result.scores:
+        usage = score.usage
+        cases.append(
+            {
+                "case_id": score.case_id,
+                "dimension": score.dimension,
+                "passed": score.passed,
+                # Defence in depth. `run_error` is built from a stage string
+                # and an exception class name, so it is already short — but it
+                # is the field whose content comes closest to a raiser's own
+                # text, and the bound costs nothing if that ever changes.
+                "run_error": (
+                    score.run_error[:400] if score.run_error else score.run_error
+                ),
+                "conditions": [
+                    {"name": c.name, "passed": c.passed, "detail": c.detail}
+                    for c in score.conditions
+                ],
+                "dimensions": {
+                    key: {
+                        "scored": d.scored,
+                        "passed": d.passed,
+                        "mechanically_scored": d.mechanical.value,
+                    }
+                    for key, d in score.dimensions.items()
+                },
+                # A tool name is model-chosen: the model can ask for a tool
+                # that does not exist, under any string it likes. `scoring`
+                # already treats it that way when it quotes one into a
+                # condition detail (`_abbreviate(call.name, 80)`); this row
+                # emitted it raw, and `--out` writes the report to a file.
+                "tool_calls": [_truncate(name, 80) for name in score.tool_calls],
+                "provider_calls": score.provider_calls,
+                "latency_ms": round(score.latency_ms, 1),
+                "tokens": {
+                    "reported": usage.reported,
+                    "prompt": usage.prompt_tokens,
+                    "completion": usage.completion_tokens,
+                    "total": usage.total_tokens,
+                },
+            }
+        )
+
+    return {
+        "profile": {
+            "id": result.profile_id,
+            "provider": result.provider,
+            "model": result.model,
+            "endpoint": result.endpoint,
+        },
+        "summary": {
+            "cases": result.total,
+            "passed": result.passed,
+            # Surfaced beside `passed` on purpose: a run that never reached the
+            # model is not a model that failed, and a reader comparing two
+            # providers on the pass count alone would read an outage as a
+            # quality difference.
+            "run_errors": result.run_errors,
+            "total_latency_ms": round(result.total_latency_ms, 1),
+            "unscored_dimensions": unscored_dimensions(),
+            "reported_only_dimensions": reported_only_dimensions(),
+        },
+        "dimensions": dimension_rows,
+        "cases": cases,
+    }
+
+
+def load_profiles(path: Path) -> List[ModelProfile]:
+    """
+    Load provider configurations from a JSON file of ModelProfile objects.
+
+    ModelProfile's own validators reject a credential value in credential_ref or
+    in options, so a file that tries to carry a key fails to load rather than
+    being quietly honoured.
+    """
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    if isinstance(raw, dict):
+        raw = raw.get("profiles", [])
+    if not isinstance(raw, list):
+        raise ValueError(f"{path} must contain a JSON array of model profiles")
+    return [ModelProfile.model_validate(item) for item in raw]
