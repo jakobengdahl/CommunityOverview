@@ -40,6 +40,7 @@ from backend.config.model_profiles import (
 from backend.evaluation.cases import FIXTURES_DIR
 from backend.evaluation.runner import (
     build_report,
+    build_skills_context,
     default_provider_factory,
     load_profiles,
     run_case,
@@ -550,6 +551,30 @@ class TestReportsNeverCarryACredential:
                 "passed",
                 "mechanically_scored",
             }, f"cases[].dimensions.{key} carries unexpected fields: {set(dimension)}"
+
+        # And `conditions[]`, which round 8's extension stopped one level short
+        # of. These rows are per-run territory carrying model-derived content
+        # by design, and a 450-character tail of the system prompt rode in one
+        # with every other check green: it is under the leaf bound, it contains
+        # none of the head-of-prompt phrases asserted below, and a constant
+        # addition cancels in the rendered-size comparison.
+        for index, condition in enumerate(row["conditions"]):
+            assert set(condition) == {"name", "passed", "detail"}, (
+                f"cases[].conditions[{index}] carries unexpected fields: "
+                f"{set(condition)}"
+            )
+
+        # Substring-by-window, not exact match. `case.prompt not in payload`
+        # is an exact match on the whole prompt, so any truncation escaped it;
+        # the same was true of the rendered skill text.
+        def windows(text, size=40):
+            return {text[i : i + size] for i in range(0, max(len(text) - size, 1))}
+
+        skills = build_skills_context(case.skill_paths()) or ""
+        for label, text in (("prompt", case.prompt), ("skill text", skills)):
+            leaked = sorted(window for window in windows(text) if window in payload)
+            assert not leaked, f"{label} fragment(s) in the report: {leaked[:3]}"
+
         assert set(row) == {
             "case_id",
             "dimension",
@@ -764,6 +789,29 @@ class TestReportsNeverCarryACredential:
         ]
         assert not stray, f"the run wrote outside the directory it created: {stray}"
 
+        # Owned is not the same as ephemeral. `TemporaryDirectory(delete=False)`
+        # is recorded here as owned and never cleaned up, so a dump of the
+        # prompt, the skill text and the answer was admitted by the path check
+        # and survived the process.
+        surviving = [str(d) for d in owned if d.exists()]
+        assert not surviving, f"temporary director(ies) outlived the run: {surviving}"
+
+        # And content, not just location. A path guard says where a file may
+        # be; G2 is about what may be in one. Read before the directories go,
+        # which is why this list is captured during the run.
+        skills = build_skills_context(case.skill_paths()) or ""
+        for path in writes:
+            try:
+                body = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for label, value in (
+                ("the prompt", case.prompt),
+                ("the skill text", skills),
+                ("the answer", PROSE_SENTINEL),
+            ):
+                assert value not in body, f"{path.name} carries {label}"
+
     def test_no_condition_detail_carries_the_answer_or_an_unbounded_argument(
         self, profile
     ):
@@ -909,7 +957,21 @@ class TestReportsNeverCarryACredential:
         monkeypatch.setenv(profile.credential_ref, SENTINEL)
         case = case_by_id["skill-adherence-ambiguous-name-halts"]
         graphs_dir = None
-        boom = f"401 with Authorization: Bearer {SENTINEL} on {case.prompt}"
+        # The raised message carries all three values. It used to carry only
+        # the credential and the prompt, so `assert "ACTIVE SKILL
+        # INSTRUCTIONS" not in ours` passed at all four sites without the skill
+        # text ever being in the message — one of the three values `_scrub`'s
+        # docstring promises, pinned by nothing.
+        skills = build_skills_context(case.skill_paths()) or ""
+        # The WHOLE skill text, not a slice. `_scrub` matches by exact value,
+        # and its docstring says so — a truncated echo is explicitly outside
+        # what it can remove. Asserting against a slice would pin an
+        # impossible property; asserting against the whole value pins the one
+        # the function actually promises.
+        boom = (
+            f"401 with Authorization: Bearer {SENTINEL} on {case.prompt} "
+            f"while sending {skills}"
+        )
 
         if site == "provider_build":
 
@@ -981,30 +1043,68 @@ class TestReportsNeverCarryACredential:
         import ast
         import inspect
 
+        from backend.ui import chat_service as chat_service_module
         from backend.ui import rest_api
 
-        source = inspect.getsource(rest_api)
-        tree = ast.parse(source)
+        # Both routes to the chat service: the chat endpoint calls
+        # `process_message` directly, and `/chat/simple` reaches it through
+        # `ChatService.process_chat_request`. The docstring said "the REST
+        # handler", singular, for two handlers.
+        #
+        # Scoped to the REQUEST-FACING functions, not to whole modules:
+        # `ChatService.process_message` forwarding `llm_provider` into
+        # `chat_logic` IS the harness seam and must keep working. What must
+        # never happen is a request-shaped value reaching it.
+        # `ast.AsyncFunctionDef` as well as `ast.FunctionDef`: the REST
+        # handlers are `async def`, so matching only the sync node type made
+        # this half of the scan visit nothing at all. Hence the positive
+        # control below — a scan that finds no function to scan is not a pass.
+        visited = set()
+
+        def calls_in(module, function_names):
+            tree = ast.parse(inspect.getsource(module))
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or (
+                    node.name not in function_names
+                ):
+                    continue
+                visited.add(f"{module.__name__}.{node.name}")
+                for inner in ast.walk(node):
+                    if isinstance(inner, ast.Call):
+                        yield module.__name__, node.name, inner
+
         forwarding = []
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            target = ast.unparse(node.func)
-            if not target.endswith("process_message"):
-                continue
-            for keyword in node.keywords:
-                if keyword.arg is None:
-                    forwarding.append(f"**{ast.unparse(keyword.value)}")
-                elif keyword.arg == "llm_provider":
-                    forwarding.append("llm_provider=")
-        assert not forwarding, (
-            "the REST chat handler forwards unpacked or explicit provider "
-            f"arguments into process_message: {forwarding}"
+        request_facing = [
+            (rest_api, {"chat", "chat_simple"}),
+            (chat_service_module, {"process_chat_request"}),
+        ]
+        for module, names in request_facing:
+            for module_name, function, call in calls_in(module, names):
+                target = ast.unparse(call.func)
+                if not target.endswith(("process_message", "process_chat_request")):
+                    continue
+                for keyword in call.keywords:
+                    if keyword.arg is None:
+                        forwarding.append(
+                            f"{module_name}.{function}: **{ast.unparse(keyword.value)}"
+                        )
+                    elif keyword.arg == "llm_provider":
+                        forwarding.append(f"{module_name}.{function}: llm_provider=")
+        assert visited == {
+            "backend.ui.rest_api.chat",
+            "backend.ui.rest_api.chat_simple",
+            "backend.ui.chat_service.process_chat_request",
+        }, f"the scan did not reach every request-facing function: {visited}"
+        assert forwarding == [], (
+            "a request-facing function forwards unpacked or explicit provider "
+            f"arguments into the chat service: {forwarding}"
         )
 
-        model = getattr(rest_api, "ChatRequest", None)
-        if model is not None and hasattr(model, "model_fields"):
-            assert "llm_provider" not in model.model_fields
+        # Unconditional: behind an `if`, a rename deleted the assertion rather
+        # than failing it. Both request models, since both reach the service.
+        for name in ("ChatRequest", "SimpleChatRequest"):
+            model = getattr(rest_api, name)
+            assert "llm_provider" not in model.model_fields, name
 
     def test_no_harness_module_state_holds_the_credential_after_a_run(
         self, monkeypatch, profile, case_by_id
@@ -1025,10 +1125,9 @@ class TestReportsNeverCarryACredential:
         not be seen. It catches the shape a cache actually takes, not every
         shape one could take.
         """
+        import sys
+
         from backend.evaluation.tests.conftest import ScriptedProvider
-        import backend.evaluation.runner as runner_module
-        import backend.evaluation.scoring as scoring_module
-        import backend.evaluation.transcript as transcript_module
 
         monkeypatch.setenv(profile.credential_ref, SENTINEL)
         run_suite(
@@ -1053,7 +1152,26 @@ class TestReportsNeverCarryACredential:
                 return any(reachable(item, depth + 1) for item in value)
             return False
 
-        for module in (runner_module, scoring_module, transcript_module):
+        # Every module in the package plus the CLI, derived rather than
+        # listed: the three names this loop used to spell out missed a cache in
+        # `cases.py`, which is the same module-level dict of strings the walk
+        # was written for, simply in a fourth module. A new module is now
+        # covered by existing code rather than by someone remembering.
+        watched = [
+            module
+            for name, module in list(sys.modules.items())
+            if module is not None
+            and (
+                name == "backend.evaluation"
+                or name.startswith("backend.evaluation.")
+                or name == "scripts.run_skill_eval"
+            )
+            and ".tests" not in name
+        ]
+        assert len(watched) >= 5, (
+            f"too few modules watched: {sorted(m.__name__ for m in watched)}"
+        )
+        for module in watched:
             holders = [
                 name
                 for name, value in vars(module).items()
@@ -1062,6 +1180,68 @@ class TestReportsNeverCarryACredential:
             assert not holders, (
                 f"{module.__name__} module state holds the credential: {holders}"
             )
+
+    def test_no_log_record_from_a_SUCCESSFUL_run_carries_any_of_the_three(
+        self, monkeypatch, profile, case_by_id
+    ):
+        """
+        The four scrubbed sites are all failure sites, so the common path was
+        unwatched.
+
+        Adding `logger.info("... (credential %s)", secrets[0])` on the success
+        path left the whole suite green, because the only `caplog` test forces
+        an error at each of the four handling sites and a line guarded by
+        `if not transcript.run_error` never appears in its records. So the
+        property is asserted over the LOGGER for a run that succeeds, rather
+        than over a list of known call sites — which is the same enumeration
+        mistake this harness has now made with read entry points, socket
+        methods, write entry points, path types and module names.
+        """
+        import logging
+
+        from backend.evaluation.tests.conftest import ScriptedProvider
+
+        case = case_by_id["skill-adherence-ambiguous-name-halts"]
+        monkeypatch.setenv(profile.credential_ref, SENTINEL)
+        skills = build_skills_context(case.skill_paths()) or ""
+        forbidden = {
+            "credential": SENTINEL,
+            "prompt": case.prompt,
+            "skill text": "ACTIVE SKILL INSTRUCTIONS",
+        }
+
+        offenders = []
+
+        class Tripwire(logging.Handler):
+            def emit(self, record):
+                try:
+                    text = record.getMessage()
+                except Exception:  # pragma: no cover - defensive
+                    return
+                for label, value in forbidden.items():
+                    if value and value in text:
+                        offenders.append((label, record.name, text[:160]))
+
+        tripwire = Tripwire()
+        root = logging.getLogger()
+        previous = root.level
+        root.addHandler(tripwire)
+        root.setLevel(logging.DEBUG)
+        try:
+            result = run_suite(
+                profile,
+                cases=[case],
+                provider_factory=lambda _p: ScriptedProvider(
+                    ["two nodes share that name, so I stopped."]
+                ),
+            )
+        finally:
+            root.removeHandler(tripwire)
+            root.setLevel(previous)
+
+        assert not result.scores[0].run_error, "this probe must drive a SUCCESSFUL run"
+        assert skills, "the case injects no skill text, so one value is unchecked"
+        assert not offenders, f"log records carried protected values: {offenders}"
 
     @pytest.mark.parametrize(
         ("length", "redacted"),

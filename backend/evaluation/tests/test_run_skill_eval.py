@@ -17,6 +17,13 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+# Every harness source file, at module level so the static scans in both
+# classes share one definition rather than each keeping its own list.
+SCANNED = sorted(
+    [*(REPO_ROOT / "backend" / "evaluation").rglob("*.py")]
+    + [REPO_ROOT / "scripts" / "run_skill_eval.py"]
+)
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -163,20 +170,22 @@ class TestTheSuiteCannotReachTheNetwork:
 
     def test_importing_the_harness_makes_no_outbound_call(self):
         """
-        Import-time egress, which no in-process guard can cover.
+                Import-time egress, which no in-process guard can cover.
 
-        The egress guard is registered when `conftest.py` is imported — but
-        importing that module requires its parent package first, and
-        `backend/evaluation/__init__.py` imports the runner, so any module body
-        in this package runs before a hook could exist. Moving the
-        registration earlier cannot fix that; the guard simply starts after the
-        package is in `sys.modules`.
+        The egress guard is registered per test, so no in-process watcher is
+                running while this package's own modules are imported. It cannot be
+                moved earlier either: importing `conftest.py` requires its parent
+                package first, and `backend/evaluation/__init__.py` imports the runner,
+                so a module body here runs before any hook inside the package could
+                exist — and registering one for the whole process is exactly what round
+                8 had to undo, because `sys.addaudithook` cannot be removed and the
+                refusal then applied to every suite in the repository.
 
-        So it is checked where it is checkable: a child process that installs
-        the hook FIRST and then imports every module in the package. A
-        reachability check or a version ping at module level — an ordinary
-        real-world shape — is caught here, and G3 is a claim about the suite,
-        not about each test body.
+                So it is checked where it is checkable: a child process that installs
+                the hook FIRST and then imports every module in the package. A
+                reachability check or a version ping at module level — an ordinary
+                real-world shape — is caught here, and G3 is a claim about the suite,
+                not about each test body.
         """
         script = (
             "import sys\n"
@@ -195,6 +204,25 @@ class TestTheSuiteCannotReachTheNetwork:
             "    importlib.import_module('backend.evaluation.' + info.name)\n"
             "import scripts.run_skill_eval  # noqa\n"
             "print('SOCKET_EVENTS:', calls)\n"
+            # Positive control, inside the child: an empty list proves nothing
+            # if the hook would not have recorded anything either way. The
+            # same gap round 8 closed for the read guard.
+            "import socket\n"
+            "control = len(calls)\n"
+            "try:\n"
+            "    socket.getaddrinfo('example.invalid', 443)\n"
+            "except OSError:\n"
+            "    pass\n"
+            "print('CONTROL_FIRED:', len(calls) > control)\n"
+            # Then report at EXIT, with the hook still live: the in-process
+            # guard is registered per test and so watches nothing at `atexit`,
+            # during final GC, or in a thread the interpreter joins on its way
+            # out. Here the whole lifetime is inside the child's own window.
+            "import atexit\n"
+            "baseline = len(calls)\n"
+            "atexit.register(\n"
+            "    lambda: print('SOCKET_EVENTS_AT_EXIT:', calls[baseline:])\n"
+            ")\n"
         )
         probe = Path(tempfile.mkdtemp()) / "import_egress_probe.py"
         probe.write_text(script, encoding="utf-8")
@@ -212,6 +240,40 @@ class TestTheSuiteCannotReachTheNetwork:
             "importing the harness touched a socket:\n"
             f"{result.stdout}\n{result.stderr[-600:]}"
         )
+        assert "CONTROL_FIRED: True" in result.stdout, (
+            "the child's hook did not record a deliberate resolve, so the "
+            f"assertion above proves nothing:\n{result.stdout}"
+        )
+        assert "SOCKET_EVENTS_AT_EXIT: []" in result.stdout, (
+            "the harness touched a socket at interpreter shutdown:\n"
+            f"{result.stdout}\n{result.stderr[-600:]}"
+        )
+
+    def test_no_harness_module_registers_an_atexit_handler(self):
+        """
+        Because nothing watches when one would run.
+
+        The egress guard is per test, so `atexit` — like final GC and a thread
+        the interpreter joins on its way out — is outside every window it has.
+        The child probe above covers shutdown for the import path; this covers
+        the shape directly, so a handler added later is a visible decision
+        rather than a silent hole.
+        """
+        import ast
+
+        offenders = []
+        for path in SCANNED:
+            if "tests" in path.parts:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and ast.unparse(node.func).endswith(
+                    ("atexit.register", "register_atexit")
+                ):
+                    offenders.append(f"{path.name}:{node.lineno}")
+                if isinstance(node, ast.ImportFrom) and node.module == "atexit":
+                    offenders.append(f"{path.name}:{node.lineno}: from atexit import")
+        assert not offenders, f"atexit handler registered at {offenders}"
 
     @pytest.mark.expects_egress_attempt
     def test_resolving_a_hostname_inside_this_suite_fails_the_test(self):
@@ -400,16 +462,11 @@ class TestNoCodePathReadsACredentialFromAFile:
     contents to a provider as an api_key, carries no literal and passed it.
     """
 
-    SCANNED = sorted(
-        [*(REPO_ROOT / "backend" / "evaluation").rglob("*.py")]
-        + [REPO_ROOT / "scripts" / "run_skill_eval.py"]
-    )
-
     def test_no_module_assigns_a_file_read_into_the_environment(self):
         import ast
 
         offenders = []
-        for path in self.SCANNED:
+        for path in SCANNED:
             if "tests" in path.parts:
                 continue
             tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -454,7 +511,7 @@ class TestNoCodePathReadsACredentialFromAFile:
             )
 
         offenders = []
-        for path in self.SCANNED:
+        for path in SCANNED:
             if "tests" in path.parts:
                 continue
             tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -494,7 +551,7 @@ class TestNoCodePathReadsACredentialFromAFile:
         import ast
 
         offenders = []
-        for path in self.SCANNED:
+        for path in SCANNED:
             if "tests" in path.parts:
                 continue
             tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -580,9 +637,12 @@ class TestNoCodePathReadsACredentialFromAFile:
         the `open` event rather than a list of patched functions: three rounds
         of this review closed a guard by widening an enumeration and each time
         a mutation walked through the item that was missing, so the net is now
-        at the layer where `builtins.open`, `io.open`, `os.open`, `Path.open`
-        and `mmap` are all the same event. A child process still has its own
-        interpreter and its own hooks, so this is a net and not a proof.
+        at the layer where `builtins.open`, `io.open`, `os.open` and
+        `Path.open` are all the same event. `mmap` is NOT that event — it
+        raises `mmap.__new__`, which nothing here watches — so a file-backed
+        mapping is caught via the `open` that produced its descriptor, by a
+        step of reasoning rather than directly. A child process has its own
+        interpreter and its own hooks. So this is a net and not a proof.
         Anything that reaches the wire, however it was read, has to pass
         through the request.
 
@@ -769,7 +829,7 @@ class TestNoCodePathReadsACredentialFromAFile:
         import ast
 
         offenders = []
-        for path in self.SCANNED:
+        for path in SCANNED:
             if "tests" in path.parts:
                 continue
             tree = ast.parse(path.read_text(encoding="utf-8"))

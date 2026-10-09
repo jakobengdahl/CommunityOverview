@@ -19,9 +19,10 @@ probe now builds a provider and stops, because resolving a credential is what
 it was ever about.
 
 So the honest form of the guarantee: no test needs an API key, and no test
-makes a network call — enforced by audit hook within this process, and true of
-the child processes because none of them sends a request, which is a property
-of those three tests rather than of a guard. A guarantee about what the suite
+makes a network call — enforced by audit hook within this process. Four tests
+shell out: three are the `.env` probes, true because their children send no
+request, which is a property of those tests rather than of a guard; the fourth
+installs a hook inside its own child, and so checks rather than asserts. A guarantee about what the suite
 does not do is worth only as much as the thing that stops it.
 """
 
@@ -147,10 +148,11 @@ class _Usage:
 # other suite in the repository too.
 #
 # What this still cannot see is a child process: it has its own interpreter and
-# its own hooks. Three tests here shell out deliberately (the `.env` probes),
-# and none of them makes a request — one used to, through a `run_case` with no
-# provider factory, and the suite really did issue outbound HTTP while three
-# places claimed it never does.
+# its own hooks. Four tests here shell out deliberately — the three `.env`
+# probes, whose children make no request, and the import-egress probe, whose
+# child installs a hook of its own. One of the `.env` probes used to run a
+# whole `run_case` with no provider factory, and the suite really did issue
+# outbound HTTP while three places claimed it never does.
 # --------------------------------------------------------------------------
 
 _AUDIT_WATCHERS: List[Any] = []
@@ -256,9 +258,8 @@ _BLOCKED_EGRESS = frozenset(
 )
 
 # Whatever is running right now, for the failure message. A list rather than a
-# fixture value because the watcher below is registered at IMPORT time, not per
-# test: a module body runs during collection, before any fixture.
-_CURRENT_NODE = ["(import or collection time)"]
+# fixture value so the watcher can read it without being rebuilt per test.
+_CURRENT_NODE = ["(outside any test)"]
 
 # Violations seen during the current test, asserted in the fixture's teardown.
 #
@@ -355,6 +356,17 @@ def no_network(request):
         seen = list(_VIOLATIONS)
         del _VIOLATIONS[:]
         if request.node.get_closest_marker("expects_egress_attempt"):
+            # A requirement, not an exemption. Returning without looking at
+            # `seen` excused a marked test that tripped the guard for an
+            # unintended reason *and* one that did not trip it at all — so the
+            # marker could be used to silence a failure rather than to declare
+            # a probe, and "asserts on it itself" was unenforced. Requiring the
+            # trip also catches a guard that has silently stopped firing.
+            assert seen, (
+                "marked expects_egress_attempt but the guard never fired — "
+                "either the probe no longer reaches the guard, or the marker "
+                "is being used to excuse something else"
+            )
             return
         assert not seen, "outbound traffic was attempted:\n" + "\n".join(seen)
 
