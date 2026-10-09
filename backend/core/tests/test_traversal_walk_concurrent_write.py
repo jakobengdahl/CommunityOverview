@@ -269,6 +269,10 @@ class TestAWriteMidWalk:
 
         assert drained
         assert copies[0] == unwritten
+        # Whatever landed, the walk's answer is complete - checked before the
+        # skip below so a copy that swallowed an interruption instead of
+        # retrying fails here rather than skipping.
+        assert {f"e{i}" for i in base} <= {e.id for e in result["edges"]}
         if len(copies) == 1:
             # The hook only interrupts the copy when a collection runs inside
             # it, which the docstring above ties to CPython 3.11's allocator.
@@ -287,7 +291,6 @@ class TestAWriteMidWalk:
         assert len(copies) - 1 >= min_retries, copies
         if write == "swap":
             assert sys.getsizeof(written) == size
-        assert {f"e{i}" for i in base} <= {e.id for e in result["edges"]}
 
 
 class TestTheCopyKeepsTheWalksAnswer:
