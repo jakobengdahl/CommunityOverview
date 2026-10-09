@@ -507,7 +507,12 @@ class TestAddNodesToSession:
         assert result["success"] is True
         assert result["added"] == ["alpha", "beta"]
         assert len(result["skipped"]) == len(unusual)
-        assert all(a is b for a, b in zip(result["skipped"], unusual))
+        # The same objects come back, each once, whichever path skipped them.
+        # The order is not part of the contract: ``json.dumps`` on CPython 3.13
+        # encodes a 5000-deep nesting that 3.11 refused, so ``deep`` and
+        # ``deep_hashable`` travel the resolvable path there and are reported
+        # ahead of the unencodable ones instead of in input order.
+        assert {id(a) for a in result["skipped"]} == {id(b) for b in unusual}
         assert manager.get_session(sid).state["node_refs"] == ["alpha", "beta"]
 
     def test_a_repeat_of_a_hashable_id_is_dropped_before_it_is_encoded(self, tools):

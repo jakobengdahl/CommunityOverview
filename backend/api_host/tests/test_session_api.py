@@ -890,6 +890,16 @@ class TestSessionImageIngestEndpoint:
         monkeypatch.setattr(
             image_ingest, "httpx", _StubHttpxModule(httpx.MockTransport(handler))
         )
+        # The pipeline validates the URL's resolved addresses before fetching;
+        # resolve the stub host to a public address so a sandbox without DNS
+        # exercises the same path CI does instead of failing in is_safe_url.
+        from backend.core.events import delivery
+
+        monkeypatch.setattr(
+            delivery.socket,
+            "getaddrinfo",
+            lambda host, *a, **k: [(None, None, None, None, ("93.184.216.34", 0))],
+        )
 
         sid = test_app.post("/api/sessions", json={}).json()["id"]
         resp = test_app.post(
