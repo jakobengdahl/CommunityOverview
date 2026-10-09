@@ -464,4 +464,66 @@ describe('GraphCanvas freehand pre-draw options', () => {
     expect(preview.getAttribute('stroke')).toBe('#F472B6');
     expect(preview.getAttribute('stroke-width')).toBe('5');
   });
+  function pickAndDraw(pickFn, moves) {
+    const { container } = render(
+      <GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /choose pen options/i }));
+    pickFn(screen.getByRole('group', { name: /^pen options$/i }));
+    const rf = container.querySelector('[data-testid="react-flow"]');
+    act(() => {
+      moves.forEach((m, i) =>
+        rf.dispatchEvent(pointerEvent(i === 0 ? 'pointerdown' : 'pointermove', m))
+      );
+    });
+    return container.querySelector('[data-testid="freehand-preview-overlay"]');
+  }
+
+  it('applies the chosen opacity to the preview group', () => {
+    const overlay = pickAndDraw(
+      (panel) => {
+        const row = within(panel).getByText('Opacity').parentElement;
+        fireEvent.click(within(row).getByRole('button', { name: '50%' }));
+      },
+      [
+        { clientX: 10, clientY: 10 },
+        { clientX: 40, clientY: 25 },
+      ]
+    );
+    expect(overlay.querySelector('g').getAttribute('opacity')).toBe('0.5');
+  });
+
+  it('draws pressure segments in the preview at the chosen base width', () => {
+    const overlay = pickAndDraw(
+      (panel) => fireEvent.click(within(panel).getByRole('button', { name: '8' })),
+      [
+        { clientX: 10, clientY: 10, pressure: 0.5 },
+        { clientX: 40, clientY: 25, pressure: 0.5 },
+        { clientX: 70, clientY: 25, pressure: 0.5 },
+      ]
+    );
+    const paths = overlay.querySelectorAll('path[stroke]');
+    expect(paths.length).toBeGreaterThan(1);
+    // Mid pressure is exactly the base width, at zoom 1.
+    paths.forEach((p) => expect(Number(p.getAttribute('stroke-width'))).toBeCloseTo(8, 6));
+  });
+
+  it('renders more preview segments at higher smoothing for the same pressure samples', () => {
+    const moves = [
+      { clientX: 10, clientY: 10, pressure: 0.3 },
+      { clientX: 40, clientY: 30, pressure: 0.6 },
+      { clientX: 70, clientY: 10, pressure: 0.9 },
+    ];
+    const countAt = (label) => {
+      const overlay = pickAndDraw((panel) => {
+        const row = within(panel).getByText('Smoothing').parentElement;
+        fireEvent.click(within(row).getByRole('button', { name: label }));
+      }, moves);
+      const n = overlay.querySelectorAll('path[stroke]').length;
+      cleanup();
+      return n;
+    };
+    expect(countAt('100%')).toBeGreaterThan(countAt('0%'));
+  });
 });
