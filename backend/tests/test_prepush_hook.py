@@ -157,7 +157,7 @@ class TestPushFormatting:
             "GIT_SSH_COMMAND=ssh git -C {repo} push",
             "if true; then git -C {repo} push; fi",
             "git -C {repo} status # check\ngit -C {repo} push",
-            'bash -c "cd {repo} && git push"',
+            "bash -c 'cd {repo} && git push'",
             "cd {repo} && git -c core.pager=cat push",
         ],
     )
