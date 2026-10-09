@@ -14,56 +14,72 @@
 # Exit 2 blocks the call and feeds stderr back to the model; exit 0 lets it run.
 set -u
 input="$(cat)"
-read -r cmd cwd < <(printf '%s' "$input" | python3 -c '
-import json, sys
+# One Python pass reads the hook's stdin and answers two questions with shell
+# quoting respected: what is the command about to do (nothing we care about,
+# a draft PR, or a push), and which directory is that push run from. It
+# prints the verdict on line 1 and the directory on line 2, so a path with
+# spaces survives.
+verdict="$(python3 -c '
+import json, os, shlex, sys
 try:
     d = json.load(sys.stdin)
+    cmd = d.get("tool_input", {}).get("command", "")
+    cwd = d.get("cwd", "") or os.getcwd()
+    if not isinstance(cmd, str) or not cmd.strip():
+        raise ValueError
 except Exception:
-    print(); sys.exit(0)
-cmd = d.get("tool_input", {}).get("command", "") or ""
-cwd = d.get("cwd", "") or ""
-# one line each, newlines collapsed, so the shell read below gets both
-print(cmd.replace("\n", " ").replace("\r", " ").replace("\t", " "), cwd)
-' 2>/dev/null | python3 -c '
-import sys
-line = sys.stdin.read().rstrip("\n")
-# the command may contain spaces, so split on the LAST space: cwd has none
-if " " in line:
-    cmd, cwd = line.rsplit(" ", 1)
-else:
-    cmd, cwd = line, ""
-print(cmd.replace(" ", "\x01") + " " + cwd)
-') || exit 0
-cmd="${cmd//$'\x01'/ }"
-[ -n "$cmd" ] || exit 0
+    print("none"); sys.exit(0)
+# A newline separates commands exactly like ";".
+lex = shlex.shlex(cmd.replace("\r", "\n").replace("\n", " ; "), posix=True, punctuation_chars=True)
+lex.whitespace_split = True
+try:
+    tokens = list(lex)
+except ValueError:
+    print("none"); sys.exit(0)
+segments, seg = [], []
+for t in tokens:
+    if t in ("&&", "||", ";", "|", "&", "(", ")", "{", "}"):
+        if seg: segments.append(seg)
+        seg = []
+    else:
+        seg.append(t)
+if seg: segments.append(seg)
 
-# Quoted text is not an argument: `--body "never use --draft here"` must not
-# match, so strip quoted strings before looking at the arguments.
-args_only="$(printf '%s' "$cmd" | sed -E "s/\"[^\"]*\"//g; s/'[^']*'//g")"
+def resolve(path, base):
+    path = os.path.expanduser(path)
+    return path if os.path.isabs(path) else os.path.normpath(os.path.join(base, path))
 
-if printf '%s' "$args_only" | grep -Eq '(^|[;&|[:space:]])gh[[:space:]]+pr[[:space:]]+create([[:space:]]|$)' \
-   && printf '%s' "$args_only" | grep -Eq '(^|[[:space:]])--draft([[:space:]=]|$)'; then
-  echo "Blocked: open the PR ready for review, not as a draft. On a draft the required checks are red by design (the suites skip and the gates fail that skip), which hides real failures and mails the owner on every push. Run the local checks first, then open it ready." >&2
-  exit 2
-fi
-
-printf '%s' "$args_only" | grep -Eq '(^|[;&|[:space:]])git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[[:space:]]+push([[:space:]]|$)' || exit 0
-
-# Which repo is being pushed: `git -C <path> push`, a leading `cd <path> &&`,
-# else the session's cwd.
-target=""
-if [[ "$args_only" =~ git[[:space:]]+-C[[:space:]]+([^[:space:]]+)[[:space:]]+push ]]; then
-  target="${BASH_REMATCH[1]}"
-elif [[ "$cmd" =~ ^[[:space:]]*cd[[:space:]]+([^[:space:];&|]+)[[:space:]]*(\&\&|\;) ]]; then
-  target="${BASH_REMATCH[1]}"
-fi
-target="${target%\"}"; target="${target#\"}"; target="${target%\'}"; target="${target#\'}"
-case "$target" in
-  "") target="$cwd" ;;
-  /*) ;;
-  *) target="${cwd:-.}/$target" ;;
+here, verdict, target = cwd, "none", ""
+for s in segments:
+    if not s: continue
+    if s[0] == "cd":
+        here = resolve(s[1], here) if len(s) > 1 else os.path.expanduser("~")
+        continue
+    if s[:3] == ["gh", "pr", "create"] and any(a in ("--draft", "-d") or a.startswith("--draft=") for a in s[3:]):
+        verdict = "draft"; break
+    if s[0] == "git":
+        rest, base = s[1:], here
+        if len(rest) >= 2 and rest[0] == "-C":
+            base, rest = resolve(rest[1], here), rest[2:]
+        elif rest and rest[0].startswith("-C") and len(rest[0]) > 2:
+            base, rest = resolve(rest[0][2:], here), rest[1:]
+        # skip other global options such as --no-pager
+        while rest and rest[0].startswith("-") and rest[0] != "push":
+            rest = rest[1:]
+        if rest and rest[0] == "push":
+            verdict, target = "push", base
+print(verdict); print(target)
+' <<<"$input" 2>/dev/null)" || exit 0
+action="${verdict%%$'\n'*}"
+target="${verdict#*$'\n'}"
+case "$action" in
+  draft)
+    echo "Blocked: open the PR ready for review, not as a draft. On a draft the required checks are red by design (the suites skip and the gates fail that skip), which hides real failures and mails the owner on every push. Run the local checks first, then open it ready." >&2
+    exit 2 ;;
+  push) ;;
+  *) exit 0 ;;
 esac
-[ -d "$target" ] || exit 0
+[ -n "$target" ] && [ -d "$target" ] || exit 0
 root="$(git -C "$target" rev-parse --show-toplevel 2>/dev/null)" || exit 0
 cd "$root" || exit 0
 
