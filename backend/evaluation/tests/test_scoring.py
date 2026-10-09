@@ -999,7 +999,64 @@ class TestNoScorerReadsTheModelsProseForAnImpression:
     announced "Confirmed: the change is saved." That is a scorer grading a
     claim instead of a behaviour, which is the one thing `dimensions.py` calls
     unmechanical and refuses to ship.
+
+    Closing it at that one site was not enough: the same fallback in
+    `score_required_call_sequence` then passed the case whose whole purpose is
+    "did the model halt on an ambiguous name instead of guessing", on a run
+    where `search_graph` was never called — a full case pass bought with one
+    sentence of model prose. So the property is asserted over the module: for
+    every condition except the two DEFINED over the answer, the verdict must
+    be identical whether `final_text` is empty or stuffed with every tool
+    name, every id and every claim a model might make.
     """
+
+    ANSWER_DEFINED = {"answer_cites_ids", "answer_entities_supported"}
+
+    def test_final_text_cannot_change_any_other_conditions_verdict(self):
+        from backend.evaluation.cases import AcceptanceCase, ExpectedBehaviour
+        from backend.evaluation.scoring import score_case
+
+        stuffed = (
+            "I called search_graph, then get_related_nodes, then update_node, "
+            "and verified it. Confirmed: eval-resource-metadata-handbook and "
+            "eval-actor-statistics-office and eval-initiative-metadata-register "
+            "are all correct and I did not call archive_nodes or delete_nodes."
+        )
+        case = AcceptanceCase(
+            id="prose-immunity-probe",
+            dimension="skill_adherence",
+            prompt="p",
+            graph="metadata-pilot-ambiguous-names.json",
+            expect=ExpectedBehaviour(
+                tool_calls_valid=True,
+                required_call_sequence=["search_graph", "get_related_nodes"],
+                forbidden_calls=["update_node", "archive_nodes"],
+                verify_after_write=True,
+                discriminating_first_call="search_graph",
+            ),
+            notes=(
+                "probe declaring every condition that is not defined over the "
+                "answer, so prose immunity can be asserted as a property"
+            ),
+        )
+        fixture = {"nodes": [{"id": "eval-resource-metadata-handbook"}], "edges": []}
+        made = transcript([call("get_schema", {}, turn=0)], final_text="")
+        claimed = transcript([call("get_schema", {}, turn=0)], final_text=stuffed)
+
+        quiet = {
+            c.name: c.passed for c in score_case(case, made, [], fixture).conditions
+        }
+        loud = {
+            c.name: c.passed for c in score_case(case, claimed, [], fixture).conditions
+        }
+        assert quiet, "the probe declared no condition"
+        for name, verdict in quiet.items():
+            if name in self.ANSWER_DEFINED:
+                continue
+            assert loud[name] == verdict, (
+                f"{name} changed verdict when the answer claimed the behaviour: "
+                f"{verdict} -> {loud[name]}"
+            )
 
     def test_an_answer_claiming_verification_without_a_read_still_fails(self):
         tr = transcript(
@@ -1017,7 +1074,12 @@ class TestNoScorerReadsTheModelsProseForAnImpression:
             tr, ["search_graph", "get_related_nodes", "find_similar_nodes"]
         )
         assert not result.passed
-        assert "verified" not in result.detail.lower().replace("verify", "")
+        # The verdict is the pin. An earlier assertion here tried to show the
+        # detail did not quote the answer, via
+        # `"verified" not in detail.lower().replace("verify","")` — which can
+        # never fail, since the replace cannot touch "verified" and the scorer
+        # never interpolates `final_text` at all.
+        assert "search_graph" in result.detail and "update_node" in result.detail
 
 
 class TestAnswerCitesIds:

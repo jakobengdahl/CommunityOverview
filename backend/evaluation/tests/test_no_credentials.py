@@ -357,21 +357,32 @@ class TestADotEnvFileIsNotAReliableCredentialSource:
         `load_dotenv()` has run and the same call accepts the `.env` value. That
         asymmetry is the reason the docs tell the operator to export instead.
         """
+        # `default_provider_factory`, not `run_case`. The claim is about where
+        # the credential is RESOLVED, and resolution happens in the provider
+        # build — but `run_case` goes on to drive the chat path, so once the
+        # second call stopped refusing it built a real client and issued a real
+        # HTTP POST. This child process is outside the autouse egress guard,
+        # which only covers the test process, so the suite genuinely made
+        # outbound calls while three places claimed it never does. Building a
+        # client sends nothing, so this drives exactly the asymmetry the docs
+        # describe and nothing more.
         script = (
             "import sys; sys.path.insert(0, %r)\n"
             "from backend.config.model_profiles import ModelProfile\n"
-            "from backend.evaluation import load_cases, run_case\n"
+            "from backend.evaluation.runner import default_provider_factory\n"
             "prof = ModelProfile(id='p', name='P', provider='openai', model='m',\n"
             "                    default=True, credential_ref='SKILL_EVAL_DOTENV_PROBE')\n"
-            "case = load_cases()[0]\n"
-            "first = run_case(case, prof)\n"
-            "print('FRESH_REFUSED:', 'MissingCredentialError' in (first.run_error or ''))\n"
+            "def refused():\n"
+            "    try:\n"
+            "        default_provider_factory(prof)\n"
+            "    except Exception as exc:\n"
+            "        return type(exc).__name__ == 'MissingCredentialError'\n"
+            "    return False\n"
+            "print('FRESH_REFUSED:', refused())\n"
             "import backend.ui.chat_logic  # noqa  -- runs load_dotenv()\n"
             "import os\n"
             "print('NOW_IN_ENV:', os.environ.get('SKILL_EVAL_DOTENV_PROBE') is not None)\n"
-            "second = run_case(case, prof)\n"
-            "print('SECOND_REFUSED:',\n"
-            "      'MissingCredentialError' in (second.run_error or ''))\n"
+            "print('SECOND_REFUSED:', refused())\n"
         ) % str(REPO_ROOT)
         result = self._run(script, "SKILL_EVAL_DOTENV_PROBE=from-repo-root\n")
         assert "FRESH_REFUSED: True" in result.stdout, result.stdout + result.stderr
@@ -574,6 +585,9 @@ class TestReportsNeverCarryACredential:
                 yield path, value
             elif isinstance(value, dict):
                 for key, item in value.items():
+                    # Keys too: a map whose KEYS carry the content was
+                    # invisible to a walk that only descended into values.
+                    yield f"{path}.<key>", key
                     yield from leaves(item, f"{path}.{key}")
             elif isinstance(value, (list, tuple)):
                 for index, item in enumerate(value):
@@ -611,53 +625,60 @@ class TestReportsNeverCarryACredential:
             if path.endswith(".run_error"):
                 assert len(text) <= 400, f"{path} is {len(text)} chars"
 
+        # And the RENDERED SIZE, because bounding each leaf is not the same as
+        # bounding the report. Returning a list of 80-character chunks from
+        # `_truncate` kept every leaf under the bound and put the whole
+        # 3200-character model-chosen value back in the file, reconstructable
+        # — and `huge not in json.dumps(report)` missed it because JSON writes
+        # `", "` between the chunks. Comparing against the same suite run with
+        # small values makes any such smuggling show up as size.
+        small = ScriptedProvider(
+            [
+                [("search_graph", {"qeury": "x", "limit": "not-an-int"})],
+                [("update_node", {"node_id": "x", "updates": {"summary": "y"}})],
+                "it is eval-nope-other.",
+            ]
+        )
+        baseline = json.dumps(
+            build_report(
+                run_suite(profile, cases=[case], provider_factory=lambda _p: small)
+            )
+        )
+        rendered = json.dumps(report)
+        assert len(rendered) - len(baseline) < 2000, (
+            f"the oversized run rendered {len(rendered) - len(baseline)} more "
+            "characters than the same run with small values, so model-written "
+            "content is reaching the report in bulk"
+        )
+
     def test_running_a_case_writes_no_file_but_its_own_temporary_graph(
         self, monkeypatch, profile, case_by_id
     ):
         """
         G2's second clause — "no file the harness writes" — pinned by path.
 
-        Watching one directory was not enough. The first version chdir'd into a
-        fresh `mkdtemp()` and walked only that, so a dump to
-        `tempfile.gettempdir()`, `Path.home()` or any absolute path was
-        invisible — and a mutation writing the prompt and the whole injected
-        skill text to `/tmp/skill-eval-debug.json` passed it. So this hooks the
-        write instead of the location: every path opened for writing during the
-        run must be the run's own fixture graph, wherever it is.
-        """
-        import builtins
-        import io
-        import pathlib
+        Two earlier versions were each one step short. Watching a single
+        directory missed an absolute path, so a dump to
+        `tempfile.gettempdir()` was invisible; hooking four write functions
+        missed `os.open` + `os.write`, which is the same hole the read guard
+        had already been widened for. Both are now the same audit event, so
+        the two guards are one net instead of two enumerations of different
+        length.
 
-        from backend.evaluation.tests.conftest import ScriptedProvider
+        "Its own" is a set of real directories, recorded as the run creates
+        them, rather than a prefix: the first attempt excluded everything under
+        the system temp dir and so swallowed the very mutation it was written
+        for, a dump straight into the temp root.
+        """
+        import tempfile as tempfile_module
+
+        from backend.evaluation.tests.conftest import (
+            ScriptedProvider,
+            audit_open_target,
+            watch_audit,
+        )
 
         case = case_by_id["skill-adherence-ambiguous-name-halts"]
-        written = []
-
-        def note(path, mode=""):
-            if any(flag in str(mode) for flag in ("w", "a", "x", "+")):
-                written.append(str(path))
-
-        def wrap_open(real):
-            def wrapper(file, mode="r", *args, **kwargs):
-                note(file, mode)
-                return real(file, mode, *args, **kwargs)
-
-            return wrapper
-
-        def wrap_path_write(real, name):
-            def wrapper(self, *args, **kwargs):
-                written.append(str(self))
-                return real(self, *args, **kwargs)
-
-            return wrapper
-
-        # Record the directories THIS RUN creates, so "its own temporary
-        # graph" is a set of real paths rather than a guess at a prefix. The
-        # first attempt excluded anything under the system temp dir, which
-        # swallowed the very mutation it was written for: a dump straight into
-        # the temp ROOT. A write is clean only inside a directory the run made.
-        import tempfile as tempfile_module
 
         owned = []
         real_tempdir = tempfile_module.TemporaryDirectory
@@ -670,36 +691,37 @@ class TestReportsNeverCarryACredential:
         monkeypatch.setattr(
             tempfile_module, "TemporaryDirectory", RecordingTemporaryDirectory
         )
-        monkeypatch.setattr(builtins, "open", wrap_open(builtins.open))
-        monkeypatch.setattr(io, "open", wrap_open(io.open))
-        monkeypatch.setattr(
-            pathlib.Path,
-            "write_text",
-            wrap_path_write(pathlib.Path.write_text, "write_text"),
-        )
-        monkeypatch.setattr(
-            pathlib.Path,
-            "write_bytes",
-            wrap_path_write(pathlib.Path.write_bytes, "write_bytes"),
-        )
 
-        run_suite(
-            profile,
-            cases=[case],
-            provider_factory=lambda _p: ScriptedProvider(
-                [f"{PROSE_SENTINEL} two nodes share that name, so I stopped."]
-            ),
-        )
+        writes = []
+
+        def watcher(event, args):
+            if event != "open":
+                return
+            decoded = audit_open_target(args)
+            if decoded is None:
+                return
+            resolved, writing = decoded
+            if writing:
+                writes.append(resolved)
+
+        with watch_audit(watcher):
+            run_suite(
+                profile,
+                cases=[case],
+                provider_factory=lambda _p: ScriptedProvider(
+                    [f"{PROSE_SENTINEL} two nodes share that name, so I stopped."]
+                ),
+            )
         monkeypatch.undo()
 
         assert owned, "the run created no temporary directory, so this proves nothing"
-        assert written, "the write hook never fired, so this proves nothing"
+        assert writes, "the write hook never fired, so this proves nothing"
 
-        stray = []
-        for path in written:
-            resolved = Path(path).resolve()
-            if not any(resolved.is_relative_to(directory) for directory in owned):
-                stray.append(str(resolved))
+        stray = [
+            str(path)
+            for path in writes
+            if not any(path.is_relative_to(directory) for directory in owned)
+        ]
         assert not stray, f"the run wrote outside the directory it created: {stray}"
 
     def test_no_condition_detail_carries_the_answer_or_an_unbounded_argument(
@@ -916,6 +938,12 @@ class TestReportsNeverCarryACredential:
         cache is a correctness bug as well as an exposure. Asserted by looking
         at the module rather than inferring from behaviour: the value is either
         reachable from module state or it is not.
+
+        Within limits worth naming: the walk covers str, dict, list, tuple and
+        set to depth three, so a credential held as an attribute of a
+        module-level object, in a function default or in a closure cell would
+        not be seen. It catches the shape a cache actually takes, not every
+        shape one could take.
         """
         from backend.evaluation.tests.conftest import ScriptedProvider
         import backend.evaluation.runner as runner_module
@@ -965,9 +993,14 @@ class TestReportsNeverCarryACredential:
         """
         The floor is a judgement, so it is pinned rather than left to drift.
 
-        Below it a value is likelier to occur in unrelated text than to be the
-        thing being hidden; the docstring states eight, and nothing checked
-        that the code agreed.
+        Pinned in both directions because it buys an exposure rather than
+        closing one: a credential of eight characters or fewer is NOT
+        redacted, and `resolve_credential` accepts any non-empty value, so
+        nothing stops one being that short. (An earlier version of this
+        docstring gave the likelihood argument — "below the floor a value is
+        likelier to occur in unrelated text" — which `_scrub` retracted as
+        false for a short credential. Repeating it here handed a reader the
+        retracted justification.)
         """
         from backend.evaluation.runner import _scrub
 

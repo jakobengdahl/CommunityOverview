@@ -376,6 +376,32 @@ def _written_node_ids(transcript: RunTranscript, call: ToolCall) -> Set[str]:
     return {i for i in ids if i}
 
 
+def _join_problems(problems: Sequence[str], limit: int = 400) -> str:
+    """
+    Join per-problem strings into one detail, bounded in total.
+
+    Each problem is already bounded individually, which is not the same as the
+    detail being bounded: nothing capped how MANY there could be, and an
+    unadvertised-tool problem runs about 126 characters, so five of them in one
+    run put a detail of over 500 characters into the report and, via ``--out``,
+    into a file. The count is model-controlled — it is one entry per tool call
+    the model chose to make — so the cap belongs here rather than in the probe
+    that happened to make one.
+    """
+    joined = "; ".join(problems)
+    if len(joined) <= limit:
+        return joined
+    kept: List[str] = []
+    used = 0
+    for problem in problems:
+        if used + len(problem) + 2 > limit:
+            break
+        kept.append(problem)
+        used += len(problem) + 2
+    remaining = len(problems) - len(kept)
+    return "; ".join(kept) + f"; and {remaining} more"
+
+
 def _abbreviate(value: Any, limit: int = 120) -> str:
     """
     Render a value for a report, bounded.
@@ -494,7 +520,7 @@ def score_tool_calls_valid(
             "tool_calls_valid", False, "the model made no tool calls at all"
         )
     if problems:
-        return ConditionResult("tool_calls_valid", False, "; ".join(problems))
+        return ConditionResult("tool_calls_valid", False, _join_problems(problems))
     return ConditionResult(
         "tool_calls_valid", True, f"{len(transcript.tool_calls)} call(s) valid"
     )
@@ -674,7 +700,7 @@ def score_final_node_state(
                     f"{node_id}.{key}: expected {want!r}, got {_abbreviate(got)}"
                 )
     if problems:
-        return ConditionResult("final_node_state", False, "; ".join(problems))
+        return ConditionResult("final_node_state", False, _join_problems(problems))
     return ConditionResult(
         "final_node_state", True, f"{len(expected)} node state(s) as expected"
     )
@@ -698,7 +724,9 @@ def score_final_node_fields_changed(
             if now == was:
                 problems.append(f"{node_id}.{key}: unchanged ({was!r})")
     if problems:
-        return ConditionResult("final_node_fields_changed", False, "; ".join(problems))
+        return ConditionResult(
+            "final_node_fields_changed", False, _join_problems(problems)
+        )
     changed = sum(len(f) for f in expected.values())
     return ConditionResult(
         "final_node_fields_changed", True, f"{changed} field(s) changed as required"

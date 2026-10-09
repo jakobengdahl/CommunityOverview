@@ -248,16 +248,42 @@ class TestEveryDeclaredConditionIsEvaluated:
         The only coverage was of the deliberately-unscored hallucination row;
         the "this case declares no condition for this dimension" branch — the
         one that fires for eight of ten dimensions on every case — had none.
+
+        Derived from the dimension table rather than hand-listed. The three
+        names written out here before were all `FULL`, so narrowing the branch
+        to `if not relevant and dim.mechanical is Mechanical.FULL` left the
+        suite green while both `PARTIAL` rows reported `scored: true,
+        passed: true` on a case that declares no condition for either —
+        `all([])` is `True`, which is the precise way unscored and passing come
+        to look alike.
         """
+        from backend.evaluation.dimensions import DIMENSIONS, Mechanical
+
+        case = case_by_id["tool-call-validity-read-path"]
         score = run_case(
-            case_by_id["tool-call-validity-read-path"],
+            case,
             profile,
             provider_factory=_factory([[("search_graph", {"query": "x"})], "done"]),
         )
+        declared = set(case.expect.declared_conditions())
         assert score.dimensions["tool_call_validity"].passed is True
-        for key in ("completeness", "id_resolution", "post_write_verification"):
+
+        uncovered = [
+            key
+            for key, dim in DIMENSIONS.items()
+            if dim.mechanical in (Mechanical.FULL, Mechanical.PARTIAL)
+            and not (set(dim.measured_by) & declared)
+        ]
+        assert len(uncovered) >= 5, uncovered
+        for key in uncovered:
             assert score.dimensions[key].scored is False, key
             assert score.dimensions[key].passed is None, key
+
+        # The same property stated directly: nothing may read as measured
+        # without a condition behind it.
+        for key, dimension in score.dimensions.items():
+            if dimension.scored:
+                assert set(DIMENSIONS[key].measured_by) & declared, key
 
 
 class TestRunCaseBadModel:

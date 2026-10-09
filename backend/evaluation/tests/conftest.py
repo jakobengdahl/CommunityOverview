@@ -7,16 +7,29 @@ convenience — a test suite that only passes with a real credential cannot run 
 CI, and the one thing this harness must never do is make a credential necessary
 to check it.
 
-The ``no_network`` fixture below ENFORCES the second half rather than asserting
-it. It had to be added after the claim turned out to be false: a test that meant
-to substitute the provider factory patched a module attribute that
+The ``no_network`` fixture below ENFORCES that rather than asserting it, and it
+exists because the claim has twice turned out to be false. First a test that
+meant to substitute the provider factory patched a module attribute that
 ``run_suite`` had already captured as a default argument, so the real factory
-ran and the suite made 27 outbound connections while documenting that it made
-none. A guarantee about what the suite does not do is worth only as much as the
-thing that stops it.
+ran and the suite made 27 outbound connections. Then — with the fixture in
+place and three places in this repo stating the guarantee absolutely — one of
+the ``.env`` probes below ran ``run_case`` with no factory *in a child
+process*, where no fixture of this one's reaches, and issued real HTTP. That
+probe now builds a provider and stops, because resolving a credential is what
+it was ever about.
+
+So the honest form of the guarantee: no test needs an API key, and no test
+makes a network call — enforced by audit hook within this process, and true of
+the child processes because none of them sends a request, which is a property
+of those three tests rather than of a guard. A guarantee about what the suite
+does not do is worth only as much as the thing that stops it.
 """
 
+import contextlib
 import json
+import os
+import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import pytest
@@ -106,74 +119,170 @@ class _Usage:
             setattr(self, key, value)
 
 
+# --------------------------------------------------------------------------
+# audit-hook infrastructure
+#
+# Three successive rounds of this review closed a guard by widening an
+# enumeration — six file-read entry points, six socket methods, four file-write
+# entry points — and each time a mutation walked through the item that was
+# missing: `os.write` in a guard whose sibling already hooked `os.open`, and
+# `_socket.socket`, the C base class of the Python class being patched (a
+# `monkeypatch.setattr` on the subclass leaves the base untouched, so
+# `_socket.socket(...).sendto(...)` had real, unpatched methods).
+#
+# An audit hook is not an enumeration. The events fire from the C layer, so
+# `open` covers `builtins.open`, `io.open`, `os.open`, `Path.open` and `mmap`
+# alike, and the socket events cannot be sidestepped by importing a different
+# module. A hook cannot be removed once installed, so one permanent hook
+# dispatches to whatever watchers are currently registered.
+#
+# What this still cannot see is a child process: it has its own interpreter and
+# its own hooks. Three tests here shell out deliberately (the `.env` probes),
+# and none of them makes a request — one used to, through a `run_case` with no
+# provider factory, and the suite really did issue outbound HTTP while three
+# places claimed it never does.
+# --------------------------------------------------------------------------
+
+_AUDIT_WATCHERS: List[Any] = []
+
+
+def _dispatch_audit(event: str, args: tuple) -> None:
+    for watcher in list(_AUDIT_WATCHERS):
+        watcher(event, args)
+
+
+sys.addaudithook(_dispatch_audit)
+
+
+@contextlib.contextmanager
+def watch_audit(watcher):
+    """Register an audit watcher for the duration of the block."""
+    _AUDIT_WATCHERS.append(watcher)
+    try:
+        yield
+    finally:
+        _AUDIT_WATCHERS.remove(watcher)
+
+
+def audit_open_target(args: tuple):
+    """
+    Decode an ``open`` audit event into ``(path, is_write)``, or None to ignore.
+
+    The event's shape differs by caller and getting this wrong silently
+    disables a guard: ``builtins.open`` passes a mode string, while ``os.open``
+    passes ``None`` for the mode and the real flags as an integer third
+    argument. A watcher that read only the second argument therefore saw
+    ``None`` for every ``os.open`` and classified a write as "not a write" —
+    which is exactly how an ``os.open`` + ``os.write`` debug dump of the
+    prompt, the injected skill text and the answer passed a guard written to
+    stop it.
+
+    Both forms are consulted, so neither spelling can be the one that slips.
+    """
+    if not args:
+        return None
+    path, mode = args[0], args[1] if len(args) > 1 else None
+    flags = args[2] if len(args) > 2 else 0
+    if path is None or isinstance(path, int):
+        return None
+    writing = False
+    if isinstance(mode, str):
+        writing = any(flag in mode for flag in ("w", "a", "x", "+"))
+    if isinstance(flags, int):
+        writing = writing or bool(
+            flags & (os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC)
+        )
+    try:
+        return Path(path).resolve(), writing
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+@contextlib.contextmanager
+def record_file_access(root: Path, exclude=("site-packages", "dist-packages", ".git")):
+    """
+    Record files under ``root`` that are opened, with the mode each was opened in.
+
+    Yields the list it fills: ``(relative_path, mode)`` tuples, where mode is
+    ``"r"`` or ``"w"``. Reads and writes come through one hook because the
+    ``open`` audit event carries both, which is also why neither side can be a
+    shorter list of entry points than the other.
+    """
+    seen: List[tuple] = []
+
+    def watcher(event, args):
+        if event != "open":
+            return
+        decoded = audit_open_target(args)
+        if decoded is None:
+            return
+        resolved, writing = decoded
+        if not resolved.is_relative_to(root):
+            return
+        if any(part in exclude for part in resolved.parts):
+            return
+        seen.append((str(resolved.relative_to(root)), "w" if writing else "r"))
+
+    with watch_audit(watcher):
+        yield seen
+
+
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch, request):
     """
     Fail any test in this suite that attempts outbound traffic.
 
     Autouse and unconditional: a test that needs the network does not belong
-    here, so there is deliberately no opt-out marker to reach for. The failure
-    names the destination, because the useful question when this fires is which
-    provider got built for real.
+    here, so there is deliberately no opt-out marker to reach for.
 
-    Connection-oriented egress was all this covered, while the module docstring
-    claimed the suite makes none at all. A mutation sending statsd-shaped
-    telemetry with `sendto` — connectionless, so it never calls `connect` —
-    left the suite green and the datagram really did leave the machine. The
-    send methods are hooked too, and `getaddrinfo`, which catches a resolve
-    before any socket exists and gives a clearer failure than a refused send.
+    Driven by audit events rather than by patched methods. Patching
+    `socket.socket.{connect,sendto,…}` covered neither `_socket.socket`, the C
+    base class, nor a connected `send` whose destination came from an earlier
+    `connect` — and computing a "destination" per method to name in the failure
+    was wrong for four of the six it hooked, naming a flags integer or the
+    outbound payload itself. The audit events carry the real arguments, and
+    `socket.connect` is unavoidable before any connected send, so blocking it
+    plus the connectionless sends plus resolution covers the process.
 
-    What this cannot see is a child process: `subprocess.run(["curl", …])`
-    opens its own sockets in its own interpreter. Three tests here do shell
-    out deliberately (the `.env` probes), so banning that outright is not an
-    option, and the claim is therefore about this process.
+    Localhost stays reachable: the fixture graph's storage is local, and
+    breaking it would say nothing about egress.
     """
-    import socket
-
-    saved = {
-        name: getattr(socket.socket, name)
-        for name in (
-            "connect",
-            "connect_ex",
-            "sendto",
-            "sendmsg",
-            "sendall",
-            "send",
-        )
-        if hasattr(socket.socket, name)
+    blocked = {
+        "socket.connect",
+        "socket.connect_ex",
+        "socket.sendto",
+        "socket.sendmsg",
+        "socket.bind",
     }
-    real_getaddrinfo = socket.getaddrinfo
+    local = {None, "", "localhost", "127.0.0.1", "::1", "0.0.0.0"}
 
-    def refuse_socket(name):
-        def refuse(self, *args, **kwargs):
-            destination = args[1] if name in ("sendto", "sendmsg") else args[0:1]
-            raise AssertionError(
-                f"{request.node.nodeid} attempted outbound traffic via "
-                f"{name}() to {destination!r}. No test in this suite may touch "
-                "the network — if a provider was built for real, the "
-                "substitution did not take effect (see this module's "
-                "docstring)."
-            )
+    def is_local(address):
+        if isinstance(address, (tuple, list)) and address:
+            return address[0] in local
+        return address in local
 
-        return refuse
-
-    def refuse_resolve(host, *args, **kwargs):
-        if host in (None, "", "localhost", "127.0.0.1", "::1"):
-            return real_getaddrinfo(host, *args, **kwargs)
+    def watcher(event, args):
+        if event == "socket.getaddrinfo":
+            if args and not is_local(args[0]):
+                raise AssertionError(
+                    f"{request.node.nodeid} attempted to resolve {args[0]!r}. "
+                    "No test in this suite may touch the network."
+                )
+            return
+        if event not in blocked:
+            return
+        address = args[1] if len(args) > 1 else None
+        if is_local(address):
+            return
         raise AssertionError(
-            f"{request.node.nodeid} attempted to resolve {host!r}. No test in "
-            "this suite may touch the network."
+            f"{request.node.nodeid} attempted outbound traffic ({event}) to "
+            f"{address!r}. No test in this suite may touch the network — if a "
+            "provider was built for real, the substitution did not take effect "
+            "(see the audit-hook note in this module)."
         )
 
-    for name in saved:
-        monkeypatch.setattr(socket.socket, name, refuse_socket(name))
-    monkeypatch.setattr(socket, "getaddrinfo", refuse_resolve)
-    try:
+    with watch_audit(watcher):
         yield
-    finally:
-        for name, original in saved.items():
-            setattr(socket.socket, name, original)
-        socket.getaddrinfo = real_getaddrinfo
 
 
 @pytest.fixture(autouse=True)

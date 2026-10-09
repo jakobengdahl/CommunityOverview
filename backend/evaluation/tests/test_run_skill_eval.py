@@ -79,30 +79,83 @@ class TestTheSuiteCannotReachTheNetwork:
         )
 
     @pytest.mark.parametrize(
-        "method", ["connect", "connect_ex", "sendto", "sendall", "send"]
+        "route",
+        [
+            "connect",
+            "connect_ex",
+            "sendto",
+            "sendmsg",
+            "bind",
+            "raw_socket_module",
+            "create_connection",
+        ],
     )
-    def test_outbound_traffic_inside_this_suite_fails_the_test(self, method):
+    def test_outbound_traffic_inside_this_suite_fails_the_test(self, route):
         """
-        The guard bites on each method, with a message naming the destination.
+        A probe per route the guard has to cover, including the C base class.
 
-        One probe on `connect` was not enough: the guard patched only the
-        connection-oriented calls, so connectionless egress — a `sendto` of
-        statsd-shaped telemetry, which never calls `connect` — left the suite
-        green while the datagram really left the machine. A probe per guarded
-        method means a future narrowing of the guard fails here.
+        Patching methods on `socket.socket` left two holes that a mutation
+        walked through: `_socket.socket` is the C base class, so the refusals
+        installed on the Python subclass were simply not there (a statsd
+        datagram sent that way was delivered), and the destination the failure
+        named was computed per method and wrong for four of the six — for
+        `send` it printed the outbound payload and called it a destination.
+
+        The guard is now audit-event driven, which changes what "a connected
+        send" means here: `send`/`sendall` have no audit event of their own,
+        but reaching a connected socket requires `connect`, which does. So
+        those two are covered by the `connect` row rather than probed directly;
+        probing them against an unconnected socket only measured the OS.
         """
         import socket
 
         payload = b"x"
         address = ("192.0.2.1", 8125)
-        with pytest.raises(AssertionError, match="attempted outbound traffic"):
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            if method in ("connect", "connect_ex"):
-                getattr(sock, method)(address)
-            elif method == "sendto":
-                sock.sendto(payload, address)
+
+        # Either branch of the guard is a pass: `create_connection` resolves
+        # before it connects, so it is stopped by the resolve check, and which
+        # of the two fires is not what this pins.
+        with pytest.raises(
+            AssertionError, match="attempted (outbound traffic|to resolve)"
+        ):
+            if route == "raw_socket_module":
+                import _socket
+
+                _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM).sendto(
+                    payload, address
+                )
+            elif route == "create_connection":
+                socket.create_connection(address, timeout=1)
+            elif route == "bind":
+                socket.socket(socket.AF_INET, socket.SOCK_DGRAM).bind(("192.0.2.1", 0))
+            elif route == "sendmsg":
+                socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendmsg(
+                    [payload], [], 0, address
+                )
+            elif route == "sendto":
+                socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(
+                    payload, address
+                )
             else:
-                getattr(sock, method)(payload)
+                getattr(socket.socket(socket.AF_INET, socket.SOCK_STREAM), route)(
+                    address
+                )
+
+    def test_a_connected_send_is_unreachable_because_connect_is_refused(self):
+        """
+        Why `send`/`sendall` need no probe of their own under the audit guard.
+
+        Stated as a test rather than only in a comment, so that if `connect`
+        ever stops being blocked this reasoning fails loudly instead of leaving
+        the two send methods silently uncovered.
+        """
+        import socket
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        with pytest.raises(AssertionError, match="attempted outbound traffic"):
+            sock.connect(("192.0.2.1", 8125))
+        with pytest.raises(OSError):
+            sock.sendall(b"x")
 
     def test_resolving_a_hostname_inside_this_suite_fails_the_test(self):
         """
@@ -452,12 +505,15 @@ class TestNoCodePathReadsACredentialFromAFile:
         built, and the built request — url, headers and body — carries the
         environment value and no other.
 
-        The second is the load-bearing one. The read guard hooks six entry
-        points (`builtins.open`, `io.open`, `os.open`, `Path.open`,
-        `Path.read_text`, `Path.read_bytes`), which is not the same as every
-        way to read a file — a child process or `mmap` walks past it — so it is
-        a net, not a proof. Anything that reaches the wire, however it was
-        read, has to pass through the request.
+        The second is the load-bearing one. The read guard is an audit hook on
+        the `open` event rather than a list of patched functions: three rounds
+        of this review closed a guard by widening an enumeration and each time
+        a mutation walked through the item that was missing, so the net is now
+        at the layer where `builtins.open`, `io.open`, `os.open`, `Path.open`
+        and `mmap` are all the same event. A child process still has its own
+        interpreter and its own hooks, so this is a net and not a proof.
+        Anything that reaches the wire, however it was read, has to pass
+        through the request.
 
         Site-packages is excluded by path segment, not by assuming it sits
         outside the tree: `.gitignore` names `venv/` and `.venv/`, so a
@@ -465,45 +521,13 @@ class TestNoCodePathReadsACredentialFromAFile:
         resolving inside the repo, and importlib.metadata reads two
         `dist-info/METADATA` files while building a client.
         """
-        import builtins
-        import io
-        import os as os_module
         import pathlib
 
         from backend.config.model_profiles import ModelProfile
         from backend.evaluation.runner import default_provider_factory
+        from backend.evaluation.tests.conftest import record_file_access
 
         repo = pathlib.Path(__file__).resolve().parents[3]
-        reads = []
-        excluded = ("site-packages", "dist-packages", "node_modules", ".git")
-
-        def guard(path):
-            try:
-                resolved = pathlib.Path(path).resolve()
-            except (OSError, ValueError, TypeError):
-                return
-            if not resolved.is_relative_to(repo) or not resolved.is_file():
-                return
-            if any(part in excluded for part in resolved.parts):
-                return
-            reads.append(str(resolved.relative_to(repo)))
-
-        originals = {
-            (builtins, "open"): builtins.open,
-            (io, "open"): io.open,
-            (os_module, "open"): os_module.open,
-            (pathlib.Path, "open"): pathlib.Path.open,
-            (pathlib.Path, "read_text"): pathlib.Path.read_text,
-            (pathlib.Path, "read_bytes"): pathlib.Path.read_bytes,
-        }
-
-        def wrap(real, path_is_self):
-            def wrapper(*args, **kwargs):
-                if args:
-                    guard(args[0])
-                return real(*args, **kwargs)
-
-            return wrapper
 
         planted = []
         try:
@@ -521,25 +545,24 @@ class TestNoCodePathReadsACredentialFromAFile:
                     candidate.write_text("FILE-SOURCED-KEY", encoding="utf-8")
                     planted.append(candidate)
 
-            for (target, name), real in originals.items():
-                monkeypatch.setattr(target, name, wrap(real, target is pathlib.Path))
             monkeypatch.setenv("SKILL_EVAL_FS_PROBE", "ENV-SOURCED-KEY")
-
-            provider = default_provider_factory(
-                ModelProfile(
-                    id="probe",
-                    name="Probe",
-                    provider="openai",
-                    model="m",
-                    default=True,
-                    credential_ref="SKILL_EVAL_FS_PROBE",
+            with record_file_access(repo) as accesses:
+                provider = default_provider_factory(
+                    ModelProfile(
+                        id="probe",
+                        name="Probe",
+                        provider="openai",
+                        model="m",
+                        default=True,
+                        credential_ref="SKILL_EVAL_FS_PROBE",
+                    )
                 )
-            )
         finally:
             monkeypatch.undo()
             for candidate in planted:
                 candidate.unlink(missing_ok=True)
 
+        reads = [path for path, mode in accesses if mode == "r"]
         assert not reads, f"building a provider read repository file(s): {reads}"
         self.assert_request_carries_only(provider, "ENV-SOURCED-KEY")
 
@@ -553,18 +576,74 @@ class TestNoCodePathReadsACredentialFromAFile:
         the content. Asserting on `request.headers` alone let a file-sourced
         key through in the query string.
         """
+        import sys as sys_module
+
         from openai._models import FinalRequestOptions
 
         client = provider.client
-        request = client._build_request(
+        built = client._build_request(
             FinalRequestOptions(method="post", url="/chat/completions", json_data={})
         )
+
+        # Then SEND it, through a mock transport. Building a request is not the
+        # last word on what goes out: an httpx event hook is installed at
+        # construction and runs at send time, so a hook reading a repo file and
+        # stamping `Authorization` left every construction-time assertion true
+        # (`client.api_key` was still the environment value, `_custom_query` was
+        # empty, nothing was read while the read guard watched) while the wire
+        # carried a file-sourced key. `Client.send` runs the hooks and a mock
+        # transport keeps it local, so what the transport receives is what the
+        # endpoint would have received.
+        captured = []
+
+        # The httpx the CLIENT uses, taken from the client rather than
+        # imported: two httpx distributions are installed here, the SDK is
+        # built against one of them, and a transport or response from the other
+        # fails the sync client's own isinstance check deep inside httpx — the
+        # probe then dies in the library instead of reaching its assertions.
+        inner = client._client
+        # From the MRO, not the instance's own class: the SDK's client is a
+        # subclass of the httpx one, so its own `__module__` is `openai`.
+        httpx = sys_module.modules[
+            next(
+                base.__module__.split(".")[0]
+                for base in type(inner).__mro__
+                if base.__module__.split(".")[0] not in ("openai", "builtins")
+            )
+        ]
+
+        class CapturingTransport(httpx.BaseTransport):
+            """A minimal sync transport; `MockTransport` differs across these."""
+
+            def handle_request(self, request):
+                captured.append(request)
+                return httpx.Response(200, content=b"{}", request=request)
+
+        # Both the default transport and any proxy mounts: with HTTPS_PROXY set
+        # — as it is in the cloud session this harness is developed in — httpx
+        # routes through `_mounts` and never consults `_transport`, so swapping
+        # only the latter sent the probe at the real proxy.
+        transport, mounts = inner._transport, dict(inner._mounts)
+        inner._transport = CapturingTransport()
+        inner._mounts = {}
+        try:
+            inner.send(built)
+        finally:
+            inner._transport = transport
+            inner._mounts = mounts
+
+        assert captured, "the request was never sent, so hooks never ran"
+        request = captured[0]
         whole = "\n".join(
             (
                 str(request.url),
                 str(request.headers),
-                request.read().decode("utf-8", "replace"),
+                (request.content or b"").decode("utf-8", "replace"),
             )
+        )
+        assert not client._client.event_hooks.get("request"), (
+            "the client carries request event hooks, which run after the "
+            f"request is built: {client._client.event_hooks.get('request')}"
         )
         assert request.headers.get("authorization") == f"Bearer {expected_key}"
         assert "FILE-SOURCED-KEY" not in whole, (
