@@ -66,6 +66,16 @@ catch a false claim about a node that genuinely exists, and it does not check
 node *names* — there is no mechanical way to tell a cited node name from a noun
 phrase that happens to repeat one.
 
+It is a **pure negative**, which matters for how a case declares it: an answer
+citing nothing cites nothing unsupported, so it passes. That is the right
+reading of the condition and the wrong reading of a case — the shipped case
+asks for a node id "exactly as stored", and a model that ran one valid read and
+then said it could not tell was scoring green. So a case that asks for an id
+declares `answer_cites_ids` alongside it: the ids the answer must state. The
+negative says nothing fabricated; the positive says the question was answered.
+A case measuring a *correct refusal* is asserting the opposite of both and
+needs a condition this harness does not have.
+
 It combines two signals of deliberately different character:
 
 1. **Closed vocabulary, no false positives.** An id from the case's own fixture
@@ -337,10 +347,22 @@ prompts, or the injected skill text. The one surface that could have carried
 any of them was `run_error`, because an exception message belongs to whoever
 raised it and a provider error can echo the request it failed on — including
 its `Authorization` header. So `run_error` names the stage and the exception
-class (`provider call failed: APIConnectionError`) and never the message. The
-message itself is logged, with the credential, the prompt and the skill text
-taken out of it, which puts the detail in the operator's terminal rather than
-in a file they may commit or paste.
+class (`provider call failed: APIConnectionError`) and never the message.
+
+The message goes to the run log instead, so the detail is in your terminal
+rather than in a file you may commit or paste. The harness scrubs the
+credential, the prompt and the injected skill text out of its own log lines by
+value. Two limits are worth knowing, because the report's guarantee does not
+rest on either:
+
+- The scrub matches an exact substring. That closes the credential, which is
+  one opaque token an SDK echoes verbatim. For the prompt and the skill text it
+  only fires on a byte-for-byte echo — a JSON-escaped or truncated one is not
+  matched.
+- The product's chat layer logs a swallowed exception at `ERROR` before the
+  harness sees it, and the harness cannot reach that line. So if a run fails
+  against a provider whose errors echo request headers, treat the whole run log
+  as sensitive, not just the part the harness wrote.
 
 Before comparing two models, check `run_error` on each case. A failed provider
 call is reported as a run error rather than as a case failure — otherwise an

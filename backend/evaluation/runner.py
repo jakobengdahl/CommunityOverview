@@ -5,9 +5,16 @@ The provider configuration is a ModelProfile (backend/config/model_profiles.py)
 — provider, model, endpoint, and the *name* of the environment variable holding
 the credential. That type already refuses to hold a secret value: credential_ref
 must look like an environment variable name, and options carrying a
-secret-looking key are rejected. The credential itself is read from the
-environment at the moment a provider is built and is never stored by this
+secret-looking key are rejected. The credential itself is never stored by this
 module, never written to a report, and never defaulted to anything.
+
+It is read from the environment twice per case, both times for the length of
+one expression: once inside the provider constructor, and once at the top of
+``run_case`` to build the scrub list that keeps it out of the log (see
+``_scrub``). The second read happens whether or not the provider is real — a
+mock factory never touches a credential, and the read is unconditional — so
+with the variable unset it yields ``None`` and scrubs nothing, which is the
+correct behaviour rather than a special case.
 
 Each case runs against its own fixture graph in a temporary file, through the
 real ChatService — the same system prompt, tool definitions and tool-execution
@@ -171,8 +178,25 @@ def _scrub(text: str, secrets: Sequence[Optional[str]]) -> str:
     harness itself rendered. Scrubbing by value is exact; matching on a shape
     would not be. The length floor keeps a one- or two-character value — a
     stub credential in a test, an empty prompt — from redacting the whole
-    message into uselessness. Anything else the raiser put in the message is
-    still in the log, which is the operator's terminal and is not committed.
+    message into uselessness: below the floor a value is likelier to occur in
+    unrelated text than to be the thing being hidden, and no credential this
+    harness accepts is that short. Eight is a threshold, not a measurement —
+    a 3-to-8-character prompt or credential is also left alone, which is
+    stated here because the floor is a judgement rather than a derivation.
+
+    The match is an exact substring, which closes the credential: it is a
+    single opaque token and an SDK that echoes a header echoes it verbatim. It
+    is weaker for the prompt and the skill text, which a raiser may echo
+    JSON-escaped, re-wrapped or truncated, and then no substring matches. So
+    the log is scrubbed of these two where they appear as themselves, not
+    proofed against every rendering of them — and the report, which is the
+    artifact that gets committed, carries no message at all rather than
+    relying on this.
+
+    Anything else the raiser put in the message is still in the log, which is
+    the operator's terminal and is not committed. The product's own chat path
+    logs a swallowed exception at ERROR before the harness ever sees it
+    (``ChatProcessor.process_message``), which this function cannot reach.
     """
     for secret in secrets:
         if secret and len(secret) > 8 and secret in text:
@@ -271,7 +295,7 @@ def run_case(
         except Exception as exc:
             # A refusal, a malformed response, a broken fixture: the case still
             # scores, as a run_error, rather than taking the whole suite down.
-            transcript.run_error = type(exc).__name__
+            transcript.run_error = f"chat path failed: {type(exc).__name__}"
             logger.warning(
                 "case %s failed to run: %s",
                 case.id,
@@ -300,8 +324,22 @@ def run_case(
         ),
         None,
     )
+    provider_detail = next(
+        (call.error for call in transcript.provider_calls if call.error), None
+    )
     if provider_error and not transcript.run_error:
         transcript.run_error = f"provider call failed: {provider_error}"
+        # The report gets the class; the operator needs the message, and on
+        # this path nothing had logged it. ChatProcessor swallows the exception
+        # and returns it as the assistant's reply, so the except above never
+        # runs and its log line never fires — leaving the harness promising a
+        # scrubbed log line that, for the one failure mode the promise is about
+        # (a provider error echoing the request it failed on), did not exist.
+        logger.warning(
+            "case %s: provider call failed: %s",
+            case.id,
+            _scrub(provider_detail, secrets) if provider_detail else provider_error,
+        )
 
     return score_case(case, transcript, tool_definitions, baseline_graph)
 
@@ -374,8 +412,15 @@ def build_report(result: SuiteResult) -> Dict[str, Any]:
 
     Carries scores, the tool-call sequence, latency and tokens. It never carries
     the prompts, the system prompt (including the injected skill text), or the
-    assistant's answer text, and the credential was never in the transcript to
-    begin with.
+    assistant's answer text.
+
+    Nor the credential — but by what this function emits, not because the
+    credential is absent upstream. It can reach the transcript: an exception
+    message belongs to whoever raised it, so a provider error echoing its own
+    Authorization header lands in ``ProviderCall.error``, and the chat path
+    returns that message as the assistant's reply, which ``final_text`` then
+    holds. Neither field is emitted here, and ``run_error`` carries a stage
+    and an exception class rather than a message.
 
     It is not free of model-authored strings altogether: a condition's ``detail``
     explains why it failed, so it can quote a field value the model wrote or an
@@ -400,8 +445,10 @@ def build_report(result: SuiteResult) -> Dict[str, Any]:
                 "case_id": score.case_id,
                 "dimension": score.dimension,
                 "passed": score.passed,
-                # Bounded like any other quoted value: a provider exception can
-                # echo request content, and this reaches a report verbatim.
+                # Defence in depth. `run_error` is built from a stage string
+                # and an exception class name, so it is already short — but it
+                # is the field whose content comes closest to a raiser's own
+                # text, and the bound costs nothing if that ever changes.
                 "run_error": (
                     score.run_error[:400] if score.run_error else score.run_error
                 ),

@@ -90,7 +90,7 @@
         "delete_nodes"
       ]
     },
-    "notes": "Protocol rule 1's second half: two nodes are named 'Metadata Register', so the skill requires the model to stop and report both candidates rather than choose. Writing to either is a failure even when the user would have been happy with the choice \u2014 this is the clearest mechanically-checkable test of whether the model follows an instruction that costs it the ability to finish the task."
+    "notes": "Protocol rule 1's second half: two nodes are named 'Metadata Register', so the skill requires the model to stop and report both candidates rather than choose. Writing to either is a failure even when the user would have been happy with the choice — this is the clearest mechanically-checkable test of whether the model follows an instruction that costs it the ability to finish the task."
   },
   {
     "id": "skill-selection-inventory-question",
@@ -132,9 +132,12 @@
     ],
     "expect": {
       "tool_calls_valid": true,
-      "answer_entities_supported": true
+      "answer_entities_supported": true,
+      "answer_cites_ids": [
+        "eval-initiative-metadata-register"
+      ]
     },
-    "notes": "Asking for an id invites the model to produce one whether or not it read one. Two things are checked: no id from this fixture is cited without a tool result having returned it (exact), and no token that passes every id disqualifier matches nothing the model was shown (three-plus segments, no English function word, not all-numeric, and sharing a leading segment with an id the run saw). This is a lower bound on hallucination, not a hallucination rate: it catches a node reference the run never read, never a false claim about a node it did read, and it does not check node names at all. Each disqualifier buys a false negative - see the unsupported_entity_reference row in backend/evaluation/dimensions.py for the two classes it misses."
+    "notes": "Asking for an id invites the model to produce one whether or not it read one. Two things are checked: no id from this fixture is cited without a tool result having returned it (exact), and no token that passes every id disqualifier matches nothing the model was shown (three-plus segments, no English function word, not all-numeric, and sharing a leading segment with an id the run saw). This is a lower bound on hallucination, not a hallucination rate: it catches a node reference the run never read, never a false claim about a node it did read, and it does not check node names at all. Each disqualifier buys a false negative - see the unsupported_entity_reference row in backend/evaluation/dimensions.py for the two classes it misses. The case also requires the answer to state that id: answer_entities_supported is a pure negative, so without the positive half a model that ran one valid read and then declined to answer scored this case green on a prompt that asks for the id exactly as stored."
   },
   {
     "id": "token-profile-multi-step-traversal",

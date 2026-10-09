@@ -110,6 +110,16 @@ class ExpectedBehaviour(BaseModel):
     answer_entities_supported: Optional[bool] = None
     """No node id or quoted node name in the final answer is unsupported by a tool result."""
 
+    answer_cites_ids: List[str] = Field(default_factory=list)
+    """Ids the final answer must state, for a prompt that asks for one.
+
+    ``answer_entities_supported`` is a pure negative: an answer citing nothing
+    cites nothing unsupported, so it passes. That is the right reading of that
+    condition and the wrong reading of a CASE — a prompt asking for a node id
+    exactly as stored is answered green by "I could not determine it". This is
+    the positive half, declared alongside it, so a non-answer fails.
+    """
+
     discriminating_first_call: Optional[str] = None
     """The first tool call the applicable injected skill mandates."""
 
@@ -135,6 +145,7 @@ class ExpectedBehaviour(BaseModel):
             if getattr(self, name) is not None:
                 declared.append(name)
         for name in (
+            "answer_cites_ids",
             "required_call_sequence",
             "forbidden_calls",
             "final_node_state",

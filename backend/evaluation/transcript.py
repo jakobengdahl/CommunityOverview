@@ -12,9 +12,16 @@ harness records there instead of instrumenting the assistant:
 
 RecordingProvider therefore wraps any LLMProvider — the real one built from a
 model profile, or a mock in the tests — and the resulting RunTranscript is a
-plain data structure the scorers read. No credential passes through here: the
+plain data structure the scorers read. The credential is not an input here: the
 key lives inside the wrapped provider's SDK client, and the transcript stores
 neither the provider instance nor its raw responses.
+
+That is not the same as the credential being unreachable from a transcript. An
+exception message belongs to whoever raised it, so a provider error that echoes
+its own Authorization header lands in ``ProviderCall.error`` — and the chat path
+returns that message as the assistant's reply, which ``final_text`` then holds.
+Both fields stay in this process: ``build_report`` emits neither, which is where
+the guarantee is kept.
 """
 
 import json

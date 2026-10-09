@@ -27,6 +27,8 @@ operator-facing version.
 import json
 import os
 import re
+import shutil
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -497,6 +499,112 @@ class TestReportsNeverCarryACredential:
         # And the model's own prose stays out too.
         assert PROSE_SENTINEL not in payload
 
+    def test_every_string_in_a_rendered_report_is_bounded_wherever_it_sits(
+        self, profile
+    ):
+        """
+        G8 was pinned per quoting SITE, so a new site was unpinned.
+
+        Adding a `tool_arguments` field to the case row — raw model arguments,
+        verbatim — left the suite green, because the payload-wide assertions
+        hunt two named sentinels and the bound probes each read one
+        `ConditionResult.detail`. Walking the rendered report and bounding every
+        string leaf closes the shape instead of the instance: a future field
+        carrying model-written content fails here without anyone remembering to
+        add a probe for it.
+        """
+        from backend.evaluation.cases import AcceptanceCase, ExpectedBehaviour
+        from backend.evaluation.tests.conftest import ScriptedProvider
+
+        huge = "ZZQQ" * 800
+        case = AcceptanceCase(
+            id="report-leaf-bound-probe",
+            dimension="unsupported_entity_reference",
+            prompt="which initiative produces the Metadata Handbook?",
+            graph="metadata-pilot-small.json",
+            expect=ExpectedBehaviour(
+                tool_calls_valid=True, answer_entities_supported=True
+            ),
+            notes=(
+                "probe case whose run puts oversized model-written content into "
+                "every field a report can quote it in"
+            ),
+        )
+        provider = ScriptedProvider(
+            [
+                [("search_graph", {"qeury": huge, "limit": "not-an-int"})],
+                [("update_node", {"node_id": huge, "updates": {"summary": huge}})],
+                f"{PROSE_SENTINEL} it is eval-{huge}-other.",
+            ]
+        )
+        result = run_suite(profile, cases=[case], provider_factory=lambda _p: provider)
+        report = build_report(result)
+
+        def leaves(value, path="report"):
+            if isinstance(value, str):
+                yield path, value
+            elif isinstance(value, dict):
+                for key, item in value.items():
+                    yield from leaves(item, f"{path}.{key}")
+            elif isinstance(value, (list, tuple)):
+                for index, item in enumerate(value):
+                    yield from leaves(item, f"{path}[{index}]")
+
+        oversized = [
+            (path, len(text)) for path, text in leaves(report) if len(text) >= 1200
+        ]
+        assert not oversized, f"unbounded string(s) in the report: {oversized}"
+        assert huge not in json.dumps(report), "the whole oversized value survived"
+
+        for path, text in leaves(report):
+            if path.endswith(".run_error"):
+                assert len(text) <= 400, f"{path} is {len(text)} chars"
+
+    def test_running_a_case_writes_no_file_outside_its_own_temporary_graph(
+        self, profile, case_by_id
+    ):
+        """
+        G2's second clause — "no file the harness writes" — had no test.
+
+        Adding a `write_text` of the prompt, the whole injected skill text and
+        the answer into the working directory left the suite green: the
+        isolation tests pin that the run's temporary graph does not outlive the
+        run, and nothing pinned that no OTHER file appears. Additive
+        instrumentation is exactly how a debug dump ships by accident.
+        """
+        from backend.evaluation.tests.conftest import ScriptedProvider
+
+        case = case_by_id["skill-adherence-ambiguous-name-halts"]
+        workdir = Path(tempfile.mkdtemp())
+        before = set(workdir.rglob("*"))
+        cwd = os.getcwd()
+        try:
+            os.chdir(workdir)
+            run_suite(
+                profile,
+                cases=[case],
+                provider_factory=lambda _p: ScriptedProvider(
+                    [f"{PROSE_SENTINEL} two nodes share that name, so I stopped."]
+                ),
+            )
+        finally:
+            os.chdir(cwd)
+
+        created = sorted(
+            str(p.relative_to(workdir)) for p in set(workdir.rglob("*")) - before
+        )
+        for path in set(workdir.rglob("*")) - before:
+            if path.is_file():
+                text = path.read_text(encoding="utf-8", errors="replace")
+                for marker in (
+                    PROSE_SENTINEL,
+                    case.prompt,
+                    "ACTIVE SKILL INSTRUCTIONS",
+                ):
+                    assert marker not in text, f"{path.name} carries {marker[:40]!r}"
+        shutil.rmtree(workdir, ignore_errors=True)
+        assert not created, f"the run left file(s) behind: {created}"
+
     def test_no_condition_detail_carries_the_answer_or_an_unbounded_argument(
         self, profile
     ):
@@ -614,8 +722,174 @@ class TestReportsNeverCarryACredential:
         assert detail.count("ZZQQ-written-field-marker") < 10
 
     @pytest.mark.parametrize(
+        "site", ["provider_build", "chat_path", "chat_raises", "fixture_setup"]
+    )
+    def test_the_harnesss_own_log_lines_are_scrubbed_of_all_three_values(
+        self, monkeypatch, tmp_path, caplog, profile, case_by_id, site
+    ):
+        """
+        The report half of round 4 was pinned; the log half was pinned by
+        nothing.
+
+        Deleting `_scrub`'s body — or just the credential entry from the list
+        it is given — left the whole suite green while a WARNING carried the
+        resolved key. `_scrub`, `caplog` and `<redacted>` appeared in no test.
+
+        Scoped to the harness's own logger on purpose. `ChatProcessor` logs a
+        swallowed exception at ERROR before the harness sees it, which this
+        function cannot reach and the docs say so: the claim being pinned is
+        that the lines the harness writes are clean, not that every line in the
+        process is.
+        """
+        import logging
+
+        from backend.ui import ChatService
+        from backend.evaluation.tests.conftest import ScriptedProvider
+
+        monkeypatch.setenv(profile.credential_ref, SENTINEL)
+        case = case_by_id["skill-adherence-ambiguous-name-halts"]
+        graphs_dir = None
+        boom = f"401 with Authorization: Bearer {SENTINEL} on {case.prompt}"
+
+        if site == "provider_build":
+
+            def factory(_profile):
+                raise RuntimeError(boom)
+
+        elif site == "chat_path":
+
+            def factory(_profile):
+                provider = ScriptedProvider(["x"])
+
+                def explode(*_args, **_kwargs):
+                    raise RuntimeError(boom)
+
+                provider.create_completion = explode
+                return provider
+
+        elif site == "chat_raises":
+
+            def explode(*_args, **_kwargs):
+                raise RuntimeError(boom)
+
+            monkeypatch.setattr(ChatService, "process_message", explode)
+
+            def factory(_profile):
+                return ScriptedProvider(["x"])
+
+        else:  # fixture_setup
+            # Not a malformed graph: `json.loads` runs before the try this site
+            # is inside, so a bad file propagates out of run_case instead of
+            # reaching it. The service build is what that except wraps.
+            import backend.evaluation.runner as runner_module
+
+            def explode(*_args, **_kwargs):
+                raise RuntimeError(boom)
+
+            monkeypatch.setattr(runner_module, "_build_chat_service", explode)
+
+            def factory(_profile):
+                return ScriptedProvider(["x"])
+
+        with caplog.at_level(logging.DEBUG, logger="backend.evaluation.runner"):
+            run_suite(
+                profile, cases=[case], provider_factory=factory, graphs_dir=graphs_dir
+            )
+
+        ours = "\n".join(
+            record.getMessage()
+            for record in caplog.records
+            if record.name == "backend.evaluation.runner"
+        )
+        assert ours, f"{site} wrote no harness log line at all"
+        assert SENTINEL not in ours, f"{site} logged the credential"
+        assert case.prompt not in ours, f"{site} logged the prompt"
+        assert "ACTIVE SKILL INSTRUCTIONS" not in ours, f"{site} logged the skill text"
+        assert "<redacted>" in ours, f"{site} redacted nothing"
+
+    @pytest.mark.parametrize(
+        ("length", "redacted"),
+        [(8, False), (9, True)],
+    )
+    def test_the_scrub_floor_is_eight_characters_in_both_directions(
+        self, length, redacted
+    ):
+        """
+        The floor is a judgement, so it is pinned rather than left to drift.
+
+        Below it a value is likelier to occur in unrelated text than to be the
+        thing being hidden; the docstring states eight, and nothing checked
+        that the code agreed.
+        """
+        from backend.evaluation.runner import _scrub
+
+        secret = "S" * length
+        out = _scrub(f"failed on {secret} here", [secret])
+        assert ("<redacted>" in out) is redacted
+        assert (secret in out) is not redacted
+
+    @pytest.mark.parametrize(
+        ("site", "expected"),
+        [
+            ("provider_build", "provider unavailable: ValueError"),
+            ("chat_path", "provider call failed: ValueError"),
+            ("chat_raises", "chat path failed: ValueError"),
+        ],
+    )
+    def test_a_run_error_names_its_stage_and_the_exception_class(
+        self, monkeypatch, tmp_path, profile, case_by_id, site, expected
+    ):
+        """
+        The docs promise `provider call failed: APIConnectionError`.
+
+        Nothing pinned either half. Deleting `ProviderCall.error_type` left the
+        whole suite green while every provider failure reported `provider call
+        failed: error`, because the aggregation falls back to a literal when
+        the class is missing — so the field the report quotes instead of the
+        raiser's message was itself unprotected. And one site emitted a bare
+        class with no stage at all, against the sentence above.
+
+        `ValueError` rather than `RuntimeError` so the assertion fails if the
+        class stops being read from the exception and starts being a constant.
+        """
+        from backend.ui import ChatService
+        from backend.evaluation.tests.conftest import ScriptedProvider
+
+        monkeypatch.setenv(profile.credential_ref, "unused-by-a-mock")
+        case = case_by_id["skill-adherence-ambiguous-name-halts"]
+
+        if site == "provider_build":
+
+            def factory(_profile):
+                raise ValueError("detail")
+
+        elif site == "chat_path":
+
+            def factory(_profile):
+                provider = ScriptedProvider(["x"])
+
+                def explode(*_args, **_kwargs):
+                    raise ValueError("detail")
+
+                provider.create_completion = explode
+                return provider
+
+        else:
+
+            def explode(*_args, **_kwargs):
+                raise ValueError("detail")
+
+            monkeypatch.setattr(ChatService, "process_message", explode)
+
+            def factory(_profile):
+                return ScriptedProvider(["x"])
+
+        result = run_suite(profile, cases=[case], provider_factory=factory)
+        assert result.scores[0].run_error == expected
+
+    @pytest.mark.parametrize(
         "site",
-        ["provider_build", "chat_path", "fixture_setup"],
+        ["provider_build", "chat_path", "chat_raises", "fixture_setup"],
     )
     def test_no_run_error_carries_the_credential_the_prompt_or_the_skill_text(
         self, monkeypatch, tmp_path, profile, case_by_id, site
@@ -623,12 +897,20 @@ class TestReportsNeverCarryACredential:
         """
         `run_error` reaches a report verbatim, and nothing asserted its CONTENT.
 
-        Only that one was set, and what it was prefixed with. Each of the three
-        construction sites wraps an exception message, and an exception can carry
-        whatever the raiser put in it — a resolved credential, the case prompt,
-        or the whole injected skill text, which G2 names explicitly. All three
-        sites are driven here, with every sentinel checked against the rendered
-        report.
+        Only that one was set, and what it was prefixed with. Each construction
+        site wraps an exception message, and an exception can carry whatever the
+        raiser put in it — a resolved credential, the case prompt, or the whole
+        injected skill text, which G2 names explicitly.
+
+        Which site each name reaches is worth stating, because an earlier
+        version of this docstring claimed three and drove one of them twice.
+        `ChatProcessor.process_message` swallows every exception and returns it
+        as the assistant's reply, so `chat_path` — a provider that raises — does
+        NOT reach the except around `process_message`; it reaches the
+        provider-call aggregation that reads the recorded call. `chat_raises`
+        makes `process_message` itself raise, which is the only way into that
+        except, and the site that had no stage prefix for exactly as long as no
+        test drove it.
         """
         from backend.evaluation.cases import load_cases
         from backend.evaluation.tests.conftest import ScriptedProvider
@@ -652,6 +934,17 @@ class TestReportsNeverCarryACredential:
 
                 provider.create_completion = explode
                 return provider
+
+        elif site == "chat_raises":
+            from backend.ui import ChatService
+
+            def explode(*_args, **_kwargs):
+                raise RuntimeError(f"boom {SENTINEL} {PROSE_SENTINEL}")
+
+            monkeypatch.setattr(ChatService, "process_message", explode)
+
+            def factory(_profile):
+                return ScriptedProvider(["x"])
 
         else:  # fixture_setup
             (tmp_path / case.graph).write_text(

@@ -241,12 +241,19 @@ class TestShippedCases:
         The sibling test above pins that the node exists; nothing pinned that
         the expected VALUE differs from the one the fixture ships. A case
         asking for a summary the node already carries would score
-        `completeness` and `post_write_verification` green on a run where the
-        model answered in prose and called no tools — the same false pass the
-        baseline-snapshot fix removed from the other direction. The validator
-        cannot catch this, because a case is validated before its fixture is
-        loaded, so it is pinned here over the shipped cases.
+        `completeness` green on a run where the model answered in prose and
+        called no tools — the same false pass the baseline-snapshot fix removed
+        from the other direction. Only `completeness` reads this expectation
+        that way: `post_write_verification` is measured by `verify_after_write`
+        alone, which refuses a run with no successful write, so naming it here
+        would overstate the reach.
+
+        The validator cannot catch this, because a case is validated before its
+        fixture is loaded, so it is pinned here over the shipped cases — with a
+        count, because exactly one shipped case declares `final_node_state` and
+        a loop over an empty selection passes while checking nothing.
         """
+        checked = 0
         for case in load_cases():
             graph = json.loads(case.graph_path().read_text(encoding="utf-8"))
             nodes = {node["id"]: node for node in graph["nodes"]}
@@ -257,6 +264,9 @@ class TestShippedCases:
                         f"{case.id}: {node_id}.{key} already is {want!r} in "
                         f"{case.graph}, so the expectation passes without a write"
                     )
+                    checked += 1
+
+        assert checked, "no shipped case declares final_node_state any more"
 
 
 class TestCaseValidation:
@@ -425,7 +435,14 @@ class TestDimensionTable:
     def test_the_narrow_entity_check_is_named_separately_from_hallucination(self):
         narrow = DIMENSIONS["unsupported_entity_reference"]
         assert narrow.mechanical is Mechanical.FULL
-        assert narrow.measured_by == ["answer_entities_supported"]
+        # Both halves: the negative (nothing unsupported is cited) and the
+        # positive (the id asked for is stated). The negative alone passes an
+        # answer that cites nothing, which is correct for the condition and a
+        # false green for a case whose prompt asks for an id.
+        assert narrow.measured_by == [
+            "answer_entities_supported",
+            "answer_cites_ids",
+        ]
         assert "not called a hallucination rate" in narrow.caveat
 
     def test_every_dimension_states_its_caveat(self):

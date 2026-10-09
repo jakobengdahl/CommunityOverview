@@ -72,7 +72,7 @@ DECLARED_CONDITIONS_PER_CASE = [
     ),
     (
         "unsupported-entity-reference",
-        {"tool_calls_valid", "answer_entities_supported"},
+        {"tool_calls_valid", "answer_entities_supported", "answer_cites_ids"},
     ),
     ("token-profile-multi-step-traversal", {"tool_calls_valid"}),
 ]
@@ -699,6 +699,41 @@ class TestSkillsContext:
         assert "Expected tools:" not in context
         # Frontmatter is parsed, not pasted through as body text.
         assert "id: graph-maintenance-protocol" not in context
+
+    def test_a_skill_with_a_body_is_rendered_whole_and_nothing_is_added(self):
+        """
+        The body-present branch pinned as the whole string, like the fallback.
+
+        As fragments — a start, an end, one phrase from the middle, and a list
+        of agent-path markers that must be absent — two mutations survived.
+        Truncating the injected body to its first 200 characters left the suite
+        green while rules 2-4 of the protocol never reached the model: the
+        scripted providers do not read the skill text, so the cases still
+        passed, and a real model would be scored against rules it was never
+        given, which is the conflation G7 exists to prevent. And prefixing the
+        agent path's `Description:` line survived, because the absent-marker
+        list named three of that renderer's labels and not that one.
+
+        Both are closed by the same move the body-less branch already got: the
+        exact string, assembled from the fixture, so anything added, dropped or
+        truncated fails. The markers above stay as documentation of intent.
+        """
+        from backend.evaluation.cases import SKILLS_DIR
+
+        path = SKILLS_DIR / "graph-maintenance-protocol.md"
+        body = path.read_text(encoding="utf-8").split("---", 2)[2].strip()
+        context = build_skills_context([path])
+
+        assert context == (
+            "ACTIVE SKILL INSTRUCTIONS — YOU MUST APPLY THESE TO THIS RESPONSE:"
+            "\n\nThe user has selected the following skills. These instructions "
+            "OVERRIDE your default behavior and style for this response. Apply "
+            "them precisely."
+            f'\n\n<skill name="Graph Maintenance Protocol">\n{body}\n</skill>'
+            "\n\nEND OF SKILL INSTRUCTIONS. Apply the above to your entire "
+            "response."
+        )
+        assert len(body) > 400, "fixture too small for truncation to be detectable"
 
     def test_the_rendered_shape_still_matches_the_frontend_that_produces_it(
         self, tmp_path

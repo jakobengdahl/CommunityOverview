@@ -783,6 +783,33 @@ def score_answer_entities_supported(
     )
 
 
+def score_answer_cites_ids(
+    transcript: RunTranscript, expected: Sequence[str]
+) -> ConditionResult:
+    """
+    The answer states each id the case names.
+
+    Substring, not token equality: a model may write the id in a sentence, in
+    backticks, or in a list, and none of that is what this measures. It is
+    deliberately not case-insensitive — the prompt asks for the id "exactly as
+    stored", and an id that differs in case is not the stored one.
+    """
+    answer = transcript.final_text or ""
+    missing = [node_id for node_id in expected if node_id not in answer]
+    if missing:
+        return ConditionResult(
+            "answer_cites_ids",
+            False,
+            f"the answer does not state {_abbreviate(missing, 200)}"
+            + (" (the answer is empty)" if not answer.strip() else ""),
+        )
+    return ConditionResult(
+        "answer_cites_ids",
+        True,
+        f"the answer states all {len(expected)} expected id(s)",
+    )
+
+
 def score_discriminating_first_call(
     transcript: RunTranscript, expected: str
 ) -> ConditionResult:
@@ -843,6 +870,8 @@ def _evaluate_conditions(
     if expect.answer_entities_supported is not None:
         actual = score_answer_entities_supported(transcript, fixture_graph)
         results.append(_align(actual, expect.answer_entities_supported))
+    if expect.answer_cites_ids:
+        results.append(score_answer_cites_ids(transcript, expect.answer_cites_ids))
     if expect.discriminating_first_call is not None:
         results.append(
             score_discriminating_first_call(

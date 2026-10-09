@@ -18,6 +18,7 @@ from backend.evaluation.scoring import (
     score_case,
     _align,
     ConditionResult,
+    score_answer_cites_ids,
     score_answer_entities_supported,
     score_discriminating_first_call,
     score_final_node_fields_changed,
@@ -986,6 +987,57 @@ class TestFinalNodeFieldsChanged:
         assert score_final_node_fields_changed(
             tr, fixture, {"eval-a": ["summary"]}
         ).passed
+
+
+class TestAnswerCitesIds:
+    """
+    The positive half of the entity check, which the pure negative cannot be.
+
+    `answer_entities_supported` passes an answer that cites nothing, because an
+    answer citing nothing cites nothing unsupported. That is the right reading
+    of the condition — and it made the one shipped case for the dimension green
+    on a model that ran one valid read and then said it could not tell, on a
+    prompt asking for the node id exactly as stored. Inverting the negative was
+    not the fix: a family of no-false-positive tests legitimately asserts that
+    ordinary prose does not trip the detector, and those answers cite no id
+    either. The case needed a condition that fails on a non-answer.
+    """
+
+    def test_an_answer_stating_the_id_passes(self):
+        tr = transcript(final_text="It is eval-initiative-metadata-register.")
+        result = score_answer_cites_ids(tr, ["eval-initiative-metadata-register"])
+        assert result.passed
+
+    def test_an_id_in_backticks_or_a_list_still_counts(self):
+        tr = transcript(final_text="- `eval-initiative-metadata-register`\n")
+        assert score_answer_cites_ids(tr, ["eval-initiative-metadata-register"]).passed
+
+    def test_a_non_answer_fails_and_names_the_missing_id(self):
+        tr = transcript(final_text="I could not determine the node id.")
+        result = score_answer_cites_ids(tr, ["eval-initiative-metadata-register"])
+        assert not result.passed
+        assert "eval-initiative-metadata-register" in result.detail
+
+    def test_an_empty_answer_fails_and_says_so(self):
+        result = score_answer_cites_ids(
+            transcript(final_text=""), ["eval-initiative-metadata-register"]
+        )
+        assert not result.passed
+        assert "empty" in result.detail
+
+    def test_a_differently_cased_id_is_not_the_stored_one(self):
+        """The prompt asks for the id "exactly as stored"."""
+        tr = transcript(final_text="It is EVAL-Initiative-Metadata-Register.")
+        assert not score_answer_cites_ids(
+            tr, ["eval-initiative-metadata-register"]
+        ).passed
+
+    def test_a_bounded_detail_when_many_ids_are_missing(self):
+        result = score_answer_cites_ids(
+            transcript(final_text="no"), [f"eval-node-{i:04d}-x" for i in range(200)]
+        )
+        assert not result.passed
+        assert len(result.detail) < 400, len(result.detail)
 
 
 class TestAnswerEntitiesSupported:

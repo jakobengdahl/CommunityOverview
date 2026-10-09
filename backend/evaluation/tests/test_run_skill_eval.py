@@ -386,9 +386,116 @@ class TestNoCodePathReadsACredentialFromAFile:
         )
         provider = default_provider_factory(profile)
 
-        # Whatever the provider will send must be exactly the environment value.
+        # Off the BUILT REQUEST, not off an attribute. `client.api_key` is one
+        # of several inputs the SDK merges into a request, and it is not the
+        # last word: `default_headers` lands after the auth header it derives,
+        # so `client._custom_headers["Authorization"] = <file contents>` puts a
+        # file-sourced key on the wire while `api_key` still reads the
+        # environment value. This test plants `.eval_key` and chdirs to it, so
+        # it EXECUTED that leak and passed. The header is what actually goes
+        # out, and asserting it closes the class instead of one attribute.
+        from openai._models import FinalRequestOptions
+
+        request = provider.client._build_request(
+            FinalRequestOptions(method="post", url="/chat/completions", json_data={})
+        )
+        assert request.headers.get("authorization") == "Bearer ENV-SOURCED-KEY"
+        assert "FILE-SOURCED-KEY" not in str(request.headers)
         assert provider.client.api_key == "ENV-SOURCED-KEY"
         assert getattr(provider, "api_key", None) in (None, "ENV-SOURCED-KEY")
+
+    def test_building_a_provider_reads_no_file_inside_the_repository(
+        self, monkeypatch, tmp_path
+    ):
+        """
+        The invariant, rather than another banned spelling.
+
+        Two mutations put a file-sourced key on the wire past every guard here.
+        Both wrote `Authorization` into the SDK client's custom headers, which
+        the SDK merges AFTER the auth header it derives from `api_key`; the
+        second reached the dict through a local variable, so the static scan saw
+        an `ast.Subscript` on an `ast.Name` and had nothing to match, and the
+        outcome assertion still held because `api_key` kept the environment
+        value. Enumerating spellings loses that race — the leak needs a repo
+        file, so this forbids the read instead.
+
+        Scoped to the repository tree: the SDK legitimately reads a CA bundle
+        and its own package data from site-packages.
+        """
+        import builtins
+        import pathlib
+
+        from backend.config.model_profiles import ModelProfile
+        from backend.evaluation.runner import default_provider_factory
+
+        repo = pathlib.Path(__file__).resolve().parents[3]
+        real_open = builtins.open
+        real_read_text = pathlib.Path.read_text
+        real_read_bytes = pathlib.Path.read_bytes
+        reads = []
+
+        def guard(path):
+            try:
+                resolved = pathlib.Path(path).resolve()
+            except (OSError, ValueError, TypeError):
+                return
+            if resolved.is_relative_to(repo) and resolved.is_file():
+                reads.append(str(resolved.relative_to(repo)))
+
+        def open_(file, *args, **kwargs):
+            guard(file)
+            return real_open(file, *args, **kwargs)
+
+        def read_text(self, *args, **kwargs):
+            guard(self)
+            return real_read_text(self, *args, **kwargs)
+
+        def read_bytes(self, *args, **kwargs):
+            guard(self)
+            return real_read_bytes(self, *args, **kwargs)
+
+        # Plant one everywhere a leak has been tried, so a read that does
+        # happen has something to find and the failure names the file.
+        planted = []
+        for candidate in (
+            repo / "backend" / "evaluation" / "fixtures" / ".eval_endpoint_token",
+            repo / ".eval_key",
+            repo / "backend" / "evaluation" / ".eval_key",
+        ):
+            if not candidate.exists():
+                candidate.write_text("FILE-SOURCED-KEY", encoding="utf-8")
+                planted.append(candidate)
+
+        monkeypatch.setattr(builtins, "open", open_)
+        monkeypatch.setattr(pathlib.Path, "read_text", read_text)
+        monkeypatch.setattr(pathlib.Path, "read_bytes", read_bytes)
+        monkeypatch.setenv("SKILL_EVAL_FS_PROBE", "ENV-SOURCED-KEY")
+
+        try:
+            provider = default_provider_factory(
+                ModelProfile(
+                    id="probe",
+                    name="Probe",
+                    provider="openai",
+                    model="m",
+                    default=True,
+                    credential_ref="SKILL_EVAL_FS_PROBE",
+                )
+            )
+        finally:
+            monkeypatch.undo()
+            for candidate in planted:
+                candidate.unlink(missing_ok=True)
+
+        assert not reads, f"building a provider read repository file(s): {reads}"
+
+        from openai._models import FinalRequestOptions
+
+        request = provider.client._build_request(
+            FinalRequestOptions(method="post", url="/chat/completions", json_data={})
+        )
+        assert request.headers.get("authorization") == "Bearer ENV-SOURCED-KEY"
+        assert "FILE-SOURCED-KEY" not in str(request.headers)
 
     def test_no_module_assigns_a_credential_onto_a_built_provider(self):
         """
@@ -411,6 +518,12 @@ class TestNoCodePathReadsACredentialFromAFile:
                     node.targets if isinstance(node, ast.Assign) else [node.target]
                 )
                 for target in targets:
+                    # A subscript target wears the attribute one level down:
+                    # `client._custom_headers["Authorization"] = …` is an
+                    # ast.Subscript, so matching ast.Attribute alone let the
+                    # proven bypass through with the whole suite green.
+                    if isinstance(target, ast.Subscript):
+                        target = target.value
                     if isinstance(target, ast.Attribute) and target.attr in (
                         "api_key",
                         "api_key_override",
