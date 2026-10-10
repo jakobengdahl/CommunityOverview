@@ -302,24 +302,19 @@ class TestTheGateSetIsDiscovered:
         """CLAUDE.md is agent-facing process text, so it must describe the same
         merge-blocking CI shape this file verifies from ci.yml."""
         text = CLAUDE_MD.read_text()
-        split_claim = re.search(
-            r"four split worker\+gate required checks: ([^.]+)\.", text
-        )
-
-        assert split_claim, (
-            "CLAUDE.md must state the count/shape of the split required checks"
-        )
-        documented_split_checks = set(re.findall(r"`([^`]+)`", split_claim.group(1)))
-        assert documented_split_checks == set(REQUIRED_CHECK_NAMES.values())
-
-        frontend_lint_claim = re.search(
-            r"Frontend lint is an\s+unconditional required check: `([^`]+)`\.",
+        claim = re.search(
+            r"Required checks on `main`: the split worker\+gate checks"
+            r"\s+([^.]+?),\s+plus the unconditional\s+`([^`]+)`\.",
             text,
         )
-        assert frontend_lint_claim, (
-            "CLAUDE.md must state that frontend lint is required and unconditional"
+
+        assert claim, (
+            "CLAUDE.md must list the required checks on main, split into the "
+            "worker+gate ones and the unconditional one"
         )
-        assert frontend_lint_claim.group(1) == "Frontend lint (eslint + prettier)"
+        documented_split_checks = set(re.findall(r"`([^`]+)`", claim.group(1)))
+        assert documented_split_checks == set(REQUIRED_CHECK_NAMES.values())
+        assert {claim.group(2)} == BRANCH_PROTECTION_CHECKS - documented_split_checks
 
 
 class TestGateDistinguishesWhyTheWorkerSkipped:
