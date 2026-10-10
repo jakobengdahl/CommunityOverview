@@ -11,8 +11,9 @@ with one status so a reader (human or agent session) knows how to trust it:
   context; the system has since moved on. Do not treat as current-state.
 
 For the working structural backlog (desired changes to the repo itself, not a
-description of the system) see [`../STRUCTURE_REVIEW.md`](../STRUCTURE_REVIEW.md)
-and [`../SMALL_FIXES.md`](../SMALL_FIXES.md).
+description of the system) see [`../STRUCTURE_REVIEW.md`](../STRUCTURE_REVIEW.md).
+Open small fixes live in the planning graph; [`../SMALL_FIXES.md`](../SMALL_FIXES.md)
+is a historical archive.
 
 ---
 
@@ -23,6 +24,7 @@ and [`../SMALL_FIXES.md`](../SMALL_FIXES.md).
 | [USER_GUIDE.md](USER_GUIDE.md) | End-user walkthrough of every user-facing feature |
 | [PROFILES.md](PROFILES.md) | Configuration profiles: node types, presentation, env |
 | [ICONS.md](ICONS.md) | Icon-name reference for node-type definitions |
+| [I18N.md](I18N.md) | UI translation fallbacks, adding a language, the English-only lock |
 | [DATA_MANAGEMENT.md](DATA_MANAGEMENT.md) | How graph data files are stored and loaded |
 | [PERSISTENCE_BACKENDS.md](PERSISTENCE_BACKENDS.md) | The storage seam: what a persistence backend implements, and how mutations reach it |
 | [EVENT_SUBSCRIPTIONS.md](EVENT_SUBSCRIPTIONS.md) | Webhook / graph-mutation event system |

@@ -25,6 +25,9 @@ from backend.tests.test_ci_gate_semantics import BRANCH_PROTECTION_CHECKS
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
+# Agent-facing process text: CLAUDE.md and the repo's skills, which carry the
+# workflow rules CLAUDE.md points to.
+AGENT_PROCESS_DOCS = [CLAUDE_MD, *sorted(REPO_ROOT.glob(".claude/skills/*/SKILL.md"))]
 ROOT_PACKAGE_JSON = REPO_ROOT / "package.json"
 
 # job id -> (check name, the exact Playwright command it runs). The command is
@@ -346,9 +349,11 @@ class TestE2EJobShape:
         name = workflow["jobs"][job_id]["name"]
         assert name == E2E_JOBS[job_id][0]
         assert name not in BRANCH_PROTECTION_CHECKS
-        assert f"`{name}`" not in CLAUDE_MD.read_text(), (
-            f"CLAUDE.md names {name!r} as a check; these jobs are non-required"
-        )
+        for doc in AGENT_PROCESS_DOCS:
+            assert f"`{name}`" not in doc.read_text(), (
+                f"{doc.relative_to(REPO_ROOT)} names {name!r} as a check; "
+                "these jobs are non-required"
+            )
 
     def test_nothing_depends_on_it(self, workflow, job_id):
         """A job in any `needs` would either block that job on a browser
