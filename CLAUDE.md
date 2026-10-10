@@ -30,7 +30,9 @@ hosts, tenants, customers or commercial plans in files, commits or PR bodies.
 Re-read every PR body and commit message for hostnames, tenant names, tokens and
 internal URLs before publishing, above all when the change removes one: describe
 it ("a personal lab hostname"), never quote it. A feature spanning more than this
-repo changes only what belongs in the open-source core here.
+repo changes only what belongs in the open-source core here; assume nothing about
+systems beyond the public codebase, and never ask the owner to name files or
+documents to route a feature.
 
 ## Branches and environments
 
@@ -43,15 +45,15 @@ claude/*, feature/*  ← one branch per task
 
 - Environments are **preview** and **prod** ("main" as a deploy target is a naming
   bug); Docker images are built only on pushes to them and on `v*` tags.
-- Merging `main → preview` or `preview → prod` is the owner's deployment action; never propose it.
-  Do it only when the owner explicitly asks for that merge in the current turn
-  ("merge main into preview", "släpp till prod"); "ship it" or "merge the PR" does
-  not count — if the target is ambiguous, ask. Then: confirm the source is green,
-  merge exactly what was asked (never chain a second merge), report what merged and
-  that it triggers a build and deploy of that environment.
-- **Hotfix path**, the only PR into `prod` without that request: branch `hotfix/<desc>` off
-  `origin/prod`, fix and test, open a PR against `prod` with the justification,
-  and after it merges, merge `prod` back into `main` at once.
+- Any merge into `preview` or `prod` is the owner's deployment action; never
+  propose one. Merge only when the owner explicitly asks for that merge in the
+  current turn ("merge main into preview", "släpp till prod"); "ship it" or "merge
+  the PR" does not count — if the target is ambiguous, ask. Then confirm the source
+  is green, merge exactly what was asked (never chain a second merge), and report
+  what merged and that it builds and deploys that environment.
+- **Hotfix path**, only when a critical bug must bypass the main/preview queue: PR
+  `hotfix/<desc>` (off `origin/prod`) into `prod` with the justification — the only
+  PR into `prod` you open unasked; the owner merges it; then merge `prod` into `main`.
 
 ## Development workflow
 
@@ -111,8 +113,7 @@ a session ends, sweep unlogged notes into the graph. Never add to `SMALL_FIXES.m
 
 ## Never
 
-- Push directly to `main`; open a PR into or merge into `preview`/`prod` without
-  the owner's request (hotfix path aside).
+- Push directly to `main`, or PR or merge into `preview`/`prod` outside the rules above.
 - Add features beyond the task. `git add -A` / `git add .` — stage by name; no
   non-source file over ~50 KB without saying why.
 - Leave `print()`, `breakpoint()`, `pdb`, test credentials, generated data in
@@ -191,7 +192,6 @@ references even when the image does not exist yet.
 | `config/default/` `schema_config.json` / `federation_config.json` | Schema (breaking-change surface) / federation topology |
 | `.github/workflows/ci.yml` | CI: tests and lint on PRs; images on `preview`/`prod`/`v*` push |
 | `.claude/settings.json`, `.claude/hooks/` | Session hooks (pre-push format check, no draft PRs) |
-| `backend/DEVELOPMENT.md` | Architecture overview and API docs |
 | `frontend/web/src/i18n/` | `en.json` (key source of truth), `sv.json`, `index.jsx` (`useI18n()`) |
 | `packages/ui-graph-canvas/src/components/GraphCanvas.jsx` | Canvas and context menus (text via props) |
 | `docs/USER_GUIDE.md` | End-user guide with screenshot references |
