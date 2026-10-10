@@ -43,13 +43,13 @@ claude/*, feature/*  ← one branch per task
 
 - Environments are **preview** and **prod** ("main" as a deploy target is a naming
   bug); Docker images are built only on pushes to them and on `v*` tags.
-- Merging `main → preview` or `preview → prod` is the owner's deployment action.
+- Merging `main → preview` or `preview → prod` is the owner's deployment action; never propose it.
   Do it only when the owner explicitly asks for that merge in the current turn
   ("merge main into preview", "släpp till prod"); "ship it" or "merge the PR" does
   not count — if the target is ambiguous, ask. Then: confirm the source is green,
   merge exactly what was asked (never chain a second merge), report what merged and
   that it triggers a build and deploy of that environment.
-- **Hotfix path**, the only PR not against `main`: branch `hotfix/<desc>` off
+- **Hotfix path**, the only PR into `prod` without that request: branch `hotfix/<desc>` off
   `origin/prod`, fix and test, open a PR against `prod` with the justification,
   and after it merges, merge `prod` back into `main` at once.
 
@@ -68,7 +68,7 @@ A session owns its task end to end — solve, PR, review loop, docs, merge to `m
    pytest backend/ -q                  # pytest backend/<module>/tests/ -q while iterating
    npm run test:unit
    (cd services/mcp_oauth_gateway && pytest test_oauth_flow.py test_upstream_auth.py test_lockfiles.py -q)
-   ruff check backend scripts && ruff format --check backend scripts
+   python3 -m ruff check backend scripts && python3 -m ruff format --check backend scripts
    npm run lint && npm run format:check
    ```
    A test you did not touch breaking is a signal: investigate before continuing.
@@ -83,8 +83,8 @@ A session owns its task end to end — solve, PR, review loop, docs, merge to `m
 9. **Review loop:** run `/review-loop` (`.claude/skills/review-loop/SKILL.md`).
 10. **Divergence:** `git merge origin/main` (never rebase a pushed branch),
     resolve conflicts by understanding both sides, re-run the suite.
-11. **Merge:** once the merging head is reviewed, enable auto-merge (squash);
-    GitHub merges on green. No scheduled self-wakeups to wait for CI.
+11. **Merge:** when `/review-loop` allows it, enable auto-merge (squash); GitHub
+    merges on green. No scheduled self-wakeups to wait for CI.
 
 Required checks on `main`: the split worker+gate checks `Backend tests`,
 `Frontend tests`, `Gateway tests`, `Python lint (ruff)`, plus the unconditional
@@ -92,8 +92,8 @@ Required checks on `main`: the split worker+gate checks `Backend tests`,
 skip and their gates fail on purpose, mailing the owner on every push; never
 "fix" that in the workflow — the PR belongs in ready-for-review.
 
-**Done:** local checks pass; CI green on the merging head; review loop terminated
-with residue logged; docs updated in the same PR; scope stated in the PR body.
+**Done:** local checks pass; CI green on the merging head; review loop ended per
+its skill, residue logged; docs updated in the same PR; scope stated in the PR body.
 
 **CI red:** read the output first. Your code → fix, verify, push. Infrastructure
 (flaky runner, network, unrelated dependency) → PR comment for the owner; no merge.
@@ -101,17 +101,18 @@ with residue logged; docs updated in the same PR; scope stated in the PR body.
 ## Fix, don't log
 
 A problem you find while working that is inside the change radius and takes under
-about 30 minutes is fixed in the same PR and named in the PR body. Anything outside
-the change radius, or larger, becomes one `small-fix`-tagged Task node in the graph
-(attached as above) with: **name**; **file:line**; **context** (branch it was found
-on); **issue** (what and why it matters); **effort** XS (one line) | S (≤ ~30 lines,
-one file) | M (more). Without a planning MCP, list it in the PR body and flag it to
-the owner. Never add entries to `SMALL_FIXES.md` (historical archive only), and
-never put proposals or TODOs into current-state docs.
+about 30 minutes is fixed in the same PR and named in the PR body (review findings
+follow `/review-loop` instead). Anything else becomes one `small-fix`-tagged Task
+node (attached as above): **name**; **file:line**; **context** (branch); **issue**
+(what, and why it matters); **effort** XS (one line) | S (≤ ~30 lines, one file) |
+M. Without a planning MCP, list it in the PR body and flag it to the owner. Before
+a session ends, sweep unlogged notes into the graph. Never add to `SMALL_FIXES.md`
+(historical archive) or put proposals or TODOs into current-state docs.
 
 ## Never
 
-- Push directly to `main`; PR or merge into `preview`/`prod` unasked (see above).
+- Push directly to `main`; open a PR into or merge into `preview`/`prod` without
+  the owner's request (hotfix path aside).
 - Add features beyond the task. `git add -A` / `git add .` — stage by name; no
   non-source file over ~50 KB without saying why.
 - Leave `print()`, `breakpoint()`, `pdb`, test credentials, generated data in
@@ -136,9 +137,9 @@ never put proposals or TODOs into current-state docs.
 - Python: standard-library style, no decorator-heavy abstractions. Never raw SQL,
   shell injection or unvalidated external data in logic; validate at boundaries.
 - Config: `pyproject.toml` (ruff; `services/mcp_oauth_gateway/` is outside its
-  scope), `eslint.config.mjs`, `.prettierrc.json`.
-- ruff is pinned below 0.16; `python3 -m ruff` is the pinned one (a newer ruff
-  reformats Markdown fences CI never asks for). `rules-of-hooks` errors are bugs.
+  scope), `eslint.config.mjs`, `.prettierrc.json`. `rules-of-hooks` errors are bugs.
+- ruff is pinned below 0.16 in `backend/requirements-dev.txt`; run that install as
+  `python3 -m ruff` (a newer ruff reformats Markdown fences CI never asks for).
 - A pre-push hook blocks `git push` while committed Python or JS files fail
   `ruff format`/`ruff check`/`prettier --check` (`npm run format` fixes JS).
 
