@@ -600,16 +600,20 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         # What a query legitimately needs is proportional to the NUMBER of
         # nodes - the similarities, their negation, and the argsort's output -
         # and not to the size of the index. So the budget is sized to the
-        # shipped path's measured peak of 17.50 bytes a row, not to something
-        # comfortable: a loose budget admits an ordering that is O(n) in
-        # Python objects rather than in numpy, which is what G2 is about.
-        # Measured at this fixture's own size, both returning results identical
-        # to the shipped path: `argsort(...).tolist()` costs 50.07 bytes a row
-        # (2.9x) and `sorted(range(n), key=...)` 82.05 (4.7x). The first fits
-        # inside the 64-byte-a-row budget this replaced; the second does not,
-        # but it did fit a budget derived from the matrix's BYTES at every size
+        # shipped path's measured peak, not to something comfortable: a loose
+        # budget admits an ordering that is O(n) in Python objects rather than
+        # in numpy, which is what G2 is about. That peak is 4 bytes a row for
+        # the float32 similarities, 4 for their negation, 8 for the int64
+        # order, plus the stable sort's merge buffer, which is numpy's to
+        # size: 17.50 bytes a row where this budget was first measured, 21.47
+        # on numpy 2.5 / CPython 3.13. Measured at this fixture's own size,
+        # both returning results identical to the shipped path:
+        # `argsort(...).tolist()` costs 50.07 bytes a row (2.1x this budget)
+        # and `sorted(range(n), key=...)` 82.05 (3.4x). The first fits inside
+        # the 64-byte-a-row budget this replaced; the second does not, but it
+        # did fit a budget derived from the matrix's BYTES at every size
         # tried, which is the budget shape this one exists to reject.
-        budget = rows * 20
+        budget = rows * 24
 
         peak = measured["peak"]
         assert peak < budget, (

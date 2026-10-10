@@ -72,8 +72,25 @@ def create_test_event(
 class TestDeliveryWorker:
     """Tests for the DeliveryWorker class."""
 
-    def test_is_safe_url(self):
+    @patch("backend.core.events.delivery.socket.getaddrinfo")
+    def test_is_safe_url(self, mock_getaddrinfo):
         """Test the SSRF URL validation function."""
+
+        # Resolve the hostnames below without the network: a sandbox with no
+        # resolver would otherwise fail every public URL and make this a
+        # test of DNS rather than of the classifier.
+        def resolve(host, *args, **kwargs):
+            table = {
+                "example.com": "93.184.216.34",
+                "google.com": "142.250.74.46",
+                "localhost": "127.0.0.1",
+            }
+            if host not in table:
+                raise socket.gaierror(f"no such host in this test: {host}")
+            return [(None, None, None, None, (table[host], 0))]
+
+        mock_getaddrinfo.side_effect = resolve
+
         # Safe URLs
         assert is_safe_url("https://example.com/hook") is True
         assert is_safe_url("http://google.com") is True

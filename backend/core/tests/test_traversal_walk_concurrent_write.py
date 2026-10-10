@@ -269,13 +269,28 @@ class TestAWriteMidWalk:
 
         assert drained
         assert copies[0] == unwritten
+        # Whatever landed, the walk's answer is complete - checked before the
+        # skip below so a copy that swallowed an interruption instead of
+        # retrying fails here rather than skipping.
+        assert {f"e{i}" for i in base} <= {e.id for e in result["edges"]}
+        if len(copies) == 1:
+            # The hook only interrupts the copy when a collection runs inside
+            # it, which the docstring above ties to CPython 3.11's allocator.
+            # Where the collection ran before or after the copy instead (a
+            # write landed, but the one copy saw a settled dict), nothing was
+            # interrupted and the retry count below means nothing - the
+            # deterministic tests in this class still cover the retry path -
+            # so this is a skip, not a pass and not a failure.
+            pytest.skip(
+                "no garbage collection ran inside the copy on this interpreter "
+                f"(CPython {sys.version.split()[0]}; writes landed: {len(writes)})"
+            )
         # The walk copies this dict once; every copy after the first is a
         # retry, which only an interrupted copy starts. A grow forces enough
         # of them that a retry giving up after a few dozen attempts fails.
         assert len(copies) - 1 >= min_retries, copies
         if write == "swap":
             assert sys.getsizeof(written) == size
-        assert {f"e{i}" for i in base} <= {e.id for e in result["edges"]}
 
 
 class TestTheCopyKeepsTheWalksAnswer:
