@@ -53,9 +53,16 @@ describe('annotation type matrix (cross-language fixture) — JS model', () => {
         'image',
         'freehand',
         'heatmap',
+        'reference',
       ])
     );
     expect(types.filter((t) => t === 'shape')).toHaveLength(2);
+    // One reference case per target kind — see the backend counterpart's own
+    // comment on this assertion for why one case would not be enough.
+    expect(types.filter((t) => t === 'reference')).toHaveLength(3);
+    expect(
+      new Set(cases.filter((c) => c.type === 'reference').map((c) => c.fields.target_kind))
+    ).toEqual(new Set(['session', 'url', 'resource']));
   });
 
   for (const testCase of cases) {

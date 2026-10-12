@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { createAnnotation } from '@community-graph/ui-graph-canvas';
+import { createAnnotation, ANNOTATION_TYPES } from '@community-graph/ui-graph-canvas';
 import {
   annotationsToGroups,
   annotationsToOverlays,
@@ -53,6 +53,23 @@ describe('describeActivity', () => {
   it('falls back to the unknown type key for an unrecognised annotation type', () => {
     const r = record({ op: 'annotation_created', after: { type: 'not_a_real_type' } });
     expect(describeActivity(r).params.type).toBe('history.annotation_type.unknown');
+  });
+
+  // Driven off the canvas package's own type list rather than a hand-copied
+  // one, so adding an annotation kind without an activity string fails here
+  // instead of silently reading as "an annotation" in the session panel. That
+  // is exactly what happened to `reference`: every other kind had a key, the
+  // new one fell through to `unknown`, and nothing noticed because the
+  // spot-checks above only name four kinds. A key-parity test cannot catch it
+  // either — a key absent from BOTH locales is consistent.
+  it.each(ANNOTATION_TYPES)('names the %s kind rather than falling back to unknown', (type) => {
+    const r = record({ op: 'annotation_created', after: { type } });
+    expect(describeActivity(r).params.type).toBe(`history.annotation_type.${type}`);
+  });
+
+  it.each(ANNOTATION_TYPES)('has an en and sv activity string for %s', (type) => {
+    expect(en.history.annotation_type[type]).toBeTruthy();
+    expect(sv.history.annotation_type[type]).toBeTruthy();
   });
 
   describe('annotation_updated classification', () => {

@@ -36,6 +36,7 @@ class TestTypeResolution:
             "image",
             "freehand",
             "heatmap",
+            "reference",
         } == set(GENERIC_ANNOTATION_TYPES)
 
     def test_all_types_includes_note_and_group(self):

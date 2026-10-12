@@ -692,3 +692,113 @@ describe('heat-map annotations survive the server <-> overlay round trip', () =>
     expect(back.intensity).toBe(7);
   });
 });
+
+describe('reference annotations survive the server <-> overlay round trip', () => {
+  // The leg that matters most: this is the browser's hydrate -> canvas ->
+  // autosave path, and a field missing from either translator is diffed back
+  // to its default on the next autosave. For a reference that means a live
+  // tile silently turning into a broken one (a dropped `target`) or being
+  // reclassified (a dropped `target_kind`) — the "unsized-geometry clobber"
+  // class of bug with a navigation target instead of a width.
+  it.each([
+    ['session', '8244-1742-3391-0057'],
+    ['url', 'https://example.org/handbook'],
+    ['resource', 'resource-method-guide'],
+  ])('keeps a %s target and the rest of the payload', (targetKind, target) => {
+    const server = {
+      id: 'ref-1',
+      type: 'reference',
+      position: { x: 5, y: 6 },
+      geometry: { x: 5, y: 6, w: 240, h: 80, rotation: 0 },
+      target_kind: targetKind,
+      target,
+      label: 'Overview',
+      icon: 'flag',
+      preview: { title: 'Overview', site: 'example.org' },
+      z: 0,
+      locked: false,
+    };
+    const overlays = annotationsToOverlays([server]);
+    expect(overlays).toHaveLength(1);
+    expect(overlays[0].kind).toBe('reference');
+    expect(overlays[0].target_kind).toBe(targetKind);
+    expect(overlays[0].target).toBe(target);
+    expect(overlays[0].label).toBe('Overview');
+    expect(overlays[0].icon).toBe('flag');
+    expect(overlays[0].preview).toEqual({ title: 'Overview', site: 'example.org' });
+
+    const [back] = overlaysToAnnotations(overlays);
+    expect(back.type).toBe('reference');
+    expect(back.target_kind).toBe(targetKind);
+    expect(back.target).toBe(target);
+    expect(back.label).toBe('Overview');
+    expect(back.icon).toBe('flag');
+    expect(back.preview).toEqual({ title: 'Overview', site: 'example.org' });
+    expect(back.geometry.w).toBe(240);
+    expect(back.geometry.h).toBe(80);
+  });
+
+  it('keeps a reference with no label, icon or preview', () => {
+    const [overlay] = annotationsToOverlays([
+      {
+        id: 'ref-2',
+        type: 'reference',
+        position: { x: 0, y: 0 },
+        target_kind: 'url',
+        target: 'https://example.org',
+      },
+    ]);
+    expect(overlay.label).toBe('');
+    expect(overlay.preview).toBeUndefined();
+    const [back] = overlaysToAnnotations([overlay]);
+    expect(back.target).toBe('https://example.org');
+    expect(back.label).toBe('');
+  });
+
+  // An unrecognised stored target kind is carried through, not coerced: the
+  // tile must render as broken, and a coercion would make it look live.
+  it('carries an unrecognised target kind through verbatim', () => {
+    const [overlay] = annotationsToOverlays([
+      {
+        id: 'ref-3',
+        type: 'reference',
+        position: { x: 0, y: 0 },
+        target_kind: 'graph_node',
+        target: 'x',
+      },
+    ]);
+    expect(overlay.target_kind).toBe('graph_node');
+    const [back] = overlaysToAnnotations([overlay]);
+    expect(back.target_kind).toBe('graph_node');
+  });
+
+  it('does not invent a target kind for a reference stored without one', () => {
+    const [overlay] = annotationsToOverlays([
+      { id: 'ref-4', type: 'reference', position: { x: 0, y: 0 }, target: 'x' },
+    ]);
+    expect(overlay.target_kind).toBe(null);
+    const [back] = overlaysToAnnotations([overlay]);
+    expect(back.target_kind).toBe(null);
+  });
+
+  it('round-trips a move without touching the payload', () => {
+    const [overlay] = annotationsToOverlays([
+      {
+        id: 'ref-5',
+        type: 'reference',
+        position: { x: 0, y: 0 },
+        geometry: { x: 0, y: 0, w: 220, h: 72, rotation: 0 },
+        target_kind: 'url',
+        target: 'https://example.org',
+        label: 'Handbook',
+      },
+    ]);
+    const moved = { ...overlay, position: { x: 400, y: 500 } };
+    const [back] = overlaysToAnnotations([moved]);
+    expect(back.position).toEqual({ x: 400, y: 500 });
+    expect(back.target).toBe('https://example.org');
+    expect(back.label).toBe('Handbook');
+    expect(back.geometry.w).toBe(220);
+    expect(back.geometry.h).toBe(72);
+  });
+});

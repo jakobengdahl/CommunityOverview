@@ -470,6 +470,7 @@ export function NodeContextMenu({
   onDimEdges,
   onRestoreEdges,
   onAttachNearby,
+  onTeleport,
   onClose,
 }) {
   const [containerRef, setContainerRef] = useMergedContainerRef(null);
@@ -550,6 +551,21 @@ export function NodeContextMenu({
           }}
         >
           🔍 {cml.expand}
+        </button>
+      )}
+      {/* Offered only for a node another graph owns; the host decides that from
+          the node's provenance and passes no handler for a local node. */}
+      {onTeleport && (
+        <button
+          type="button"
+          data-menu-item="root"
+          title={cml.openInSourceGraphTooltip}
+          onClick={() => {
+            onTeleport(menu.node.id, menu.node.data);
+            onClose();
+          }}
+        >
+          🛰️ {cml.openInSourceGraph}
         </button>
       )}
       <button

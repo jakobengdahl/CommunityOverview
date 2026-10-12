@@ -1,5 +1,10 @@
 import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
-import { GraphCanvas, CANVAS_ANNOTATION_TYPES } from '@community-graph/ui-graph-canvas';
+import {
+  GraphCanvas,
+  CANVAS_ANNOTATION_TYPES,
+  isSafeReferenceUrl,
+  trimReferenceTarget,
+} from '@community-graph/ui-graph-canvas';
 import '@community-graph/ui-graph-canvas/styles';
 import useGraphStore from './store/graphStore';
 import { useI18n } from './i18n';
@@ -13,6 +18,7 @@ import AppDialogs from './components/AppDialogs';
 import ConfirmDialog from './components/ConfirmDialog';
 import AppInstallPrompt from './components/AppInstallPrompt';
 import * as api from './services/api';
+import { teleportToSourceGraph } from './utils/teleport';
 import * as sessionStore from './services/sessionStore';
 import {
   annotationsToGroups,
@@ -126,6 +132,7 @@ function App() {
     focusNodeId,
     clearFocusNode,
     setFocusNodeId,
+    setGuideSearchInput,
     pendingGroups,
     setPendingGroups,
     pendingAnnotations,
@@ -157,6 +164,14 @@ function App() {
 
   const urlGuideStartedRef = useRef(false);
   const urlViewLoadedRef = useRef(false);
+  const urlFocusNodeLoadedRef = useRef(false);
+  // The saved-view load clears the canvas after its own await, so focusing a
+  // ?node= before it settles can have the node wiped out from under the focus.
+  // Starts settled when there is no ?view= to wait for, which is also why this
+  // is derived at mount rather than set from inside the view effect.
+  const [urlViewSettled, setUrlViewSettled] = useState(
+    () => !new URLSearchParams(window.location.search).get('view')
+  );
   const latestViewport = useRef(null);
   const dialogOpenRef = useRef(false);
   const appRef = useRef(null);
@@ -1060,6 +1075,8 @@ function App() {
         if (result.annotations?.length) setPendingAnnotations(result.annotations);
       } catch (err) {
         console.error('[App] Failed to load view from URL:', err);
+      } finally {
+        setUrlViewSettled(true);
       }
     })();
   }, [
@@ -1075,6 +1092,53 @@ function App() {
     setNotification({ type, message });
     setTimeout(() => setNotification(null), 3000);
   }, []);
+
+  // Arrive from a teleport: ?node=<id> focuses that node, and ?from_graph
+  // names where the visitor came from. This is the receiving half of the
+  // navigation contract whose outbound half handleTeleportToSourceGraph
+  // builds — the parameter names live in backend/federation/teleport.py, so a
+  // route this app hands out is one it can also consume.
+  useEffect(() => {
+    // Waits for ?view= to settle: a saved-view load clears the canvas after its
+    // own await, and a gui_url may legitimately carry both parameters.
+    if (!stats || !urlViewSettled || urlFocusNodeLoadedRef.current) return;
+    const params = new URLSearchParams(window.location.search);
+    const focusId = params.get('node');
+    if (!focusId) return;
+    urlFocusNodeLoadedRef.current = true;
+    const searchContext = params.get('q');
+    const fromGraph = params.get('from_graph');
+    (async () => {
+      try {
+        const result = await api.getNodeDetails(focusId);
+        if (!result?.success || !result.node) {
+          showNotification('info', t('federation.teleport_focus_not_found'));
+          return;
+        }
+        addNodesToVisualization([result.node], result.edges || []);
+        setFocusNodeId(result.node.id);
+        // Carry the sender's search text into the search box so the visitor
+        // lands on the node without losing what they were looking for.
+        if (searchContext) {
+          setGuideSearchInput({ text: searchContext, animated: false });
+        }
+        if (fromGraph) {
+          showNotification('info', t('federation.teleport_returned_from', { graph: fromGraph }));
+        }
+      } catch (err) {
+        console.error('[App] Failed to focus node from URL:', err);
+        showNotification('info', t('federation.teleport_focus_not_found'));
+      }
+    })();
+  }, [
+    stats,
+    urlViewSettled,
+    addNodesToVisualization,
+    setFocusNodeId,
+    setGuideSearchInput,
+    showNotification,
+    t,
+  ]);
 
   useEffect(() => {
     const syncOfflineState = () => setIsOffline(window.navigator?.onLine === false);
@@ -1158,6 +1222,21 @@ function App() {
       setDetailNode,
       showNotification,
     ]
+  );
+
+  // Callback: leave for the graph that owns this node. The status-to-outcome
+  // mapping lives in utils/teleport.js so the canvas context menu and the
+  // search result list answer the four defined behaviours identically.
+  const handleTeleportToSourceGraph = useCallback(
+    (nodeId, _nodeData, { searchQuery = '' } = {}) =>
+      teleportToSourceGraph({
+        nodeId,
+        sessionId,
+        searchQuery,
+        t,
+        showNotification,
+      }),
+    [sessionId, showNotification, t]
   );
 
   // Callback: open the node detail dialog directly on its change-history tab
@@ -2133,10 +2212,10 @@ function App() {
   // round-trip), then swap the session ID (reconnects the SSE stream, reflects
   // the URL) and load the target's canvas from the server.
   const switchToSession = useCallback(
-    (targetId, { register = true, eagerConnect = false } = {}) => {
+    (targetId, { register = true, eagerConnect = false, onMissing } = {}) => {
       requestSessionSnapshot(async () => {
         try {
-          await loadSessionFromServer(targetId, { eagerConnect });
+          await loadSessionFromServer(targetId, { eagerConnect, onMissing });
           setSessionId(targetId);
           reflectSessionUrl(targetId);
           if (register) sessionStore.touchSession(targetId);
@@ -2233,6 +2312,99 @@ function App() {
       }
     },
     [sessionId, switchToSession, showNotification, t]
+  );
+
+  // ── Reference tiles (docs/ANNOTATION_CONTRACT.md "Reference tiles") ──────
+  // What the canvas can decide for itself (no target; a url target whose
+  // scheme it refuses to link) it already has. This answers the one thing
+  // only the host knows, and answers `undefined` — "no opinion" — for
+  // everything it does not actually know, because greying out a live tile is
+  // as wrong as leaving a dead one looking live.
+  const isReferenceTargetAvailable = useCallback((targetKind, target) => {
+    // A session id that cannot be a session id is unreachable with certainty.
+    // A well-formed one that is not in this browser's local session list is
+    // NOT: that list is what this browser has visited, not what exists on the
+    // server, so a colleague's shared session would be marked broken on the
+    // strength of never having been opened here.
+    if (targetKind === 'session') {
+      return sessionStore.isValidSessionId(target) ? undefined : false;
+    }
+    // `url` is the canvas's own scheme check, and a `resource` target needs a
+    // graph lookup this cannot do synchronously during render — it is resolved
+    // when the reference is actually opened (handleReferenceOpen below).
+    return undefined;
+  }, []);
+
+  const handleReferenceOpen = useCallback(
+    async ({ targetKind, target }) => {
+      if (targetKind === 'session') {
+        if (!sessionStore.isValidSessionId(target)) {
+          showNotification('error', t('sessions.invalid_session_id'));
+          return;
+        }
+        if (target === sessionId) {
+          showNotification('info', t('context_menu.reference_already_here'));
+          return;
+        }
+        // Eager connect for the same reason handleConnectSession above does
+        // it: this is a join by id, not a session this browser created.
+        //
+        // `onMissing` for the same reason the ?session= deep-link path passes
+        // it (contract §5.3): a 404 does not throw — the hook clears the
+        // canvas and seeds a new session under that id — so without this,
+        // following a tile to a session that has since been deleted would move
+        // the user off their board onto a blank canvas with no explanation.
+        // A reference tile is the same kind of deep link.
+        switchToSession(target, {
+          eagerConnect: true,
+          onMissing: () => showNotification('info', t('sessions.link_not_found')),
+        });
+        return;
+      }
+      if (targetKind === 'url') {
+        // Re-checked here even though the canvas refuses to render an unsafe
+        // target as openable and the server refuses to store one. This is the
+        // call that actually hands a string to the browser, and a guard at the
+        // point of use costs one function call; the alternative is trusting
+        // every layer upstream of it to have stayed correct.
+        //
+        // Trimmed with the gate's OWN set before both the check and the open,
+        // so the string validated is the string handed to the browser.
+        // `isSafeReferenceUrl` trims internally, so passing it a raw value
+        // made it approve one string while `window.open` received another —
+        // and U+0085 survives `String.prototype.trim()`, so a stored target
+        // the shared fixture lists as valid resolved against the app's own
+        // origin instead of the author's page.
+        const safeTarget = trimReferenceTarget(target);
+        if (!isSafeReferenceUrl(safeTarget)) {
+          showNotification('error', t('context_menu.reference_unsafe_target'));
+          return;
+        }
+        // `noopener,noreferrer`: the opened page must not get a handle on this
+        // window (reverse tabnabbing) and should not be told where it came
+        // from.
+        window.open(safeTarget, '_blank', 'noopener,noreferrer');
+        return;
+      }
+      if (targetKind === 'resource') {
+        // Bring the node into the view and focus it. The existence check is
+        // here rather than in the resolver above because it needs the server:
+        // a resource reference therefore reports a missing target when it is
+        // followed, not before.
+        try {
+          const details = await api.getNodeDetails(target);
+          if (!details?.node) {
+            showNotification('error', t('context_menu.reference_broken_target'));
+            return;
+          }
+          await addNodesToVisualization([details.node], []);
+          setFocusNodeId(target);
+        } catch {
+          showNotification('error', t('context_menu.reference_broken_target'));
+        }
+      }
+    },
+    [sessionId, switchToSession, showNotification, t, addNodesToVisualization, setFocusNodeId]
   );
 
   const handleRenameSession = useCallback(
@@ -2429,6 +2601,7 @@ function App() {
 
   const shellProps = {
     sessionId,
+    onTeleportToSourceGraph: handleTeleportToSourceGraph,
     sessions,
     currentSessionId: sessionId,
     onNewSession: handleNewSession,
@@ -2496,6 +2669,8 @@ function App() {
           onCreateAgent={handleCreateAgent}
           onDropCreateNode={handleDropCreateNode}
           onImageIngest={handleImageIngest}
+          onReferenceOpen={handleReferenceOpen}
+          isReferenceTargetAvailable={isReferenceTargetAvailable}
           onShowOnly={handleShowOnly}
           onSelectionChange={handleSelectionChange}
           onNodeDoubleClick={handleNodeDoubleClick}
@@ -2661,6 +2836,23 @@ function App() {
             ariaKindArrow: t('context_menu.aria_kind_arrow'),
             ariaKindFreehand: t('context_menu.aria_kind_freehand'),
             ariaKindGroup: t('context_menu.aria_kind_group'),
+            ariaKindReference: t('context_menu.aria_kind_reference'),
+            ariaKindReferenceSession: t('context_menu.aria_kind_reference_session'),
+            ariaKindReferenceUrl: t('context_menu.aria_kind_reference_url'),
+            ariaKindReferenceResource: t('context_menu.aria_kind_reference_resource'),
+            ariaKindReferenceBroken: t('context_menu.aria_kind_reference_broken'),
+            referenceUntitled: t('context_menu.reference_untitled'),
+            referenceOpen: t('context_menu.reference_open'),
+            referenceRename: t('context_menu.reference_rename'),
+            referenceLabel: t('context_menu.reference_label'),
+            referenceTarget: t('context_menu.reference_target'),
+            referenceTargetSession: t('context_menu.reference_target_session'),
+            referenceTargetUrl: t('context_menu.reference_target_url'),
+            referenceTargetResource: t('context_menu.reference_target_resource'),
+            referenceTargetUnknown: t('context_menu.reference_target_unknown'),
+            referenceBrokenTarget: t('context_menu.reference_broken_target'),
+            referenceUnsafeTarget: t('context_menu.reference_unsafe_target'),
+            referencePasteCreated: t('context_menu.reference_paste_created'),
             annotationWidth: t('context_menu.annotation_width'),
             annotationHeight: t('context_menu.annotation_height'),
             annotationSize: t('context_menu.annotation_size'),
@@ -2672,7 +2864,10 @@ function App() {
             annotationAttachToCancel: t('context_menu.annotation_attach_to_cancel'),
             annotationMultiSelectMode: t('context_menu.annotation_multi_select_mode'),
             annotationOverlapPickerTitle: t('context_menu.annotation_overlap_picker_title'),
+            openInSourceGraph: t('context_menu.open_in_source_graph'),
+            openInSourceGraphTooltip: t('federation.teleport_action_tooltip'),
           }}
+          onTeleportToSourceGraph={handleTeleportToSourceGraph}
           annotationToolboxLabels={{
             toggleExpand: t('annotation_toolbox.toggle_expand'),
             toggleCollapse: t('annotation_toolbox.toggle_collapse'),
