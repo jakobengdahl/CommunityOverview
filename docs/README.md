@@ -38,6 +38,7 @@ is a historical archive.
 | [DEPLOYMENT_AND_CONCURRENCY_ANALYSIS.md](DEPLOYMENT_AND_CONCURRENCY_ANALYSIS.md) | GraphStorage thread/process-safety design |
 | [mcp-oauth-gateway.md](mcp-oauth-gateway.md) | The OAuth 2.1 gateway service that fronts the MCP endpoint |
 | [SSPCloud-setup.md](SSPCloud-setup.md) | Getting started on SSPCloud with the stat-metadata profile |
+| [SKILL_EVALUATION.md](SKILL_EVALUATION.md) | Measuring the AI assistant's skill loading, instruction following and tool execution across providers |
 | [MANUAL_TESTING.md](MANUAL_TESTING.md) | Manual verification checklist before `main` → `preview` |
 | [TEST_PLAN.md](TEST_PLAN.md) | Manual test plan for features on `main` not yet in `preview` |
 

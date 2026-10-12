@@ -291,3 +291,13 @@ uvicorn backend.api_host.server:get_app --factory --port 8000
 
 **Recommendation:** For cost-effective operations with similar quality, GPT-4o is recommended.
 
+
+## Comparing providers on skill execution
+
+Which provider to use is partly an empirical question: a mid-size open model may
+load a skill and follow it less reliably than a larger one on the same inputs.
+`docs/SKILL_EVALUATION.md` describes a harness that runs a fixed set of
+acceptance cases — the same graph, prompts and skills — against any provider
+configuration, and scores skill adherence, tool-call validity, ID resolution,
+post-write verification, completeness, latency and token profile. It also states
+which of those are scored mechanically and which are not.
