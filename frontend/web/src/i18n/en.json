@@ -151,6 +151,7 @@
       "heatmap": "a heat-map circle",
       "image": "an image",
       "freehand": "a freehand drawing",
+      "reference": "a reference tile",
       "unknown": "an annotation"
     },
     "desc": {
@@ -416,7 +417,19 @@
     "depth_label": "Depth",
     "depth_tooltip": "Depth levels are defined by installation configuration",
     "depth_indicator": "Depth {current}/{max}",
-    "depth_indicator_tooltip": "Current federated search depth and maximum allowed depth"
+    "depth_indicator_tooltip": "Current federated search depth and maximum allowed depth",
+    "teleport_action": "Open in source graph",
+    "teleport_action_tooltip": "Open this node in the graph that owns it",
+    "teleport_opening": "Opening {graph}…",
+    "teleport_already_local": "This node is already in the current graph.",
+    "teleport_permission_denied": "You do not have access to this node's source graph.",
+    "teleport_graph_unavailable": "{graph} cannot be reached right now.",
+    "teleport_graph_unavailable_unnamed": "The source graph cannot be reached right now.",
+    "teleport_unknown_node": "This node could not be found.",
+    "teleport_failed": "Could not work out where this node comes from.",
+    "teleport_cross_deployment_confirm": "{graph} is a separate deployment. Open it in a new tab?",
+    "teleport_returned_from": "Opened from {graph}.",
+    "teleport_focus_not_found": "The linked node is not in this graph."
   },
   "canvas": {
     "lazy_showing": "Showing {loaded} of {total} nodes",
@@ -556,7 +569,26 @@
     "annotation_multi_select_mode": "Select multiple",
     "annotation_overlap_picker_title": "Multiple objects here — choose one",
     "annotation_size": "Size",
-    "annotation_more_actions": "More actions"
+    "annotation_more_actions": "More actions",
+    "reference_untitled": "Reference",
+    "reference_open": "Open target",
+    "reference_rename": "Rename",
+    "reference_label": "Label",
+    "reference_target": "Target",
+    "reference_target_session": "Session",
+    "reference_target_url": "Web page",
+    "reference_target_resource": "Supporting material",
+    "reference_target_unknown": "Unknown target",
+    "reference_broken_target": "Target not available",
+    "reference_unsafe_target": "Unsafe link — not opened",
+    "reference_paste_created": "Added a link to the pasted address",
+    "reference_already_here": "You are already in that session",
+    "aria_kind_reference": "Reference",
+    "aria_kind_reference_session": "session",
+    "aria_kind_reference_url": "web page",
+    "aria_kind_reference_resource": "supporting material",
+    "aria_kind_reference_broken": "broken target",
+    "open_in_source_graph": "Open in source graph"
   },
   "annotation_toolbox": {
     "toggle_expand": "Add annotation",

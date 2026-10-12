@@ -13,6 +13,7 @@ import httpx2 as httpx
 from backend.core import storage_search
 from backend.core.models import Edge, Node
 
+from . import teleport
 from .config import FederationFileConfig, FederationGraphConfig
 
 
@@ -334,6 +335,26 @@ class FederationManager:
             return None
         return self._get_graph_config(origin_graph_id)
 
+    def get_graph_config(self, graph_id: str) -> Optional[FederationGraphConfig]:
+        """Resolve a graph's config by its id, or None when it is not configured.
+
+        Keyed on ``graph_id`` rather than on a cached node, so a node that
+        carries provenance but is not in the cache — an adopted node's local
+        reference stub, or any node whose cache entry has not been synced yet —
+        still resolves to the graph that owns it.
+        """
+        return self._get_graph_config(graph_id)
+
+    def get_cache_status(self, graph_id: str) -> str:
+        """Return the cache health state for ``graph_id`` ("" when unknown).
+
+        Teleport uses this to tell a configured-but-unreachable source graph
+        apart from one that can be opened.
+        """
+        with self._lock:
+            entry = self._cache.get(graph_id)
+            return entry.status if entry is not None else ""
+
     def get_max_selectable_depth(self) -> int:
         """Return effective max depth users may select for federated search."""
         max_depth = int(self._config.federation.max_traversal_depth or 0)
@@ -501,7 +522,9 @@ class FederationManager:
         id_mapping: Dict[str, str] = {}
         for source_node in source_nodes:
             origin_node_id = source_node.get("id")
-            federated_node_id = f"federated::{graph.graph_id}::{origin_node_id}"
+            federated_node_id = teleport.build_federated_node_id(
+                graph.graph_id, origin_node_id
+            )
             id_mapping[str(origin_node_id)] = federated_node_id
 
             metadata = dict(source_node.get("metadata") or {})
@@ -542,7 +565,9 @@ class FederationManager:
             if not source or not target:
                 continue
 
-            edge_id = f"federated::{graph.graph_id}::{source_edge.get('id', f'{source}->{target}')}"
+            edge_id = teleport.build_federated_node_id(
+                graph.graph_id, source_edge.get("id", f"{source}->{target}")
+            )
             edge_payload = {
                 "id": edge_id,
                 "source": source,

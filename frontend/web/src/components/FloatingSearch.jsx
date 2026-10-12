@@ -1,13 +1,14 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
-import { Search } from 'react-bootstrap-icons';
+import { Search, BoxArrowUpRight } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { resolveIcon, resolveColor } from './FloatingToolbar';
 import * as api from '../services/api';
 import './FloatingSearch.css';
 import { useI18n } from '../i18n';
 import { savedViewMetadataToCanvasMetadata } from '../utils/sessionAnnotations';
+import { isFederatedNode, originGraphName } from '@community-graph/ui-graph-canvas';
 
-function FloatingSearch({ variant = 'floating' }) {
+function FloatingSearch({ variant = 'floating', onTeleport }) {
   const { t, language } = useI18n();
   const {
     nodes: vizNodes,
@@ -159,14 +160,15 @@ function FloatingSearch({ variant = 'floating' }) {
         return node.name;
       }
 
-      const originGraphId = node.metadata?.origin_graph_id;
-      const originGraphName =
-        node.metadata?.origin_graph_name ||
-        (originGraphId ? graphDisplayNames[originGraphId] : null) ||
-        graphDisplayNames.local ||
-        t('floating_search.local_graph');
+      // Same reader the canvas context menu uses to decide what is federated,
+      // so one node cannot be labelled by one rule here and acted on by another
+      // there.
+      const graphName = originGraphName(node, {
+        graphDisplayNames,
+        localLabel: t('floating_search.local_graph'),
+      });
 
-      return `${originGraphName}: ${node.name}`;
+      return `${graphName}: ${node.name}`;
     },
     [graphDisplayNames, showGraphPrefix, t]
   );
@@ -451,25 +453,43 @@ function FloatingSearch({ variant = 'floating' }) {
             const isInViz =
               vizNodes.some((n) => n.id === node.id) && !hiddenNodeIds.includes(node.id);
 
+            // A result owned by another graph gets a second, explicit action
+            // beside the ordinary one, so selecting the result still brings it
+            // onto this canvas and only the teleport button leaves for the
+            // source graph. The row is a wrapper rather than one button
+            // because a button cannot nest inside another button.
+            const canTeleport = Boolean(onTeleport) && isFederatedNode(node);
+
             return (
-              <button
-                key={node.id}
-                className={`floating-search-result ${index === selectedIndex ? 'selected' : ''}`}
-                onClick={() => selectResult(node)}
-                onMouseEnter={() => setSelectedIndex(index)}
-              >
-                <span className="floating-search-result-dot" style={{ backgroundColor: color }} />
-                {Icon && <Icon size={14} style={{ color, flexShrink: 0 }} />}
-                <span className="floating-search-result-name">{getResultLabel(node)}</span>
-                <span className="floating-search-result-type" style={{ color }}>
-                  {getTypeLabel(node.type)}
-                </span>
-                {isInViz && (
-                  <span className="floating-search-result-badge">
-                    {t('floating_search.in_view_badge')}
+              <div key={node.id} className="floating-search-result-row">
+                <button
+                  className={`floating-search-result ${index === selectedIndex ? 'selected' : ''}`}
+                  onClick={() => selectResult(node)}
+                  onMouseEnter={() => setSelectedIndex(index)}
+                >
+                  <span className="floating-search-result-dot" style={{ backgroundColor: color }} />
+                  {Icon && <Icon size={14} style={{ color, flexShrink: 0 }} />}
+                  <span className="floating-search-result-name">{getResultLabel(node)}</span>
+                  <span className="floating-search-result-type" style={{ color }}>
+                    {getTypeLabel(node.type)}
                   </span>
+                  {isInViz && (
+                    <span className="floating-search-result-badge">
+                      {t('floating_search.in_view_badge')}
+                    </span>
+                  )}
+                </button>
+                {canTeleport && (
+                  <button
+                    className="floating-search-result-teleport"
+                    title={t('federation.teleport_action_tooltip')}
+                    aria-label={t('federation.teleport_action')}
+                    onClick={() => onTeleport(node.id, node, { searchQuery: query })}
+                  >
+                    <BoxArrowUpRight size={13} aria-hidden="true" />
+                  </button>
                 )}
-              </button>
+              </div>
             );
           })}
         </div>
