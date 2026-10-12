@@ -3526,25 +3526,29 @@ class GraphStorage:
         Get all edges connected to any of the given nodes (incoming or outgoing).
         More efficient than iterating through all edges.
         """
-        collected_edges = {}
+        collected_edges = []
+        seen = set()
 
-        for node_id in node_ids:
-            if node_id not in self.nodes:
-                continue
+        valid_nodes = [nid for nid in node_ids if nid in self.graph]
+        if not valid_nodes:
+            return []
 
-            if node_id in self.graph:
-                # Outgoing edges
-                for _, _, _, edge_data in self.graph.out_edges(
-                    node_id, keys=True, data=True
-                ):
-                    edge = edge_data["data"]
-                    collected_edges[edge.id] = edge
+        # Outgoing edges
+        for _, _, _, edge_data in self.graph.out_edges(
+            valid_nodes, keys=True, data=True
+        ):
+            edge = edge_data["data"]
+            if edge.id not in seen:
+                seen.add(edge.id)
+                collected_edges.append(edge)
 
-                # Incoming edges
-                for _, _, _, edge_data in self.graph.in_edges(
-                    node_id, keys=True, data=True
-                ):
-                    edge = edge_data["data"]
-                    collected_edges[edge.id] = edge
+        # Incoming edges
+        for _, _, _, edge_data in self.graph.in_edges(
+            valid_nodes, keys=True, data=True
+        ):
+            edge = edge_data["data"]
+            if edge.id not in seen:
+                seen.add(edge.id)
+                collected_edges.append(edge)
 
-        return list(collected_edges.values())
+        return collected_edges
