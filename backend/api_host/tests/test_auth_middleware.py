@@ -243,6 +243,24 @@ class TestAuthEnabledTakesPrecedence:
         finally:
             os.unlink(path)
 
+    def test_only_the_shared_session_stream_route_is_bypassed(self):
+        """The stream bypass covers exactly {prefix}/sessions/{id}/stream. Other
+        paths that merely start with {prefix}/sessions/ and end in /stream —
+        the session CRUD route addressed as id "stream", or a deeper sub-path —
+        must still be 401'd rather than handed to routing unauthenticated."""
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+        try:
+            for method, url in [
+                ("GET", "/api/sessions/stream"),
+                ("PATCH", "/api/sessions/stream"),
+                ("DELETE", "/api/sessions/stream"),
+                ("GET", "/api/sessions/1234-5678/extra/stream"),
+            ]:
+                resp = client.request(method, url, json={"name": "x"})
+                assert resp.status_code == 401, (method, url, resp.status_code)
+        finally:
+            os.unlink(path)
+
 
 class TestUnauthorizedContentNegotiation:
     """The 401 challenge is negotiated by Accept.
