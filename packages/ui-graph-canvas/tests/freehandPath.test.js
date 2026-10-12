@@ -545,3 +545,34 @@ describe('pressure width range', () => {
     expect(widthAt(0, 0.01)).toBeCloseTo(0.2, 9);
   });
 });
+
+describe('pressure width continuity and clamping', () => {
+  const widthAt = (pressure, base = 4) =>
+    buildPressureSegments(
+      [
+        { x: 0, y: 0, pressure },
+        { x: 10, y: 0, pressure },
+      ],
+      0,
+      base
+    )[0].width;
+
+  it('has no jump across the 0.5 anchor: neighbouring pressures give neighbouring widths', () => {
+    // Steepest slope is (3.5 - 1) / 0.5 = 5 base widths per unit pressure, so
+    // 0.001 of pressure may move the width by at most 0.005 * base.
+    const base = 4;
+    for (const p of [0.4, 0.45, 0.49, 0.499, 0.5, 0.501, 0.51, 0.55, 0.6]) {
+      expect(Math.abs(widthAt(p + 0.001, base) - widthAt(p, base))).toBeLessThan(
+        0.005 * base + 1e-9
+      );
+    }
+    expect(widthAt(0.499, base)).toBeCloseTo(base, 1);
+    expect(widthAt(0.501, base)).toBeCloseTo(base, 1);
+  });
+
+  it('clamps out-of-range pressure to the 0 and 1 widths', () => {
+    expect(widthAt(-1)).toBeCloseTo(widthAt(0), 9);
+    expect(widthAt(2)).toBeCloseTo(widthAt(1), 9);
+    expect(widthAt(1.1)).toBeCloseTo(widthAt(1), 9);
+  });
+});
