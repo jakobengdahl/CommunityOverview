@@ -36,6 +36,8 @@ function DesktopShell({
   onEnterFullscreen,
   suspendEscape,
   onCreateNodeForType,
+  // Teleport a federated search result to the graph that owns it.
+  onTeleportToSourceGraph,
   onCreateAgent,
   onCreateSubscription,
   onSaveView,
@@ -72,7 +74,7 @@ function DesktopShell({
         onEnterFullscreen={onEnterFullscreen}
         suspendEscape={suspendEscape}
       />
-      <FloatingSearch />
+      <FloatingSearch onTeleport={onTeleportToSourceGraph} />
       <FloatingToolbar
         onCreateNode={onCreateNodeForType}
         onCreateAgent={onCreateAgent}

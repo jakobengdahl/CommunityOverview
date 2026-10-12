@@ -149,6 +149,43 @@
       "w": 180,
       "h": 180,
       "fields": { "intensity": 7 }
+    },
+    {
+      "id": "reference-session-1",
+      "type": "reference",
+      "x": 120,
+      "y": 240,
+      "w": 220,
+      "h": 72,
+      "fields": {
+        "target_kind": "session",
+        "target": "8244-1742-3391-0057",
+        "label": "Programme overview",
+        "icon": "flag"
+      }
+    },
+    {
+      "id": "reference-url-1",
+      "type": "reference",
+      "x": 360,
+      "y": 240,
+      "w": 220,
+      "h": 72,
+      "fields": {
+        "target_kind": "url",
+        "target": "https://example.org/handbook",
+        "label": "Handbook",
+        "preview": { "title": "Statistical handbook", "site": "example.org" }
+      }
+    },
+    {
+      "id": "reference-resource-1",
+      "type": "reference",
+      "x": 600,
+      "y": 240,
+      "w": 220,
+      "h": 72,
+      "fields": { "target_kind": "resource", "target": "resource-method-guide" }
     }
   ]
 }

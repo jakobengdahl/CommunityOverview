@@ -248,10 +248,23 @@ class TestAuthorization:
             assert denied["success"] is False
             assert denied.get("error_code") == "access_denied"
 
-    def test_deny_all_mode_blocks_reads(self, crud_tools, monkeypatch):
+    # Every session-index READ goes here, not just the first one written. A
+    # session id is itself the capability — the grouped-digit shape exists so
+    # an unauthenticated caller cannot feasibly enumerate live sessions (see
+    # session_store.py) — so a tool that lists them must be refused under
+    # deny-all. `search_reference_target_sessions` enumerates them with an
+    # empty query, and shipped without this coverage: removing its
+    # authorization check left the whole backend green, while removing the
+    # identical check from `list_visualization_sessions` was killed here
+    # immediately (round 1 mutation review, S4).
+    @pytest.mark.parametrize(
+        "tool_name",
+        ["list_visualization_sessions", "search_reference_target_sessions"],
+    )
+    def test_deny_all_mode_blocks_reads(self, crud_tools, monkeypatch, tool_name):
         tools_map, _ = crud_tools
         monkeypatch.setenv(AUTHORIZATION_MODE_ENV, "deny-all")
-        result = tools_map["list_visualization_sessions"]()
+        result = tools_map[tool_name]()
         assert result["success"] is False
         assert result.get("error_code") == "access_denied"
 
