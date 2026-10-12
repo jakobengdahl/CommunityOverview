@@ -178,7 +178,22 @@ export function groupsToAnnotations(viewGroups, parentIds) {
 // subsumes what the retired `frame` kind was.
 // `heatmap` carries only its whole-number `intensity` beyond the envelope; its
 // colour and transparency are both derived from that level.
-const GENERIC_OVERLAY_TYPES = new Set(['text', 'shape', 'icon', 'vote_dot', 'image', 'heatmap']);
+// `reference` carries what it points at (`target_kind` + `target`) and what
+// it shows (`label`, `icon`, an optional text-only `preview`) beyond the
+// envelope. All of them must travel BOTH ways: dropping `target` on either
+// leg would make the next autosave diff a live tile back to a broken one,
+// and dropping `target_kind` would silently reclassify it — the
+// "unsized-geometry clobber" class of bug, with a navigation target instead
+// of a width.
+const GENERIC_OVERLAY_TYPES = new Set([
+  'text',
+  'shape',
+  'icon',
+  'vote_dot',
+  'image',
+  'heatmap',
+  'reference',
+]);
 
 function genericAnnotationToOverlay(a) {
   const overlay = {
@@ -251,6 +266,16 @@ function genericAnnotationToOverlay(a) {
     overlay.alt = a.alt || '';
   } else if (a.type === 'heatmap') {
     overlay.intensity = a.intensity;
+  } else if (a.type === 'reference') {
+    // `?? null` rather than `|| null`: an unrecognised stored target kind is
+    // carried through verbatim so the tile renders as broken, which is the
+    // truth about it — coercing it to a known kind would make a broken
+    // reference look live.
+    overlay.target_kind = a.target_kind ?? null;
+    overlay.target = a.target || '';
+    overlay.label = a.label || '';
+    overlay.icon = a.icon;
+    if (a.preview) overlay.preview = a.preview;
   }
   return overlay;
 }
@@ -307,6 +332,12 @@ function genericOverlayToAnnotation(o) {
     input.alt = o.alt || '';
   } else if (o.kind === 'heatmap') {
     input.intensity = o.intensity;
+  } else if (o.kind === 'reference') {
+    input.target_kind = o.target_kind ?? null;
+    input.target = o.target || '';
+    input.label = o.label || '';
+    input.icon = o.icon;
+    if (o.preview) input.preview = o.preview;
   }
   if (o.size) input.size = o.size;
   return createAnnotation(input);
