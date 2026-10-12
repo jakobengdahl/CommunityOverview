@@ -730,6 +730,7 @@ class ChatService:
         collection_short_name: Optional[str] = None,
         visible_node_ids: Optional[List[str]] = None,
         selected_node_ids: Optional[List[str]] = None,
+        llm_provider: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         Process a chat message and return the response.
@@ -759,6 +760,10 @@ class ChatService:
                 canvas. Injected as situational context so the AI can distinguish
                 between an empty canvas and a populated one.
             selected_node_ids: IDs of nodes the user has selected in the canvas.
+            llm_provider: Optional ready-made LLMProvider used verbatim instead of
+                resolving one from env/model profiles. Passed through to
+                ChatProcessor.process_message for the evaluation harness
+                (backend/evaluation); see that parameter's docstring there.
 
         Returns:
             Dict with:
@@ -844,6 +849,7 @@ class ChatService:
                 tools_override=tools_override,
                 visualization_context=visualization_context,
                 tool_allowlist=tool_allowlist,
+                llm_provider=llm_provider,
             )
         finally:
             self._current_federation_depth = None

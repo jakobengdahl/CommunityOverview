@@ -49,3 +49,10 @@ numpy>=1.24.0
 # SECRET_STORE_HEALTH_CHECK_SECRET_ID is set (hosted-SaaS deployments); a
 # no-op elsewhere.
 google-cloud-secret-manager>=2.16.0
+
+# jsonschema - validates the assistant's tool-call arguments against the tools'
+# own input_schema in the evaluation harness (backend/evaluation/scoring.py).
+# Already present transitively via mcp; declared here because the harness
+# imports it directly, and a transitive dependency can be dropped by an
+# unrelated upgrade.
+jsonschema>=4.20.0
