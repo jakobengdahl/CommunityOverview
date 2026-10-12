@@ -3529,7 +3529,7 @@ class GraphStorage:
         collected_edges = []
         seen = set()
 
-        valid_nodes = [nid for nid in node_ids if nid in self.graph]
+        valid_nodes = [nid for nid in node_ids if nid in self.nodes and nid in self.graph]
         if not valid_nodes:
             return []
 
