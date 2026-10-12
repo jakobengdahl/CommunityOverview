@@ -28,6 +28,7 @@ import AnnotationErrorBoundary from './AnnotationErrorBoundary';
 import AnnotationToolbox from './AnnotationToolbox';
 import FreehandAnnotationNode from './FreehandAnnotationNode';
 import { DEFAULT_FREEHAND_OPTIONS } from '../utils/freehandOptions';
+import { isFederatedNode } from '../utils/nodeProvenance';
 import { AnnotationContext } from './AnnotationContext';
 import SimpleFloatingEdge from './SimpleFloatingEdge';
 import {
@@ -429,6 +430,9 @@ function GraphCanvasInner({
   onShowOnly,
   onSelectionChange,
   onNodeDoubleClick: onNodeDoubleClickCallback,
+  // Teleport a node to the graph that owns it. Offered only for a node whose
+  // provenance names another graph; ordinary double-click is unaffected.
+  onTeleportToSourceGraph,
   focusNodeId = null,
   onFocusComplete,
   createGroupSignal = 0,
@@ -674,6 +678,8 @@ function GraphCanvasInner({
     ariaKindReferenceUrl: 'web page',
     ariaKindReferenceResource: 'supporting material',
     ariaKindReferenceBroken: 'broken target',
+    openInSourceGraph: 'Open in source graph',
+    openInSourceGraphTooltip: 'Open this node in the graph that owns it',
     ...contextMenuLabels,
   };
   // Read through a ref inside the freehand pointer-capture effect below, for
@@ -5647,6 +5653,11 @@ function GraphCanvasInner({
           onDimEdges={onDimEdges}
           onRestoreEdges={onRestoreEdges}
           onAttachNearby={attachNearbyAnnotation}
+          onTeleport={
+            onTeleportToSourceGraph && isFederatedNode(nodeContextMenu?.node?.data)
+              ? onTeleportToSourceGraph
+              : undefined
+          }
           onClose={() => setNodeContextMenu(null)}
         />
 

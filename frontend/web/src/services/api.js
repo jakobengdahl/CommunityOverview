@@ -120,6 +120,28 @@ export async function searchGraph(query, options = {}) {
 }
 
 /**
+ * Resolve the canonical route from a node to the graph that owns it.
+ *
+ * The server decides, from the caller's graph access, whether a route may be
+ * handed back at all; the response's `status` is one of `ok`, `local`,
+ * `permission_denied`, `graph_unavailable` or `unknown_node`.
+ *
+ * @param {string} nodeId - Local or federated node ID
+ * @param {Object} options - `sessionId` and `searchQuery` to carry along
+ * @returns {Promise<Object>} Resolved teleport target
+ */
+export async function resolveTeleport(nodeId, options = {}) {
+  return apiFetch(`${API_BASE}/federation/teleport`, {
+    method: 'POST',
+    body: JSON.stringify({
+      node_id: nodeId,
+      session_id: options.sessionId,
+      search_query: options.searchQuery,
+    }),
+  });
+}
+
+/**
  * Get details for a specific node
  * @param {string} nodeId - Node ID
  * @returns {Promise<{node: Object, edges: Array}>}
