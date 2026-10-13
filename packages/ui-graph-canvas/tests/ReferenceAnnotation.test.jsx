@@ -159,15 +159,6 @@ describe('reference URL gate — the whitespace enumeration itself', () => {
   });
 });
 
-// The other half of the shared cross-language fixture that
-// backend/core/tests/test_session_annotations_reference.py drives. The backend
-// gate and this one are separate implementations by design — the backend
-// decides what may be STORED, this decides what may be DRAWN AS CLICKABLE, and
-// this side must not trust what it is handed. Separate implementations drift,
-// and round 1 of the review loop caught drift in the dangerous direction: the
-// backend's lenient `urlsplit` accepted hosts with spaces and out-of-range
-// ports that this strict WHATWG parser refuses, so a target could be stored
-// and then render permanently broken as "Unsafe link — not opened".
 // U+001C-U+001F are whitespace to Python's `str.isspace()` but are left out of
 // the shared class: both gates' control-character check refuses them first.
 // The fixture's per-character cases enumerate the class, so they never reach
@@ -191,6 +182,15 @@ describe('reference URL gate — the C0 separators are left to the control check
   });
 });
 
+// The other half of the shared cross-language fixture that
+// backend/core/tests/test_session_annotations_reference.py drives. The backend
+// gate and this one are separate implementations by design — the backend
+// decides what may be STORED, this decides what may be DRAWN AS CLICKABLE, and
+// this side must not trust what it is handed. Separate implementations drift,
+// and round 1 of the review loop caught drift in the dangerous direction: the
+// backend's lenient `urlsplit` accepted hosts with spaces and out-of-range
+// ports that this strict WHATWG parser refuses, so a target could be stored
+// and then render permanently broken as "Unsafe link — not opened".
 describe('reference URL gate — agreement with the backend', () => {
   it.each(urlGate.accept)('accepts the shared case %j', (target) => {
     expect(isSafeReferenceUrl(target)).toBe(true);
@@ -249,9 +249,10 @@ describe('reference annotation — model', () => {
     // Round 5's mutation pass reverted this function's trim to `.trim()` and
     // both JS suites stayed green: the url kind is masked because
     // `isSafeReferenceUrl` trims internally, and no case drove a session or
-    // resource target through it. For a target of only U+0085 the revert
-    // returns null — a tile drawn live, with an open control, whose own
-    // referenceTarget is ''. Every kind, every character of the shared set.
+    // resource target through it. For a session or resource target of only
+    // U+0085 the revert returns null — a tile drawn live, with an open
+    // control, whose own referenceTarget is '' (a url one reads 'unsafe'
+    // instead). Every kind, every character of the shared set.
     it.each(
       REFERENCE_TARGET_KINDS.flatMap((kind) => urlGate.whitespace.map((code) => [kind, code]))
     )('reports a %s target of only U+%s as missing', (kind, code) => {
