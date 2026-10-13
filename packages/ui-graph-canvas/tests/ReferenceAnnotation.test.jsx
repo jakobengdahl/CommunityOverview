@@ -159,6 +159,29 @@ describe('reference URL gate — the whitespace enumeration itself', () => {
   });
 });
 
+// U+001C-U+001F are whitespace to Python's `str.isspace()` but are left out of
+// the shared class: both gates' control-character check refuses them first.
+// The fixture's per-character cases enumerate the class, so they never reach
+// these four, and round 5's mutation pass narrowed the backend's control check
+// to `< 0x1C` with the whole backend green. This is the canvas half of the pin
+// on that delegation; test_session_annotations_reference.py carries the other.
+const C0_SEPARATORS = ['001C', '001D', '001E', '001F'];
+
+describe('reference URL gate — the C0 separators are left to the control check', () => {
+  it.each(C0_SEPARATORS)('does not trim U+%s as whitespace', (code) => {
+    const char = String.fromCodePoint(parseInt(code, 16));
+    expect(trimReferenceTarget(`${char}x${char}`)).toBe(`${char}x${char}`);
+  });
+
+  it.each(C0_SEPARATORS)('refuses U+%s in a path, a host and at either end', (code) => {
+    const char = String.fromCodePoint(parseInt(code, 16));
+    expect(isSafeReferenceUrl(`https://example.org/a${char}b`)).toBe(false);
+    expect(isSafeReferenceUrl(`https://exa${char}mple.org/x`)).toBe(false);
+    expect(isSafeReferenceUrl(`${char}https://example.org/x`)).toBe(false);
+    expect(isSafeReferenceUrl(`https://example.org/x${char}`)).toBe(false);
+  });
+});
+
 // The other half of the shared cross-language fixture that
 // backend/core/tests/test_session_annotations_reference.py drives. The backend
 // gate and this one are separate implementations by design — the backend
@@ -221,6 +244,20 @@ describe('reference annotation — model', () => {
       expect(referenceTargetProblem({ target: 'https://example.org' })).toBe('missing');
       expect(referenceTargetProblem({ target_kind: 'url', target: '   ' })).toBe('missing');
       expect(referenceTargetProblem({ target_kind: 'nope', target: 'x' })).toBe('missing');
+    });
+
+    // Round 5's mutation pass reverted this function's trim to `.trim()` and
+    // both JS suites stayed green: the url kind is masked because
+    // `isSafeReferenceUrl` trims internally, and no case drove a session or
+    // resource target through it. For a session or resource target of only
+    // U+0085 the revert returns null — a tile drawn live, with an open
+    // control, whose own referenceTarget is '' (a url one reads 'unsafe'
+    // instead). Every kind, every character of the shared set.
+    it.each(
+      REFERENCE_TARGET_KINDS.flatMap((kind) => urlGate.whitespace.map((code) => [kind, code]))
+    )('reports a %s target of only U+%s as missing', (kind, code) => {
+      const char = String.fromCodePoint(parseInt(code, 16));
+      expect(referenceTargetProblem({ target_kind: kind, target: char })).toBe('missing');
     });
 
     it('reports an unsafe url target as unsafe, not merely missing', () => {

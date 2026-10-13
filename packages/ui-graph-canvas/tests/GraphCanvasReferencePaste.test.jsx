@@ -383,6 +383,18 @@ describe('GraphCanvas reference paste', () => {
       expect(clipboardImageWillBeIngested(undefined, ingest)).toBe(false);
     });
 
+    // Must mirror the image handler, which takes only `image/` types — so a
+    // looser `startsWith('image')` would stand the URL paste down for a type
+    // nothing ingests, silently dropping the paste. Round 5 found it unpinned.
+    it('is false for a type that only starts with the word image', () => {
+      expect(
+        clipboardImageWillBeIngested(
+          [{ type: 'imagemap/x', getAsFile: () => file }, textItem],
+          ingest
+        )
+      ).toBe(false);
+    });
+
     it('tolerates an item with no type', () => {
       expect(clipboardImageWillBeIngested([{ getAsFile: () => null }], ingest)).toBe(false);
     });
