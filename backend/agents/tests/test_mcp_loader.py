@@ -759,7 +759,8 @@ class _StubHttpxModule:
     and the webhook tests in backend/core/events/tests/test_delivery.py).
 
     `RequestError` and `InvalidURL` are forwarded because `_connect_http`
-    names them in its `except` clause; a stub that dropped them would turn a
+    names them in its `except` clause, and `RemoteProtocolError` because
+    `_execute_search_tool` does; a stub that dropped them would turn a
     caught error into an AttributeError. `HTTPError` is not named anywhere in
     mcp_loader.py -- it is forwarded only so the stub stays usable if a future
     walker reaches for it.
@@ -770,6 +771,7 @@ class _StubHttpxModule:
     """
 
     RequestError = httpx.RequestError
+    RemoteProtocolError = httpx.RemoteProtocolError
     InvalidURL = httpx.InvalidURL
     HTTPError = httpx.HTTPError
 
@@ -2432,16 +2434,57 @@ class TestSearchToolRedirects:
         assert "error" in result
         assert "results" not in result
 
-    def test_redirect_error_does_not_echo_the_location(self, requests_seen):
+    @pytest.mark.parametrize("status_code", REDIRECT_STATUSES)
+    def test_redirect_error_does_not_echo_the_location(
+        self, requests_seen, status_code
+    ):
         """The far end chooses Location; it must not reach the model's tool
-        result, where it would read as instructions or a link to follow."""
+        result, where it would read as instructions or a link to follow.
+        Every 3xx, because raise_for_status quotes Location for any status
+        that carries one, so a guard narrowed to some statuses would leak it."""
         _, install = requests_seen
-        install(lambda request: _redirect("https://elsewhere.example/collect"))
+        install(
+            lambda request: _redirect("https://elsewhere.example/collect", status_code)
+        )
 
         result = MCPLoader([])._execute_search_tool("search", {"query": "q"})
 
         assert "elsewhere.example" not in result["error"]
-        assert "302" in result["error"]
+        assert str(status_code) in result["error"]
+
+    @pytest.mark.parametrize(
+        "location",
+        [
+            "https://[elsewhere.example]/collect",
+            "https://999.999.999.999/collect",
+            "https://elsewhere.example:99999/collect",
+        ],
+    )
+    def test_malformed_location_is_not_echoed(self, requests_seen, location):
+        """httpx parses Location even when not following it, and its parse
+        error quotes the offending host or port."""
+        seen, install = requests_seen
+        install(lambda request: _redirect(location))
+
+        result = MCPLoader([])._execute_search_tool("search", {"query": "q"})
+
+        assert "elsewhere.example" not in result["error"]
+        assert "999" not in result["error"]
+        assert len(seen) == 1
+
+    @pytest.mark.parametrize("status_code", [401, 429, 500])
+    def test_error_status_is_an_error_not_empty_results(
+        self, requests_seen, status_code
+    ):
+        _, install = requests_seen
+        install(
+            lambda request: httpx.Response(status_code, json={"web": {"results": []}})
+        )
+
+        result = MCPLoader([])._execute_search_tool("search", {"query": "q"})
+
+        assert "error" in result
+        assert "results" not in result
 
     def test_direct_response_still_returns_results(self, requests_seen):
         seen, install = requests_seen

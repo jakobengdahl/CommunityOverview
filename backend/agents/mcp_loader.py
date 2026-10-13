@@ -1098,6 +1098,12 @@ class MCPLoader:
 
                 return {"query": query, "results": results}
 
+            except httpx.RemoteProtocolError:
+                # Raised among others for an unparseable Location, and its
+                # message quotes that far-end-chosen text; return a fixed one.
+                return {
+                    "error": "Search failed: malformed response from the search API"
+                }
             except Exception as e:
                 return {"error": f"Search failed: {e}"}
 
