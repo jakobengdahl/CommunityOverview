@@ -627,6 +627,35 @@ def test_one_add_nodes_call_writes_the_sidecar_once(storage, tmpdir_path):
     }
 
 
+def test_a_second_write_before_the_first_lands_does_not_resnapshot_the_matrix(
+    storage,
+):
+    """A write issued while one carrying the same vector revision is still
+    queued must not export and rewrite the identical matrix."""
+    calls = []
+    real_save = storage._embedding_sidecar.save
+
+    def counting_save(vectors):
+        calls.append(sorted(vectors))
+        return real_save(vectors)
+
+    storage._embedding_sidecar.save = counting_save
+    # Hold the single writer so neither write lands before both are issued.
+    release = threading.Event()
+    storage._io_executor.submit(release.wait)
+    try:
+        storage.add_nodes(_sample_nodes(), [])
+        storage.add_nodes(
+            [],
+            [Edge(id="e1", source="n1", target="n2", type=RelationshipType.RELATES_TO)],
+        )
+    finally:
+        release.set()
+    storage.flush()
+
+    assert len(calls) == 1, f"sidecar rewritten {len(calls)} times: {calls}"
+
+
 def test_a_zero_length_inline_vector_does_not_empty_the_whole_sidecar(tmpdir_path):
     """dim 0 would make the sidecar read back as no vectors at all.
 
