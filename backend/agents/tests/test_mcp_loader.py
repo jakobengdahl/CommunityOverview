@@ -763,6 +763,10 @@ class _StubHttpxModule:
     caught error into an AttributeError. `HTTPError` is not named anywhere in
     mcp_loader.py -- it is forwarded only so the stub stays usable if a future
     walker reaches for it.
+
+    `get` is routed too: _execute_search_tool calls the module-level
+    httpx.get, and it wraps everything in a broad `except`, so a missing stub
+    attribute would come back as a plausible-looking {"error": ...} dict.
     """
 
     RequestError = httpx.RequestError
@@ -776,19 +780,11 @@ class _StubHttpxModule:
         return httpx.Client(transport=self._transport, **kwargs)
 
     def get(self, *args, **kwargs):
-        """Fail loudly rather than leaving an unbound call to look like a product error.
-
-        _execute_search_tool calls httpx.get, which this stub does not route
-        through the mock transport. No test reaches it today, but that tool
-        wraps everything in a broad `except`, so an AttributeError from a
-        missing stub attribute would come back as a plausible-looking
-        {"error": ...} dict and the test would read as a product failure
-        rather than a harness gap.
-        """
-        raise NotImplementedError(
-            "httpx.get is not routed through this stub's transport; add it to "
-            "_StubHttpxModule before testing a walker that calls it"
-        )
+        """Route module-level httpx.get (used by _execute_search_tool) through
+        the mock transport, honouring the caller's follow_redirects and timeout
+        exactly as httpx.get would."""
+        with self.Client() as client:
+            return client.get(*args, **kwargs)
 
 
 def _install_transport(monkeypatch, handler, client_kwargs=None):
@@ -2385,6 +2381,96 @@ class TestFetchToolSSRFGuard:
 
         assert result["content"] == "<html>final page</html>"
         assert reads == ["terminal"]
+
+
+SEARCH_TOKEN = "search-token-under-test"
+
+
+class TestSearchToolRedirects:
+    """The search tool must never carry the provider's subscription token past
+    the provider's own response: httpx strips only Authorization on an
+    off-origin redirect, not an arbitrary header such as X-Subscription-Token.
+    """
+
+    @pytest.fixture
+    def requests_seen(self, monkeypatch):
+        monkeypatch.setenv("BRAVE_API_KEY", SEARCH_TOKEN)
+        seen = []
+
+        def install(handler):
+            def recording(request):
+                seen.append(request)
+                return handler(request)
+
+            monkeypatch.setattr(
+                mcp_loader, "httpx", _StubHttpxModule(httpx.MockTransport(recording))
+            )
+
+        return seen, install
+
+    @pytest.mark.parametrize("status_code", REDIRECT_STATUSES)
+    def test_off_origin_redirect_never_receives_the_token(
+        self, requests_seen, status_code
+    ):
+        seen, install = requests_seen
+        install(
+            lambda request: (
+                _redirect("https://elsewhere.example/collect", status_code)
+                if request.url.host == "api.search.brave.com"
+                else httpx.Response(200, json={"web": {"results": []}})
+            )
+        )
+
+        result = MCPLoader([])._execute_search_tool("search", {"query": "q"})
+
+        assert all(
+            SEARCH_TOKEN not in r.headers.get("x-subscription-token", "")
+            for r in seen
+            if r.url.host != "api.search.brave.com"
+        )
+        assert [r.url.host for r in seen] == ["api.search.brave.com"]
+        assert "error" in result
+        assert "results" not in result
+
+    def test_redirect_error_does_not_echo_the_location(self, requests_seen):
+        """The far end chooses Location; it must not reach the model's tool
+        result, where it would read as instructions or a link to follow."""
+        _, install = requests_seen
+        install(lambda request: _redirect("https://elsewhere.example/collect"))
+
+        result = MCPLoader([])._execute_search_tool("search", {"query": "q"})
+
+        assert "elsewhere.example" not in result["error"]
+        assert "302" in result["error"]
+
+    def test_direct_response_still_returns_results(self, requests_seen):
+        seen, install = requests_seen
+        install(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "web": {
+                        "results": [
+                            {
+                                "title": "T",
+                                "url": "https://r.example/",
+                                "description": "D",
+                            }
+                        ]
+                    }
+                },
+            )
+        )
+
+        result = MCPLoader([])._execute_search_tool("search", {"query": "q"})
+
+        assert result == {
+            "query": "q",
+            "results": [
+                {"title": "T", "url": "https://r.example/", "description": "D"}
+            ],
+        }
+        assert seen[0].headers["x-subscription-token"] == SEARCH_TOKEN
 
 
 class TestRedirectCapIsShared:

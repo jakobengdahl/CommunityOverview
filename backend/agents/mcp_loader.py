@@ -1069,8 +1069,19 @@ class MCPLoader:
                     params={"q": query, "count": count},
                     headers={"X-Subscription-Token": api_key},
                     timeout=10,
-                    follow_redirects=True,
+                    # httpx strips only Authorization when a redirect leaves the
+                    # origin, so following one would carry the subscription token
+                    # to wherever Location points. A JSON search API has no reason
+                    # to redirect: treat any 3xx as a failed search instead.
+                    follow_redirects=False,
                 )
+                if response.is_redirect:
+                    # Location is chosen by the far end; keep it out of the
+                    # result the model reads.
+                    return {
+                        "error": "Search failed: unexpected redirect "
+                        f"(HTTP {response.status_code}) from the search API"
+                    }
                 response.raise_for_status()
                 data = response.json()
 
