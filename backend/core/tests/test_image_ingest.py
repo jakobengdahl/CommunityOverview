@@ -180,6 +180,10 @@ class _StubHttpxModule:
         self._transport = transport
 
     def Client(self, **kwargs):
+        # The mock takes the place of the walker's own transport, which must
+        # be the address-pinning one: a walker that dropped it would otherwise
+        # pass every test here while connecting by name again.
+        assert isinstance(kwargs.pop("transport", None), delivery._PinnedTransport)
         return httpx.Client(transport=self._transport, **kwargs)
 
 

@@ -11,6 +11,7 @@ import contextlib
 import pytest
 from unittest.mock import patch
 
+from backend.core.events.delivery import _AsyncPinnedTransport
 from backend.skills import loader as loader_module
 from backend.skills.loader import (
     SkillDefinition,
@@ -549,6 +550,10 @@ def _mock_http(handler, returned=None):
     real_client = loader_module.httpx.AsyncClient
 
     def factory(**kwargs):
+        # The mock takes the place of the loader's own transport, which must be
+        # the address-pinning one: a loader that dropped it would otherwise
+        # pass every test here while connecting by name again.
+        assert isinstance(kwargs.pop("transport", None), _AsyncPinnedTransport)
         client = real_client(
             transport=loader_module.httpx.MockTransport(handler), **kwargs
         )
