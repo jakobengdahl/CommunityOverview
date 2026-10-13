@@ -20,6 +20,13 @@ import secrets
 from typing import List, Optional, Dict, Any, Callable
 
 from backend.core.session_auto_add import AutoAddRuleError
+from backend.service.mcp_widget import (
+    MCP_APP_MIME_TYPE,
+    WIDGET_RESOURCE_URI,
+    build_widget_html,
+    widget_resource_meta,
+    widget_tool_meta,
+)
 from backend.core.storage_search import MATCH_MODE_SUBSTRING
 from backend.core.session_store import (
     AnnotationFieldConflict,
@@ -205,6 +212,7 @@ def register_mcp_tools(
     session_registry=None,
     session_manager=None,
     auto_add_registry=None,
+    widget_dist_path=None,
 ) -> Dict[str, Callable]:
     """
     Register all GraphService methods as MCP tools.
@@ -219,6 +227,8 @@ def register_mcp_tools(
         auto_add_registry: SessionAutoAddRegistry backing the session-scoped
             auto-add agents (create/list/remove tools below). None disables
             those tools (they return an error).
+        widget_dist_path: directory holding the built widget bundle inlined
+            into the MCP UI resource; defaults to ``frontend/widget/dist``.
 
     Returns:
         Dict mapping tool names to their functions (for ChatProcessor)
@@ -446,6 +456,48 @@ def register_mcp_tools(
         )
         _push(visualization_session_id, "search_graph", result)
         return result
+
+    # ==================== Interactive widget (MCP Apps) ====================
+    # Registered on the MCP server only: the in-app chat and the REST tool
+    # route have no host that could render the UI resource.
+
+    def show_graph_widget(
+        query: str,
+        node_types: Optional[List[str]] = None,
+        limit: int = 50,
+    ) -> Dict[str, Any]:
+        """
+        Show matching nodes as an interactive graph the user can explore in the
+        chat (search, expand neighbours). Use when the user asks to see,
+        visualize or explore the graph. Hosts without interactive UI support
+        receive the same nodes and edges as ``search_graph``.
+
+        Args:
+            query: Search text, as for search_graph ("" or "*" lists nodes)
+            node_types: List of node types to filter on
+            limit: Max number of nodes (default 50)
+
+        Returns:
+            Dict with nodes, edges and the query that produced them
+        """
+        result = service.search_graph(query=query, node_types=node_types, limit=limit)
+        return {
+            "query": query,
+            "nodes": result.get("nodes", []),
+            "edges": result.get("edges", []),
+        }
+
+    mcp.tool(meta=widget_tool_meta())(show_graph_widget)
+
+    @mcp.resource(
+        WIDGET_RESOURCE_URI,
+        name="graph_widget",
+        description="Interactive graph canvas rendered by show_graph_widget",
+        mime_type=MCP_APP_MIME_TYPE,
+        meta=widget_resource_meta(),
+    )
+    def graph_widget_resource() -> str:
+        return build_widget_html(widget_dist_path)
 
     @register_tool
     def get_node_details(node_id: str) -> Dict[str, Any]:
