@@ -1051,6 +1051,7 @@ interface.
 | `save_view` | Save a named canvas view |
 | `get_capabilities` | Discover what the server supports |
 | `connect_to_visualization_session` | Check that a session ID resolves, and whether a client is connected to it |
+| `show_graph_widget` | Show matching nodes as an interactive graph inside the chat (see 8.4) |
 
 ### 8.2 Connecting
 
@@ -1097,6 +1098,20 @@ content.
 The canvas updates in real time — nodes appear, edges are drawn, and the layout
 adjusts automatically, all driven by the external AI without any manual work in
 the browser.
+
+### 8.4 Interactive graph inside the chat
+
+Chat clients that support interactive MCP UI (the MCP Apps standard, implemented
+by Claude and ChatGPT) can show the graph directly in the conversation. Ask the
+assistant to *show* or *visualize* something — e.g. *"Show me the actors working
+on data strategies as a graph"* — and it calls `show_graph_widget`. The client
+renders a small graph canvas in the chat with the matching nodes and their
+connections. In the canvas you can search again and expand a node's neighbours;
+those calls go through the same MCP connection, so they see exactly what your
+account may see.
+
+Clients without interactive UI support get the same nodes and edges as a normal
+search result.
 
 When the assistant **arranges** the view — laying nodes out as a left-to-right
 flow, a grid, or swimlanes — the whole batch glides smoothly into place rather
