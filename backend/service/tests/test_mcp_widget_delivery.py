@@ -133,6 +133,27 @@ async def test_render_tool_passes_its_arguments_to_the_search(widget_dist):
     assert result.structuredContent["result"]["query"] == "data strategy"
 
 
+@pytest.mark.asyncio
+async def test_render_tool_reports_an_access_denial_like_search_graph(widget_dist):
+    denial = {
+        "success": False,
+        "error": "Graph access denied",
+        "message": "Graph access denied.",
+        "error_code": "access_denied",
+    }
+    service = Mock()
+    service.search_graph.return_value = denial
+    mcp = FastMCP("widget-denied")
+    register_mcp_tools(mcp, service, widget_dist_path=widget_dist)
+
+    async with await _session(mcp) as client:
+        widget = await client.call_tool("show_graph_widget", {"query": "x"})
+        search = await client.call_tool("search_graph", {"query": "x"})
+
+    assert widget.structuredContent["result"] == denial
+    assert widget.structuredContent == search.structuredContent
+
+
 def test_render_tool_stays_off_the_in_app_tools_map(tmp_path, widget_dist):
     mock_mcp = Mock()
     mock_mcp.tool = MagicMock(return_value=lambda f: f)
@@ -155,6 +176,19 @@ def test_inlined_bundle_cannot_close_its_script_or_style_tag(tmp_path):
     assert html.lower().count("</script") == 1
     assert html.lower().count("</style") == 2  # the base style block plus the bundle's
     assert 'a="<\\/script><b>";c="<\\/SCRIPT >";' in html
+
+
+def test_inlined_bundle_cannot_swallow_its_own_end_tag(tmp_path):
+    # "<!--" then "<script" puts the HTML tokenizer in the double-escaped
+    # state, where the wrapper's real </script> would no longer end the element.
+    dist = tmp_path / "d"
+    dist.mkdir()
+    (dist / "widget.iife.js").write_text('a="<!--";b="<script>";')
+
+    html = build_widget_html(dist)
+
+    assert "<!--" not in html
+    assert 'a="\\x3C!--";b="<script>";' in html
 
 
 def test_missing_bundle_yields_a_placeholder_document(tmp_path):

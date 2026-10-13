@@ -70,7 +70,12 @@ _STYLE_END = re.compile(r"</(style)", re.IGNORECASE)
 
 def _inline_script(js: str) -> str:
     # A literal "</script" inside the bundle would close the tag early;
-    # "<\/script" is the same string to the JS parser.
+    # "<\/script" is the same string to the JS parser. "<!--" followed by
+    # "<script" would instead make the tokenizer swallow the real end tag, so
+    # it becomes "\x3C!--", which JS strings, templates and regexes (with or
+    # without the u flag) read identically. Bundlers never emit "<!--" as code:
+    # in a classic script it opens a single-line comment.
+    js = js.replace("<!--", "\\x3C!--")
     return _SCRIPT_END.sub(r"<\\/\1", js)
 
 

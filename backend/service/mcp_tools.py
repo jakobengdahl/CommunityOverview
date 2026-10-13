@@ -481,6 +481,10 @@ def register_mcp_tools(
             Dict with nodes, edges and the query that produced them
         """
         result = service.search_graph(query=query, node_types=node_types, limit=limit)
+        if result.get("success") is False:
+            # An access denial or invalid argument must read as one, exactly as
+            # search_graph reports it, not as an empty graph.
+            return result
         return {
             "query": query,
             "nodes": result.get("nodes", []),

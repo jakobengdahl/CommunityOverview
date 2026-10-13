@@ -35,6 +35,7 @@ shared knowledge graphs. This guide covers all user-facing features.
    - [Connecting](#82-connecting)
    - [Live visualization control via session ID](#83-live-visualization-control-via-session-id)
    - [External pulse triggers](#84-external-pulse-triggers)
+   - [Interactive graph inside the chat](#85-interactive-graph-inside-the-chat)
 9. [On a phone](#9-on-a-phone)
 
 ---

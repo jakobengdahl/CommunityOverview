@@ -197,6 +197,65 @@ describe('MCP Apps bridge lifecycle', () => {
     expect(second).toHaveBeenCalledWith({ nodes: [{ id: 'n' }] });
   });
 
+  it('delivers each tool result to every connected listener until it disconnects', async () => {
+    const { connectHost } = await import('../src/mcpClient');
+    const a = vi.fn();
+    const b = vi.fn();
+    const connectA = connectHost({ onToolResult: a });
+    const connectB = connectHost({ onToolResult: b });
+    const init = await nextMessage((m) => m.method === 'ui/initialize');
+    fromHost({ jsonrpc: '2.0', id: init.id, result: initResult });
+    const disconnectA = await connectA;
+    await connectB;
+
+    const toolResult = (id) =>
+      fromHost({
+        jsonrpc: '2.0',
+        method: 'ui/notifications/tool-result',
+        params: { structuredContent: { nodes: [{ id }] } },
+      });
+    toolResult('one');
+    expect(a).toHaveBeenCalledWith({ nodes: [{ id: 'one' }] });
+    expect(b).toHaveBeenCalledWith({ nodes: [{ id: 'one' }] });
+
+    disconnectA();
+    toolResult('two');
+    expect(a).toHaveBeenCalledTimes(1);
+    expect(b).toHaveBeenLastCalledWith({ nodes: [{ id: 'two' }] });
+  });
+
+  it('drops the listener of a failed handshake', async () => {
+    const { connectHost } = await import('../src/mcpClient');
+    const onToolResult = vi.fn();
+    const connected = connectHost({ onToolResult });
+    const init = await nextMessage((m) => m.method === 'ui/initialize');
+    fromHost({ jsonrpc: '2.0', id: init.id, error: { code: -32000, message: 'refused' } });
+    await expect(connected).rejects.toThrow('refused');
+
+    fromHost({
+      jsonrpc: '2.0',
+      method: 'ui/notifications/tool-result',
+      params: { structuredContent: { nodes: [] } },
+    });
+    expect(onToolResult).not.toHaveBeenCalled();
+  });
+
+  it('retries the handshake on the next connect after a failure', async () => {
+    const { connectHost } = await import('../src/mcpClient');
+    const first = connectHost({});
+    const init1 = await nextMessage((m) => m.method === 'ui/initialize');
+    fromHost({ jsonrpc: '2.0', id: init1.id, error: { code: -32000, message: 'busy' } });
+    await expect(first).rejects.toThrow('busy');
+
+    const second = connectHost({});
+    await vi.waitFor(() =>
+      expect(sent.filter((m) => m.method === 'ui/initialize')).toHaveLength(2)
+    );
+    const init2 = sent.filter((m) => m.method === 'ui/initialize')[1];
+    fromHost({ jsonrpc: '2.0', id: init2.id, result: initResult });
+    await expect(second).resolves.toBeTypeOf('function');
+  });
+
   it('answers ping and rejects unknown host requests with method-not-found', async () => {
     const { connectHost } = await import('../src/mcpClient');
     connectHost({});
