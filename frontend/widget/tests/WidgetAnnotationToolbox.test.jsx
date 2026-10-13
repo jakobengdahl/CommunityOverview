@@ -59,6 +59,7 @@ vi.mock('@community-graph/ui-graph-canvas/styles', () => ({}));
 
 vi.mock('../src/mcpClient', () => ({
   isMCPAvailable: vi.fn(),
+  connectHost: vi.fn(() => Promise.resolve(() => {})),
   searchGraph: vi.fn(),
   getRelatedNodes: vi.fn(),
   getNodeDetails: vi.fn(),
