@@ -193,6 +193,43 @@ class TestPinnedTransport:
         assert len(received) == 1
         assert timeouts == [0.3, 0.3]
 
+    def test_when_every_checked_address_fails_nothing_connects_by_name(
+        self, monkeypatch
+    ):
+        """Falling back to the name after the checked addresses fail would
+        resolve it again, and could reach whatever that lookup answers."""
+        tried = []
+
+        def refuse(self, host, port, **kwargs):
+            tried.append(host)
+            raise httpcore2.ConnectError("refused")
+
+        monkeypatch.setattr(httpcore2.SyncBackend, "connect_tcp", refuse)
+        with _resolver(monkeypatch, {"pinned.test": [[PUBLIC, "93.184.216.35"]]}):
+            with httpx.Client(transport=delivery.pinned_transport()) as client:
+                with pytest.raises(httpx.ConnectError):
+                    client.get("http://pinned.test/x")
+        assert tried == [PUBLIC, "93.184.216.35"]
+
+    @pytest.mark.asyncio
+    async def test_async_when_every_checked_address_fails_nothing_connects_by_name(
+        self, monkeypatch
+    ):
+        tried = []
+
+        async def refuse(self, host, port, **kwargs):
+            tried.append(host)
+            raise httpcore2.ConnectError("refused")
+
+        monkeypatch.setattr(httpcore2.AnyIOBackend, "connect_tcp", refuse)
+        with _resolver(monkeypatch, {"pinned.test": [[PUBLIC, "93.184.216.35"]]}):
+            async with httpx.AsyncClient(
+                transport=delivery.async_pinned_transport()
+            ) as client:
+                with pytest.raises(httpx.ConnectError):
+                    await client.get("http://pinned.test/x")
+        assert tried == [PUBLIC, "93.184.216.35"]
+
     @pytest.mark.asyncio
     async def test_async_falls_through_to_the_next_checked_address(
         self, monkeypatch, server, loopback_is_public
