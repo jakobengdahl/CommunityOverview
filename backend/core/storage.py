@@ -286,9 +286,8 @@ class GraphStorage:
         # with nothing written in its place.
         self._inline_fallback: Dict[str, Any] = {}
         # Set when a save has already captured a revision for writing but the
-        # background write has not landed yet. Without it a second save in the
-        # same operation — add_nodes saves once for the nodes and again for the
-        # edges — snapshots and rewrites the identical matrix.
+        # background write has not landed yet. Without it a second save before
+        # the first lands snapshots and rewrites the identical matrix.
         self._snapshotted_vector_revision: Optional[int] = None
 
         # Durable append-only mutation history sidecar. Only enabled for the
@@ -2492,15 +2491,10 @@ class GraphStorage:
 
                 generate_landed_vectors()
 
-                # Persisted before the edges so that, as before, a rejected
-                # edge leaves the nodes it was meant to join in place.
-                self._persist(
-                    [
-                        EntityOperation.upsert_node(self._serialize_node(node))
-                        for node in nodes_to_embed
-                    ]
-                )
-                unpersisted_nodes.clear()
+                # Nodes and edges go to the store as one write, after the
+                # edges: on a snapshot backend each write is the whole graph.
+                # A rejected edge still leaves these nodes in place - every
+                # failure exit persists them through persist_landed().
 
                 # Create name-to-ID mapping for newly added nodes and existing nodes
                 name_to_id = {}
@@ -2555,10 +2549,15 @@ class GraphStorage:
 
                 self._persist(
                     [
+                        EntityOperation.upsert_node(self._serialize_node(node))
+                        for node in nodes_to_embed
+                    ]
+                    + [
                         EntityOperation.upsert_edge(self.edges[edge_id].to_dict())
                         for edge_id in added_edge_ids
                     ]
                 )
+                unpersisted_nodes.clear()
                 unpersisted_edges.clear()
 
                 # Emit events for added nodes

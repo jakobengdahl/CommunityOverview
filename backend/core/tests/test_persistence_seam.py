@@ -3137,19 +3137,20 @@ class TestExternalRefreshFailureModes:
 
 
 class TestSnapshotOnlyBackends:
-    def test_a_snapshot_backend_is_driven_exactly_as_before(self):
+    def test_one_add_nodes_call_is_one_snapshot_on_a_snapshot_backend(self):
         backend = _SnapshotBackend()
         storage = _storage(backend)
 
         storage.add_nodes([_node("a"), _node("b")], [_edge("e", "a", "b")])
         storage.flush()
-        # add_nodes has always written twice: once after the nodes, once
-        # after the edges. That is the shape to keep, not to tidy.
-        assert backend.snapshots == 2
+        # One add_nodes call is one write: on this backend every write is the
+        # whole graph, so writing after the nodes and again after the edges
+        # serialised it twice per call.
+        assert backend.snapshots == 1
 
         storage.update_node("a", {"name": "Renamed"})
         storage.flush()
-        assert backend.snapshots == 3
+        assert backend.snapshots == 2
         assert {n["id"]: n["name"] for n in backend.data["nodes"]}["a"] == "Renamed"
 
     def test_the_bootstrap_of_an_empty_store_is_a_snapshot(self):
@@ -3195,8 +3196,7 @@ class TestSnapshotOnlyBackends:
     def test_add_nodes_with_no_nodes_still_snapshots_on_a_snapshot_backend(self):
         """A snapshot-only backend has no notion of "nothing changed" -
         _persist() always calls save() for it, empty operations list or not.
-        add_nodes([], edges) still runs the nodes phase (empty) and the edges
-        phase, so it snapshots twice, the same as a non-empty call."""
+        add_nodes([], edges) writes once, the same as a non-empty call."""
         backend = _SnapshotBackend()
         storage = _storage(backend)
         storage.add_nodes([_node("a"), _node("b")], [])
@@ -3207,7 +3207,7 @@ class TestSnapshotOnlyBackends:
         storage.flush()
 
         assert result.success
-        assert backend.snapshots == snapshots_before + 2
+        assert backend.snapshots == snapshots_before + 1
         assert {e["id"] for e in backend.data["edges"]} == {"e"}
 
     def test_delete_edges_with_no_ids_still_snapshots_on_a_snapshot_backend(self):
@@ -3254,7 +3254,7 @@ class TestIncrementalBackends:
         storage.save().result()
         assert backend.nodes["a"] == upserted
 
-    def test_adding_nodes_and_edges_lands_the_nodes_before_the_edge(self):
+    def test_adding_nodes_and_edges_is_one_batch_with_the_nodes_first(self):
         backend = _IncrementalBackend()
         storage = _storage(backend)
 
@@ -3262,13 +3262,13 @@ class TestIncrementalBackends:
         storage.flush()
 
         assert result.success
-        assert _kinds(backend) == ["apply_batch", "upsert_edge"]
+        assert _kinds(backend) == ["apply_batch"]
         batch = backend.calls[0][1]
-        assert [(op.action, op.entity_id) for op in batch] == [
-            ("upsert", "a"),
-            ("upsert", "b"),
+        assert [(op.kind, op.action, op.entity_id) for op in batch] == [
+            ("node", "upsert", "a"),
+            ("node", "upsert", "b"),
+            ("edge", "upsert", "e"),
         ]
-        assert backend.calls[1][1]["id"] == "e"
         assert backend.snapshots == 0
 
     def test_deleting_a_node_is_one_batch_with_its_edges_first(self):
@@ -3397,9 +3397,8 @@ class TestIncrementalBackends:
         storage = _storage(backend)
         storage.add_nodes([_node("a"), _node("b")], [_edge("e", "a", "b")])
         storage.flush()
-        # Two nodes in one batch cannot be promised atomic, so a snapshot;
-        # the single edge still goes as itself.
-        assert _kinds(backend) == ["snapshot", "upsert_edge"]
+        # Nodes and edge in one batch cannot be promised atomic, so a snapshot.
+        assert _kinds(backend) == ["snapshot"]
         backend.calls.clear()
 
         storage.update_node("a", {"name": "Renamed"})
@@ -3480,8 +3479,8 @@ class TestPartialFailure:
 
         assert not result.success
         assert set(storage.edges) == {"good"}
-        assert _kinds(backend) == ["apply_batch", "upsert_edge"]
-        assert backend.calls[1][1]["id"] == "good"
+        assert _kinds(backend) == ["apply_batch"]
+        assert [op.entity_id for op in backend.calls[0][1]] == ["a", "b", "good"]
         assert set(backend.nodes) == {"a", "b"} and set(backend.edges) == {"good"}
 
     @pytest.mark.parametrize(
@@ -3602,7 +3601,7 @@ class TestPartialFailure:
         assert "Error during add" in result.message
         assert "a" in storage.nodes and "a" not in backend.nodes
 
-    def test_a_snapshot_backend_writes_once_more_on_the_same_failure(self):
+    def test_a_snapshot_backend_writes_once_on_the_same_failure(self):
         backend = _SnapshotBackend()
         storage = _storage(backend)
 
@@ -3613,8 +3612,8 @@ class TestPartialFailure:
         storage.flush()
 
         assert not result.success
-        # The nodes' write, then the failure handler's write of the edge.
-        assert backend.snapshots == 2
+        # The failure handler's write carries the nodes and the good edge.
+        assert backend.snapshots == 1
         assert [e["id"] for e in backend.data["edges"]] == ["good"]
 
     def test_a_duplicate_first_node_writes_nothing_more_to_a_snapshot_backend(self):
@@ -3638,17 +3637,12 @@ class TestPartialFailure:
         "nodes, edges, expect_nodes, expect_edges, expect_snapshots",
         [
             ([_node("c"), _node("a")], [], {"a", "b", "c"}, {"e"}, 1),
-            # An empty `nodes` list still triggers the nodes-phase persist
-            # call unconditionally (pinned separately in
-            # test_add_nodes_with_no_nodes_still_snapshots_on_a_snapshot_backend),
-            # so this case gets that snapshot plus persist_landed's - two,
-            # not one.
             (
                 [],
                 [_edge("e2", "a", "b"), _edge("e", "a", "b")],
                 {"a", "b"},
                 {"e", "e2"},
-                2,
+                1,
             ),
         ],
         ids=["duplicate-node-id", "duplicate-edge-id"],
@@ -3830,7 +3824,7 @@ class TestFaultInjectionOnlyPaths:
         # here as an extra call re-sending what already landed.
         assert set(storage.nodes) == {"a", "b"} == set(backend.nodes)
         assert set(storage.edges) == {"e"} == set(backend.edges)
-        assert _kinds(backend) == ["apply_batch", "upsert_edge"]
+        assert _kinds(backend) == ["apply_batch"]
 
 
 class TestADeferredReport:

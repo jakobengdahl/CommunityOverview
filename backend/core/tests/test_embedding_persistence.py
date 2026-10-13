@@ -604,8 +604,7 @@ def test_a_stale_graph_file_cannot_outvote_the_sidecar_on_dimension(tmpdir_path)
 
 
 def test_one_add_nodes_call_writes_the_sidecar_once(storage, tmpdir_path):
-    """add_nodes saves twice — once for the nodes, once for the edges — and the
-    edge save changes no vector, so it must not resnapshot the same matrix."""
+    """One add_nodes call with nodes and edges writes the sidecar once."""
     calls = []
     real_save = storage._embedding_sidecar.save
 
@@ -1121,8 +1120,7 @@ def test_the_matrix_handed_to_the_writer_is_a_snapshot_not_the_live_index(
     it: what is handed over is not the object the store keeps mutating.
     Both writers are captured: the snapshot one and the entity one, which is
     what a mutation on the file backend now goes through."""
-    # add_nodes writes twice — once for the nodes, once for the edges — and
-    # only the first carries a matrix, so keep every call rather than the last.
+    # Keep every call rather than the last: not every write carries a matrix.
     captured = []
     original_save = storage._do_save_to_disk
     original_apply = storage._do_apply
