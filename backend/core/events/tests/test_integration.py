@@ -17,6 +17,7 @@ from typing import List, Dict, Any, Optional
 import pytest
 
 from backend.core import GraphStorage, Node
+from backend.core.events import delivery
 from backend.core.events.models import EventContext
 
 
@@ -131,6 +132,16 @@ class WebhookServer:
 
 class TestEventIntegration:
     """Integration tests for the event system."""
+
+    @pytest.fixture(autouse=True)
+    def _loopback_receiver_is_reachable(self, monkeypatch):
+        """The receiver listens on loopback, which the delivery transport
+        refuses at connect time as well as in is_safe_url (mocked per test
+        below), so let the connect-time check accept loopback too."""
+        real = delivery._is_safe_ip
+        monkeypatch.setattr(
+            delivery, "_is_safe_ip", lambda ip: ip.is_loopback or real(ip)
+        )
 
     @pytest.fixture
     def storage(self, tmp_path):
