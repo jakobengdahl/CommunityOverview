@@ -8,6 +8,7 @@ walker that connected by name would reach the server; the pinned transport
 must refuse before anything is sent.
 """
 
+import asyncio
 import contextlib
 import ipaddress
 import socket
@@ -199,24 +200,53 @@ class TestPinnedTransport:
 
     @pytest.mark.asyncio
     async def test_async_connect_timeout_also_bounds_the_lookup(self, monkeypatch):
-        """The wrapped async backend resolves and connects under one deadline;
-        the pin keeps that, so a stalled lookup cannot outlast the timeout."""
+        """The wrapped async backend resolves under the connect timeout; the
+        pin keeps that, so a stalled lookup cannot outlast the timeout."""
         real = socket.getaddrinfo
+        release = threading.Event()
 
         def stalled(host, *args, **kwargs):
             if host == "slow.test":
-                time.sleep(1.5)
+                release.wait(10)
                 return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (PUBLIC, 0))]
             return real(host, *args, **kwargs)
 
         monkeypatch.setattr(socket, "getaddrinfo", stalled)
         started = time.monotonic()
-        async with httpx.AsyncClient(
-            transport=delivery.async_pinned_transport(), timeout=0.2
-        ) as client:
-            with pytest.raises(httpx.ConnectTimeout):
-                await client.get("http://slow.test/x")
-        assert time.monotonic() - started < 1.0
+        try:
+            async with httpx.AsyncClient(
+                transport=delivery.async_pinned_transport(), timeout=0.2
+            ) as client:
+                with pytest.raises(httpx.ConnectTimeout):
+                    await client.get("http://slow.test/x")
+            assert time.monotonic() - started < 5
+        finally:
+            release.set()
+
+    @pytest.mark.asyncio
+    async def test_async_a_timed_out_address_still_falls_through(
+        self, monkeypatch, server, loopback_is_public
+    ):
+        """An address that times out gets its own timeout, not the whole
+        connect: the next checked address is still tried."""
+        port, received, _ = server
+        real_connect = httpcore2.AnyIOBackend.connect_tcp
+
+        async def blackholed_first(self, host, port, timeout=None, **kwargs):
+            if host == "127.0.0.9":
+                await asyncio.sleep(timeout)
+                raise httpcore2.ConnectTimeout("blackholed")
+            return await real_connect(self, host, port, timeout=timeout, **kwargs)
+
+        monkeypatch.setattr(httpcore2.AnyIOBackend, "connect_tcp", blackholed_first)
+        with _resolver(monkeypatch, {"pinned.test": [["127.0.0.9", "127.0.0.1"]]}):
+            async with httpx.AsyncClient(
+                transport=delivery.async_pinned_transport(), timeout=0.3
+            ) as client:
+                response = await client.get(f"http://pinned.test:{port}/x")
+
+        assert response.status_code == 200
+        assert len(received) == 1
 
     @pytest.mark.parametrize(
         "pinned, plain",
