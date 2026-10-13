@@ -167,6 +167,32 @@ class TestPinnedTransport:
         assert response.status_code == 200
         assert len(received) == 1
 
+    def test_a_timed_out_address_gets_the_timeout_and_falls_through(
+        self, monkeypatch, server, loopback_is_public
+    ):
+        """Each attempt is held to the client's connect timeout, and an address
+        that times out is followed by the next checked one."""
+        port, received, _ = server
+        real_connect = httpcore2.SyncBackend.connect_tcp
+        timeouts = []
+
+        def blackholed_first(self, host, port, timeout=None, **kwargs):
+            timeouts.append(timeout)
+            if host == "127.0.0.9":
+                raise httpcore2.ConnectTimeout("blackholed")
+            return real_connect(self, host, port, timeout=timeout, **kwargs)
+
+        monkeypatch.setattr(httpcore2.SyncBackend, "connect_tcp", blackholed_first)
+        with _resolver(monkeypatch, {"pinned.test": [["127.0.0.9", "127.0.0.1"]]}):
+            with httpx.Client(
+                transport=delivery.pinned_transport(), timeout=0.3
+            ) as client:
+                response = client.get(f"http://pinned.test:{port}/x")
+
+        assert response.status_code == 200
+        assert len(received) == 1
+        assert timeouts == [0.3, 0.3]
+
     @pytest.mark.asyncio
     async def test_async_falls_through_to_the_next_checked_address(
         self, monkeypatch, server, loopback_is_public
