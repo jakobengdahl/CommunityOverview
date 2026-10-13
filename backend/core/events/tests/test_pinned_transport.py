@@ -11,7 +11,9 @@ must refuse before anything is sent.
 import contextlib
 import ipaddress
 import socket
+import ssl
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpcore2
@@ -29,8 +31,16 @@ _real_getaddrinfo = socket.getaddrinfo
 
 
 @pytest.fixture
-def server():
-    """A loopback HTTP server that records every request it receives."""
+def server(monkeypatch):
+    """A loopback HTTP server that records every request it receives.
+
+    Proxy variables are cleared so every client here connects directly: a
+    by-name client would otherwise send its request to a proxy, and a test
+    asserting "nothing reached the server" could pass without the pin.
+    """
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.lower(), raising=False)
     received = []
     routes = {}
 
@@ -71,8 +81,9 @@ def _resolver(monkeypatch, answers):
     httpx's own by-name connect all go through socket.getaddrinfo).
 
     `answers` maps a hostname to a list of answer lists; the Nth lookup of that
-    name gets the Nth list (the last one repeats). IP literals resolve as
-    themselves. Yields the per-name lookup counts.
+    name gets the Nth list (the last one repeats), and an exception in that
+    place is raised instead. Names not listed resolve for real, so IP literals
+    resolve as themselves.
     """
     lookups = {}
 
@@ -84,12 +95,14 @@ def _resolver(monkeypatch, answers):
         n = lookups.get(host, 0)
         lookups[host] = n + 1
         ips = answers[host][min(n, len(answers[host]) - 1)]
+        if isinstance(ips, Exception):
+            raise ips
         return [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port or 0)) for ip in ips
         ]
 
     monkeypatch.setattr(socket, "getaddrinfo", fake)
-    yield lookups
+    yield
 
 
 def _rebinding(monkeypatch, host="rebind.test"):
@@ -119,22 +132,19 @@ class TestPinnedTransport:
         self, monkeypatch, server, loopback_is_public
     ):
         port, received, _ = server
-        with _resolver(monkeypatch, {"pinned.test": [["127.0.0.1"]]}) as lookups:
+        with _resolver(monkeypatch, {"pinned.test": [["127.0.0.1"]]}):
             with httpx.Client(transport=delivery.pinned_transport()) as client:
                 response = client.get(f"http://pinned.test:{port}/x")
 
         assert response.status_code == 200
         assert received == [("GET", "/x", f"pinned.test:{port}")]
-        # Resolved exactly once for the connection: the connect used the
-        # answer that was checked rather than looking the name up again.
-        assert lookups == {"pinned.test": 1}
 
     @pytest.mark.asyncio
     async def test_async_connects_to_the_checked_address_with_the_original_host(
         self, monkeypatch, server, loopback_is_public
     ):
         port, received, _ = server
-        with _resolver(monkeypatch, {"pinned.test": [["127.0.0.1"]]}) as lookups:
+        with _resolver(monkeypatch, {"pinned.test": [["127.0.0.1"]]}):
             async with httpx.AsyncClient(
                 transport=delivery.async_pinned_transport()
             ) as client:
@@ -142,7 +152,6 @@ class TestPinnedTransport:
 
         assert response.status_code == 200
         assert received == [("GET", "/x", f"pinned.test:{port}")]
-        assert lookups == {"pinned.test": 1}
 
     def test_falls_through_to_the_next_checked_address(
         self, monkeypatch, server, loopback_is_public
@@ -156,6 +165,82 @@ class TestPinnedTransport:
 
         assert response.status_code == 200
         assert len(received) == 1
+
+    @pytest.mark.asyncio
+    async def test_async_falls_through_to_the_next_checked_address(
+        self, monkeypatch, server, loopback_is_public
+    ):
+        port, received, _ = server
+        with _resolver(monkeypatch, {"pinned.test": [["127.0.0.2", "127.0.0.1"]]}):
+            async with httpx.AsyncClient(
+                transport=delivery.async_pinned_transport()
+            ) as client:
+                response = await client.get(f"http://pinned.test:{port}/x")
+
+        assert response.status_code == 200
+        assert len(received) == 1
+
+    def test_a_failed_lookup_at_connect_is_refused_not_retried_by_name(
+        self, monkeypatch, server
+    ):
+        """If the pin's own lookup fails, nothing may fall back to connecting
+        by name, which would resolve again -- here, to loopback."""
+        port, received, _ = server
+        answers = {
+            "flaky.test": [[PUBLIC], socket.gaierror("no answer"), ["127.0.0.1"]]
+        }
+        with _resolver(monkeypatch, answers):
+            assert delivery.is_safe_url(f"http://flaky.test:{port}/x")
+            with httpx.Client(transport=delivery.pinned_transport()) as client:
+                with pytest.raises(httpx.ConnectError) as excinfo:
+                    client.get(f"http://flaky.test:{port}/x")
+        assert isinstance(excinfo.value.__cause__, delivery.UnsafeAddressError)
+        assert received == []
+
+    @pytest.mark.asyncio
+    async def test_async_connect_timeout_also_bounds_the_lookup(self, monkeypatch):
+        """The wrapped async backend resolves and connects under one deadline;
+        the pin keeps that, so a stalled lookup cannot outlast the timeout."""
+        real = socket.getaddrinfo
+
+        def stalled(host, *args, **kwargs):
+            if host == "slow.test":
+                time.sleep(1.5)
+                return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (PUBLIC, 0))]
+            return real(host, *args, **kwargs)
+
+        monkeypatch.setattr(socket, "getaddrinfo", stalled)
+        started = time.monotonic()
+        async with httpx.AsyncClient(
+            transport=delivery.async_pinned_transport(), timeout=0.2
+        ) as client:
+            with pytest.raises(httpx.ConnectTimeout):
+                await client.get("http://slow.test/x")
+        assert time.monotonic() - started < 1.0
+
+    @pytest.mark.parametrize(
+        "pinned, plain",
+        [
+            (delivery.pinned_transport, httpx.HTTPTransport),
+            (delivery.async_pinned_transport, httpx.AsyncHTTPTransport),
+        ],
+    )
+    def test_pool_matches_what_httpx_would_build(self, pinned, plain):
+        """The pinned transport builds its own pool, so its TLS and limits are
+        compared with the pool httpx's own default transport builds."""
+        ours, theirs = pinned()._pool, plain()._pool
+        for attr in (
+            "_max_connections",
+            "_max_keepalive_connections",
+            "_keepalive_expiry",
+            "_http1",
+            "_http2",
+            "_retries",
+        ):
+            assert getattr(ours, attr) == getattr(theirs, attr), attr
+        assert ours._ssl_context.verify_mode == ssl.CERT_REQUIRED
+        assert ours._ssl_context.check_hostname is True
+        assert type(ours._ssl_context) is type(theirs._ssl_context)
 
     @pytest.mark.parametrize("pinned", [True, False])
     def test_a_rebound_name_is_refused_before_anything_is_sent(

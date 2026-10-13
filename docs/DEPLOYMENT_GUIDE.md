@@ -557,6 +557,18 @@ Cloud platforms are often stateless. Ensure:
 
 Most cloud platforms handle SSL automatically. For self-hosted setups, add a reverse proxy such as Caddy or nginx in front of the application.
 
+### Outbound Fetches Fail Behind an Egress Proxy
+
+Requests that reach addresses users or remote servers choose — webhook
+delivery, `image_url` ingest, the agent fetch tool, skill fetches, and the
+redirect hops of MCP server discovery — do **not** use `HTTP_PROXY` /
+`HTTPS_PROXY`. They connect directly, and only to an address they have just
+resolved and checked as public, so a name cannot pass the check and then
+resolve to an internal address at connect time (DNS rebinding). A proxy would
+resolve the name itself and undo that check. In an environment whose only way
+out is an egress proxy, these requests fail with a connection error; allow
+direct outbound HTTP(S) from the backend for them to work.
+
 ---
 
 ## Summary

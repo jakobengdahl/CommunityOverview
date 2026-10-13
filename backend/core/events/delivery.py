@@ -190,7 +190,12 @@ class _PinnedBackend(httpcore2.NetworkBackend):
 
 
 class _AsyncPinnedBackend(httpcore2.AsyncNetworkBackend):
-    """The async counterpart of _PinnedBackend; resolution runs in a thread."""
+    """The async counterpart of _PinnedBackend; resolution runs in a thread.
+
+    The connect timeout bounds resolution and every attempt together, as it
+    does in the backend this wraps, which resolves and connects inside one
+    deadline.
+    """
 
     def __init__(self) -> None:
         self._inner = httpcore2.AnyIOBackend()
@@ -203,6 +208,15 @@ class _AsyncPinnedBackend(httpcore2.AsyncNetworkBackend):
         local_address: str | None = None,
         socket_options: typing.Iterable[httpcore2.SOCKET_OPTION] | None = None,
     ) -> httpcore2.AsyncNetworkStream:
+        try:
+            async with asyncio.timeout(timeout):
+                return await self._connect(
+                    host, port, timeout, local_address, socket_options
+                )
+        except TimeoutError as exc:
+            raise httpcore2.ConnectTimeout(f"Timed out connecting to {host}") from exc
+
+    async def _connect(self, host, port, timeout, local_address, socket_options):
         last_error: Exception | None = None
         for address in await asyncio.to_thread(_pinned_targets, host):
             try:
@@ -223,10 +237,11 @@ class _AsyncPinnedBackend(httpcore2.AsyncNetworkBackend):
 
 
 class _PinnedTransport(httpx.HTTPTransport):
-    # HTTPTransport keeps no network-backend option, so the pool is built here
-    # with the same TLS and limit defaults it would otherwise use. Should a
-    # future httpx2 stop routing requests through self._pool, requests fail
-    # rather than silently bypass the pin.
+    # HTTPTransport keeps no network-backend option, so the pool it routes
+    # requests through (self._pool) is built here with the same TLS and limit
+    # defaults it would otherwise use. That attribute is httpx2's own; the
+    # rebinding tests in tests/test_pinned_transport.py go through the real
+    # transport and fail if a future httpx2 stops using it.
     def __init__(self) -> None:
         self._pool = httpcore2.ConnectionPool(
             ssl_context=httpx.create_ssl_context(),

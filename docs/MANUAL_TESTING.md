@@ -33,7 +33,7 @@ It is updated when PRs that require manual verification land on `main`.
 - [ ] Create an `EventSubscription` with URL `http://127.0.0.1:8000/health`
 - [ ] Trigger a mutation → verify that the delivery is logged as `DROPPED` (not attempted)
 - [ ] Also test with `http://169.254.169.254/` (AWS metadata endpoint)
-- [ ] **Known limitation:** DNS rebinding attacks (TOCTOU) require infra-level egress filtering for full mitigation
+- [ ] DNS rebinding: the delivery connects only to the address it has just checked, so a name that resolves publicly at the check and internally at connect is refused (covered by `backend/core/events/tests/test_pinned_transport.py`)
 
 ### Authentication on execute_tool (PR #39)
 **Purpose:** Verify that `/execute_tool` requires auth for write operations.
