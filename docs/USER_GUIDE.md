@@ -35,6 +35,7 @@ shared knowledge graphs. This guide covers all user-facing features.
    - [Connecting](#82-connecting)
    - [Live visualization control via session ID](#83-live-visualization-control-via-session-id)
    - [External pulse triggers](#84-external-pulse-triggers)
+   - [Interactive graph inside the chat](#85-interactive-graph-inside-the-chat)
 9. [On a phone](#9-on-a-phone)
 
 ---
@@ -1051,6 +1052,7 @@ interface.
 | `save_view` | Save a named canvas view |
 | `get_capabilities` | Discover what the server supports |
 | `connect_to_visualization_session` | Check that a session ID resolves, and whether a client is connected to it |
+| `show_graph_widget` | Show matching nodes as an interactive graph inside the chat (see [8.5](#85-interactive-graph-inside-the-chat)) |
 
 ### 8.2 Connecting
 
@@ -1145,6 +1147,20 @@ fresh token and **revokes** the previous URL. The token lives only as long as th
 session, so a trigger URL stops working once the session ends. If your system is
 set to **reduce motion**, a triggered node shows a static highlight instead of an
 animation.
+
+### 8.5 Interactive graph inside the chat
+
+Chat clients that support interactive MCP UI (the MCP Apps standard, implemented
+by Claude and ChatGPT) can show the graph directly in the conversation. Ask the
+assistant to *show* or *visualize* something — e.g. *"Show me the actors working
+on data strategies as a graph"* — and it calls `show_graph_widget`. The client
+renders a small graph canvas in the chat with the matching nodes and their
+connections. In the canvas you can search again and expand a node's neighbours;
+those calls go through the same MCP connection, so they see exactly what your
+account may see.
+
+Clients without interactive UI support get the same nodes and edges as a normal
+search result.
 
 ---
 

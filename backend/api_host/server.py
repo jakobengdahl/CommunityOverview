@@ -333,6 +333,7 @@ def create_app(
         session_registry=session_registry,
         session_manager=session_manager,
         auto_add_registry=auto_add_registry,
+        widget_dist_path=config.widget_static_path,
     )
 
     # Store MCP instance and tools map on app state

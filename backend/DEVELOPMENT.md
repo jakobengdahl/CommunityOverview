@@ -882,6 +882,7 @@ can configure one. See `docs/EVENT_SUBSCRIPTIONS.md`.
 | Tool Name | Description |
 |-----------|-------------|
 | `search_graph` | Search nodes by query |
+| `show_graph_widget` | Same search, returned with an MCP Apps UI link (`_meta.ui.resourceUri` → `ui://community-graph/graph-widget.html`) so Claude/ChatGPT render the interactive widget; MCP only, not in the chat/REST tool map |
 | `get_node_details` | Get full details for a node |
 | `get_related_nodes` | Get nodes connected to a node |
 | `find_similar_nodes` | Find nodes with similar names |
@@ -1570,11 +1571,23 @@ Click the "Chat" button in the application header to open the panel. The panel d
 - Loading indicators during processing
 - Error messages when something goes wrong
 
-### ChatGPT Widget Integration
+### Interactive widget over MCP (Claude, ChatGPT)
 
-The same chat functionality is available via the embeddable widget (`frontend/widget/`). This widget can be embedded in ChatGPT or other interfaces that support custom widgets.
+`frontend/widget/` is a graph canvas delivered to chat clients as an MCP UI
+resource, following the MCP Apps extension (`io.modelcontextprotocol/ui`, spec
+2026-01-26), which both Claude and ChatGPT implement:
 
-The widget uses the same `/ui/chat` endpoint, ensuring consistent behavior between the web app and external integrations.
+- `backend/service/mcp_widget.py` builds the resource
+  `ui://community-graph/graph-widget.html` (MIME `text/html;profile=mcp-app`)
+  by inlining `frontend/widget/dist` (`npm run build:widget`; `WIDGET_STATIC_PATH`
+  overrides the directory). Without a build the resource is a placeholder page.
+- The `show_graph_widget` tool links to it with `_meta.ui.resourceUri`, plus the
+  deprecated flat `ui/resourceUri` and ChatGPT's `openai/outputTemplate` alias.
+- In the iframe, `frontend/widget/src/mcpClient.js` uses `window.openai` when
+  ChatGPT injects it and otherwise the MCP Apps postMessage JSON-RPC bridge
+  (`ui/initialize`, `ui/notifications/tool-result`, `tools/call`). The widget
+  calls `search_graph` and `get_related_nodes` through the host, never the
+  server directly, so the sandbox needs no network origins.
 
 ### Active Knowledge Collection kiosk
 

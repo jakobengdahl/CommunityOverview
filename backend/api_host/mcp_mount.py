@@ -83,7 +83,7 @@ DATA MANAGEMENT:
 {language_policy_section}
 VISUALIZATION:
 - If the user asks to see the graph visually or mentions "widget", "canvas", or "visualize",
-  provide them with the Widget URL (available via 'get_presentation').
+  call 'show_graph_widget'; clients that support interactive MCP UI render it in the chat.
 """
     return instructions
 
