@@ -209,6 +209,69 @@ class TestTheWhitespaceSetItselfIsPinned:
             assert error is None
 
 
+# U+001C-U+001F: `str.isspace()` is true for all four, yet they are carved out
+# of ``REFERENCE_WHITESPACE_CHARS`` on the strength of ``_has_control_characters``
+# refusing them first. Nothing else reaches them: the fixture's per-character
+# cases enumerate the set, so they never see these four.
+_C0_SEPARATORS = ["\u001c", "\u001d", "\u001e", "\u001f"]
+
+
+class TestTheC0SeparatorsAreLeftToTheControlCheck:
+    """The carve-out is a delegation, and the delegation is what is pinned.
+
+    Round 5's mutation pass narrowed ``_has_control_characters`` to
+    ``ord(ch) < 0x1C`` and the whole backend stayed byte-identical: these four
+    became storable on every path, inside a host and through SavedView
+    metadata, while the canvas still refuses them — a target the server stores
+    and the canvas draws permanently broken.
+    """
+
+    @pytest.mark.parametrize("char", _C0_SEPARATORS)
+    def test_python_calls_it_whitespace_but_the_set_does_not(self, char):
+        assert char.isspace()
+        assert char not in REFERENCE_WHITESPACE_CHARS
+
+    @pytest.mark.parametrize("kind", sorted(REFERENCE_TARGET_KINDS))
+    @pytest.mark.parametrize("char", _C0_SEPARATORS)
+    def test_it_is_refused_as_a_control_character_in_every_target_kind(
+        self, kind, char
+    ):
+        target = f"https://example.org/a{char}b" if kind == "url" else f"a{char}b"
+        error = reference_content_error(
+            {"target_kind": kind, "target": target}, require_complete=True
+        )
+        assert error is not None
+        assert "control characters" in error
+
+    @pytest.mark.parametrize("char", _C0_SEPARATORS)
+    @pytest.mark.parametrize(
+        "template",
+        [
+            "{c}https://example.org/x",
+            "https://example.org/x{c}",
+            "https://exa{c}mple.org/x",
+        ],
+    )
+    def test_the_url_gate_refuses_it_at_the_ends_and_in_a_host(self, char, template):
+        error = reference_url_error(template.format(c=char))
+        assert error is not None
+        assert "control characters" in error
+
+    @pytest.mark.parametrize("char", _C0_SEPARATORS)
+    def test_saved_view_metadata_refuses_it(self, char):
+        metadata = {
+            "annotations": [
+                {
+                    "id": "a1",
+                    "type": "reference",
+                    "target_kind": "session",
+                    "target": f"a{char}b",
+                }
+            ]
+        }
+        assert saved_view_annotation_error(metadata) is not None
+
+
 class TestSavedViewPathDemandsACompletePayload:
     """A SavedView annotation with no ``target_kind`` must not be stored.
 
@@ -235,6 +298,21 @@ class TestSavedViewPathDemandsACompletePayload:
             "annotations": [{"id": "a1", "type": "reference", "target": target}]
         }
         assert saved_view_annotation_error(metadata) is not None
+
+    # Round 5's mutation pass turned this call site's `require_complete=True`
+    # into `require_complete=("target" in annotation)` and the backend stayed
+    # green: the kindless cases above all carry a target, so a reference with a
+    # kind and no target, or with neither field, became storable.
+    @pytest.mark.parametrize(
+        "fields",
+        [{"target_kind": "url"}, {"target_kind": "session"}, {}],
+        ids=["url-kind-only", "session-kind-only", "neither-field"],
+    )
+    def test_a_targetless_saved_view_reference_is_refused(self, fields):
+        metadata = {"annotations": [{"id": "a1", "type": "reference", **fields}]}
+        error = saved_view_annotation_error(metadata)
+        assert error is not None
+        assert "is required" in error
 
     def test_a_complete_saved_view_reference_still_passes(self):
         metadata = {
