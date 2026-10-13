@@ -28,9 +28,36 @@ function Widget({ initialQuery = '', onNodeSelect }) {
   // layout that is gone.
   const [canvasBaselineEpoch, setCanvasBaselineEpoch] = useState(0);
 
-  // Check MCP availability on mount
+  // Check MCP availability on mount, then show the result of the tool call
+  // that opened the widget (show_graph_widget) once the host delivers it.
   useEffect(() => {
-    setMcpAvailable(mcp.isMCPAvailable());
+    const available = mcp.isMCPAvailable();
+    setMcpAvailable(available);
+    if (!available) return undefined;
+
+    let disconnect = () => {};
+    let active = true;
+    mcp
+      .connectHost({
+        onToolResult: (payload) => {
+          if (!active || !Array.isArray(payload?.nodes)) return;
+          setNodes(payload.nodes);
+          setEdges(payload.edges || []);
+          setCanvasBaselineEpoch((epoch) => epoch + 1);
+        },
+      })
+      .then((fn) => {
+        if (active) disconnect = fn;
+        else fn();
+      })
+      .catch((err) => {
+        console.error('Host connection failed:', err);
+        if (active) setError(err.message);
+      });
+    return () => {
+      active = false;
+      disconnect();
+    };
   }, []);
 
   // Run initial query if provided
@@ -106,9 +133,10 @@ function Widget({ initialQuery = '', onNodeSelect }) {
         <div className="widget-error">
           <h3>MCP Not Available</h3>
           <p>
-            This widget requires MCP tools to be available via <code>window.openai.callTool</code>.
+            This widget runs inside an MCP Apps host (such as Claude or ChatGPT), or with{' '}
+            <code>window.openai.callTool</code>.
           </p>
-          <p>Please ensure you're running this widget in a compatible environment.</p>
+          <p>Open it from the show_graph_widget tool in a compatible chat client.</p>
         </div>
       </div>
     );
@@ -151,24 +179,29 @@ function Widget({ initialQuery = '', onNodeSelect }) {
 function SearchBar({ onSearch, isLoading }) {
   const [query, setQuery] = useState('');
 
-  const handleSubmit = (e) => {
-    e.preventDefault();
-    onSearch(query);
+  // Not a <form>: a host iframe sandboxed without allow-forms blocks form
+  // submission outright, so the submit event would never fire.
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !isLoading) {
+      e.preventDefault();
+      onSearch(query);
+    }
   };
 
   return (
-    <form className="widget-search" onSubmit={handleSubmit}>
+    <div className="widget-search" role="search">
       <input
         type="text"
         value={query}
         onChange={(e) => setQuery(e.target.value)}
+        onKeyDown={handleKeyDown}
         placeholder="Search graph..."
         disabled={isLoading}
       />
-      <button type="submit" disabled={isLoading || !query.trim()}>
+      <button type="button" onClick={() => onSearch(query)} disabled={isLoading || !query.trim()}>
         Search
       </button>
-    </form>
+    </div>
   );
 }
 

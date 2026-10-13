@@ -39,6 +39,7 @@ vi.mock('@community-graph/ui-graph-canvas/styles', () => ({}));
 // Mock mcp module
 vi.mock('../src/mcpClient', () => ({
   isMCPAvailable: vi.fn(),
+  connectHost: vi.fn(() => Promise.resolve(() => {})),
   searchGraph: vi.fn(),
   getRelatedNodes: vi.fn(),
   getNodeDetails: vi.fn(),
@@ -407,5 +408,83 @@ describe('MCP Tool Compliance - Widget Callbacks', () => {
       expect(mcp.searchGraph).toHaveBeenCalledTimes(1);
       expect(mcp.searchGraph).toHaveBeenCalledWith('my search');
     });
+  });
+});
+
+describe('Host-delivered tool result', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mcp.isMCPAvailable.mockReturnValue(true);
+  });
+
+  it('renders the nodes of the tool call that opened the widget', async () => {
+    let onToolResult;
+    mcp.connectHost.mockImplementation((handlers) => {
+      onToolResult = handlers.onToolResult;
+      return Promise.resolve(() => {});
+    });
+
+    render(<Widget />);
+    await waitFor(() => expect(onToolResult).toBeTypeOf('function'));
+
+    act(() => {
+      onToolResult({
+        query: 'alpha',
+        nodes: [
+          { id: 'a1', name: 'Alpha', type: 'Actor' },
+          { id: 'i1', name: 'Programme', type: 'Initiative' },
+        ],
+        edges: [{ id: 'e1', source: 'a1', target: 'i1', type: 'RELATES_TO' }],
+      });
+    });
+
+    expect(screen.getByTestId('node-count')).toHaveTextContent('2 nodes');
+    expect(screen.getByTestId('edge-count')).toHaveTextContent('1 edges');
+    expect(mcp.searchGraph).not.toHaveBeenCalled();
+  });
+
+  it('ignores a tool result that carries no node list', async () => {
+    let onToolResult;
+    mcp.connectHost.mockImplementation((handlers) => {
+      onToolResult = handlers.onToolResult;
+      return Promise.resolve(() => {});
+    });
+
+    render(<Widget />);
+    await waitFor(() => expect(onToolResult).toBeTypeOf('function'));
+    act(() => onToolResult({ success: false, error: 'boom' }));
+
+    expect(screen.getByTestId('node-count')).toHaveTextContent('0 nodes');
+  });
+
+  it('does not connect to a host when MCP is unavailable', () => {
+    mcp.isMCPAvailable.mockReturnValue(false);
+    render(<Widget />);
+    expect(mcp.connectHost).not.toHaveBeenCalled();
+  });
+});
+
+describe('Search without form submission', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mcp.isMCPAvailable.mockReturnValue(true);
+  });
+
+  // Host iframes sandboxed without allow-forms block form submission, so the
+  // search must not depend on a submit event.
+  it('renders no form element', () => {
+    const { container } = render(<Widget />);
+    expect(container.querySelector('form')).toBeNull();
+  });
+
+  it('searches on Enter in the input', async () => {
+    mcp.searchGraph.mockResolvedValue({ nodes: [], edges: [] });
+    render(<Widget />);
+
+    const input = screen.getByPlaceholderText('Search graph...');
+    fireEvent.change(input, { target: { value: 'enter query' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    await waitFor(() => expect(mcp.searchGraph).toHaveBeenCalledWith('enter query'));
   });
 });
