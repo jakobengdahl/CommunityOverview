@@ -69,12 +69,15 @@ _STYLE_END = re.compile(r"</(style)", re.IGNORECASE)
 
 
 def _inline_script(js: str) -> str:
-    # A literal "</script" inside the bundle would close the tag early;
-    # "<\/script" is the same string to the JS parser. "<!--" followed by
-    # "<script" would instead make the tokenizer swallow the real end tag, so
-    # it becomes "\x3C!--", which JS strings, templates and regexes (with or
-    # without the u flag) read identically. Bundlers never emit "<!--" as code:
-    # in a classic script it opens a single-line comment.
+    # A literal "</script" inside the bundle would close the tag early, and
+    # "<!--" followed by "<script" would make the tokenizer swallow the real
+    # end tag. Both are rewritten ("<\/script", "\x3C!--"), which string
+    # literals, cooked template literals and regex literals read identically.
+    # Two contexts would read them differently: a raw template (String.raw)
+    # and a "<" already preceded by a backslash. Minified output does not put
+    # either pattern there, and bundlers never emit "<!--" as code (in a
+    # classic script it opens a comment), so the rewrite is kept rather than
+    # loading the bundle some way a host CSP may refuse.
     js = js.replace("<!--", "\\x3C!--")
     return _SCRIPT_END.sub(r"<\\/\1", js)
 
