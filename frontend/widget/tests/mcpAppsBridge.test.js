@@ -12,6 +12,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 let host;
 let sent;
 let originalParent;
+// Each test imports a fresh module instance; drop the window listeners the
+// previous instances added so they cannot answer this test's host messages.
+let addedListeners;
+let addListenerSpy;
 
 function fromHost(data) {
   window.dispatchEvent(new MessageEvent('message', { data, source: host }));
@@ -24,6 +28,12 @@ async function nextMessage(predicate) {
 
 beforeEach(() => {
   vi.resetModules();
+  addedListeners = [];
+  const originalAdd = window.addEventListener.bind(window);
+  addListenerSpy = vi.spyOn(window, 'addEventListener').mockImplementation((type, fn, opts) => {
+    addedListeners.push([type, fn, opts]);
+    return originalAdd(type, fn, opts);
+  });
   const frame = document.createElement('iframe');
   document.body.appendChild(frame);
   host = frame.contentWindow;
@@ -35,6 +45,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  addListenerSpy.mockRestore();
+  addedListeners.forEach(([type, fn, opts]) => window.removeEventListener(type, fn, opts));
   if (originalParent) Object.defineProperty(window, 'parent', originalParent);
   document.body.innerHTML = '';
 });
@@ -140,6 +152,64 @@ describe('MCP Apps bridge', () => {
   });
 });
 
+describe('MCP Apps bridge lifecycle', () => {
+  const initResult = {
+    protocolVersion: '2026-01-26',
+    hostInfo: {},
+    hostCapabilities: {},
+    hostContext: {},
+  };
+
+  it('sends initialized only after the host answers ui/initialize', async () => {
+    const { connectHost } = await import('../src/mcpClient');
+    const connected = connectHost({});
+    const init = await nextMessage((m) => m.method === 'ui/initialize');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sent.some((m) => m.method === 'ui/notifications/initialized')).toBe(false);
+
+    fromHost({ jsonrpc: '2.0', id: init.id, result: initResult });
+    await connected;
+    expect(sent.filter((m) => m.method === 'ui/notifications/initialized')).toHaveLength(1);
+  });
+
+  // React StrictMode mounts, cleans up and re-mounts the effect before the
+  // handshake resolves.
+  it('survives a connect, disconnect, connect sequence with one handshake', async () => {
+    const { connectHost } = await import('../src/mcpClient');
+    const first = vi.fn();
+    const second = vi.fn();
+    const firstConnect = connectHost({ onToolResult: first });
+    const secondConnect = connectHost({ onToolResult: second });
+
+    const init = await nextMessage((m) => m.method === 'ui/initialize');
+    fromHost({ jsonrpc: '2.0', id: init.id, result: initResult });
+    const disconnectFirst = await firstConnect;
+    await secondConnect;
+    disconnectFirst();
+
+    fromHost({
+      jsonrpc: '2.0',
+      method: 'ui/notifications/tool-result',
+      params: { structuredContent: { result: { nodes: [{ id: 'n' }] } } },
+    });
+    expect(sent.filter((m) => m.method === 'ui/initialize')).toHaveLength(1);
+    expect(first).not.toHaveBeenCalled();
+    expect(second).toHaveBeenCalledWith({ nodes: [{ id: 'n' }] });
+  });
+
+  it('answers ping and rejects unknown host requests with method-not-found', async () => {
+    const { connectHost } = await import('../src/mcpClient');
+    connectHost({});
+    await nextMessage((m) => m.method === 'ui/initialize');
+
+    fromHost({ jsonrpc: '2.0', id: 'p-1', method: 'ping' });
+    fromHost({ jsonrpc: '2.0', id: 'u-1', method: 'ui/unknown-thing', params: {} });
+
+    expect((await nextMessage((m) => m.id === 'p-1')).result).toEqual({});
+    expect((await nextMessage((m) => m.id === 'u-1')).error.code).toBe(-32601);
+  });
+});
+
 describe('unwrapToolResult', () => {
   it('handles every shape a host can hand back', async () => {
     const { unwrapToolResult } = await import('../src/mcpClient');
@@ -176,6 +246,29 @@ describe('window.openai bridge', () => {
     await expect(callTool('get_node_details', { node_id: 'o1' })).resolves.toEqual({ ok: 1 });
     expect(callToolMock).toHaveBeenCalledWith('get_node_details', { node_id: 'o1' });
     expect(sent).toEqual([]);
+    delete window.openai;
+  });
+
+  it('delivers a toolOutput that arrives later through openai:set_globals', async () => {
+    window.openai = { callTool: vi.fn() };
+    const { connectHost } = await import('../src/mcpClient');
+    const onToolResult = vi.fn();
+    const disconnect = await connectHost({ onToolResult });
+
+    window.dispatchEvent(
+      new CustomEvent('openai:set_globals', {
+        detail: { globals: { toolOutput: { result: { nodes: [{ id: 'late' }] } } } },
+      })
+    );
+    expect(onToolResult).toHaveBeenCalledWith({ nodes: [{ id: 'late' }] });
+
+    disconnect();
+    window.dispatchEvent(
+      new CustomEvent('openai:set_globals', {
+        detail: { globals: { toolOutput: { nodes: [{ id: 'after' }] } } },
+      })
+    );
+    expect(onToolResult).toHaveBeenCalledTimes(1);
     delete window.openai;
   });
 });

@@ -15,6 +15,7 @@ the server's public URL never has to be known here.
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -62,10 +63,15 @@ def widget_resource_meta() -> Dict[str, Any]:
     }
 
 
+# HTML matches end-tag names case-insensitively, so "</SCRIPT" closes the tag too.
+_SCRIPT_END = re.compile(r"</(script)", re.IGNORECASE)
+_STYLE_END = re.compile(r"</(style)", re.IGNORECASE)
+
+
 def _inline_script(js: str) -> str:
     # A literal "</script" inside the bundle would close the tag early;
     # "<\/script" is the same string to the JS parser.
-    return js.replace("</script", "<\\/script")
+    return _SCRIPT_END.sub(r"<\\/\1", js)
 
 
 def build_widget_html(dist_path: Optional[Path] = None) -> str:
@@ -83,7 +89,7 @@ def build_widget_html(dist_path: Optional[Path] = None) -> str:
     js = script_file.read_text(encoding="utf-8")
     css = style_file.read_text(encoding="utf-8") if style_file.is_file() else ""
     # Same early-close guard for the stylesheet; an escaped "/" is valid CSS.
-    css = css.replace("</style", "<\\/style")
+    css = _STYLE_END.sub(r"<\\/\1", css)
     return (
         "<!DOCTYPE html>\n"
         '<html lang="en"><head><meta charset="utf-8">'

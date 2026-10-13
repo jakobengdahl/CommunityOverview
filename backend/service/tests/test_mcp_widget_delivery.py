@@ -76,7 +76,8 @@ async def test_only_the_render_tool_carries_ui_meta(server):
     async with await _session(server) as client:
         tools = (await client.list_tools()).tools
 
-    with_ui = [t.name for t in tools if t.meta and "ui" in t.meta]
+    ui_keys = {"ui", "ui/resourceUri", "openai/outputTemplate"}
+    with_ui = [t.name for t in tools if t.meta and ui_keys & set(t.meta)]
     assert with_ui == ["show_graph_widget"]
 
 
@@ -86,9 +87,11 @@ async def test_ui_resource_is_listed_and_read_as_mcp_app_html(server):
         listed = {str(r.uri): r for r in (await client.list_resources()).resources}
         read = await client.read_resource(WIDGET_RESOURCE_URI)
 
-    assert listed[WIDGET_RESOURCE_URI].mimeType == MCP_APP_MIME_TYPE
+    # The literal, not the constant: hosts match this exact profile string.
+    assert MCP_APP_MIME_TYPE == "text/html;profile=mcp-app"
+    assert listed[WIDGET_RESOURCE_URI].mimeType == "text/html;profile=mcp-app"
     (content,) = read.contents
-    assert content.mimeType == MCP_APP_MIME_TYPE
+    assert content.mimeType == "text/html;profile=mcp-app"
     assert content.meta["ui"]["csp"] == {"connectDomains": [], "resourceDomains": []}
     assert content.meta["ui"]["prefersBorder"] is True
     assert content.text.startswith("<!DOCTYPE html>")
@@ -111,6 +114,25 @@ async def test_render_tool_returns_nodes_and_edges_as_structured_content(server)
     assert [(e["source"], e["target"]) for e in payload["edges"]] == [("a1", "i1")]
 
 
+@pytest.mark.asyncio
+async def test_render_tool_passes_its_arguments_to_the_search(widget_dist):
+    service = Mock()
+    service.search_graph.return_value = {"nodes": [], "edges": []}
+    mcp = FastMCP("widget-args")
+    register_mcp_tools(mcp, service, widget_dist_path=widget_dist)
+
+    async with await _session(mcp) as client:
+        result = await client.call_tool(
+            "show_graph_widget",
+            {"query": "data strategy", "node_types": ["Actor"], "limit": 7},
+        )
+
+    service.search_graph.assert_called_once_with(
+        query="data strategy", node_types=["Actor"], limit=7
+    )
+    assert result.structuredContent["result"]["query"] == "data strategy"
+
+
 def test_render_tool_stays_off_the_in_app_tools_map(tmp_path, widget_dist):
     mock_mcp = Mock()
     mock_mcp.tool = MagicMock(return_value=lambda f: f)
@@ -124,14 +146,15 @@ def test_render_tool_stays_off_the_in_app_tools_map(tmp_path, widget_dist):
 def test_inlined_bundle_cannot_close_its_script_or_style_tag(tmp_path):
     dist = tmp_path / "d"
     dist.mkdir()
-    (dist / "widget.iife.js").write_text('a="</script><b>";')
-    (dist / "style.css").write_text('x::after{content:"</style>"}')
+    (dist / "widget.iife.js").write_text('a="</script><b>";c="</SCRIPT >";')
+    (dist / "style.css").write_text('x::after{content:"</style>"}y{content:"</STYLE>"}')
 
     html = build_widget_html(dist)
 
-    assert html.count("</script>") == 1
-    assert html.count("</style>") == 2  # the base style block plus the bundle's
-    assert 'a="<\\/script><b>";' in html
+    # HTML matches end tags case-insensitively, so every casing must be escaped.
+    assert html.lower().count("</script") == 1
+    assert html.lower().count("</style") == 2  # the base style block plus the bundle's
+    assert 'a="<\\/script><b>";c="<\\/SCRIPT >";' in html
 
 
 def test_missing_bundle_yields_a_placeholder_document(tmp_path):

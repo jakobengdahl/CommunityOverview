@@ -69,7 +69,11 @@ export function unwrapToolResult(raw) {
 
 let nextRequestId = 1;
 const pending = new Map();
-let notificationHandlers = {};
+// One handshake and one listener set per page: a widget that connects twice
+// (React StrictMode re-runs effects) must neither re-initialize nor let the
+// first connection's disconnect drop the second one's listener.
+const toolResultListeners = new Set();
+let initialized = null;
 let listening = false;
 
 function post(message) {
@@ -89,8 +93,9 @@ function handleMessage(event) {
     return;
   }
   if (msg.method && msg.id === undefined) {
-    const handler = notificationHandlers[msg.method];
-    if (handler) handler(msg.params || {});
+    if (msg.method === 'ui/notifications/tool-result') {
+      toolResultListeners.forEach((listener) => listener(msg.params || {}));
+    }
     return;
   }
   if (msg.method) {
@@ -148,22 +153,33 @@ export async function connectHost({ onToolResult } = {}) {
 
   if (!isFramed()) return () => {};
 
-  notificationHandlers = {
-    'ui/notifications/tool-result': deliver,
-  };
+  toolResultListeners.add(deliver);
   listen();
-  await request('ui/initialize', {
-    protocolVersion: MCP_APPS_PROTOCOL_VERSION,
-    appInfo: APP_INFO,
-    appCapabilities: {},
-  });
-  post({ method: 'ui/notifications/initialized', params: {} });
-  post({
-    method: 'ui/notifications/size-changed',
-    params: { height: WIDGET_HEIGHT_PX },
-  });
+  if (!initialized) {
+    initialized = request('ui/initialize', {
+      protocolVersion: MCP_APPS_PROTOCOL_VERSION,
+      appInfo: APP_INFO,
+      appCapabilities: {},
+    }).then(() => {
+      post({ method: 'ui/notifications/initialized', params: {} });
+      post({
+        method: 'ui/notifications/size-changed',
+        params: { height: WIDGET_HEIGHT_PX },
+      });
+    });
+    // A failed handshake may be retried by the next connect.
+    initialized.catch(() => {
+      initialized = null;
+    });
+  }
+  try {
+    await initialized;
+  } catch (error) {
+    toolResultListeners.delete(deliver);
+    throw error;
+  }
   return () => {
-    notificationHandlers = {};
+    toolResultListeners.delete(deliver);
   };
 }
 
