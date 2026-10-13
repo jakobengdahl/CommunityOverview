@@ -192,9 +192,11 @@ class _PinnedBackend(httpcore2.NetworkBackend):
 class _AsyncPinnedBackend(httpcore2.AsyncNetworkBackend):
     """The async counterpart of _PinnedBackend; resolution runs in a thread.
 
-    The lookup is held to the connect timeout, as it is in the backend this
-    wraps; each address then gets the full timeout, as in _PinnedBackend, so
-    one unreachable address does not use up the time for the next.
+    The lookup is held to the connect timeout. Checked addresses are then
+    tried one at a time, each with the full timeout, as _PinnedBackend and
+    socket.create_connection do -- not raced, as the by-name connect this
+    replaces does -- so a name with N unreachable addresses can take up to
+    N times the timeout before the next one answers.
     """
 
     def __init__(self) -> None:
