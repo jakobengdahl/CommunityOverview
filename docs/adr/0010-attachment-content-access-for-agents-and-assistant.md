@@ -211,7 +211,13 @@ the five *tool names* to the wrappers explicitly, never by `getattr` on the
 tool name: `register_mcp_tools` in `backend/service/mcp_tools.py` (MCP and
 `/execute_tool`), `ChatService._build_tools_map` (the assistant and kiosks)
 and `MCPLoader._execute_graph_tool` (Agents, as `GRAPH__<name>`, listed in
-`MCPLoader._get_graph_mcp_tools`). A regression test calls each tool name
+`MCPLoader._get_graph_mcp_tools`). `_execute_graph_tool` then dispatches
+only the names `_get_graph_mcp_tools` lists and refuses any other name as
+an unknown graph tool, so an Agent cannot reach the REST-shaped methods
+(`open_node_attachment`, `get_node_attachment_record` and the rest) by
+naming them; a test calls `GRAPH__open_node_attachment` and
+`GRAPH__get_node_attachment_record` and checks the refusal. A regression
+test calls each tool name
 through each of the three dispatchers and checks that the response carries
 the tool shape (the envelope where §1 requires it), not the REST shape.
 
@@ -531,14 +537,17 @@ documentation states both.
 Adoption (`adopt_federated_node`) writes two local nodes from a remote
 node's metadata: the adopted copy and the local `federated::…` reference
 node. It strips `attachment_access` from both, and removes attachment tool
-names from a copied `tool_allowlist` on both, so a federated source never
-brings a grant with it. Independently, the Agent config treats an Agent
+names from a copied `tool_allowlist` on both; if that leaves the list
+empty, it is replaced by a fixed non-empty sentinel list that names no
+existing tool, never left empty or removed (an empty allowlist means every
+tool). So a federated source never brings a grant with it. Independently, the Agent config treats an Agent
 whose id starts with `federated::` as `attachment_access: none`, and a
 collection whose id starts with `federated::` (a cached remote node, which
 `search_graph` returns when federation is on, or a reference node) never
 grants an attachment tool, whatever its allowlist says. Tests adopt a
 granted remote Agent and a remote collection whose allowlist names an
-attachment tool and check both local nodes, and check that a cached remote
+attachment tool and check both local nodes, adopt one whose allowlist names
+only attachment tools and check it is offered no tools, and check that a cached remote
 collection grants nothing. The hook context carries no resource id, so this target is
 what lets a hook keep people who may edit nodes from granting Agents file
 access.
@@ -1087,6 +1096,7 @@ structured log record, at INFO, to the `attachments.audit` logger:
 | `event` | `attachment_content_read`, `attachment_added` or `attachment_deleted` |
 | `tool` | the tool name |
 | `actor` | `{type, id}`, the type taken from the bound caller kind, never from headers: `user` (from the request actor, or `null` when unauthenticated), `agent` (the Agent id), `kiosk` (the collection short name) or `mcp` (the request actor) |
+| `on_behalf_of` | the bound request actor `{type, id}` (or `null`) when it differs from `actor`: the requesting user of a kiosk call, and the approver of a write applied from an approved proposal (where `actor` stays the proposing Agent) |
 | `node_id` | the node, only once it has resolved to a visible node; otherwise `null` |
 | `attachment_id` | the file, only when it matches the id pattern and is in the node's index; otherwise `null` |
 | `sha256` | the stored file's SHA-256 |
@@ -1111,8 +1121,8 @@ this. The sites that write tool arguments or model text are:
   (`search_graph` is permitted in tainted turns and runs, so an injected
   passage can put file text into its query); in a tainted turn or run it
   logs the query's length only;
-- the route-level `logger.exception` lines of `/ui/chat` and
-  `/ui/chat/simple` in `backend/ui/rest_api.py`, and the governance lines
+- the route-level `logger.exception` lines of `/ui/chat`,
+  `/ui/chat/simple` and `/ui/upload` in `backend/ui/rest_api.py`, and the governance lines
   `failed to record proposal` (`backend/agents/governance/gate.py`) and
   `applying proposal … failed` (`backend/agents/governance/manager.py`),
   which log exception text from calls that can carry attachment arguments;
