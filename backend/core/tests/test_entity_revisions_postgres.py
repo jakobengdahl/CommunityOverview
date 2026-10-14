@@ -441,3 +441,55 @@ def test_an_id_the_store_cannot_take_is_refused_at_once(instances, bad_id):
     with pytest.raises(GraphWriteFailed):
         storage.add_nodes([_node(bad_id, "bad")], [])
     assert bad_id not in storage.nodes
+
+
+SECRET = "host=db.internal role=app_writer"
+
+
+@pytest.mark.parametrize("outcome", ["refused", "did_not_land", "unknown"])
+def test_no_store_error_text_reaches_the_caller(instances, outcome):
+    storage = instances()
+    storage.add_nodes([_node("n")], [])
+    backend = storage._persistence_backend
+
+    class Refusal(psycopg.DataError):
+        sqlstate = "22000"
+
+    def fail(operations, write_token=None):
+        if outcome == "refused":
+            raise Refusal(SECRET)
+        raise psycopg.OperationalError(SECRET)
+
+    backend.apply_batch = fail
+    if outcome == "unknown":
+
+        def unreadable(keys):
+            raise psycopg.OperationalError(SECRET)
+
+        backend.read_write_evidence = unreadable
+    with pytest.raises((GraphWriteFailed, GraphWriteOutcomeUnknown)) as failed:
+        storage.update_node("n", {"name": "x"})
+    assert SECRET not in str(failed.value)
+    from backend.service.mutations import write_error_result
+
+    assert SECRET not in str(write_error_result(failed.value))
+
+
+def test_a_failed_write_whose_entity_someone_else_moved_is_unknown(instances, schema):
+    storage = instances()
+    storage.add_nodes([_node("n")], [])
+    backend = storage._persistence_backend
+    other = PostgresGraphPersistenceBackend(DSN, schema=schema)
+    try:
+
+        def lost_while_another_wrote(operations, write_token=None):
+            other.upsert_node(_node("n", "theirs").to_dict())
+            raise psycopg.OperationalError("connection lost")
+
+        backend.apply_batch = lost_while_another_wrote
+        with pytest.raises(GraphWriteOutcomeUnknown):
+            storage.update_node("n", {"name": "mine"})
+        # Re-read from the store, which holds the other writer's value.
+        assert storage.nodes["n"].name == "theirs"
+    finally:
+        other.close()

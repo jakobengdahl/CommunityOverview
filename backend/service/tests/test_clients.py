@@ -252,6 +252,25 @@ class TestRESTAPIClient:
         still = populated_api_client.get("/api/graph/nodes/api-1")
         assert still.status_code == 200
 
+    @pytest.mark.parametrize(
+        "expected",
+        [{"api-1": -1}, {f"n{i}": 1 for i in range(11)}],
+        ids=["negative", "more-than-ten"],
+    )
+    def test_out_of_bounds_node_expectations_are_a_422(
+        self, populated_api_client, expected
+    ):
+        response = populated_api_client.request(
+            "DELETE",
+            "/api/graph/nodes",
+            json={
+                "node_ids": ["api-1"],
+                "confirmed": True,
+                "expected_revisions": expected,
+            },
+        )
+        assert response.status_code == 422
+
     def test_a_create_expecting_absence_of_a_taken_id_is_a_409(
         self, populated_api_client
     ):

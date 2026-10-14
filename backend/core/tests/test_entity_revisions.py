@@ -415,3 +415,26 @@ def test_the_revision_in_memory_is_the_one_on_disk(make_storage, tmp_path):
     reopened = make_storage()
     assert (reopened.nodes["a"].revision, reopened.edges["e"].revision) == held
     reopened.update_node("a", {"name": "z"}, expected_revision=held[0])
+
+
+def test_an_edge_revision_past_the_ceiling_is_refused_too():
+    from pydantic import ValidationError
+
+    from backend.core.models import MAX_REVISION
+
+    with pytest.raises(ValidationError):
+        Edge(id="e", source="a", target="b", revision=MAX_REVISION + 1)
+
+
+def test_expectations_on_some_of_the_deleted_nodes_are_enough(make_storage):
+    storage = make_storage()
+    storage.add_nodes([_node("a"), _node("b")], [])
+    result = mutations.delete_nodes(
+        storage,
+        DefaultGraphAuthorizationHook(),
+        ["a", "b"],
+        confirmed=True,
+        expected_revisions={"a": storage.nodes["a"].revision},
+    )
+    assert result["success"], result
+    assert not storage.nodes
