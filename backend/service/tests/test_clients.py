@@ -222,6 +222,49 @@ class TestRESTAPIClient:
         assert landed.status_code == 200
         assert landed.json()["node"]["summary"] == "four"
 
+    @pytest.mark.parametrize(
+        "method,path,body",
+        [
+            ("PATCH", "/api/graph/edges/api-e1", {"updates": {"label": "x"}}),
+            ("DELETE", "/api/graph/edges/api-e1", {}),
+        ],
+    )
+    def test_an_edge_write_with_a_stale_revision_is_a_409(
+        self, populated_api_client, method, path, body
+    ):
+        response = populated_api_client.request(
+            method, path, json={**body, "expected_revision": 10**9}
+        )
+        assert response.status_code == 409
+        assert response.json()["detail"]["error"] == "entity_revision_conflict"
+
+    def test_a_node_delete_with_a_stale_revision_is_a_409(self, populated_api_client):
+        response = populated_api_client.request(
+            "DELETE",
+            "/api/graph/nodes",
+            json={
+                "node_ids": ["api-1"],
+                "confirmed": True,
+                "expected_revisions": {"api-1": 10**9},
+            },
+        )
+        assert response.status_code == 409
+        still = populated_api_client.get("/api/graph/nodes/api-1")
+        assert still.status_code == 200
+
+    def test_a_create_expecting_absence_of_a_taken_id_is_a_409(
+        self, populated_api_client
+    ):
+        response = populated_api_client.post(
+            "/api/graph/nodes",
+            json={
+                "nodes": [{"id": "api-1", "type": "Actor", "name": "again"}],
+                "expect_absent": True,
+            },
+        )
+        assert response.status_code == 409
+        assert response.json()["detail"]["current_revision"] is None
+
     def test_delete_nodes_endpoint(self, populated_api_client):
         """Test DELETE /api/graph/nodes endpoint."""
         response = populated_api_client.request(

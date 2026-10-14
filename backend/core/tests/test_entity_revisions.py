@@ -402,3 +402,16 @@ def test_rest_answers_each_write_refusal_with_its_contract_status(code, status):
         )
     assert raised.value.status_code == status
     assert raised.value.detail["error"] == code
+
+
+def test_the_revision_in_memory_is_the_one_on_disk(make_storage, tmp_path):
+    storage = make_storage()
+    storage.add_nodes([_node("a"), _node("b")], [Edge(id="e", source="a", target="b")])
+    storage.update_node("a", {"name": "x"})
+    storage.update_edge("e", {"label": "y"})
+    held = (storage.nodes["a"].revision, storage.edges["e"].revision)
+    storage.flush()
+
+    reopened = make_storage()
+    assert (reopened.nodes["a"].revision, reopened.edges["e"].revision) == held
+    reopened.update_node("a", {"name": "z"}, expected_revision=held[0])

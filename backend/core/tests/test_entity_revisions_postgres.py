@@ -187,10 +187,15 @@ def test_a_create_expecting_absence_is_refused_when_another_instance_has_it(
 def test_the_write_token_never_leaves_the_store(instances, schema):
     a = instances()
     b = instances(deaf=True)
-    a.add_nodes([_node("n")], [])
+    a.add_nodes([_node("n")], [Edge(id="e", source="n", target="n")])
     assert WRITE_TOKEN_KEY in _stored(schema, "graph_nodes", "n")
+    assert WRITE_TOKEN_KEY in _stored(schema, "graph_edges", "e")
     loaded = b._persistence_backend.load_graph_data()
     assert all(WRITE_TOKEN_KEY not in doc for doc in loaded["nodes"])
+    assert all(WRITE_TOKEN_KEY not in doc for doc in loaded["edges"])
+    # What a peer is told to apply is read back the same way.
+    resolved = b._persistence_backend._resolve([("node", "n"), ("edge", "e")])
+    assert all(WRITE_TOKEN_KEY not in op.payload for op in resolved)
     b.load()
     assert WRITE_TOKEN_KEY not in b.nodes["n"].to_dict()
     assert WRITE_TOKEN_KEY not in b.nodes["n"].metadata
