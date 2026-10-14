@@ -233,3 +233,10 @@ def test_pdf_signature_needs_the_dash():
 
 def test_allowed_types_are_case_insensitive():
     assert parse_allowed_types("Application/PDF") == {types.PDF}
+
+
+@pytest.mark.parametrize("suffix", ["\n", " "])
+def test_odf_mimetype_must_match_exactly(suffix):
+    data = _zip({"mimetype": types.ODT + suffix, "content.xml": "<x/>"})
+    with pytest.raises(UnsupportedAttachmentType):
+        _detect(data, "file.odt")

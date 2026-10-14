@@ -947,3 +947,68 @@ class TestRequestContextReachesOffLoopRoutes:
             ("get_node_attachment", "alice"),
             ("delete_node_attachment", "alice"),
         ]
+
+
+class TestLateChecks:
+    def test_content_length_over_node_budget_is_refused_without_reading(
+        self, service, store
+    ):
+        _seed(store, "doc", b"x" * 200)  # 50 bytes of budget left, file limit 100
+        consumed = []
+
+        async def body():
+            consumed.append(True)
+            yield b"x" * 60
+
+        result = asyncio.run(
+            service.add_node_attachment(
+                "doc",
+                filename="a.txt",
+                declared_content_type=None,
+                content=body(),
+                content_length=60,
+            )
+        )
+        assert result["error_code"] == "node_attachment_limit"
+        assert consumed == []
+
+    def test_node_becoming_invisible_mid_upload_stores_nothing(self, storage, store):
+        class FlipHook:
+            narrowed = False
+
+            def evaluate(self, context):
+                return GraphAuthorizationDecision(allowed=True)
+
+        service = GraphService(
+            storage, authorization_hook=FlipHook(), attachment_settings=_settings(store)
+        )
+
+        async def body():
+            yield b"first "
+            # The node moves to a graph this caller's narrowing cannot see.
+            storage.update_node("doc", {"metadata": {"origin_graph_id": "elsewhere"}})
+            yield b"second"
+
+        import backend.service.attachments as ops
+
+        original = ops._node_still_accepts_uploads
+
+        def narrowed(storage_, node_id, graph_access):
+            return original(
+                storage_,
+                node_id,
+                GraphAccessNarrowing(enabled=True, allow_local_graph=True),
+            )
+
+        ops._node_still_accepts_uploads = narrowed
+        try:
+            result = asyncio.run(
+                service.add_node_attachment(
+                    "doc", filename="a.txt", declared_content_type=None, content=body()
+                )
+            )
+        finally:
+            ops._node_still_accepts_uploads = original
+        assert result["error_code"] == "not_found"
+        assert store.list(NS, "doc") == []
+        assert _tmp_is_empty(store)
