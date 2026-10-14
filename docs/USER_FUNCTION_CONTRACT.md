@@ -65,8 +65,10 @@ against them.
    process and never receives a reference to an application object, module,
    database handle or service credential.
 2. **Every effect goes through the broker.** A function's only channel to the
-   host is the protocol in §6. A runner provides no network access and no
-   filesystem outside a private, temporary working directory.
+   host is the protocol in §6. A runner provides no network access. The only
+   writable filesystem is a private, temporary working directory; read access
+   is limited to the runtime itself, the helper library (§10) and the
+   function's own directory.
 3. **Grants are a ceiling, not a request.** A tool call outside the function's
    enabled grants fails, whatever the call claims about itself.
 4. **Scope is fixed by the host.** The graph a run may touch and the actor it
@@ -152,21 +154,22 @@ A manifest is **rejected**, and the function cannot run, when:
 - a required field is missing, or a field has the wrong type;
 - a field holds a value this contract version does not allow, such as a trigger
   kind other than `manual`, a `write_target` other than `graph`, an unknown
-  grant, a limit above the platform maximum, or any reserved field;
+  grant, a limit above the contract maximum in §8, or any reserved field;
 - `entry_point` does not resolve to a file inside the function directory.
 
-Unknown **optional** top-level fields are ignored, so that a manifest written
-for a later minor version still loads. A field this section lists as reserved is
-not unknown: it is rejected, because accepting it silently would suggest a
-behaviour version 1 does not provide.
+Top-level fields this contract does not name are ignored, so that tooling may
+add its own annotations. A field §4.2 lists as reserved is not unknown: it is
+rejected, because accepting it silently would suggest a behaviour version 1
+does not provide.
 
 ### 4.4 Enablement
 
 Loading a manifest does not make it runnable. An operator enables a function,
-and its grants, explicitly in instance configuration. A function that is not
-enabled is listed with its validation state but cannot be invoked. Enabling a
-function is an operator action; a function cannot enable itself or another
-function.
+and each grant it declares, explicitly in instance configuration. A function
+that is not enabled, or that declares a grant the operator has not enabled, is
+listed with its validation state and every invocation of it is `rejected`
+(§11). Enabling a function is an operator action; a function cannot enable
+itself or another function.
 
 ## 5. Invocation
 
@@ -178,8 +181,9 @@ an `input` object and, optionally, an `idempotency_key` and a `correlation_id`.
 
 The invocation is authorized as the calling actor: the host evaluates the
 caller's graph access through the existing authorization hook before the run
-starts. A caller without mutate access cannot start a function that holds
-`graph:write`.
+starts. A caller without read access cannot start any function, and a caller
+without mutate access cannot start a function whose manifest declares
+`graph:write`; such an invocation is `rejected`.
 
 ### 5.2 Envelope
 
@@ -230,9 +234,11 @@ A run is a durable job in the `ExecutionStore`
 ([`DURABLE_EXECUTION_CONTRACT.md`](DURABLE_EXECUTION_CONTRACT.md) §5). Its
 idempotency key is `fn:<function_id>:<key>`, where `<key>` is the invocation's
 `idempotency_key`, or a fresh id when none is given. An invocation that repeats
-a key returns the existing run instead of starting a new one, in any state.
-Callers that retry a manual invocation after a network failure therefore pass
-the same key.
+a key returns the existing run instead of starting a new one, in any state,
+until retention purges that run. Callers that retry a manual invocation after a
+network failure therefore pass the same key. A `rejected` run also holds its
+key: after fixing the cause (for example, enabling the function), invoke with a
+new key.
 
 ## 6. Broker protocol (ABI)
 
@@ -251,16 +257,18 @@ the same for every runtime and every runner.
 2. The function sends zero or more **tool calls**, each a request:
    `{"jsonrpc": "2.0", "id": 1, "method": "tool", "params": {"name": "graph.search", "arguments": {…}}}`.
    The host answers each with a response carrying `result` or `error`, in the
-   order of the requests. A function makes one call at a time; the host rejects
-   a request sent while another is unanswered.
+   order of the requests. A function makes one call at a time; a request sent
+   while another is unanswered is answered with the error `concurrent_call`.
 3. The function ends with one notification:
    `{"jsonrpc": "2.0", "method": "result", "params": {"status": "ok", "output": {…}}}`
    or `{"jsonrpc": "2.0", "method": "result", "params": {"status": "error", "error": {"code": "…", "message": "…"}}}`,
    and then exits.
 
-A process that exits without sending `result` fails the run (§11). Output that
-is not valid JSON-RPC on standard output fails the run with
-`protocol_error`. Anything after `result` is ignored.
+A process that exits without sending `result` fails the run with
+`no_result`. Output on standard output that is not valid JSON-RPC, or a
+message the sequence above does not allow, fails the run with
+`protocol_error`. Anything after `result` is ignored. Run-level error codes are
+listed in §11.
 
 ### 6.3 Tools in version 1
 
@@ -280,8 +288,8 @@ is rejected. Deletion is not available in version 1 (§13).
 
 ### 6.4 Tool errors
 
-A tool call the broker refuses returns a JSON-RPC error whose `data.code` is one
-of:
+A tool call the broker refuses returns a JSON-RPC error with the numeric
+`code` `-32000` and a `data.code` that is one of:
 
 | `data.code` | Meaning |
 |---|---|
@@ -290,6 +298,7 @@ of:
 | `access_denied` | The run's actor may not perform this action on this graph. |
 | `invalid_arguments` | The arguments failed validation, including a scope-changing argument. |
 | `limit_exceeded` | The run has used its tool-call budget (§8). |
+| `concurrent_call` | A request arrived while an earlier one was unanswered (§6.2). |
 | `tool_failed` | The underlying operation failed; `message` carries a sanitized reason. |
 
 A refused tool call does not end the run; the function decides how to react.
@@ -303,10 +312,12 @@ A refused tool call does not end the run; the function decides how to react.
 | `graph:read` | The read tools in §6.3. |
 | `graph:write` | The write tools in §6.3. Implies nothing about read; a function that writes usually declares both. |
 
-A function's **effective grants** are the grants its manifest declares that the
-operator has also enabled. A grant the operator has not enabled behaves as if it
-were not declared. Revoking a grant takes effect for the next tool call of a run
-in progress, not only for the next run.
+A function's grants are the grants its manifest declares. Every declared grant
+must be enabled by the operator before the function can run (§4.4); a tool call
+covered by no declared grant returns `grant_denied`. Revoking a grant while a
+run is in progress takes effect at that run's next tool call, which returns
+`grant_denied`; later invocations are `rejected` until the grant is enabled
+again.
 
 ### 7.2 Scope
 
@@ -329,12 +340,13 @@ system that started it.
 | Captured log | 256 KiB | Further log output is dropped and the truncation is recorded. |
 | Concurrent runs per function | 1 | A further invocation waits in the queue. |
 
-- A manifest may set a **lower** value through `limits` (`timeout_seconds`,
-  `memory_mib`, `max_tool_calls`). A value above the platform maximum rejects
-  the manifest (§4.3).
-- An operator may lower any platform maximum for an instance. No setting raises
-  one: these limits keep functions short, so that long-running work does not
-  move into them.
+- The maximums in this table are contract maximums. An operator may lower any
+  of them for an instance; no setting raises one. These limits keep functions
+  short, so that long-running work does not move into them.
+- A manifest may set a lower value through `limits` (`timeout_seconds`,
+  `memory_mib`, `max_tool_calls`). A value above the contract maximum rejects
+  the manifest (§4.3). The limit a run gets is the smaller of the manifest
+  value and the instance value.
 - Termination is forced. The runner does not wait for the function to clean up,
   and writes the function made before it was terminated stay in the graph.
   Functions that make several writes should make them idempotent, so that a
@@ -420,40 +432,69 @@ The run record exposes:
 Status meanings:
 
 - `rejected`: the run never started, because the manifest failed validation, the
-  function or a needed grant is not enabled, the input failed `input_schema`, or
-  the chain-depth limit was reached.
+  function or one of its declared grants is not enabled, the invoking actor
+  lacks the required access, the input failed `input_schema`, or the
+  chain-depth limit was reached.
 - `failed`: the function returned `status: error`, exited without a result,
   broke the protocol, exceeded memory or produced output that is too large or
   fails `output_schema`.
 - `timed_out`: the wall-clock limit was reached.
-- `cancelled`: an operator cancelled the run.
+- `cancelled`: an operator cancelled the run. Cancelling a running run
+  terminates its process as in §8; writes already made stay.
 
 Records never contain secret values, credentials or tokens. Tool arguments and
 results are not recorded, because they may hold graph content the run record's
 readers should not see.
 
-`timed_out` and `rejected` are run-record statuses. In the `ExecutionStore`
-they are terminal jobs (`DEAD_LETTER` and `CANCELLED` respectively) with the
-status kept in the job result; the store's state machine does not change.
+Run-level error codes are a closed set:
+
+| Status | Code | Cause |
+|---|---|---|
+| `rejected` | `invalid_manifest` | The manifest failed validation (§4.3). |
+| `rejected` | `not_enabled` | The function or one of its declared grants is not enabled (§4.4). |
+| `rejected` | `access_denied` | The invoking actor lacks the access §5.1 requires. |
+| `rejected` | `invalid_input` | `input` failed `input_schema`. |
+| `rejected` | `chain_depth_exceeded` | The chain-depth limit was reached (§9). |
+| `failed` | `function_error` | The function returned `status: error`; its code and message are kept, sanitized. |
+| `failed` | `no_result` | The process exited without sending `result`. |
+| `failed` | `protocol_error` | The function broke the protocol (§6.2). |
+| `failed` | `memory_exceeded` | The memory limit was reached (§8). |
+| `failed` | `output_too_large` | `result.output` exceeded its limit (§8). |
+| `failed` | `invalid_output` | `result.output` failed `output_schema`. |
+| `timed_out` | `timeout` | The wall-clock limit was reached (§8). |
+
+The store's state machine does not change. In the `ExecutionStore`:
+
+- `succeeded` is `SUCCEEDED`;
+- `failed` and `timed_out` are `DEAD_LETTER`, with `dead_letter_reason` starting
+  with the code (`timeout: …`), so that the run-history view can tell
+  `timed_out` from `failed`;
+- `rejected` and `cancelled` are `CANCELLED`, with the outcome and code kept in
+  the job `result` that `cancel` stores.
 
 ## 12. Compatibility
 
 - `contract_version` is a single integer string. A host lists the versions it
-  supports and rejects others.
-- Within a contract version, a change that adds an optional field, a tool, a
-  grant, a trigger kind or a `write_target` value is **non-breaking**: existing
-  manifests keep loading and behaving the same.
+  supports and rejects others. The text of a contract version does not change
+  once a host implements it, so two hosts that support the same version accept
+  and run the same manifests the same way.
+- Any change to what a manifest may contain or what a run may do, including
+  enabling a capability reserved in §13, is a new contract version.
+- A new version is **additive** when every manifest valid under the previous
+  version is valid under it and behaves the same: adding a tool, a grant, a
+  trigger kind, a `write_target` value or an optional field. A host that
+  supports an additive version also accepts manifests that declare the
+  versions before it.
 - Removing or changing the meaning of a field, a tool, a grant or a status is
-  **breaking** and needs a new contract version. A host may support more than
-  one contract version at a time.
+  **breaking**. A host may support more than one breaking line at a time.
 - The envelope's `schema_version` follows `EVENT_SUBSCRIPTIONS.md`; the
   `invocation` block follows `contract_version`.
 
 ## 13. Reserved for later versions
 
 These are deliberately outside version 1. Each is listed with the field or rule
-already reserved for it, so that adding it extends this contract instead of
-replacing it.
+already reserved for it, so that adding it is an additive contract version
+(§12) instead of a redesign.
 
 | Capability | Reserved now | Constraint already fixed |
 |---|---|---|

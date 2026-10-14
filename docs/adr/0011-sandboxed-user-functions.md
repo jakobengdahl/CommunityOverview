@@ -36,8 +36,10 @@ Facts from the current code that shape the decision:
 - Graph access is checked per actor through an authorization hook (read or
   mutate), so a broker can check a function's call exactly as it would check a
   direct request from the invoking actor.
-- No code in the repository spawns or isolates a process today, and the
-  isolation technology has not been chosen.
+- Process isolation exists only in narrow forms: attachment extraction runs in
+  an environment-stripped, time-limited worker process that is killed on
+  timeout, and stdio MCP integrations run as subprocesses. No general isolation
+  runtime for operator code has been chosen.
 
 ## Decision
 
