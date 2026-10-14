@@ -1485,6 +1485,17 @@ class PostgresGraphPersistenceBackend:
             except psycopg.errors.DeadlockDetected:
                 if attempt == self.DEADLOCK_RETRIES:
                     raise
+            except (psycopg.DataError, psycopg.ProgrammingError) as exc:
+                # No SQLSTATE means the driver refused a value before the
+                # statement left - a NUL in an id, which a text parameter
+                # cannot carry. Nothing was sent, so nothing landed; said so,
+                # or the caller would read the store back for a write that
+                # never reached it.
+                if getattr(exc, "sqlstate", None) is None:
+                    raise WriteRefusedByStore(
+                        f"the driver refused a value in the batch: {exc}"
+                    ) from exc
+                raise
         raise AssertionError("unreachable")  # pragma: no cover
 
     def _apply_batch_once(

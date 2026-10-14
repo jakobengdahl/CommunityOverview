@@ -419,3 +419,25 @@ def test_a_cross_scope_create_is_refused_at_once_without_reading_back(schema):
             storage.shutdown_events()
         owner.close()
         other.close()
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    [
+        pytest.param("a\u0000b", id="nul-the-driver-refuses"),
+        pytest.param(
+            "".join(chr(0x4E00 + i) for i in range(4000)), id="too-big-to-index"
+        ),
+    ],
+)
+def test_an_id_the_store_cannot_take_is_refused_at_once(instances, bad_id):
+    storage = instances()
+    storage.WRITE_RESOLVE_DELAY_SECONDS = 30.0
+
+    def never_asked(keys):
+        raise AssertionError("a refused write read its evidence back")
+
+    storage._persistence_backend.read_write_evidence = never_asked
+    with pytest.raises(GraphWriteFailed):
+        storage.add_nodes([_node(bad_id, "bad")], [])
+    assert bad_id not in storage.nodes

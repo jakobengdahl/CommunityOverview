@@ -407,8 +407,9 @@ class WriteRefusedByStore(RuntimeError):
 
 
 # SQLSTATE classes that are a statement refused, never a commit lost: data
-# exception, integrity constraint violation, syntax error or access rule.
-REFUSAL_SQLSTATE_CLASSES = frozenset({"22", "23", "42"})
+# exception, integrity constraint violation, a program limit (an id too large
+# to index, say), syntax error or access rule.
+REFUSAL_SQLSTATE_CLASSES = frozenset({"22", "23", "42", "54"})
 
 
 def refused_outright(exc: BaseException) -> bool:
