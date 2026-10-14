@@ -20,6 +20,8 @@ ARGV_MARKER = "--argv-marker-token"
 
 def _client(tmp_path, monkeypatch):
     monkeypatch.setenv(AGENTS_WORKSPACE_ENV_VAR, WORKSPACE_MARKER)
+    # A configured Brave key adds a fifth default integration; pin the set.
+    monkeypatch.delenv("BRAVE_API_KEY", raising=False)
     # The built-in defaults put the resolved workspace root into the FS argv;
     # add an operator-supplied stdio integration on top of them.
     integrations = AgentsSettings._get_default_integrations() + [
@@ -83,6 +85,9 @@ def test_status_response_never_contains_argv_or_workspace_path(tmp_path, monkeyp
     resp = client.get("/agents/status")
 
     assert resp.status_code == 200
-    assert len(resp.json()["mcp_integrations"]) == 4
+    integrations = resp.json()["mcp_integrations"]
+    assert len(integrations) == 4
+    assert all("command" not in item for item in integrations)
     assert WORKSPACE_MARKER not in resp.text
     assert ARGV_MARKER not in resp.text
+    assert "/opt/tools/custom-mcp" not in resp.text
