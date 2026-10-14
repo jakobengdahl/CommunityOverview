@@ -171,9 +171,14 @@ Extracted attachment text may be sent to the configured LLM provider:
 - **for unattended Agents and for kiosks only with an explicit grant**
   (§2);
 - **never, for anyone, when the instance switch is off**
-  (`ATTACHMENT_CONTENT_ACCESS=off`, §2), through any attachment tool; files
-  the REST routes serve without authentication stay reachable to any HTTP
-  client (§2).
+  (`ATTACHMENT_CONTENT_ACCESS=off`, §2).
+
+These rules govern the attachment tools. They cannot govern the REST
+download routes of ADR 0008: a deployment whose REST attachment routes
+answer without authentication exposes the files to any HTTP client that
+reaches them, an ungranted Agent's `WEB` fetch included, whatever the
+grants and the switch say. A deployment that relies on D1's limits enables
+authentication.
 
 The rationale: the user could download the file and paste it into the chat,
 and `/ui/upload` already sends document text to the provider. Deployments
@@ -212,8 +217,9 @@ the tool shape (the envelope where §1 requires it), not the REST shape.
 
 `attachment_tool_add` decodes its arguments and then runs the service's
 `async` `add_node_attachment` to completion on a private event loop in a
-helper thread, because every caller is synchronous and the chat caller is
-already on the server's event loop thread. The store needs no particular
+helper thread, because every caller is synchronous and some run on the
+server's event-loop thread (the MCP mount, the confirmation and approve
+routes). The store needs no particular
 loop: its locks are thread locks and its blocking work goes through
 `asyncio.to_thread`. Request authorization lives in a `ContextVar`
 (`backend/runtime/authorization.py`), which a thread-pool worker does not
@@ -489,7 +495,7 @@ treated as `none`, and the Agent's config load logs a warning.
 
 Editing a granted Agent is wielding its grant: its prompts, skills and
 subscription decide what it reads and where the text goes. So a dedicated
-mutate target, `grant_agent_attachment_access`, is evaluated, and the write
+mutate target, `grant_attachment_access`, is evaluated, and the write
 refused unless it allows, on every write — `add_nodes` (its nodes and
 edges), `update_node`, `delete_nodes`, `delete_edges` touching it, a graph
 import, or any later path — to:
@@ -497,14 +503,30 @@ import, or any later path — to:
 - an Agent node whose stored or resulting `metadata.attachment_access` is
   not `none` (creating a grant, changing it, or editing anything on an
   Agent that holds one);
-- a Skill node that a granted Agent references (through
-  `metadata.skill_node_ids` or a `USES_SKILL` edge).
+- any node, of any stored or resulting type and including its creation,
+  whose id appears in a granted Agent's `metadata.skill_node_ids` or is the
+  target of one of its `USES_SKILL` edges;
+- the `EventSubscription` node a granted Agent's `subscription_id` names
+  (it decides which events, and so which editor-written payloads, reach
+  the Agent);
+- an `ActiveKnowledgeCollection` node whose stored or resulting
+  `tool_allowlist` names an attachment tool (the kiosk grant, below).
+
+Tests cover each bullet under a hook that refuses the target: a write to a
+referenced Skill through `skill_node_ids` and through a `USES_SKILL` edge,
+creating a node at a dangling `skill_node_ids` id, an edit of a granted
+Agent, an edge deletion on one, an edit of its subscription, and adding an
+attachment tool to a kiosk allowlist.
 
 The check lives in one shared helper in the service's mutation layer that
 every such path calls, not in each route. Skills an Agent loads from
 `skills_urls` are outside the graph; whoever controls those URLs steers a
 granted Agent, so granting an Agent that uses them trusts those URLs as
-much as the Agent's editors. The hook-author documentation states this.
+much as the Agent's editors. Event payloads are written by whoever edited
+the node that fired the event and reach the Agent's prompt as they are, so
+they too are untrusted input to a granted Agent; the taint rule (§5) starts
+only once the Agent has read attachment content. The hook-author
+documentation states both.
 
 Adoption (`adopt_federated_node`) writes two local nodes from a remote
 node's metadata: the adopted copy and the local `federated::…` reference
@@ -558,13 +580,22 @@ Agent reads can reappear in its run summary and its proposals; so the
 `/agents/*` read routes (`GET /agents/runs`, `/agents/runs/{id}`,
 `/agents/proposals`, `/agents/proposals/{id}`) run inside
 `use_request_authorization` and evaluate a new target, `read_agent_runs`
-(action read), in the same change that binds approve and reject. For runs
-and proposals of an Agent whose `attachment_access` is not `none`, the
-routes evaluate `read_node_attachment_content` as well and leave those
-entries out (or answer `access_denied` on the detail routes) unless both
-allow; so a hook that already refuses a user file text keeps that user from
-reading it through Agent output, without knowing the new target. The hook
-context names no Agent, so each decision covers all granted Agents at once.
+(action read), in the same change that binds approve and reject. Each run
+record and each proposal stores, when it is written, whether the Agent
+held a grant when the run started, whether the run read attachment content
+(`tainted`), and the ids of the nodes whose attachment content it read. For
+an entry whose stored grant flag or `tainted` is set, the routes evaluate
+`read_node_attachment_content` as well and require every recorded node to
+be visible under the reader's own graph narrowing
+(`access.is_node_visible`); otherwise they leave the entry out (or answer
+`access_denied` on the detail routes). The decision rests on the stored
+values, so revoking a grant or deleting the Agent does not release earlier
+output. A hook that already refuses a user file text thereby keeps that
+user from reading it through Agent output, without knowing the new target.
+Tests list and fetch runs and proposals of a granted Agent, before and
+after the grant is revoked and the Agent deleted, under a hook that
+refuses `read_node_attachment_content` and under a narrowing that hides a
+recorded node.
 With the default permissive hook, everyone who can reach the `/agents/*`
 routes can read what granted Agents quoted.
 
@@ -585,11 +616,22 @@ target node's type has `update` in the collection's
 `node_type_permissions`. The overlay applies on the confirmation path too
 (§5).
 
+Naming an attachment tool in a collection's `tool_allowlist` is a grant,
+so that write evaluates `grant_attachment_access` (above, under Agents).
+`ChatService` caches resolved collections for the life of the process; the
+cache is invalidated on every write to an `ActiveKnowledgeCollection` node,
+and the confirmation route (§5) resolves the collection without the cache,
+so a revoked allowlist entry or permission is refused on the next turn and
+on confirmation. A test revokes an entry and checks both.
+
 Because the kiosk is a client-selected mode of `/ui/chat` (Context), its
 allowlist governs what the kiosk's model is offered, not what a determined
 client can reach. A deployment that serves a kiosk to people who must not
-read attachments also sets `ASSISTANT_ATTACHMENT_ACCESS=off` or denies
-`read_node_attachment_content` in its authorization hook.
+read attachments sets `ASSISTANT_ATTACHMENT_ACCESS=off` (for clients that
+call `/ui/chat` without the collection), keeps attachment tools out of
+that kiosk's allowlist, and lets only trusted people hold
+`grant_attachment_access`; or it denies `read_node_attachment_content` in
+its authorization hook, which closes every path at once.
 
 #### The interactive assistant
 
@@ -613,11 +655,21 @@ hook sees the same inputs it sees for that user's REST calls. Binding all
 three is part of the permission work and lands **before or with** the read
 tools; without it a per-user hook could not tell users apart.
 
-Extraction and search can take seconds, so these routes and
-`POST /execute_tool` run the chat call (or the tool) off the server's event
-loop, through `asyncio.to_thread`, which carries the bound authorization
-context with it. An attachment tool therefore never blocks other requests
-for its timeouts.
+Extraction and search can take seconds, so no attachment tool runs on the
+server's event loop. These routes and `POST /execute_tool` run the chat
+call (or the tool) through `asyncio.to_thread`, which carries the bound
+authorization context with it. The MCP mount calls synchronous tools
+directly on the loop (`mcp` 1.x), so the five tools are registered with
+the MCP server as `async` shims that call the synchronous wrapper through
+`asyncio.to_thread`, while `tools_map` and `/execute_tool` keep the
+synchronous callable.
+
+Moving the chat call off the loop makes chat turns run concurrently, which
+they do not today. So per-request state that `ChatService` keeps on its
+shared instance (such as `_current_federation_depth`) moves to per-call
+arguments or a `ContextVar`, and the new in-memory stores (pending actions
+with their touched-ids lists, the text cache, the extraction slots) are
+guarded by locks.
 
 #### External MCP clients and `/execute_tool`
 
