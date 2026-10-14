@@ -220,15 +220,18 @@ tests exercise them.
 
 - **Only terminal jobs.** `redact` and `purge` skip `PENDING` and `RUNNING` jobs
   (and unknown ids) without error. A job's age is measured from `finished_at`,
-  falling back to `updated_at`.
+  falling back to `updated_at`. A run history record left `RUNNING` by a crashed
+  process therefore keeps its content until something moves it to a terminal
+  state; the read window still hides it once it is old enough.
 - **Redaction** (`models.redact_job`, shared by all adapters) keeps `state`,
   every timestamp, `id`, `agent_id`, `kind`, `idempotency_key`,
   `correlation_id`, `attempts` and `dead_letter_reason`. It reduces
   `payload.event` to `{event_type, entity: {kind, id, type}}` (dropping the
   entity data and the event's actor attribution), drops every other payload key
-  except `agent_name`, nulls `result.summary`, `last_error`, `session_id` and
-  `origin`, and stamps `redacted_at`. Redacting an already redacted job is a
-  no-op.
+  except `agent_name`, and keeps those identifiers only as short strings or
+  integers. In `result` it nulls `summary` and every non-boolean, non-numeric
+  value. It nulls `last_error`, `session_id` and `origin`, and stamps
+  `redacted_at`. Redacting an already redacted job is a no-op.
 - **Purge drops idempotency memory.** A purged job's `idempotency_key` is
   forgotten: a later `enqueue` with that key creates a new job (§5 holds only
   while the job exists). Retention therefore must not be shorter than the window
@@ -236,7 +239,11 @@ tests exercise them.
   it to at least a week.
 
 The durable SQLite adapter adds `redacted_at` in schema version 2, an additive,
-forward-only migration of a version-1 file.
+forward-only migration of a version-1 file, run once inside a write transaction
+even when several processes open the file together. It enables
+`secure_delete` and checkpoints the WAL after a redact or purge that changed
+rows, so the removed content does not linger in free pages or the `-wal` file.
+Copies taken before a sweep (backups, disk snapshots) are outside its reach.
 
 ### Run-history retention policy
 
@@ -251,7 +258,9 @@ Durable AgentRun history applies these operations through
 | `AGENTS_RUN_HISTORY_SWEEP_INTERVAL_HOURS` | Hours between sweeps (default 24). |
 
 With none set, history is kept forever and nothing is redacted or purged. A
-value that is not a positive integer fails startup. The sweep runs when the
+value that is not an integer from 1 to 36500 (1 to 87600 for the interval)
+fails startup; leave a window unset rather than very large to keep history
+forever. The sweep runs when the
 agent registry starts (also when agents are disabled, since it governs data
 already at rest) and then every interval; a failing sweep is logged and never
 stops the runtime. `python -m backend.agents.run_history_retention [--dry-run]`

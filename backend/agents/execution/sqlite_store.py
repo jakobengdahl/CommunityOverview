@@ -122,6 +122,9 @@ class SqliteExecutionStore:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
+        # Overwrite freed pages so purged or redacted content does not linger
+        # in the file.
+        self._conn.execute("PRAGMA secure_delete=ON")
         self._migrate()
 
     # ------------------------------------------------------------------
@@ -129,16 +132,29 @@ class SqliteExecutionStore:
     # ------------------------------------------------------------------
 
     def _migrate(self) -> None:
+        # One write transaction, re-reading the version inside it, so processes
+        # opening the same file concurrently migrate it exactly once.
         with self._lock:
-            version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-            if version < 1:
-                self._conn.executescript(_CREATE_SCHEMA)
-            if version < 2:
-                self._conn.execute(_MIGRATE_V2)
-            if version < _SCHEMA_VERSION:
-                # PRAGMA does not accept bound parameters.
-                self._conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+                if version < 1:
+                    for statement in _CREATE_SCHEMA.split(";"):
+                        if statement.strip():
+                            self._conn.execute(statement)
+                if version < 2 and "redacted_at" not in self._columns():
+                    self._conn.execute(_MIGRATE_V2)
+                if version < _SCHEMA_VERSION:
+                    # PRAGMA does not accept bound parameters.
+                    self._conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
                 self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def _columns(self) -> set:
+        rows = self._conn.execute("PRAGMA table_info(execution_jobs)").fetchall()
+        return {row["name"] for row in rows}
 
     def close(self) -> None:
         """Close the underlying connection. The database file persists."""
@@ -535,6 +551,8 @@ class SqliteExecutionStore:
             except Exception:
                 self._conn.rollback()
                 raise
+            if count:
+                self._checkpoint()
         return count
 
     def purge(self, job_ids: Sequence[str]) -> int:
@@ -552,7 +570,14 @@ class SqliteExecutionStore:
             except Exception:
                 self._conn.rollback()
                 raise
+            if count:
+                self._checkpoint()
         return count
+
+    def _checkpoint(self) -> None:
+        # Fold the WAL back into the file so pre-redaction/purge page images do
+        # not linger in the -wal file. Best effort: a busy reader only delays it.
+        self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     # ------------------------------------------------------------------
     # Internal helpers (call under self._lock)

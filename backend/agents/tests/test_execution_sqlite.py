@@ -214,3 +214,60 @@ def test_recover_stale_binds_every_job_id(tmp_path):
             assert j.id not in sql
     finally:
         store.close()
+
+
+def _v1_file(db):
+    import sqlite3
+
+    from backend.agents.execution.sqlite_store import _CREATE_SCHEMA
+
+    conn = sqlite3.connect(db)
+    conn.executescript(_CREATE_SCHEMA)
+    conn.execute("PRAGMA user_version=1")
+    conn.commit()
+    conn.close()
+
+
+def test_migration_survives_crash_between_alter_and_version_bump(tmp_path):
+    """A v1 file that already has redacted_at (crash mid-migration) still opens."""
+    import sqlite3
+
+    db = tmp_path / "execution.db"
+    _v1_file(db)
+    conn = sqlite3.connect(db)
+    conn.execute("ALTER TABLE execution_jobs ADD COLUMN redacted_at REAL")
+    conn.commit()
+    conn.close()
+
+    store = SqliteExecutionStore(db)
+    try:
+        assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    finally:
+        store.close()
+
+
+def test_concurrent_opens_of_a_v1_file_migrate_once(tmp_path):
+    """Several stores opening one v1 file at once all succeed."""
+    import threading
+
+    db = tmp_path / "execution.db"
+    _v1_file(db)
+    barrier = threading.Barrier(4)
+    errors, stores = [], []
+
+    def open_store():
+        barrier.wait()
+        try:
+            stores.append(SqliteExecutionStore(db))
+        except Exception as exc:  # pragma: no cover - the failure being tested
+            errors.append(exc)
+
+    threads = [threading.Thread(target=open_store) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    for s in stores:
+        s.close()
+    assert errors == []
+    assert len(stores) == 4

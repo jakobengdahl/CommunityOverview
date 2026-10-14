@@ -111,6 +111,25 @@ class TestRetentionPolicy:
         with pytest.raises(ValueError, match=name):
             RetentionPolicy.from_env({name: value})
 
+    @pytest.mark.parametrize(
+        "name,value",
+        [
+            ("AGENTS_RUN_HISTORY_RETENTION_DAYS", "36501"),
+            ("AGENTS_RUN_HISTORY_REDACT_AFTER_DAYS", "1000000"),
+            ("AGENTS_RUN_HISTORY_EXPORT_MAX_DAYS", "1000000"),
+            ("AGENTS_RUN_HISTORY_SWEEP_INTERVAL_HOURS", "3000000"),
+        ],
+    )
+    def test_out_of_range_value_fails_at_load(self, name, value):
+        with pytest.raises(ValueError, match=name):
+            RetentionPolicy.from_env({name: value})
+
+    def test_largest_accepted_retention_keeps_read_api_working(self):
+        policy = RetentionPolicy.from_env(
+            {"AGENTS_RUN_HISTORY_RETENTION_DAYS": "36500"}
+        )
+        assert policy.read_cutoff() is not None
+
     def test_invalid_config_fails_settings_load(self, monkeypatch):
         monkeypatch.setenv("AGENTS_RUN_HISTORY_RETENTION_DAYS", "forever")
         with pytest.raises(ValueError):
@@ -212,6 +231,41 @@ class TestSweep:
         assert record["redacted"] == 2 and record["purged"] == 1
         for leaked in (SECRET, a.id, b.id, "corr", "n1"):
             assert leaked not in audit[0]
+
+
+class TestRedactJob:
+    def _job(self, payload, result):
+        return ExecutionJob(
+            agent_id="a1",
+            kind=ExecutionKind.EVENT,
+            idempotency_key="k",
+            payload=payload,
+            result=result,
+        )
+
+    def test_free_text_under_any_result_key_is_dropped(self):
+        from backend.agents.execution.models import redact_job
+
+        job = self._job({}, {"handled": True, "turns": 3, "message": SECRET})
+        redact_job(job, T0)
+        assert job.result == {"handled": True, "turns": 3, "message": None}
+
+    def test_non_scalar_or_long_kept_fields_are_dropped(self):
+        from backend.agents.execution.models import redact_job
+
+        job = self._job(
+            {
+                "agent_name": {"nested": SECRET},
+                "event": {
+                    "event_type": "node.update",
+                    "entity": {"kind": "node", "id": SECRET * 20, "type": [SECRET]},
+                },
+            },
+            None,
+        )
+        redact_job(job, T0)
+        assert SECRET not in json.dumps(job.to_dict())
+        assert job.payload["event"]["event_type"] == "node.update"
 
 
 # -- sweeper -----------------------------------------------------------------

@@ -15,7 +15,8 @@ An operator bounds how long run history is kept with four optional settings:
   (default 24).
 
 All unset means history is kept forever and nothing is ever swept. A value that
-is not a positive integer is a configuration error raised at startup.
+is not an integer from 1 to ``MAX_DAYS`` (``MAX_SWEEP_INTERVAL_HOURS`` for the
+interval) is a configuration error raised at startup.
 
 The sweep only ever touches terminal runs: a queued or running run is never
 redacted or purged. It runs once when the agent registry starts and then every
@@ -47,6 +48,10 @@ audit_logger = logging.getLogger(f"{__name__}.audit")
 
 RETENTION_FLOOR_DAYS = 7
 DEFAULT_SWEEP_INTERVAL_HOURS = 24
+# Upper bounds (100 years / 10 years) keep date arithmetic and thread waits in
+# range; leave a window unset rather than very large to keep history forever.
+MAX_DAYS = 36_500
+MAX_SWEEP_INTERVAL_HOURS = 87_600
 
 ENV_RETENTION_DAYS = "AGENTS_RUN_HISTORY_RETENTION_DAYS"
 ENV_REDACT_AFTER_DAYS = "AGENTS_RUN_HISTORY_REDACT_AFTER_DAYS"
@@ -58,12 +63,9 @@ def _positive_int(name: str, raw: Optional[str]) -> Optional[int]:
     if raw is None or raw.strip() == "":
         return None
     try:
-        value = int(raw.strip())
+        return int(raw.strip())
     except ValueError:
         raise ValueError(f"{name} must be a positive integer, got {raw!r}") from None
-    if value < 1:
-        raise ValueError(f"{name} must be a positive integer, got {raw!r}")
-    return value
 
 
 @dataclass(frozen=True)
@@ -85,14 +87,16 @@ class RetentionPolicy:
         sweep_interval_hours: Optional[int] = None,
     ) -> "RetentionPolicy":
         """Apply the floor and clamps to configured values."""
-        for name, value in (
-            ("retention_days", retention_days),
-            ("redact_after_days", redact_after_days),
-            ("export_max_days", export_max_days),
-            ("sweep_interval_hours", sweep_interval_hours),
+        for name, value, ceiling in (
+            (ENV_RETENTION_DAYS, retention_days, MAX_DAYS),
+            (ENV_REDACT_AFTER_DAYS, redact_after_days, MAX_DAYS),
+            (ENV_EXPORT_MAX_DAYS, export_max_days, MAX_DAYS),
+            (ENV_SWEEP_INTERVAL_HOURS, sweep_interval_hours, MAX_SWEEP_INTERVAL_HOURS),
         ):
-            if value is not None and value < 1:
-                raise ValueError(f"{name} must be a positive integer, got {value!r}")
+            if value is not None and not 1 <= value <= ceiling:
+                raise ValueError(
+                    f"{name} must be an integer from 1 to {ceiling}, got {value!r}"
+                )
 
         if retention_days is not None and retention_days < RETENTION_FLOOR_DAYS:
             logger.warning(

@@ -262,6 +262,18 @@ class ExecutionJob:
         return self.finished_at or self.updated_at
 
 
+_MAX_KEPT_LEN = 200
+
+
+def _kept_scalar(value: Any) -> Any:
+    """An identifier kept through redaction: a short str/int, else None."""
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return None
+    if isinstance(value, str) and len(value) > _MAX_KEPT_LEN:
+        return None
+    return value
+
+
 def redact_job(job: ExecutionJob, now: datetime) -> None:
     """
     Strip ``job``'s content in place, keeping what an operator needs to account
@@ -270,8 +282,10 @@ def redact_job(job: ExecutionJob, now: datetime) -> None:
 
     * ``payload.event`` shrinks to ``{event_type, entity: {kind, id, type}}``
       (the entity's before/after/patch data and the event's actor attribution
-      go); every other payload key except ``agent_name`` is dropped.
-    * ``result.summary`` is nulled; the remaining result counters stay.
+      go); every other payload key except ``agent_name`` is dropped. Kept
+      values survive only as short strings or integers.
+    * ``result.summary`` is nulled and only boolean/numeric result values are
+      kept, so free text under any other key goes too.
     * ``last_error`` and the attribution fields ``session_id`` and ``origin``
       are nulled.
 
@@ -280,21 +294,30 @@ def redact_job(job: ExecutionJob, now: datetime) -> None:
     payload = job.payload or {}
     redacted: Dict[str, Any] = {}
     if "agent_name" in payload:
-        redacted["agent_name"] = payload["agent_name"]
+        redacted["agent_name"] = _kept_scalar(payload["agent_name"])
     event = payload.get("event")
     if isinstance(event, dict):
         entity = event.get("entity") if isinstance(event.get("entity"), dict) else {}
         redacted["event"] = {
-            "event_type": event.get("event_type"),
+            "event_type": _kept_scalar(event.get("event_type")),
             "entity": {
-                "kind": entity.get("kind"),
-                "id": entity.get("id"),
-                "type": entity.get("type"),
+                "kind": _kept_scalar(entity.get("kind")),
+                "id": _kept_scalar(entity.get("id")),
+                "type": _kept_scalar(entity.get("type")),
             },
         }
     job.payload = redacted
-    if isinstance(job.result, dict) and "summary" in job.result:
-        job.result = {**job.result, "summary": None}
+    if isinstance(job.result, dict):
+        job.result = {
+            key: (
+                value
+                if key != "summary" and isinstance(value, (bool, int, float))
+                else None
+            )
+            for key, value in job.result.items()
+        }
+    elif job.result is not None:
+        job.result = None
     job.last_error = None
     job.session_id = None
     job.origin = None
