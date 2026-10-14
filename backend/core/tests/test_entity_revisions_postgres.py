@@ -307,3 +307,85 @@ def test_an_edge_write_holds_its_endpoints_against_a_node_delete(instances, sche
     writer.join(10)
     assert finished.is_set()
     assert _stored(schema, "graph_edges", "e") is not None
+
+
+def test_a_write_the_store_refuses_fails_at_once_without_reading_back(instances):
+    storage = instances()
+    storage.add_nodes([_node("n")], [])
+    storage.WRITE_RESOLVE_DELAY_SECONDS = 30.0  # would show as a stall
+
+    def never_asked(keys):
+        raise AssertionError("a refused write read its evidence back")
+
+    storage._persistence_backend.read_write_evidence = never_asked
+    # jsonb cannot hold NUL: refused inside the transaction, nothing landed.
+    with pytest.raises(GraphWriteFailed) as failed:
+        storage.update_node("n", {"description": "bad\u0000value"})
+    assert "\u0000" not in str(failed.value)
+    assert storage.nodes["n"].description == ""
+    assert not storage._resync_pending
+
+
+def test_a_whole_graph_save_never_lowers_the_counter(instances):
+    storage = instances()
+    storage.add_nodes([_node("a"), _node("b")], [])
+    storage.update_node("a", {"name": "moved"})
+    highest = storage.nodes["a"].revision
+    # A save carrying revisions below what the sequence has handed out.
+    storage.nodes["a"].revision = 1
+    storage.nodes["b"].revision = 1
+    storage.save().result()
+    storage.add_nodes([_node("after")], [])
+    assert storage.nodes["after"].revision > highest
+
+
+def test_a_write_still_landing_at_the_first_read_is_found_at_the_second(instances):
+    storage = instances()
+    storage.add_nodes([_node("n")], [])
+    backend = storage._persistence_backend
+    real_apply = backend.apply_batch
+    real_read = backend.read_write_evidence
+    held: List[Any] = []
+
+    def lands_late(operations, write_token=None):
+        held.append((operations, write_token))
+        raise psycopg.OperationalError("connection lost while committing")
+
+    reads: List[Any] = []
+
+    def evidence(keys):
+        if reads:
+            # The commit that was still flushing lands between the two reads.
+            operations, token = held[0]
+            real_apply(operations, write_token=token)
+        reads.append(keys)
+        return real_read(keys)
+
+    backend.apply_batch = lands_late
+    backend.read_write_evidence = evidence
+    storage.update_node("n", {"name": "late"})
+
+    assert len(reads) == 2
+    assert storage.nodes["n"].name == "late"
+    assert (
+        storage.nodes["n"].revision
+        == _stored(schema_of(storage), "graph_nodes", "n")["revision"]
+    )
+    assert not storage._resync_pending
+
+
+def schema_of(storage: GraphStorage) -> str:
+    return storage._persistence_backend.schema
+
+
+def test_an_import_does_not_carry_the_documents_revisions_into_the_store(instances):
+    from backend.core.models import MAX_REVISION
+
+    storage = instances()
+    storage.add_nodes([_node("old")], [])
+    storage.replace_all_nodes_and_edges(
+        [Node(id="n", type=NodeType.ACTOR, name="n", revision=MAX_REVISION)], []
+    )
+    assert storage.nodes["n"].revision == 0
+    storage.add_nodes([_node("after")], [])
+    assert 0 < storage.nodes["after"].revision < 1_000_000

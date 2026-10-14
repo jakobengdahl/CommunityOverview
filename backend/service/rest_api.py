@@ -20,7 +20,7 @@ Usage:
 import asyncio
 import json
 import logging
-from typing import TYPE_CHECKING, List, Optional, Dict, Any
+from typing import TYPE_CHECKING, Annotated, List, Optional, Dict, Any
 from fastapi import (
     APIRouter,
     File,
@@ -259,8 +259,9 @@ class DeleteNodesRequest(BaseModel):
         ..., max_length=10, description="Node IDs to delete (max 10)"
     )
     confirmed: bool = Field(False, description="Confirmation flag")
-    expected_revisions: Optional[Dict[str, int]] = Field(
+    expected_revisions: Optional[Dict[str, Annotated[int, Field(ge=0)]]] = Field(
         None,
+        max_length=10,
         description=(
             "Node id -> the revision it must still have. Any mismatch deletes "
             "nothing and fails with 409 entity_revision_conflict."

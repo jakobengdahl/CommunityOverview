@@ -1249,10 +1249,17 @@ edge upserts hold their endpoint rows `FOR KEY SHARE` until commit, so a node
 delete on another instance, which locks the row it removes, is ordered
 against them; `KEY SHARE` rather than `SHARE` so an ordinary update of the
 node does not wait on someone drawing an edge to it. A whole-graph save keeps the revisions it is handed and raises
-the sequence past the highest, under the save's exclusive lock; it does not
-restamp, so an import into a PostgreSQL store keeps the revisions its
-document carries (the restamp §4.2 asks of an import is done only on a
-single-writer store so far).
+the sequence past the highest, under the save's exclusive lock. It does not
+restamp: an import into a PostgreSQL store sets every imported entity's
+revision to 0 ("never written under revisions") rather than keep the
+document's values, which are not this store's and could otherwise carry its
+sequence to its ceiling. An expectation taken against the replaced graph
+therefore matches an imported entity only if it was 0 - the restamp §4.2 asks
+of an import is done on a single-writer store so far. A shared store's
+revisions also count every scope's writes, so a scoped instance can infer
+how much the other scopes in its schema write from the gaps between its own
+revisions; a deployment that must hide that keeps scopes in schemas of their
+own.
 
 `checkpoint()` is a no-op here. The file backend needs it because it appends
 to a journal and rewrites the graph only periodically; a database has no

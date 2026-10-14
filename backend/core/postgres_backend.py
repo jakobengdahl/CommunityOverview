@@ -83,6 +83,7 @@ from backend.core.storage_backends import (
     EntityRevisionConflict,
     ExternalChange,
     ExternalChangeRefused,
+    WriteRefusedByStore,
 )
 
 logger = logging.getLogger(__name__)
@@ -133,6 +134,11 @@ REVISION_SEQUENCE = "graph_revision_seq"
 # after a failure the writer can tell whether its own write committed
 # (§4.4). Server-internal: stripped from every entity a read returns.
 WRITE_TOKEN_KEY = "_write_token"
+
+# How long reading a failed write's evidence may wait for a connection. It
+# runs with the application's storage lock held, so a store that is down must
+# not hold it for the pool's whole default wait, twice.
+EVIDENCE_CONNECT_TIMEOUT_SECONDS = 5.0
 
 # Connections are the resource that scales with instance count, and the
 # server's ceiling is shared by every instance at once: stock PostgreSQL
@@ -276,7 +282,7 @@ class ScopeIsolationUnavailable(RuntimeError):
     """
 
 
-class CrossScopeWriteRefused(RuntimeError):
+class CrossScopeWriteRefused(WriteRefusedByStore):
     """An entity write named an id that belongs to another scope.
 
     `id` is the primary key of the table rather than of the table per scope,
@@ -1734,7 +1740,7 @@ class PostgresGraphPersistenceBackend:
         found: Dict[Tuple[str, str], Optional[Tuple[int, Optional[str]]]] = {
             (kind, entity_id): None for kind, entity_id in keys
         }
-        with self._pool.connection() as conn:
+        with self._pool.connection(timeout=EVIDENCE_CONNECT_TIMEOUT_SECONDS) as conn:
             with conn.transaction():
                 conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
                 self._bind_scope(conn)

@@ -145,6 +145,11 @@ def event_to_history_record(event: "Event") -> Dict[str, Any]:
     before = _without_excluded(event.entity.before)
     after = _without_excluded(event.entity.after)
     patch = _without_excluded(event.entity.patch)
+    # Whether the event carried a patch at all, before the silent keys go: a
+    # write that changed nothing but its revision leaves an empty patch, and
+    # must still be projected, or its snapshots would show the revision as
+    # the change.
+    projected = bool(patch)
     if isinstance(patch, dict) and _HISTORY_PATCH_SILENT_KEYS.intersection(patch):
         patch = {k: v for k, v in patch.items() if k not in _HISTORY_PATCH_SILENT_KEYS}
 
@@ -153,7 +158,7 @@ def event_to_history_record(event: "Event") -> Dict[str, Any]:
     # rest of a full before/after pair is bulk no reader looks at, so keep the
     # projection and drop it. Creates and deletes carry no patch and keep their
     # whole snapshot: it is the only description of what appeared or vanished.
-    if patch:
+    if projected:
         retained = frozenset(patch) | _HISTORY_DISPLAY_KEYS
         before = _project(before, retained)
         after = _project(after, retained)

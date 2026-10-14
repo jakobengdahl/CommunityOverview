@@ -1236,3 +1236,16 @@ def test_an_update_record_never_shows_the_revision_as_a_change(storage):
     assert "revision" not in update["patch"]
     assert "revision" not in update["before"]
     assert create["after"]["revision"] == storage.get_node("actor-1").revision - 1
+
+
+def test_an_edge_update_that_changes_nothing_shows_no_change(storage):
+    _seed_two_nodes(storage)
+    storage.add_nodes(
+        [], [Edge(id="e1", source="actor-1", target="actor-2", label="same")]
+    )
+    storage.update_edge("e1", {"label": "same"})
+
+    update = storage.get_edge_history("e1")[0]
+    assert _rendered_diff(update) == []
+    assert "revision" not in update["before"]
+    assert "revision" not in update["after"]

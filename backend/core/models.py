@@ -163,6 +163,12 @@ NODE_COLORS = {
 # enforce them too — otherwise an over-limit update silently persists and bricks the
 # next graph load. Scalar limits mirror the Field(max_length=...) below; the list
 # limits cover tags/aliases, which have no per-field max_length.
+# The largest revision a client can hold exactly: a JSON number past 2**53 - 1
+# loses precision in JavaScript. A store counting one per write never gets
+# near it; a document claiming more is refused rather than allowed to carry
+# the store's counter to its ceiling.
+MAX_REVISION = 2**53 - 1
+
 FIELD_LIMITS = {"name": 200, "description": 2000, "summary": 300}
 LIST_FIELD_TOTAL_LIMIT = 2000  # total characters across all tags / all aliases
 LIST_FIELD_ITEM_LIMIT = 200  # per individual tag / alias
@@ -195,7 +201,7 @@ class Node(BaseModel):
     # Server-owned: the storage stamps it on every write it applies, from one
     # graph-wide counter (docs/SESSION_OVERLAY_CONTRACT.md §4). 0 means
     # "present, never written under revisions" - what a legacy entity loads as.
-    revision: int = Field(default=0, ge=0)
+    revision: int = Field(default=0, ge=0, le=MAX_REVISION)
 
     @field_validator("type", mode="before")
     @classmethod
@@ -279,7 +285,7 @@ class Edge(BaseModel):
     )  # Lifecycle flag: archived edges are hidden from search/traversal by default
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     # Server-owned; see Node.revision.
-    revision: int = Field(default=0, ge=0)
+    revision: int = Field(default=0, ge=0, le=MAX_REVISION)
 
     @field_validator("type", mode="before")
     @classmethod

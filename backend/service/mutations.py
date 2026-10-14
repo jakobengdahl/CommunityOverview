@@ -165,6 +165,17 @@ def add_nodes(
             event_context=event_context,
             expect_absent=expect_absent,
         )
+    except EntityRevisionConflict as e:
+        # A create expecting absence needs only to know the id is taken. The
+        # taken entity may be one this caller cannot see, so nothing about it
+        # - its revision included - goes back.
+        return write_error_result(
+            EntityRevisionConflict(e.kind, e.entity_id, None, None),
+            message=f"{e.kind} {e.entity_id!r} already exists",
+            current_revision=None,
+            added_node_ids=[],
+            added_edge_ids=[],
+        )
     except _WRITE_ERRORS as e:
         return write_error_result(e, added_node_ids=[], added_edge_ids=[])
     response = serialize_add_result(result)
@@ -277,6 +288,19 @@ def delete_nodes(
         denied.setdefault("deleted_node_ids", [])
         denied.setdefault("affected_edge_ids", [])
         return denied
+
+    # An expectation is a condition on a node this call deletes; one on any
+    # other node would be checked against memory and never by the store.
+    stray = sorted(set(expected_revisions or {}) - set(node_ids))
+    if stray:
+        return {
+            "success": False,
+            "message": (
+                f"expected_revisions names nodes this call does not delete: {stray}"
+            ),
+            "deleted_node_ids": [],
+            "affected_edge_ids": [],
+        }
 
     if decision.graph_access.enabled:
         node_ids = [

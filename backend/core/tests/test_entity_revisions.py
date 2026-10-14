@@ -313,3 +313,92 @@ def test_a_failed_reservation_undoes_the_write_and_fires_no_event(make_storage):
         storage.add_nodes([_node("b")], [])
     assert _snapshot(storage) == before
     assert events == []
+
+
+def test_a_refresh_never_writes_a_reservation(make_storage):
+    storage = make_storage()
+    storage.add_nodes([_node("a")], [])
+
+    def refuse(_ceiling: int) -> None:
+        raise AssertionError("a refresh wrote a reservation")
+
+    storage._persistence_backend.reserve_revisions = refuse  # type: ignore[method-assign]
+    storage._revision_reservation = storage._next_revision  # due for a raise
+    storage.load(bootstrap_if_missing=False)
+    assert "a" in storage.nodes
+
+
+def test_a_shared_store_without_enforcement_never_persists_a_reservation():
+    from backend.core.tests.persistence_contract import (
+        InMemoryGraphPersistenceBackend,
+    )
+
+    store: Dict[str, Any] = {}
+    storage = GraphStorage(persistence_backend=InMemoryGraphPersistenceBackend(store))
+    try:
+        for index in range(3):
+            storage.add_nodes([_node(f"n{index}")], [])
+        storage.flush()
+        assert "revision_reservation" not in store["metadata"]
+        assert len({n.revision for n in storage.nodes.values()}) == 3
+    finally:
+        storage.shutdown_events()
+
+
+def test_a_create_conflict_never_reports_the_taken_entitys_revision(make_storage):
+    storage = make_storage()
+    storage.add_nodes([_node("taken")], [])
+    result = mutations.add_nodes(
+        storage,
+        DefaultGraphAuthorizationHook(),
+        [{"id": "taken", "type": "Actor", "name": "again"}],
+        [],
+        expect_absent=True,
+    )
+    assert result["error"] == "entity_revision_conflict"
+    assert result["current_revision"] is None
+    assert str(storage.nodes["taken"].revision) not in result["message"]
+
+
+def test_an_expectation_on_a_node_the_call_does_not_delete_is_refused(make_storage):
+    storage = make_storage()
+    storage.add_nodes([_node("a"), _node("b")], [])
+    result = mutations.delete_nodes(
+        storage,
+        DefaultGraphAuthorizationHook(),
+        ["a"],
+        confirmed=True,
+        expected_revisions={"b": storage.nodes["b"].revision},
+    )
+    assert result["success"] is False
+    assert "a" in storage.nodes
+
+
+def test_an_imported_revision_past_the_ceiling_is_refused():
+    from pydantic import ValidationError
+
+    from backend.core.models import MAX_REVISION
+
+    with pytest.raises(ValidationError):
+        Node(id="x", type="Actor", name="x", revision=MAX_REVISION + 1)
+
+
+@pytest.mark.parametrize(
+    "code,status",
+    [
+        ("entity_revision_conflict", 409),
+        ("write_failed", 502),
+        ("write_outcome_unknown", 503),
+    ],
+)
+def test_rest_answers_each_write_refusal_with_its_contract_status(code, status):
+    from fastapi import HTTPException
+
+    from backend.service.rest_api import _raise_for_access_denied
+
+    with pytest.raises(HTTPException) as raised:
+        _raise_for_access_denied(
+            {"success": False, "error": code, "message": "m", "current_revision": 3}
+        )
+    assert raised.value.status_code == status
+    assert raised.value.detail["error"] == code

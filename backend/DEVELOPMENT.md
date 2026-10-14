@@ -746,7 +746,7 @@ code and a `message`:
 | `error` | HTTP | Meaning |
 |---|---|---|
 | `entity_revision_conflict` | 409 | the expectation did not hold; carries `entity_kind`, `entity_id`, `current_revision` (null when absent). Nothing was written. |
-| `write_failed` | 502 | shared store only: the write did not land, confirmed on two reads. Nothing changed. |
+| `write_failed` | 502 | the write did not land and nothing changed: refused by the store, confirmed absent on two reads of a shared store, or (file backend) its revisions could not be reserved. |
 | `write_outcome_unknown` | 503 | shared store only: whether it landed could not be told. Re-read before retrying. |
 
 Over MCP the same fields come back with `success: false`. Archive and the

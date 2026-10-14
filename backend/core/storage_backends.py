@@ -395,6 +395,30 @@ class EntityRevisionConflict(RuntimeError):
         super().__init__(f"{kind} {entity_id!r}: expected {wanted}, found {found}")
 
 
+class WriteRefusedByStore(RuntimeError):
+    """The store refused a write outright and applied none of it.
+
+    A refusal is decided inside the transaction - a value the store cannot
+    hold, a constraint, a row another scope owns - so there is nothing in
+    flight to wait for: GraphStorage answers it with `write_failed` at once
+    instead of reading back the write's evidence (§4.4), which would only
+    hold the storage lock for nothing.
+    """
+
+
+# SQLSTATE classes that are a statement refused, never a commit lost: data
+# exception, integrity constraint violation, syntax error or access rule.
+REFUSAL_SQLSTATE_CLASSES = frozenset({"22", "23", "42"})
+
+
+def refused_outright(exc: BaseException) -> bool:
+    """Whether a failed write is a refusal that provably applied nothing."""
+    if isinstance(exc, WriteRefusedByStore):
+        return True
+    sqlstate = getattr(exc, "sqlstate", None)
+    return isinstance(sqlstate, str) and sqlstate[:2] in REFUSAL_SQLSTATE_CLASSES
+
+
 class GraphWriteFailed(RuntimeError):
     """A shared-store write that did not land (§4.4: `write_failed`).
 

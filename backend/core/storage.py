@@ -51,6 +51,7 @@ from .storage_backends import (
     GraphWriteFailed,
     GraphWriteOutcomeUnknown,
     capabilities_of,
+    refused_outright,
 )
 from .vector_store import VectorStore, dominant_dimension, matching_dimension
 from . import storage_search
@@ -1195,8 +1196,9 @@ class GraphStorage:
                 first = self._take_revisions(len(upserted))
             except Exception as exc:
                 self._undo(undo)
+                logger.warning(f"could not reserve revisions: {exc}")
                 raise GraphWriteFailed(
-                    f"could not reserve revisions for the write: {exc}"
+                    "could not reserve revisions for the write"
                 ) from exc
             for offset, entity in enumerate(upserted):
                 entity.revision = first + offset
@@ -1221,6 +1223,12 @@ class GraphStorage:
         except ExternalChangeRefused:
             raise
         except Exception as exc:
+            if refused_outright(exc):
+                # Refused inside the transaction: nothing landed and nothing
+                # is in flight, so there is no evidence worth waiting for.
+                logger.warning(f"the store refused a write: {exc}")
+                self._undo(undo)
+                raise GraphWriteFailed("the store refused the write") from exc
             revisions = self._resolve_failed_write(operations, undo, token, exc)
         stamps = iter(revisions or [])
         for (_, action, entity), revision in zip(changes, stamps):
@@ -1336,9 +1344,12 @@ class GraphStorage:
                 ]
             readings.append(evidence)
 
+        # The store's own error text stays in the log: it can name hosts,
+        # roles and schemas, and the caller is owed only the outcome.
+        logger.warning(f"a write failed: {failure}")
         if readings and len(readings) == 2 and all(unchanged(r) for r in readings):
             self._undo(undo)
-            raise GraphWriteFailed(f"the write did not land: {failure}") from failure
+            raise GraphWriteFailed("the write did not land") from failure
 
         # Neither confirmed nor ruled out. Memory may hold a write the store
         # does not, or lack one it does; the store is the authority, so the
@@ -1353,7 +1364,7 @@ class GraphStorage:
                 f"the next reported change"
             )
         raise GraphWriteOutcomeUnknown(
-            f"could not confirm whether the write landed: {failure}"
+            "could not confirm whether the write landed; re-read before retrying"
         ) from failure
 
     def save(self) -> "Future[None]":
@@ -3212,12 +3223,19 @@ class GraphStorage:
             # Replacing a graph restamps it (§4.2): an expectation taken
             # against the old content must not match the new. Reserved in one
             # durable step, before anything is swapped in. A store that
-            # assigns revisions itself keeps what it is given; see
+            # assigns revisions itself does not restamp; see below and
             # docs/PERSISTENCE_BACKENDS.md.
             if not self._store_assigns_revisions:
                 first = self._take_revisions(len(nodes) + len(edges))
                 for offset, entity in enumerate([*nodes, *edges]):
                     entity.revision = first + offset
+            else:
+                # The document's revisions are not this store's. Kept, a
+                # whole-graph save would raise the store's counter to them -
+                # to its ceiling, for a document that asks - so the imported
+                # entities read as never written under revisions instead.
+                for entity in [*nodes, *edges]:
+                    entity.revision = 0
 
             new_nodes = {node.id: node for node in nodes}
             new_edges = {edge.id: edge for edge in edges}
