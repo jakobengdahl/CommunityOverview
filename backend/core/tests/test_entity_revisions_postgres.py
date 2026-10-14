@@ -394,3 +394,28 @@ def test_an_import_does_not_carry_the_documents_revisions_into_the_store(instanc
     assert storage.nodes["n"].revision == 0
     storage.add_nodes([_node("after")], [])
     assert 0 < storage.nodes["after"].revision < 1_000_000
+
+
+def test_a_cross_scope_create_is_refused_at_once_without_reading_back(schema):
+    owner = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-a")
+    other = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-b")
+    storage = None
+    try:
+        owner.save_graph_data({"nodes": [], "edges": [], "metadata": {}})
+        owner.upsert_node(_node("taken").to_dict())
+        storage = GraphStorage(persistence_backend=other)
+        storage.WRITE_RESOLVE_DELAY_SECONDS = 30.0
+
+        def never_asked(keys):
+            raise AssertionError("a refused write read its evidence back")
+
+        other.read_write_evidence = never_asked
+        with pytest.raises(GraphWriteFailed) as failed:
+            storage.add_nodes([_node("taken")], [])
+        assert "scope" not in str(failed.value)
+        assert "taken" not in storage.nodes
+    finally:
+        if storage is not None:
+            storage.shutdown_events()
+        owner.close()
+        other.close()

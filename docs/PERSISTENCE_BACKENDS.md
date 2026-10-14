@@ -76,7 +76,7 @@ class BackendCapabilities:
 | `transactions` | `apply_batch` lands all of its operations or none | a multi-entity mutation arrives as one batch; without it, as a snapshot |
 | `change_notification` | the backend can report changes made by another instance | `GraphStorage` subscribes before its first load, holds what arrives until the load returns, then refreshes what each reported entity touches; see *Reporting external changes* |
 | `store_traversal` | `traverse` is implemented | `get_related_nodes` asks the store for the reachable ids instead of walking the in-memory graph — but only while the store is current; see *Answering a traversal from the store* |
-| `revision_enforcement` | the store assigns entity revisions and checks expectations itself; `apply_batch` takes a write token and returns revisions, and `read_write_evidence` is implemented | every write waits for the store, and a failed one is resolved on its own evidence; see *Entity revisions* |
+| `revision_enforcement` | the store assigns entity revisions and checks expectations itself; `apply_batch` takes a write token and returns revisions, and `read_write_evidence` is implemented | every write waits for the store; one the store refused outright fails at once, any other failed one is resolved on its own evidence; see *Entity revisions* |
 
 Everything defaults to `False`; `SNAPSHOT_ONLY` is that default.
 
@@ -518,7 +518,14 @@ the journal: they are a condition of a write, not part of it.
 `GraphStorage` then waits for every write while holding the storage lock,
 stamps the revisions the store returned onto memory, and only then fires the
 write's events. A refused expectation undoes the change in memory without an
-event. Any other failure is decided on the write's evidence, read twice with
+event. So does a write the store refused outright, which also fails at once
+with `write_failed`, reading nothing back: a backend says so by raising
+`WriteRefusedByStore` (from `storage_backends`), or an error whose `sqlstate`
+is in class 22, 23 or 42 - a value the store cannot hold, a constraint, a
+statement or privilege it rejects. A refusal raised any other way is
+indistinguishable from a lost commit and pays for the evidence reads below,
+holding the storage lock throughout. Any other failure is decided on the
+write's evidence, read twice with
 a delay (`WRITE_RESOLVE_DELAY_SECONDS`) between: every upserted entity
 carrying the token means it landed and the call completes; every touched
 entity unchanged on both reads means it did not, memory is undone and the
