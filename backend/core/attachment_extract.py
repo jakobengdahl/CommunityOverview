@@ -130,9 +130,9 @@ def _worker_argv() -> list[str]:
 
 
 def _max_reply_bytes(limits: ExtractionLimits) -> int:
-    # JSON escapes a control character as six bytes; a locator and the
-    # segment's framing fit in well under 1 KiB.
-    return 6 * limits.max_chars + 1024 * limits.max_segments + 4096
+    # JSON escapes a control character as six bytes, which also bounds a
+    # 256-character locator string; keys and framing fit in the remainder.
+    return 6 * limits.max_chars + 2048 * limits.max_segments + 4096
 
 
 def _run_worker(
@@ -345,6 +345,9 @@ def _extract_pdf(data: bytes, out: _Collector, limits: ExtractionLimits) -> str:
 # --- ZIP containers and XML ------------------------------------------------------
 
 
+_ZIP_METHODS = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
+
+
 def _open_zip(data: bytes, limits: ExtractionLimits) -> zipfile.ZipFile:
     """Open an archive after checking what its central directory declares.
 
@@ -359,6 +362,10 @@ def _open_zip(data: bytes, limits: ExtractionLimits) -> zipfile.ZipFile:
     except zipfile.BadZipFile:
         raise _Refused("not_a_zip") from None
     infos = archive.infolist()
+    # OOXML and ODF use only these two. Other methods' decompressors are not
+    # bounded per read on every supported CPython, so they are refused unread.
+    if any(info.compress_type not in _ZIP_METHODS for info in infos):
+        raise _Refused("zip_compression")
     if len(infos) > limits.max_zip_members:
         raise _TooLarge("zip_members")
     total = sum(info.file_size for info in infos)
@@ -419,6 +426,11 @@ def _parse_member(archive: zipfile.ZipFile, name: str):
     return _parse_xml(_read_member(archive, name))
 
 
+def _under_fallback(element) -> bool:
+    # mc:AlternateContent carries the same content twice (Choice, Fallback).
+    return any(_localname(a) == "Fallback" for a in element.iterancestors())
+
+
 def _localname(element) -> str:
     tag = element.tag
     return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
@@ -465,7 +477,6 @@ def _extract_docx(data: bytes, out: _Collector, limits: ExtractionLimits) -> str
 
     from docx import Document
     from docx.oxml.ns import qn
-    from docx.text.paragraph import Paragraph
 
     tags = (qn("w:p"), qn("w:tbl"))
     # python-docx reads members with an unbounded read of its own, so it gets
@@ -479,7 +490,7 @@ def _extract_docx(data: bytes, out: _Collector, limits: ExtractionLimits) -> str
     for block in _docx_blocks(document.element.body, tags):
         if block.tag == tags[0]:
             paragraphs += 1
-            text, locator = Paragraph(block, document).text, {"paragraph": paragraphs}
+            text, locator = _docx_paragraph_text(block), {"paragraph": paragraphs}
         else:
             tables += 1
             text = _docx_table_text(block, document, tags, out.remaining)
@@ -512,7 +523,12 @@ def _refuse_docx_dtds(members: dict[str, bytes]) -> None:
         lowered = name.lower()
         extension = posixpath.splitext(lowered)[1].lstrip(".")
         ctype = overrides.get("/" + lowered) or defaults.get(extension, "")
-        if lowered.endswith((".xml", ".rels")) or ctype.lower().endswith("xml"):
+        ctype = ctype.lower()
+        # python-docx keeps images (SVG included) as opaque bytes; only parts it
+        # parses need the check, and an SVG exporter's DOCTYPE is routine.
+        if ctype.startswith("image/"):
+            continue
+        if lowered.endswith((".xml", ".rels")) or ctype.endswith("xml"):
             _parse_xml(body)
 
 
@@ -532,9 +548,43 @@ def _docx_blocks(element, tags):
             yield from _docx_blocks(child, tags)
 
 
+# Subtrees whose text is not the paragraph's current text: tracked deletions
+# and moves, the fallback copy of alternate content, field codes, properties.
+_DOCX_SKIPPED = frozenset(
+    {"del", "moveFrom", "Fallback", "instrText", "delText", "pPr", "rPr"}
+)
+
+
+def _docx_paragraph_text(paragraph) -> str:
+    """Text of a ``w:p``, including runs inside tracked insertions, content
+    controls, fields, smart tags and hyperlinks (python-docx's
+    ``Paragraph.text`` reads only direct runs and hyperlinks)."""
+    parts: list[str] = []
+
+    def walk(element) -> None:
+        for child in element:
+            name = _localname(child)
+            if name in _DOCX_SKIPPED:
+                continue
+            if name == "t":
+                parts.append(child.text or "")
+            elif name == "tab":
+                parts.append("\t")
+            elif name in ("br", "cr"):
+                parts.append("\n")
+            elif name == "p":  # a text-box paragraph inside this one
+                if parts:
+                    parts.append("\n")
+                walk(child)
+            else:
+                walk(child)
+
+    walk(paragraph)
+    return "".join(parts)
+
+
 def _docx_table_text(element, parent, tags, limit: int) -> str:
     from docx.table import Table
-    from docx.text.paragraph import Paragraph
 
     def cell_text(cell) -> str:
         # cell.text covers only a cell's own paragraphs; a nested table's text
@@ -542,7 +592,7 @@ def _docx_table_text(element, parent, tags, limit: int) -> str:
         parts = []
         for block in _docx_blocks(cell._tc, tags):
             if block.tag == tags[0]:
-                parts.append(Paragraph(block, cell).text)
+                parts.append(_docx_paragraph_text(block))
             else:
                 parts.append(_docx_table_text(block, cell, tags, limit))
         return "\n".join(part for part in parts if part.strip())
@@ -653,6 +703,7 @@ def _extract_pptx(data: bytes, out: _Collector, limits: ExtractionLimits) -> str
                 for el in paragraph.iter("{*}t", "{*}br")
             )
             for paragraph in slide.iter("{*}p")
+            if not _under_fallback(paragraph)
         )
         text = _bounded_join(
             (line for line in lines if line.strip()), "\n", out.remaining
@@ -701,6 +752,15 @@ def _odf_text(element) -> str:
     return "".join(parts)
 
 
+def _odf_paragraphs(element):
+    """Paragraphs and headings under ``element`` in document order, leaving out
+    the deleted text a tracked-changes region keeps."""
+    tracked = f"{{{_ODF_TEXT}}}tracked-changes"
+    for paragraph in element.iter(*_ODF_PARAGRAPHS):
+        if next(paragraph.iterancestors(tracked), None) is None:
+            yield paragraph
+
+
 def _odf_body(data: bytes, limits: ExtractionLimits, kind: str):
     archive = _open_zip(data, limits)
     body = _parse_member(archive, "content.xml").find(f"{{{_ODF_OFFICE}}}body")
@@ -713,7 +773,7 @@ def _extract_odt(data: bytes, out: _Collector, limits: ExtractionLimits) -> str:
     content = _odf_body(data, limits, "text")
     if content is None:
         return STATUS_OK
-    for number, paragraph in enumerate(content.iter(*_ODF_PARAGRAPHS), 1):
+    for number, paragraph in enumerate(_odf_paragraphs(content), 1):
         if not out.add(_odf_text(paragraph), {"paragraph": number}):
             break
     return STATUS_OK
@@ -728,7 +788,7 @@ def _extract_ods(data: bytes, out: _Collector, limits: ExtractionLimits) -> str:
         def rows(table=table):
             for row in table.iter(f"{{{_ODF_TABLE}}}table-row"):
                 cells = (
-                    "\n".join(_odf_text(p) for p in cell.iter(*_ODF_PARAGRAPHS))
+                    "\n".join(_odf_text(p) for p in _odf_paragraphs(cell))
                     for cell in row
                     if _localname(cell) in ("table-cell", "covered-table-cell")
                 )
@@ -747,7 +807,7 @@ def _extract_odp(data: bytes, out: _Collector, limits: ExtractionLimits) -> str:
     if content is None:
         return STATUS_OK
     for number, page in enumerate(content.iter(f"{{{_ODF_DRAW}}}page"), 1):
-        lines = (_odf_text(p) for p in page.iter(*_ODF_PARAGRAPHS))
+        lines = (_odf_text(p) for p in _odf_paragraphs(page))
         text = _bounded_join(
             (line for line in lines if line.strip()), "\n", out.remaining
         )

@@ -911,3 +911,139 @@ def test_g7_odf_space_runs_are_capped():
     body = '<office:text><text:p>a<text:s text:c="900000000"/>b</text:p></office:text>'
     result = extract(_odf(ae.ODT, body), ae.ODT)
     assert _texts(result) == ["a" + " " * 100 + "b"]
+
+
+# --- Review round 2 regressions ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "wrapper",
+    [
+        "<w:ins>{}</w:ins>",
+        "<w:sdt><w:sdtPr/><w:sdtContent>{}</w:sdtContent></w:sdt>",
+        '<w:fldSimple w:instr="AUTHOR">{}</w:fldSimple>',
+        "<w:smartTag>{}</w:smartTag>",
+    ],
+)
+def test_g7_docx_runs_inside_inline_wrappers_are_read(wrapper):
+    run = "<w:r><w:t>WRAPPED</w:t></w:r>"
+    inner = f'<w:p><w:r><w:t xml:space="preserve">before </w:t></w:r>{wrapper.format(run)}</w:p>'
+    assert _texts(extract(_docx_with_body(inner), ae.DOCX)) == ["before WRAPPED"]
+
+
+def test_g7_docx_tracked_deletions_and_field_codes_are_left_out():
+    inner = (
+        "<w:p><w:r><w:t>kept</w:t></w:r>"
+        "<w:del><w:r><w:delText>DELETED</w:delText></w:r></w:del>"
+        '<w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>'
+        "<w:r><w:tab/><w:t>after</w:t></w:r></w:p>"
+    )
+    assert _texts(extract(_docx_with_body(inner), ae.DOCX)) == ["kept\tafter"]
+
+
+def test_g7_odt_tracked_deletions_are_not_paragraphs():
+    body = (
+        "<office:text><text:tracked-changes><text:changed-region><text:deletion>"
+        "<text:p>DELETED_TEXT</text:p></text:deletion></text:changed-region></text:tracked-changes>"
+        "<text:p>First</text:p><text:p>Second</text:p></office:text>"
+    )
+    result = extract(_odf(ae.ODT, body), ae.ODT)
+    assert result.segments == (
+        ae.Segment("First", {"paragraph": 1}),
+        ae.Segment("Second", {"paragraph": 2}),
+    )
+
+
+def test_g7_pptx_alternate_content_is_read_once():
+    _mc = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+    copy = "<a:p><a:r><a:t>EQUATION</a:t></a:r></a:p>"
+    data = _pptx([["Title"]])
+    slide = zipfile.ZipFile(io.BytesIO(data)).read("ppt/slides/slide1.xml").decode()
+    alternate = (
+        f'<mc:AlternateContent xmlns:mc="{_mc}"><mc:Choice Requires="a14"><p:sp><p:txBody>'
+        f"{copy}</p:txBody></p:sp></mc:Choice><mc:Fallback><p:sp><p:txBody>{copy}"
+        "</p:txBody></p:sp></mc:Fallback></mc:AlternateContent>"
+    )
+    slide = slide.replace("</p:spTree>", alternate + "</p:spTree>")
+    result = extract(_replace_member(data, "ppt/slides/slide1.xml", slide), ae.PPTX)
+    assert _texts(result) == ["Title\nEQUATION"]
+
+
+def test_g7_pptx_a_slide_listed_twice_is_read_once():
+    data = _pptx([["Only"]])
+    presentation = (
+        zipfile.ZipFile(io.BytesIO(data)).read("ppt/presentation.xml").decode()
+    )
+    presentation = presentation.replace(
+        "</p:sldIdLst>", '<p:sldId id="900" r:id="rId1"/></p:sldIdLst>'
+    )
+    result = extract(
+        _replace_member(data, "ppt/presentation.xml", presentation), ae.PPTX
+    )
+    assert result.segments == (ae.Segment("Only", {"slide": 1}),)
+
+
+def test_g7_docx_with_an_svg_image_carrying_a_doctype_still_extracts():
+    data = _docx(["Has a picture"])
+    types = zipfile.ZipFile(io.BytesIO(data)).read("[Content_Types].xml").decode()
+    types = types.replace(
+        "</Types>", '<Default Extension="svg" ContentType="image/svg+xml"/></Types>'
+    )
+    data = _replace_member(data, "[Content_Types].xml", types)
+    svg = (
+        '<?xml version="1.0"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" '
+        '"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg/>'
+    )
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as target:
+        source = zipfile.ZipFile(io.BytesIO(data))
+        for info in source.infolist():
+            target.writestr(info.filename, source.read(info))
+        target.writestr("word/media/image1.svg", svg)
+    assert _texts(extract(out.getvalue(), ae.DOCX)) == ["Has a picture"]
+
+
+def test_g3_docx_relationships_part_is_scanned_by_name_without_a_content_type():
+    data = _docx()
+    types = zipfile.ZipFile(io.BytesIO(data)).read("[Content_Types].xml").decode()
+    types = types.replace('Extension="rels"', 'Extension="relsx"')
+    data = _replace_member(data, "[Content_Types].xml", types)
+    rels = _rels([]).replace("?>", '?><!DOCTYPE x [<!ENTITY a "b">]>', 1)
+    data = _replace_member(data, "word/_rels/document.xml.rels", rels)
+    assert extract(data, ae.DOCX).detail == "xml_dtd"
+
+
+@pytest.mark.parametrize("method", [zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA])
+def test_g2_compression_methods_outside_ooxml_and_odf_are_refused_unread(method):
+    data = _zip({"mimetype": ae.ODT, "content.xml": "<a/>"}, method)
+    result = extract(data, ae.ODT)
+    assert (result.status, result.detail) == (ae.STATUS_FAILED, "zip_compression")
+
+
+def test_g1_a_valid_reply_over_the_byte_cap_is_failed():
+    code = (
+        'import sys; sys.stdout.write(\'{"status": "ok", "segments": [], '
+        "\"truncated\": false}' + ' ' * 100000)"
+    )
+    limits = ExtractionLimits(max_chars=10, max_segments=1)
+    result = ae._run_worker(b"x", ae.TEXT, limits, _fake_worker(code))
+    assert result == ae.ExtractionResult(ae.STATUS_FAILED, detail="worker_output")
+
+
+def test_g1_a_reply_at_the_locator_and_segment_bounds_fits_the_byte_cap():
+    limits = ExtractionLimits(max_chars=1000, max_segments=1000)
+    segment = {"text": "\x01", "locator": {"sheet": "\U0001f600" * 256}}
+    reply = ae._to_wire(ae.ExtractionResult("ok", (ae.Segment(**segment),) * 1000))
+    encoded = __import__("json").dumps(reply, ensure_ascii=False).encode()
+    assert len(encoded) <= ae._max_reply_bytes(limits)
+
+
+def test_g1_worker_argv_isolates_the_child_interpreter():
+    argv = ae._worker_argv()
+    assert argv[0] == sys.executable and argv[1] == "-I"
+
+
+def test_g4_collector_replaces_lone_surrogates():
+    out = ae._Collector(100, max_segments=10)
+    out.add("a\ud800b", {})
+    out.segments[0].text.encode("utf-8")
