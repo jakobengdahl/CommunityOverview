@@ -844,3 +844,74 @@ class TestNodeDeleteIsolation:
         result = service.delete_nodes(["doc"], confirmed=True)
         assert result["deleted_node_ids"] == ["doc"]
         assert service.storage.get_node("doc") is None
+
+
+class TestStreamCapUsesNodeBudget:
+    def test_stream_without_length_stops_at_the_remaining_budget(self, service, store):
+        _seed(store, "doc", b"x" * 200)  # 50 bytes of node budget left
+        sent = []
+
+        async def body():
+            for _ in range(10):
+                sent.append(10)
+                yield b"x" * 10
+
+        result = asyncio.run(
+            service.add_node_attachment(
+                "doc", filename="a.txt", declared_content_type=None, content=body()
+            )
+        )
+        assert result["error_code"] == "node_attachment_limit"
+        # The cap is the 50-byte budget, not the 100-byte file limit.
+        assert sum(sent) <= 60
+        assert _tmp_is_empty(store)
+
+    def test_budget_already_overrun_by_lowered_limit_refuses(self, storage, store):
+        _seed(store, "doc", b"x" * 200)
+        service = GraphService(
+            storage,
+            attachment_settings=_settings(
+                store,
+                limits=AttachmentLimits(
+                    max_file_bytes=100, max_files_per_node=3, max_bytes_per_node=150
+                ),
+            ),
+        )
+        result = asyncio.run(
+            service.add_node_attachment(
+                "doc", filename="a.txt", declared_content_type=None, content=b"x"
+            )
+        )
+        assert result["error_code"] == "node_attachment_limit"
+
+
+class TestFederatedPrefixIsExact:
+    def test_single_colon_id_is_an_ordinary_node(self, storage, client):
+        storage.add_nodes([Node(id="federated:x", type="Document", name="Local")], [])
+        assert _upload(client, "federated:x").status_code == 201
+
+
+class TestContentDispositionHeader:
+    @pytest.mark.parametrize(
+        "name, expected",
+        [
+            ("a/b.txt", "attachment; filename=\"a/b.txt\"; filename*=UTF-8''a%2Fb.txt"),
+            (
+                'q"\\\r\n.txt',
+                "attachment; filename=\"q____.txt\"; filename*=UTF-8''q%22%5C%0D%0A.txt",
+            ),
+        ],
+    )
+    def test_header_is_ascii_and_cannot_be_split(self, name, expected):
+        from backend.service.rest_api import _content_disposition
+
+        header = _content_disposition(name)
+        assert header == expected
+        assert header.isascii()
+        assert "\r" not in header and "\n" not in header
+
+    def test_csv_download_declares_utf8_and_length(self, client):
+        record = _upload(client, "doc", b"a,b\n1,2\n", "t.csv").json()
+        response = client.get(f"/api/nodes/doc/attachments/{record['id']}")
+        assert response.headers["content-type"] == "text/csv; charset=utf-8"
+        assert response.headers["content-length"] == "8"

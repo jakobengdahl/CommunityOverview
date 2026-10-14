@@ -211,3 +211,25 @@ def test_zip64_archive_is_refused():
 def test_allowed_types_naming_no_type_is_refused():
     with pytest.raises(ValueError, match="names no type"):
         parse_allowed_types(" , ")
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"\x89PNG\r\n" + b"\x00" * 10,  # truncated PNG signature
+        b"\xff\xd8" + b"\x00" * 10,  # two-byte JPEG start only
+        b"RIFF\x10\x00\x00\x00WAVEfmt ",  # RIFF, but not WebP
+    ],
+)
+def test_near_miss_signatures_are_not_accepted_as_images(data):
+    with pytest.raises(UnsupportedAttachmentType):
+        _detect(data, "x.bin")
+
+
+def test_pdf_signature_needs_the_dash():
+    # "%PDFx" is not a PDF header; as UTF-8 text it is plain text.
+    assert _detect(b"%PDFx hello", "x.txt") == types.TEXT
+
+
+def test_allowed_types_are_case_insensitive():
+    assert parse_allowed_types("Application/PDF") == {types.PDF}

@@ -283,3 +283,40 @@ def test_commit_moves_the_blob_before_writing_the_index(store, monkeypatch):
     monkeypatch.setattr(store, "_write_index", spying)
     _upload(store, "n1")
     assert seen == [True]
+
+
+def test_lock_file_lives_outside_the_node_dir_and_survives_delete_node(store):
+    _upload(store, "n1")
+    lock = store.root / hashed_key(NS) / ".locks" / f"{hashed_key('n1')}.lock"
+    assert lock.is_file()
+    store.delete_node(NS, "n1")
+    assert lock.is_file()
+
+
+def test_delete_node_removes_a_directory_whose_index_is_corrupt(store):
+    _upload(store, "n1")
+    node_dir = store.root / hashed_key(NS) / hashed_key("n1")
+    (node_dir / "index.json").write_text("{broken")
+    store.delete_node(NS, "n1")
+    assert not node_dir.exists()
+
+
+def test_commit_refuses_a_staged_file_over_the_file_limit(store):
+    with pytest.raises(AttachmentTooLarge):
+        _upload(store, "n1", b"x" * 11, limits=AttachmentLimits(max_file_bytes=10))
+    assert store.list(NS, "n1") == []
+    assert _tmp_entries(store) == []
+
+
+@pytest.mark.parametrize(
+    "bad", ["../x", "A" * 32, "a" * 31, "a" * 33, "a" * 32 + "\n", ""]
+)
+def test_malformed_ids_never_reach_the_index(store, bad, monkeypatch):
+    from backend.core.attachment_store import is_valid_attachment_id
+
+    assert is_valid_attachment_id(bad) is False
+    calls = []
+    monkeypatch.setattr(store, "_read_index", lambda *a: calls.append(a) or [])
+    assert store.get_record(NS, "n1", bad) is None
+    assert store.delete(NS, "n1", bad) is False
+    assert calls == []
