@@ -26,3 +26,4 @@ ADRs carry only the technical decision.
 | [0007](0007-vector-aware-export-archive.md) | Vector-aware export/import archive | Accepted |
 | [0008](0008-node-attachment-storage.md) | Node attachment storage layer and metadata index | Accepted |
 | [0009](0009-dual-mode-graph-storage-seam.md) | Dual-mode graph storage: ratify the seam, keep one graph per runtime | Accepted |
+| [0010](0010-attachment-content-access-for-agents-and-assistant.md) | Agent and assistant access to node attachment content | Proposed |
