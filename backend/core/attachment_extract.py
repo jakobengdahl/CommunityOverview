@@ -20,6 +20,10 @@ before anything is decompressed, and XML is parsed without DTDs, entity
 expansion or network access. Dispatch is by the sniffed content type alone:
 there is no file name parameter, so an extension cannot pick the parser.
 
+``extract`` blocks for up to the timeout and each call holds one child
+process: a caller on an event loop runs it in a worker thread and bounds how
+many run at once.
+
 The module is pure: it reads no settings and touches no storage. It must keep
 importing only the standard library at module level, because the child runs
 it outside the ``backend`` package.
@@ -65,6 +69,9 @@ CSV = "text/csv"
 SUPPORTED_CONTENT_TYPES = frozenset({PDF, DOCX, XLSX, PPTX, ODT, ODS, ODP, TEXT, CSV})
 
 _MiB = 1024 * 1024
+# Locator strings (sheet names) are file content too; they are cut to this.
+_MAX_LOCATOR_CHARS = 256
+_LOCATOR_KEYS = frozenset({"page", "paragraph", "table", "sheet", "slide", "line"})
 
 
 @dataclass(frozen=True)
@@ -73,6 +80,10 @@ class ExtractionLimits:
     max_input_bytes: int = 25 * _MiB
     # Characters of text returned per file, across all segments.
     max_chars: int = 1_000_000
+    # Segments returned per file: bounds the reply (and the parent's memory)
+    # for a file of a million one-character paragraphs, which max_chars alone
+    # would not.
+    max_segments: int = 10_000
     max_zip_members: int = 2_000
     # Sum of the uncompressed sizes the archive's central directory declares.
     max_zip_uncompressed_bytes: int = 100 * _MiB
@@ -113,9 +124,15 @@ def extract(
 
 
 def _worker_argv() -> list[str]:
-    # -P keeps this file's directory off sys.path, so sibling modules in
-    # backend/core cannot shadow the parser libraries the child imports.
-    return [sys.executable, "-P", os.path.abspath(__file__)]
+    # -I: no PYTHON* variables, no user site, and this file's directory off
+    # sys.path, so nothing beside it can shadow the parser libraries.
+    return [sys.executable, "-I", os.path.abspath(__file__)]
+
+
+def _max_reply_bytes(limits: ExtractionLimits) -> int:
+    # JSON escapes a control character as six bytes; a locator and the
+    # segment's framing fit in well under 1 KiB.
+    return 6 * limits.max_chars + 1024 * limits.max_segments + 4096
 
 
 def _run_worker(
@@ -131,15 +148,34 @@ def _run_worker(
             stderr=subprocess.DEVNULL,
             timeout=limits.timeout_seconds,
             check=False,
+            # The child parses untrusted bytes; it gets none of the server's
+            # environment (credentials, API keys).
+            env={},
         )
     except subprocess.TimeoutExpired:
         return ExtractionResult(STATUS_TIMEOUT, detail="wall_clock")
     if proc.returncode != 0:
         return ExtractionResult(STATUS_FAILED, detail=f"worker_exit_{proc.returncode}")
+    if len(proc.stdout) > _max_reply_bytes(limits):
+        return ExtractionResult(STATUS_FAILED, detail="worker_output")
     try:
         return _from_wire(json.loads(proc.stdout), limits)
-    except (ValueError, KeyError, TypeError):
+    except (ValueError, KeyError, TypeError, RecursionError):
         return ExtractionResult(STATUS_FAILED, detail="worker_output")
+
+
+def _valid_locator(locator) -> bool:
+    if not isinstance(locator, dict):
+        return False
+    for key, value in locator.items():
+        if key not in _LOCATOR_KEYS:
+            return False
+        if isinstance(value, str):
+            if len(value) > _MAX_LOCATOR_CHARS:
+                return False
+        elif not isinstance(value, int) or isinstance(value, bool):
+            return False
+    return True
 
 
 def _to_wire(result: ExtractionResult) -> dict:
@@ -155,10 +191,12 @@ def _from_wire(obj: dict, limits: ExtractionLimits) -> ExtractionResult:
     status = obj["status"]
     if status not in STATUSES:
         raise ValueError("unknown status")
+    if len(obj["segments"]) > limits.max_segments:
+        raise ValueError("worker exceeded the segment cap")
     segments = []
     for raw in obj["segments"]:
         text, locator = raw["text"], raw["locator"]
-        if not isinstance(text, str) or not isinstance(locator, dict):
+        if not isinstance(text, str) or not _valid_locator(locator):
             raise TypeError("malformed segment")
         segments.append(Segment(text, locator))
     if sum(len(s.text) for s in segments) > limits.max_chars:
@@ -184,10 +222,11 @@ class _Refused(Exception):
 
 
 class _Collector:
-    """Accumulates segments until the per-file character budget runs out."""
+    """Accumulates segments until the character or segment budget runs out."""
 
-    def __init__(self, max_chars: int):
+    def __init__(self, max_chars: int, max_segments: int):
         self.remaining = max_chars
+        self.max_segments = max_segments
         self.segments: list[Segment] = []
         self.truncated = False
 
@@ -197,6 +236,9 @@ class _Collector:
             return False
         if not text or not text.strip():
             return True
+        if len(self.segments) >= self.max_segments:
+            self.truncated = True
+            return False
         # Lone surrogates (seen in some PDF text) cannot cross the UTF-8 pipe.
         text = text.encode("utf-8", "replace").decode("utf-8")
         if len(text) > self.remaining:
@@ -204,21 +246,27 @@ class _Collector:
             self.truncated = True
         self.remaining -= len(text)
         if text:
-            self.segments.append(Segment(text, dict(locator)))
+            locator = {
+                key: value[:_MAX_LOCATOR_CHARS] if isinstance(value, str) else value
+                for key, value in locator.items()
+            }
+            self.segments.append(Segment(text, locator))
         return not self.truncated
 
 
 def _bounded_join(parts, sep: str, limit: int) -> str:
-    """Join lazily produced ``parts``, stopping once ``limit`` chars are passed.
+    """Join lazily produced ``parts``, stopping once the result passes ``limit``.
 
-    The collector truncates exactly; this only stops a huge sheet or table from
-    being materialised in full when the budget can take a fraction of it.
+    This only stops a huge sheet or table from being materialised in full when
+    the budget can take a fraction of it. It stops only once the joined text is
+    *longer* than ``limit``, so a cut always reaches the collector as text over
+    its budget and is reported as truncated.
     """
     buf = []
-    size = 0
+    size = -len(sep)
     for part in parts:
         buf.append(part)
-        size += len(part) + len(sep)
+        size += len(sep) + len(part)
         if size > limit:
             break
     return sep.join(buf)
@@ -227,7 +275,7 @@ def _bounded_join(parts, sep: str, limit: int) -> str:
 def _extract_in_process(
     data: bytes, ctype: str, limits: ExtractionLimits
 ) -> ExtractionResult:
-    out = _Collector(limits.max_chars)
+    out = _Collector(limits.max_chars, limits.max_segments)
     try:
         status = _EXTRACTORS[ctype](data, out, limits)
     except _TooLarge as exc:
@@ -254,7 +302,10 @@ def _extract_text(data: bytes, out: _Collector, limits: ExtractionLimits) -> str
         raise _Refused("not_utf8") from None
     block: list[str] = []
     start = 0
-    for number, line in enumerate(text.splitlines(), 1):
+    # Lines are counted by newline as an editor counts them; str.splitlines
+    # would also break on form feeds and Unicode separators.
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    for number, line in enumerate(lines, 1):
         if line.strip():
             if not block:
                 start = number
@@ -298,9 +349,10 @@ def _open_zip(data: bytes, limits: ExtractionLimits) -> zipfile.ZipFile:
     """Open an archive after checking what its central directory declares.
 
     Reading the central directory decompresses nothing, so a bomb is refused
-    on its declared sizes before a single member is inflated. zipfile itself
-    never yields more than a member's declared size, so the declared total is
-    also a bound on what later reads can produce.
+    on its declared sizes before a single member is inflated. Members are then
+    only read through ``_read_member``, which never inflates more than the
+    declared size, so the declared total also bounds what a lying archive can
+    make the child hold.
     """
     try:
         archive = zipfile.ZipFile(io.BytesIO(data))
@@ -331,8 +383,15 @@ def _read_member(archive: zipfile.ZipFile, name: str) -> bytes:
         info = archive.getinfo(name)
     except KeyError:
         raise _Refused("missing_part") from None
+    return _read_bounded(archive, info)
+
+
+def _read_bounded(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
+    # read() with no size inflates a member's whole stream before cutting it to
+    # the declared size, so a member that under-declares would expand without
+    # bound; read(n) inflates at most n bytes per step.
     with archive.open(info) as member:
-        return member.read()
+        return member.read(info.file_size)
 
 
 def _parse_xml(raw: bytes):
@@ -397,38 +456,99 @@ def _relationships(archive: zipfile.ZipFile, part: str) -> dict[str, tuple[str, 
 
 def _extract_docx(data: bytes, out: _Collector, limits: ExtractionLimits) -> str:
     archive = _open_zip(data, limits)
-    # python-docx parses the parts with its own parser; refuse any DTD-bearing
-    # part with ours first so the guarantee does not rest on its settings.
-    for name in archive.namelist():
-        if name.lower().endswith((".xml", ".rels")):
-            _parse_member(archive, name)
+    members = {
+        info.filename: _read_bounded(archive, info)
+        for info in archive.infolist()
+        if not info.is_dir()
+    }
+    _refuse_docx_dtds(members)
 
     from docx import Document
     from docx.oxml.ns import qn
-    from docx.table import Table
     from docx.text.paragraph import Paragraph
 
-    document = Document(io.BytesIO(data))
-    paragraph_tag, table_tag = qn("w:p"), qn("w:tbl")
+    tags = (qn("w:p"), qn("w:tbl"))
+    # python-docx reads members with an unbounded read of its own, so it gets
+    # an archive rebuilt from the bounded reads, stored uncompressed.
+    rebuilt = io.BytesIO()
+    with zipfile.ZipFile(rebuilt, "w", zipfile.ZIP_STORED) as target:
+        for name, body in members.items():
+            target.writestr(name, body)
+    document = Document(rebuilt)
     paragraphs = tables = 0
-    for child in document.element.body.iterchildren():
-        if child.tag == paragraph_tag:
+    for block in _docx_blocks(document.element.body, tags):
+        if block.tag == tags[0]:
             paragraphs += 1
-            text, locator = Paragraph(child, document).text, {"paragraph": paragraphs}
-        elif child.tag == table_tag:
-            tables += 1
-            text = _docx_table_text(Table(child, document), out.remaining)
-            locator = {"table": tables}
+            text, locator = Paragraph(block, document).text, {"paragraph": paragraphs}
         else:
-            continue
+            tables += 1
+            text = _docx_table_text(block, document, tags, out.remaining)
+            locator = {"table": tables}
         if not out.add(text, locator):
             break
     return STATUS_OK
 
 
-def _docx_table_text(table, limit: int) -> str:
+def _refuse_docx_dtds(members: dict[str, bytes]) -> None:
+    """Parse, with our parser, every member python-docx could parse as XML.
+
+    python-docx picks XML parts by the content type ``[Content_Types].xml``
+    gives them, not by extension, and uses its own parser; checking each such
+    part here keeps the no-DTD guarantee from resting on its settings.
+    """
+    try:
+        types = _parse_xml(members["[Content_Types].xml"])
+    except KeyError:
+        raise _Refused("missing_part") from None
+    defaults = {
+        (el.get("Extension") or "").lower(): el.get("ContentType") or ""
+        for el in types.iter("{*}Default")
+    }
+    overrides = {
+        (el.get("PartName") or "").lower(): el.get("ContentType") or ""
+        for el in types.iter("{*}Override")
+    }
+    for name, body in members.items():
+        lowered = name.lower()
+        extension = posixpath.splitext(lowered)[1].lstrip(".")
+        ctype = overrides.get("/" + lowered) or defaults.get(extension, "")
+        if lowered.endswith((".xml", ".rels")) or ctype.lower().endswith("xml"):
+            _parse_xml(body)
+
+
+_DOCX_WRAPPERS = frozenset({"sdt", "sdtContent", "customXml", "smartTag"})
+
+
+def _docx_blocks(element, tags):
+    """Paragraphs and tables under ``element`` in document order.
+
+    Content controls and custom-XML wrappers (tables of contents, cover pages,
+    template fields) hold ordinary paragraphs and tables one level down.
+    """
+    for child in element.iterchildren():
+        if child.tag in tags:
+            yield child
+        elif _localname(child) in _DOCX_WRAPPERS:
+            yield from _docx_blocks(child, tags)
+
+
+def _docx_table_text(element, parent, tags, limit: int) -> str:
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    def cell_text(cell) -> str:
+        # cell.text covers only a cell's own paragraphs; a nested table's text
+        # would be lost.
+        parts = []
+        for block in _docx_blocks(cell._tc, tags):
+            if block.tag == tags[0]:
+                parts.append(Paragraph(block, cell).text)
+            else:
+                parts.append(_docx_table_text(block, cell, tags, limit))
+        return "\n".join(part for part in parts if part.strip())
+
     def rows():
-        for row in table.rows:
+        for row in Table(element, parent).rows:
             cells = []
             previous = None
             for cell in row.cells:
@@ -436,7 +556,7 @@ def _docx_table_text(table, limit: int) -> str:
                 if previous is not None and cell._tc is previous:
                     continue
                 previous = cell._tc
-                cells.append(cell.text)
+                cells.append(cell_text(cell))
             line = "\t".join(cells).rstrip("\t")
             if line.strip():
                 yield line
@@ -491,10 +611,12 @@ def _extract_xlsx(data: bytes, out: _Collector, limits: ExtractionLimits) -> str
     workbook = _parse_member(archive, workbook_name)
     rels = _relationships(archive, workbook_name)
     shared = _xlsx_shared_strings(archive, rels)
+    seen = set()
     for sheet in workbook.iter("{*}sheet"):
         target = rels.get(_relationship_id(sheet) or "")
-        if target is None or target[1] not in archive.NameToInfo:
+        if target is None or target[1] not in archive.NameToInfo or target[1] in seen:
             continue
+        seen.add(target[1])
         root = _parse_member(archive, target[1])
 
         def rows(root=root):
@@ -518,13 +640,18 @@ def _extract_pptx(data: bytes, out: _Collector, limits: ExtractionLimits) -> str
     presentation_name = "ppt/presentation.xml"
     presentation = _parse_member(archive, presentation_name)
     rels = _relationships(archive, presentation_name)
+    seen = set()
     for number, slide_id in enumerate(presentation.iter("{*}sldId"), 1):
         target = rels.get(_relationship_id(slide_id) or "")
-        if target is None or target[1] not in archive.NameToInfo:
+        if target is None or target[1] not in archive.NameToInfo or target[1] in seen:
             continue
+        seen.add(target[1])
         slide = _parse_member(archive, target[1])
         lines = (
-            "".join(t.text or "" for t in paragraph.iter("{*}t"))
+            "".join(
+                "\n" if _localname(el) == "br" else el.text or ""
+                for el in paragraph.iter("{*}t", "{*}br")
+            )
             for paragraph in slide.iter("{*}p")
         )
         text = _bounded_join(
@@ -564,6 +691,10 @@ def _odf_text(element) -> str:
             parts.append("\t")
         elif name == "line-break":
             parts.append("\n")
+        elif name in ("annotation", "annotation-end"):
+            # A comment's author and date are not paragraph text; its own
+            # paragraphs are emitted by the document-order walk.
+            pass
         elif child.tag not in _ODF_PARAGRAPHS:
             parts.append(_odf_text(child))
         parts.append(child.tail or "")

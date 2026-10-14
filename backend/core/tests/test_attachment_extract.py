@@ -8,7 +8,9 @@ import io
 import struct
 import sys
 import time
+import tracemalloc
 import zipfile
+import zlib
 
 import docx
 import pytest
@@ -583,7 +585,7 @@ def test_g4_text_exactly_at_the_cap_is_not_truncated():
 
 
 def test_g4_collector_never_exceeds_its_budget():
-    out = ae._Collector(10)
+    out = ae._Collector(10, max_segments=100)
     assert out.add("12345678", {}) is True
     assert out.add("abcdef", {}) is False
     assert out.add("more", {}) is False
@@ -641,3 +643,196 @@ def test_g6_content_type_parameters_and_case_are_ignored():
     result = extract(b"hello", "Text/Plain; charset=utf-8")
     assert result.status == ae.STATUS_OK
     assert _texts(result) == ["hello"]
+
+
+# --- Review regressions ------------------------------------------------------
+
+
+def _fake_worker(code: str) -> list[str]:
+    return [sys.executable, "-c", code]
+
+
+def test_g1_worker_runs_without_the_parent_environment(monkeypatch):
+    monkeypatch.setenv("ATTACHMENT_EXTRACT_TEST_SECRET", "s3cret")
+    code = (
+        "import json, os; print(json.dumps({'status': 'ok', 'truncated': False, "
+        "'segments': [{'text': os.environ.get('ATTACHMENT_EXTRACT_TEST_SECRET', 'absent'), "
+        "'locator': {}}]}))"
+    )
+    result = ae._run_worker(b"x", ae.TEXT, ExtractionLimits(), _fake_worker(code))
+    assert _texts(result) == ["absent"]
+
+
+def test_g1_oversized_or_hostile_worker_replies_are_failed_not_raised():
+    flood = _fake_worker("import sys; sys.stdout.write('x' * 5000)")
+    limits = ExtractionLimits(max_chars=10, max_segments=1)
+    assert ae._run_worker(b"x", ae.TEXT, limits, flood).status == ae.STATUS_FAILED
+    nested = _fake_worker("import sys; sys.stdout.write('[' * 200000)")
+    assert (
+        ae._run_worker(b"x", ae.TEXT, ExtractionLimits(), nested).status
+        == ae.STATUS_FAILED
+    )
+
+
+@pytest.mark.parametrize(
+    "segments",
+    [
+        [{"text": "a", "locator": {}}] * 3,
+        [{"text": "a", "locator": {"sheet": "n" * 300}}],
+        [{"text": "a", "locator": {"evil": 1}}],
+    ],
+)
+def test_g1_parent_rejects_replies_over_segment_or_locator_bounds(segments):
+    limits = ExtractionLimits(max_segments=2)
+    obj = {"status": "ok", "segments": segments, "truncated": False}
+    with pytest.raises((ValueError, TypeError)):
+        ae._from_wire(obj, limits)
+
+
+def _under_declare(data: bytes, member: str, declared: bytes) -> bytes:
+    """Make ``member`` declare ``declared``'s size and CRC while its stream holds more."""
+    buf = bytearray(data)
+    name = member.encode()
+    crc = zlib.crc32(declared)
+    for signature, name_len_at, name_at, crc_at, size_at in (
+        (b"PK\x03\x04", 26, 30, 14, 22),
+        (b"PK\x01\x02", 28, 46, 16, 24),
+    ):
+        at = buf.find(signature)
+        while at != -1:
+            name_len = struct.unpack_from("<H", buf, at + name_len_at)[0]
+            if bytes(buf[at + name_at : at + name_at + name_len]) == name:
+                struct.pack_into("<I", buf, at + crc_at, crc)
+                struct.pack_into("<I", buf, at + size_at, len(declared))
+            at = buf.find(signature, at + 4)
+    return bytes(buf)
+
+
+def test_g2_a_member_that_under_declares_its_size_is_never_inflated_past_it():
+    document_xml = zipfile.ZipFile(io.BytesIO(_docx(["Bounded"]))).read(
+        "word/document.xml"
+    )
+    source = zipfile.ZipFile(io.BytesIO(_docx(["Bounded"])))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as target:
+        for info in source.infolist():
+            if info.filename != "word/document.xml":
+                target.writestr(info.filename, source.read(info))
+                continue
+            with target.open("word/document.xml", "w") as member:
+                member.write(document_xml)
+                for _ in range(64):
+                    member.write(b" " * (1024 * 1024))
+    data = _under_declare(out.getvalue(), "word/document.xml", document_xml)
+
+    tracemalloc.start()
+    try:
+        result = ae._extract_in_process(data, ae.DOCX, ExtractionLimits())
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert result.status == ae.STATUS_OK
+    assert _texts(result) == ["Bounded"]
+    assert peak < 16 * 1024 * 1024
+
+
+def test_g3_docx_dtd_in_a_part_not_named_xml_is_refused():
+    data = _docx(["PLACEHOLDER"])
+    source = zipfile.ZipFile(io.BytesIO(data))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as target:
+        for info in source.infolist():
+            body = source.read(info).decode("utf-8", "surrogateescape")
+            name = info.filename
+            if name == "word/document.xml":
+                name = "word/document.dat"
+                head, root = body.split("?>", 1)
+                body = head + '?><!DOCTYPE w:document [<!ENTITY x "EXPANDED">]>' + root
+                body = body.replace("PLACEHOLDER", "before &x;")
+            else:
+                body = body.replace("document.xml", "document.dat")
+            target.writestr(name, body.encode("utf-8", "surrogateescape"))
+    result = extract(out.getvalue(), ae.DOCX)
+    assert result.status == ae.STATUS_FAILED
+    assert result.detail == "xml_dtd"
+
+
+def test_g4_a_cut_on_a_row_boundary_of_the_last_segment_is_reported_truncated():
+    result = extract(
+        _xlsx({"S": [["i:abcde"], ["i:fgh"]]}), ae.XLSX, ExtractionLimits(max_chars=5)
+    )
+    assert _texts(result) == ["abcde"]
+    assert result.truncated is True
+
+
+def test_g4_bounded_join_stops_only_past_the_limit():
+    assert ae._bounded_join(iter(["abcde", "fgh"]), "\n", 5) == "abcde\nfgh"
+    assert ae._bounded_join(iter(["ab", "cd"]), "\n", 5) == "ab\ncd"
+
+
+def test_g4_segment_count_is_capped_and_reported_truncated():
+    result = extract(b"a\n\n" * 30, ae.TEXT, ExtractionLimits(max_segments=10))
+    assert len(result.segments) == 10
+    assert result.truncated is True
+
+
+def test_g4_locator_strings_are_capped_and_repeated_sheets_read_once():
+    data = _xlsx({"N" * 1000: [["i:x"]]})
+    source = zipfile.ZipFile(io.BytesIO(data))
+    workbook = source.read("xl/workbook.xml").decode()
+    repeated = workbook.replace(
+        "</sheets>", '<sheet name="again" sheetId="9" r:id="rId1"/></sheets>'
+    )
+    result = extract(_replace_member(data, "xl/workbook.xml", repeated), ae.XLSX)
+    assert result.segments == (ae.Segment("x", {"sheet": "N" * 256}),)
+
+
+def _docx_with_body(inner: str) -> bytes:
+    data = _docx(["PLACEHOLDER"])
+    document_xml = zipfile.ZipFile(io.BytesIO(data)).read("word/document.xml").decode()
+    start = (
+        document_xml.index("<w:p>")
+        if "<w:p>" in document_xml
+        else document_xml.index("<w:p ")
+    )
+    end = document_xml.index("</w:p>", start) + len("</w:p>")
+    return _replace_member(
+        data, "word/document.xml", document_xml[:start] + inner + document_xml[end:]
+    )
+
+
+def test_g7_docx_body_level_content_controls_are_read():
+    inner = "<w:sdt><w:sdtPr/><w:sdtContent><w:p><w:r><w:t>INSIDE_SDT</w:t></w:r></w:p></w:sdtContent></w:sdt>"
+    result = extract(_docx_with_body(inner), ae.DOCX)
+    assert result.segments == (ae.Segment("INSIDE_SDT", {"paragraph": 1}),)
+
+
+def test_g7_docx_nested_table_text_is_kept():
+    def table(cell: str) -> str:
+        return f"<w:tbl><w:tblGrid><w:gridCol/></w:tblGrid><w:tr><w:tc>{cell}</w:tc></w:tr></w:tbl>"
+
+    inner = table(table("<w:p><w:r><w:t>NESTED</w:t></w:r></w:p>") + "<w:p/>")
+    result = extract(_docx_with_body(inner), ae.DOCX)
+    assert result.segments == (ae.Segment("NESTED", {"table": 1}),)
+
+
+def test_g7_text_lines_are_counted_by_newline_only():
+    result = extract("a\x0cb\r\n\r\nc\n".encode(), ae.TEXT)
+    assert result.segments == (
+        ae.Segment("a\x0cb", {"line": 1}),
+        ae.Segment("c", {"line": 3}),
+    )
+
+
+def test_g7_pptx_line_breaks_separate_runs():
+    data = _pptx([["Line1</a:t></a:r><a:br/><a:r><a:t>Line2"]])
+    assert _texts(extract(data, ae.PPTX)) == ["Line1\nLine2"]
+
+
+def test_g7_odt_comment_metadata_is_not_spliced_into_paragraph_text():
+    body = (
+        '<office:text><text:p>Body<office:annotation xmlns:dc="http://purl.org/dc/elements/1.1/">'
+        "<dc:creator>Reviewer</dc:creator><dc:date>2026-01-01</dc:date>"
+        "<text:p>Comment</text:p></office:annotation> text</text:p></office:text>"
+    )
+    assert _texts(extract(_odf(ae.ODT, body), ae.ODT)) == ["Body text", "Comment"]
