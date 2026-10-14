@@ -1047,3 +1047,61 @@ def test_g4_collector_replaces_lone_surrogates():
     out = ae._Collector(100, max_segments=10)
     out.add("a\ud800b", {})
     out.segments[0].text.encode("utf-8")
+
+
+# --- Review round 2 mutation findings ----------------------------------------
+
+
+def test_g1_a_child_flooding_stdout_is_stopped_at_the_reply_cap():
+    flood = _fake_worker(
+        "import sys\nwhile True: sys.stdout.buffer.write(b'x' * 65536)"
+    )
+    limits = ExtractionLimits(max_chars=10, max_segments=1, timeout_seconds=20)
+    started = time.monotonic()
+    result = ae._run_worker(b"x", ae.TEXT, limits, flood)
+    assert result == ae.ExtractionResult(ae.STATUS_FAILED, detail="worker_output")
+    # Stopped at the cap, not at the wall clock.
+    assert time.monotonic() - started < 10
+
+
+@pytest.mark.parametrize(
+    "locator", [[], "x", {"page": True}, {"page": 1.5}, {"page": None}]
+)
+def test_g1_parent_rejects_malformed_locators(locator):
+    obj = {
+        "status": "ok",
+        "segments": [{"text": "a", "locator": locator}],
+        "truncated": False,
+    }
+    with pytest.raises((ValueError, TypeError)):
+        ae._from_wire(obj, ExtractionLimits())
+
+
+@pytest.mark.parametrize(
+    "ctype,builder,rels_name",
+    [
+        (ae.XLSX, lambda: _xlsx({"S": [["1"]]}), "xl/_rels/workbook.xml.rels"),
+        (ae.PPTX, lambda: _pptx([["x"]]), "ppt/_rels/presentation.xml.rels"),
+    ],
+)
+def test_g3_dtd_in_a_relationships_part_is_refused(ctype, builder, rels_name):
+    data = builder()
+    rels = zipfile.ZipFile(io.BytesIO(data)).read(rels_name).decode()
+    rels = rels.replace("?>", '?><!DOCTYPE x [<!ENTITY a "b">]>', 1)
+    assert extract(_replace_member(data, rels_name, rels), ctype).detail == "xml_dtd"
+
+
+def test_g7_docx_nested_table_keeps_every_row():
+    def table(rows: list[str]) -> str:
+        body = "".join(f"<w:tr><w:tc>{cell}</w:tc></w:tr>" for cell in rows)
+        return f"<w:tbl><w:tblGrid><w:gridCol/></w:tblGrid>{body}</w:tbl>"
+
+    def para(text: str) -> str:
+        return f"<w:p><w:r><w:t>{text}</w:t></w:r></w:p>"
+
+    inner = table([table([para("N1"), para("N2")]) + "<w:p/>"])
+    assert _texts(extract(_docx_with_body(inner), ae.DOCX)) == ["N1\nN2"]
+
+
+def test_g5_a_pdf_whose_pages_hold_only_whitespace_is_no_text_layer():
+    assert extract(_pdf([" ", "  "]), ae.PDF).status == ae.STATUS_NO_TEXT_LAYER

@@ -37,6 +37,8 @@ import os
 import posixpath
 import subprocess
 import sys
+import threading
+import time
 import zipfile
 from dataclasses import asdict, dataclass, field
 
@@ -80,9 +82,8 @@ class ExtractionLimits:
     max_input_bytes: int = 25 * _MiB
     # Characters of text returned per file, across all segments.
     max_chars: int = 1_000_000
-    # Segments returned per file: bounds the reply (and the parent's memory)
-    # for a file of a million one-character paragraphs, which max_chars alone
-    # would not.
+    # Segments returned per file: bounds the reply for a file of a million
+    # one-character paragraphs, which max_chars alone would not.
     max_segments: int = 10_000
     max_zip_members: int = 2_000
     # Sum of the uncompressed sizes the archive's central directory declares.
@@ -140,26 +141,70 @@ def _run_worker(
 ) -> ExtractionResult:
     header = json.dumps({"content_type": ctype, "limits": asdict(limits)}).encode()
     payload = len(header).to_bytes(4, "big") + header + data
+    cap = _max_reply_bytes(limits)
+    proc = subprocess.Popen(
+        argv,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        # The child parses untrusted bytes; it gets none of the server's
+        # environment (credentials, API keys).
+        env={},
+    )
+    reply = bytearray()
+    overflow = threading.Event()
+
+    def feed() -> None:
+        try:
+            proc.stdin.write(payload)
+        except OSError:  # the child exited or was killed before reading it all
+            pass
+        finally:
+            try:
+                proc.stdin.close()
+            except OSError:
+                pass
+
+    def drain() -> None:
+        # Read the reply incrementally and stop past the cap, so a child that
+        # floods stdout cannot grow this (the server's) process's memory.
+        while True:
+            chunk = proc.stdout.read1(65536)
+            if not chunk:
+                return
+            if len(reply) + len(chunk) > cap:
+                overflow.set()
+                return
+            reply.extend(chunk)
+
+    threads = [threading.Thread(target=fn, daemon=True) for fn in (feed, drain)]
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + limits.timeout_seconds
+    timed_out = False
     try:
-        proc = subprocess.run(
-            argv,
-            input=payload,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            timeout=limits.timeout_seconds,
-            check=False,
-            # The child parses untrusted bytes; it gets none of the server's
-            # environment (credentials, API keys).
-            env={},
-        )
-    except subprocess.TimeoutExpired:
+        while True:
+            try:
+                proc.wait(timeout=0.05)
+                break
+            except subprocess.TimeoutExpired:
+                if overflow.is_set() or time.monotonic() >= deadline:
+                    timed_out = not overflow.is_set()
+                    proc.kill()
+                    proc.wait()
+                    break
+    finally:
+        for thread in threads:
+            thread.join(timeout=5)
+        proc.stdout.close()
+    if timed_out:
         return ExtractionResult(STATUS_TIMEOUT, detail="wall_clock")
+    if overflow.is_set():
+        return ExtractionResult(STATUS_FAILED, detail="worker_output")
     if proc.returncode != 0:
         return ExtractionResult(STATUS_FAILED, detail=f"worker_exit_{proc.returncode}")
-    if len(proc.stdout) > _max_reply_bytes(limits):
-        return ExtractionResult(STATUS_FAILED, detail="worker_output")
     try:
-        return _from_wire(json.loads(proc.stdout), limits)
+        return _from_wire(json.loads(bytes(reply)), limits)
     except (ValueError, KeyError, TypeError, RecursionError):
         return ExtractionResult(STATUS_FAILED, detail="worker_output")
 
