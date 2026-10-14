@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 from typing import TYPE_CHECKING, List, Optional, Dict, Any
+from urllib.parse import quote
 from fastapi import (
     APIRouter,
     File,
@@ -33,6 +34,7 @@ from fastapi import (
 )
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import Response, StreamingResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field, field_validator
 from pydantic import ValidationError as PydanticValidationError
 
@@ -41,6 +43,8 @@ from backend.config.config_loader import (
     get_public_base_url,
     get_rest_interfaces,
 )
+from backend.core.attachment_store import copy_stream
+from backend.core.attachment_types import TEXT_TYPES
 from backend.core.image_ingest import (
     DEFAULT_MAX_SOURCE_IMAGE_BYTES,
     ImageFetchError,
@@ -60,6 +64,7 @@ from backend.core.session_annotations import (
 from backend.core.storage_search import MATCH_MODE_SUBSTRING, validate_match_mode
 from backend.runtime.authorization import use_request_authorization
 
+from . import attachments as attachment_ops
 from .service import GraphService
 
 if TYPE_CHECKING:
@@ -1722,6 +1727,139 @@ def _register_single_custom_interface(
             return result
 
 
+# ==================== Node Attachments ====================
+# ADR 0008 section 7. Authorization and every per-route check live in
+# backend/service/attachments.py; these routes only translate HTTP.
+
+_ATTACHMENT_ERROR_STATUS = {
+    attachment_ops.ATTACHMENT_ERROR_NOT_FOUND: 404,
+    attachment_ops.ATTACHMENT_ERROR_UNAVAILABLE: 503,
+    attachment_ops.ATTACHMENT_ERROR_FEDERATED: 422,
+    attachment_ops.ATTACHMENT_ERROR_NOT_ALLOWED: 422,
+    attachment_ops.ATTACHMENT_ERROR_ARCHIVED: 409,
+    attachment_ops.ATTACHMENT_ERROR_TOO_LARGE: 413,
+    attachment_ops.ATTACHMENT_ERROR_NODE_LIMIT: 409,
+    attachment_ops.ATTACHMENT_ERROR_UNSUPPORTED_TYPE: 415,
+    attachment_ops.ATTACHMENT_ERROR_INDEX_CORRUPT: 500,
+}
+
+
+def _raise_for_attachment_error(result: Dict[str, Any]) -> None:
+    _raise_for_access_denied(result)
+    if result.get("success"):
+        return
+    code = result.get("error_code") or ""
+    raise HTTPException(
+        status_code=_ATTACHMENT_ERROR_STATUS.get(code, 500),
+        detail={"error": code, "message": result.get("error") or ""},
+    )
+
+
+def _declared_content_length(http_request: Request) -> Optional[int]:
+    raw = http_request.headers.get("content-length")
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value >= 0 else None
+
+
+def _content_disposition(filename: str) -> str:
+    """Always ``attachment``, with an ASCII fallback and an RFC 5987 name."""
+    fallback = "".join(
+        "_" if (ord(ch) > 126 or ch in '"\\' or ord(ch) < 32) else ch for ch in filename
+    )
+    encoded = quote(filename, safe="")
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}"
+
+
+def _attachment_download_headers(record: Dict[str, Any]) -> Dict[str, str]:
+    return {
+        "Content-Disposition": _content_disposition(record["filename"]),
+        "Content-Length": str(record["size"]),
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "Cache-Control": "private, no-store",
+    }
+
+
+def _register_attachment_endpoints(router: APIRouter, service: GraphService) -> None:
+    # The store reads files and takes OS locks, so its calls run off the event
+    # loop. asyncio.to_thread copies the context, so the request authorization
+    # bound below reaches the service call.
+    @router.get("/nodes/{node_id}/attachments")
+    async def list_node_attachments(node_id: str, request: Request) -> Dict[str, Any]:
+        """List a node's attachments, the limits, and whether uploads are allowed."""
+        with use_request_authorization(headers=request.headers):
+            result = await asyncio.to_thread(service.list_node_attachments, node_id)
+        _raise_for_attachment_error(result)
+        return {
+            "attachments": result["attachments"],
+            "limits": result["limits"],
+            "uploads_allowed": result["uploads_allowed"],
+        }
+
+    @router.post("/nodes/{node_id}/attachments", status_code=201)
+    async def add_node_attachment(
+        node_id: str,
+        request: Request,
+        filename: str = Query("", max_length=4096),
+    ) -> Dict[str, Any]:
+        """Attach one file to a node.
+
+        The body is the raw file bytes, not multipart: a multipart body is
+        spooled by the framework before the handler runs, which would defeat
+        the size checks. The name comes from ``filename``; the declared type
+        from ``Content-Type`` and is kept for diagnosis only.
+        """
+        with use_request_authorization(headers=request.headers):
+            result = await service.add_node_attachment(
+                node_id,
+                filename=filename,
+                declared_content_type=request.headers.get("content-type"),
+                content=request.stream(),
+                content_length=_declared_content_length(request),
+            )
+        _raise_for_attachment_error(result)
+        return result["attachment"]
+
+    @router.get("/nodes/{node_id}/attachments/{attachment_id}")
+    async def download_node_attachment(
+        node_id: str, attachment_id: str, request: Request
+    ) -> StreamingResponse:
+        """Stream one attachment back, always as a download."""
+        with use_request_authorization(headers=request.headers):
+            result = await asyncio.to_thread(
+                service.open_node_attachment, node_id, attachment_id
+            )
+        _raise_for_attachment_error(result)
+        record = result["attachment"]
+        stream = result["stream"]
+        media_type = record["content_type"]
+        if media_type in TEXT_TYPES:
+            media_type = f"{media_type}; charset=utf-8"
+        return StreamingResponse(
+            copy_stream(stream),
+            media_type=media_type,
+            headers=_attachment_download_headers(record),
+            background=BackgroundTask(stream.close),
+        )
+
+    @router.delete("/nodes/{node_id}/attachments/{attachment_id}")
+    async def delete_node_attachment(
+        node_id: str, attachment_id: str, request: Request
+    ) -> Dict[str, Any]:
+        """Delete one attachment from a node."""
+        with use_request_authorization(headers=request.headers):
+            result = await asyncio.to_thread(
+                service.delete_node_attachment, node_id, attachment_id
+            )
+        _raise_for_attachment_error(result)
+        return {"success": True}
+
+
 # ==================== Router Factory ====================
 
 
@@ -1768,6 +1906,7 @@ def create_rest_router(
     _register_metadata_endpoints(router, service)
     _register_views_endpoints(router, service)
     _register_export_endpoints(router, service)
+    _register_attachment_endpoints(router, service)
     _register_import_endpoints(router, service, import_job_store)
     if session_manager is not None:
         _register_session_endpoints(router, service, session_manager)
