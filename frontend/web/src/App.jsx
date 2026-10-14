@@ -2986,9 +2986,19 @@ function App() {
       <NodeHistoryPanel />
 
       {notification && (
-        <div className={`app-notification app-notification-${notification.type}`}>
+        <div
+          className={`app-notification app-notification-${notification.type}`}
+          role={notification.type === 'error' ? 'alert' : 'status'}
+          aria-live={notification.type === 'error' ? 'assertive' : 'polite'}
+        >
           <span>{notification.message}</span>
-          <button onClick={() => setNotification(null)}>×</button>
+          <button
+            onClick={() => setNotification(null)}
+            aria-label={t('common.close')}
+            title={t('common.close')}
+          >
+            ×
+          </button>
         </div>
       )}
       {isOffline && (
