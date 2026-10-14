@@ -1,0 +1,471 @@
+# User Function Contract
+
+**Contract version:** 1
+**Status:** Draft contract, adopted by
+[ADR 0011](adr/0011-sandboxed-user-functions.md). It is normative for the first
+implementation slices; nothing in it is implemented yet.
+**Scope:** Open-source core. This version covers manually invoked functions that
+read and write the graph through a broker. Every other trigger, tool and binding
+is out of scope (see [§13](#13-reserved-for-later-versions)); the fields they
+will need are reserved here so that adding them is not a breaking change.
+
+**Related:**
+[`DURABLE_EXECUTION_CONTRACT.md`](DURABLE_EXECUTION_CONTRACT.md) (run state,
+idempotency and run history this contract reuses),
+[`EVENT_SUBSCRIPTIONS.md`](EVENT_SUBSCRIPTIONS.md) (the event envelope and the
+origin-based loop prevention reused here),
+[`SECRET_PROVIDER_CONTRACT.md`](SECRET_PROVIDER_CONTRACT.md) (the seam a later
+version binds secrets through),
+[`SESSION_OVERLAY_CONTRACT.md`](SESSION_OVERLAY_CONTRACT.md) (the staged-write
+model a later `write_target: session` follows),
+[`EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md`](EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md)
+(actor classes and correlation forwarding).
+
+---
+
+## 1. Purpose
+
+A **user function** is a small, versioned program, written by whoever operates
+an instance, that reacts to an invocation by reading and changing the graph. A
+typical example: "when a threshold changes, recompute the derived values on the
+nodes that depend on it".
+
+User functions are deliberately narrow:
+
+- **Deterministic code, not an AI agent.** A function runs no model loop. It is
+  invoked, does its work through tools and returns a result. Agents remain the
+  mechanism for open-ended, model-driven work.
+- **Short-lived, not a process engine.** A run is bounded by a hard wall-clock
+  limit (§8). There is no multi-step orchestration, no waiting on external
+  events and no state carried between runs other than what the function writes
+  to the graph.
+- **Isolated, not a plugin.** Function code runs outside the application process
+  and never imports, calls or depends on application modules. Everything it
+  does crosses the broker described in §6.
+
+## 2. Terms
+
+| Term | Meaning |
+|---|---|
+| **Function** | A versioned package: a manifest plus code. Identified by `id` and `version`. |
+| **Manifest** | `function.json`, the declarative description of a function (§4). |
+| **Host** | The application side: validates manifests, starts runs, runs the broker, records results. |
+| **Runner** | The isolation adapter that starts the function's process and enforces limits (§8). The isolation technology is chosen outside this contract. |
+| **Broker** | The host component that answers the function's tool calls, checking grants and scope on every call (§6). |
+| **Run** | One execution of one function version for one invocation. |
+| **Invocation** | The request that starts a run, together with the actor and scope it carries (§5). |
+| **Grant** | A permission the manifest declares and the operator enables (§7). |
+
+## 3. Invariants
+
+These hold for every run and every runner. An implementation slice is tested
+against them.
+
+1. **No in-process code.** Function code never runs inside the application
+   process and never receives a reference to an application object, module,
+   database handle or service credential.
+2. **Every effect goes through the broker.** A function's only channel to the
+   host is the protocol in §6. A runner provides no network access and no
+   filesystem outside a private, temporary working directory.
+3. **Grants are a ceiling, not a request.** A tool call outside the function's
+   enabled grants fails, whatever the call claims about itself.
+4. **Scope is fixed by the host.** The graph a run may touch and the actor it
+   acts as are set when the run starts. The function cannot name another graph,
+   another actor or another session.
+5. **The time limit is absolute.** A run that has not returned by its deadline is
+   terminated (§8). No configuration raises the platform maximum.
+6. **Writes are attributed.** Every write a run makes carries the function's
+   origin and the run's correlation id (§9).
+7. **No secret material in v1.** No secret value is reachable from a function in
+   this contract version; see §13 for how a later version adds them.
+
+## 4. Package and manifest
+
+### 4.1 Layout
+
+Functions are loaded from configuration, without a database or a hosted control
+plane. Each function lives in its own directory under the configured functions
+root (default `config/functions/`):
+
+```
+config/functions/
+  recompute-derived-values/
+    function.json        # the manifest
+    main.py              # entry module named by the manifest
+    ...                  # further source files, if any
+```
+
+The directory name equals the manifest `id`. The host reads only the directory
+of a function that is enabled (§4.4).
+
+### 4.2 Manifest fields
+
+`function.json` is a JSON object:
+
+```json
+{
+  "contract_version": "1",
+  "id": "recompute-derived-values",
+  "version": "1.2.0",
+  "name": "Recompute derived values",
+  "description": "Recomputes values on nodes that depend on a changed threshold.",
+  "runtime": "python",
+  "entry_point": "main.py",
+  "input_schema": {
+    "type": "object",
+    "properties": {"node_id": {"type": "string"}},
+    "required": ["node_id"]
+  },
+  "output_schema": {"type": "object"},
+  "triggers": [{"kind": "manual"}],
+  "grants": ["graph:read", "graph:write"],
+  "write_target": "graph",
+  "limits": {"timeout_seconds": 60}
+}
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `contract_version` | yes | The version of this contract the manifest targets. `"1"` for this document. |
+| `id` | yes | Stable identifier: lowercase letters, digits and `-`, 3–64 characters. Equals the directory name. |
+| `version` | yes | Semantic version of the function. Recorded on every run. |
+| `name` | yes | Human-readable name. |
+| `description` | no | What the function does. |
+| `runtime` | yes | `python` or `node` (§10). |
+| `entry_point` | yes | Path, relative to the function directory, of the file the runner starts. Must not leave the directory. |
+| `input_schema` | no | JSON Schema the invocation `input` is validated against before the run starts. Absent means `input` must be an empty object. |
+| `output_schema` | no | JSON Schema the function's `result.output` is validated against. A mismatch fails the run. |
+| `triggers` | yes | List of trigger objects. Version 1 accepts exactly `[{"kind": "manual"}]` (§13). |
+| `grants` | yes | List of grants the function needs (§7). May be empty. |
+| `write_target` | no | Where writes land. Version 1 accepts only `"graph"`, the default (§13). |
+| `limits` | no | Per-function limits, each at most the platform maximum (§8). |
+| `retry` | reserved | Retry policy for non-manual triggers (§13). Must be absent in version 1. |
+| `secrets` | reserved | Secret references (§13). Must be absent in version 1. |
+| `egress` | reserved | Outbound network allowlist (§13). Must be absent in version 1. |
+
+### 4.3 Validation
+
+The host validates a manifest when it loads it and again before every run.
+A manifest is **rejected**, and the function cannot run, when:
+
+- `contract_version` is not one the host supports;
+- a required field is missing, or a field has the wrong type;
+- a field holds a value this contract version does not allow, such as a trigger
+  kind other than `manual`, a `write_target` other than `graph`, an unknown
+  grant, a limit above the platform maximum, or any reserved field;
+- `entry_point` does not resolve to a file inside the function directory.
+
+Unknown **optional** top-level fields are ignored, so that a manifest written
+for a later minor version still loads. A field this section lists as reserved is
+not unknown: it is rejected, because accepting it silently would suggest a
+behaviour version 1 does not provide.
+
+### 4.4 Enablement
+
+Loading a manifest does not make it runnable. An operator enables a function,
+and its grants, explicitly in instance configuration. A function that is not
+enabled is listed with its validation state but cannot be invoked. Enabling a
+function is an operator action; a function cannot enable itself or another
+function.
+
+## 5. Invocation
+
+### 5.1 Manual trigger
+
+Version 1 has one trigger: an explicit, manual invocation through the host's
+API (and any CLI built on it). The invocation names the function `id`, carries
+an `input` object and, optionally, an `idempotency_key` and a `correlation_id`.
+
+The invocation is authorized as the calling actor: the host evaluates the
+caller's graph access through the existing authorization hook before the run
+starts. A caller without mutate access cannot start a function that holds
+`graph:write`.
+
+### 5.2 Envelope
+
+The function receives one envelope, built by the host. It reuses the event
+envelope from `EVENT_SUBSCRIPTIONS.md` (`schema_version`, `event_id`,
+`event_type`, `occurred_at`, `origin`, `entity`) and adds an `invocation`
+block:
+
+```json
+{
+  "schema_version": "1.0",
+  "event_id": "evt-…",
+  "event_type": "function.invoke",
+  "occurred_at": "2026-10-14T09:00:00Z",
+  "origin": {
+    "event_origin": "web-ui",
+    "event_session_id": null,
+    "event_correlation_id": "corr-…",
+    "attribution": {"actor": {"…": "…"}, "scope": {"…": "…"}}
+  },
+  "entity": null,
+  "invocation": {
+    "contract_version": "1",
+    "run_id": "job-…",
+    "function_id": "recompute-derived-values",
+    "function_version": "1.2.0",
+    "trigger": "manual",
+    "input": {"node_id": "…"},
+    "idempotency_key": "…",
+    "chain_depth": 0,
+    "deadline": "2026-10-14T09:01:00Z"
+  }
+}
+```
+
+- `entity` is `null` for a manual invocation. Graph-change triggers (§13) fill
+  it with the triggering entity's `before`, `after` and `patch`, unchanged from
+  the event payload.
+- `origin` describes **who started the run**. The origin the run's own writes
+  carry is defined in §9.
+- `deadline` is informative: the function may use it to stop early. The runner
+  enforces the limit regardless (§8).
+- The envelope never contains a secret, a credential or a token.
+
+### 5.3 Idempotency
+
+A run is a durable job in the `ExecutionStore`
+([`DURABLE_EXECUTION_CONTRACT.md`](DURABLE_EXECUTION_CONTRACT.md) §5). Its
+idempotency key is `fn:<function_id>:<key>`, where `<key>` is the invocation's
+`idempotency_key`, or a fresh id when none is given. An invocation that repeats
+a key returns the existing run instead of starting a new one, in any state.
+Callers that retry a manual invocation after a network failure therefore pass
+the same key.
+
+## 6. Broker protocol (ABI)
+
+### 6.1 Transport
+
+The function and the host speak **JSON-RPC 2.0 over the function process's
+standard input and output**, one JSON object per line (newline-delimited, UTF-8).
+Standard error is captured as the run's log (§11) and is never parsed as
+protocol. This transport needs no network inside the isolation boundary and is
+the same for every runtime and every runner.
+
+### 6.2 Sequence
+
+1. The runner starts the process. The host writes one notification:
+   `{"jsonrpc": "2.0", "method": "invoke", "params": <envelope>}`.
+2. The function sends zero or more **tool calls**, each a request:
+   `{"jsonrpc": "2.0", "id": 1, "method": "tool", "params": {"name": "graph.search", "arguments": {…}}}`.
+   The host answers each with a response carrying `result` or `error`, in the
+   order of the requests. A function makes one call at a time; the host rejects
+   a request sent while another is unanswered.
+3. The function ends with one notification:
+   `{"jsonrpc": "2.0", "method": "result", "params": {"status": "ok", "output": {…}}}`
+   or `{"jsonrpc": "2.0", "method": "result", "params": {"status": "error", "error": {"code": "…", "message": "…"}}}`,
+   and then exits.
+
+A process that exits without sending `result` fails the run (§11). Output that
+is not valid JSON-RPC on standard output fails the run with
+`protocol_error`. Anything after `result` is ignored.
+
+### 6.3 Tools in version 1
+
+| Tool | Grant | Maps to |
+|---|---|---|
+| `graph.search` | `graph:read` | `search_graph` |
+| `graph.get_node` | `graph:read` | `get_node_details` |
+| `graph.get_related` | `graph:read` | `get_related_nodes` |
+| `graph.find_similar` | `graph:read` | `find_similar_nodes` |
+| `graph.add` | `graph:write` | `add_nodes` (nodes and edges) |
+| `graph.update_node` | `graph:write` | `update_node` |
+
+Arguments and results follow the mapped MCP tool. The broker never forwards an
+argument that would change scope (a graph id, a session id, an event origin or
+a correlation id): those come from the run (§3, §9) and a caller-supplied value
+is rejected. Deletion is not available in version 1 (§13).
+
+### 6.4 Tool errors
+
+A tool call the broker refuses returns a JSON-RPC error whose `data.code` is one
+of:
+
+| `data.code` | Meaning |
+|---|---|
+| `unknown_tool` | The tool does not exist in this contract version. |
+| `grant_denied` | The function's enabled grants do not cover the tool. |
+| `access_denied` | The run's actor may not perform this action on this graph. |
+| `invalid_arguments` | The arguments failed validation, including a scope-changing argument. |
+| `limit_exceeded` | The run has used its tool-call budget (§8). |
+| `tool_failed` | The underlying operation failed; `message` carries a sanitized reason. |
+
+A refused tool call does not end the run; the function decides how to react.
+
+## 7. Grants and scope
+
+### 7.1 Grants
+
+| Grant | Allows |
+|---|---|
+| `graph:read` | The read tools in §6.3. |
+| `graph:write` | The write tools in §6.3. Implies nothing about read; a function that writes usually declares both. |
+
+A function's **effective grants** are the grants its manifest declares that the
+operator has also enabled. A grant the operator has not enabled behaves as if it
+were not declared. Revoking a grant takes effect for the next tool call of a run
+in progress, not only for the next run.
+
+### 7.2 Scope
+
+A run acts on exactly one graph, the one the invocation targets, and as exactly
+one actor, the one that invoked it. Every tool call is evaluated against both:
+the broker checks the grant (§7.1) and then the actor's access through the
+authorization hook, read or mutate, exactly as a direct request from that actor
+would be checked. A function therefore never has more access than the person or
+system that started it.
+
+## 8. Limits
+
+| Limit | Platform maximum | Behaviour when reached |
+|---|---|---|
+| Wall-clock time | **120 seconds** | The runner terminates the process. The run ends `timed_out`. |
+| Memory | 256 MiB | The runner terminates the process. The run ends `failed` with `memory_exceeded`. |
+| Tool calls per run | 200 | Further calls return `limit_exceeded`. |
+| Size of one tool call or response | 1 MiB | The call is refused with `invalid_arguments`, or the response is replaced by a `tool_failed` error. |
+| Size of `result.output` | 256 KiB | The run ends `failed` with `output_too_large`. |
+| Captured log | 256 KiB | Further log output is dropped and the truncation is recorded. |
+| Concurrent runs per function | 1 | A further invocation waits in the queue. |
+
+- A manifest may set a **lower** value through `limits` (`timeout_seconds`,
+  `memory_mib`, `max_tool_calls`). A value above the platform maximum rejects
+  the manifest (§4.3).
+- An operator may lower any platform maximum for an instance. No setting raises
+  one: these limits keep functions short, so that long-running work does not
+  move into them.
+- Termination is forced. The runner does not wait for the function to clean up,
+  and writes the function made before it was terminated stay in the graph.
+  Functions that make several writes should make them idempotent, so that a
+  second run repairs what a terminated run left behind.
+
+## 9. Attribution and loop prevention
+
+Every write a run makes carries an event context set by the host:
+
+- `event_origin` = `function:<function_id>@<function_version>`;
+- `event_correlation_id` = the run's correlation id: the invocation's, when it
+  carried one, otherwise a new id;
+- `event_session_id` = `null` in version 1;
+- `attribution` = the invoking actor and scope.
+
+This gives a later graph-change trigger what it needs to avoid loops, and fixes
+the rules it must follow:
+
+- **Self-exclusion is mandatory.** A function is never triggered by an event
+  whose origin is its own `function:<id>@…`. Unlike event subscriptions, where
+  self-exclusion is opt-in, this is not configurable.
+- **Chain depth is bounded.** A run started by an event that another function
+  run caused gets `chain_depth` = the causing run's depth + 1. The host refuses
+  to start a run whose depth would exceed the instance limit (default 3), and
+  records the refusal.
+- **Correlation is forwarded, not regenerated**, so a chain of runs can be
+  traced through one id (as in `EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md`).
+
+In version 1, with manual triggers only, `chain_depth` is always 0. The rules are
+part of this version so that the trigger slice implements them, not designs them.
+
+## 10. Runtimes
+
+The protocol in §6 is language-neutral. Version 1 names two runtimes:
+
+| `runtime` | Entry point | Notes |
+|---|---|---|
+| `python` | A `.py` file run with the runner's Python interpreter. | First runtime implemented. |
+| `node` | A `.js` or `.mjs` file run with the runner's Node.js. | Contracted here; implemented in a later slice. A host without it rejects `node` manifests as unsupported. |
+
+A thin helper library per runtime hides the protocol. The function only writes
+a handler:
+
+```python
+from communityoverview_function import run
+
+def handle(envelope, tools):
+    node = tools.graph.get_node(node_id=envelope["invocation"]["input"]["node_id"])
+    # … compute …
+    tools.graph.update_node(node_id=node["id"], updates={"metadata": {"derived": 42}})
+    return {"updated": [node["id"]]}
+
+run(handle)
+```
+
+The helper library is part of the open core. Third-party dependencies of a
+function are outside this contract: version 1 runs a function with only its
+own source files and the helper library on its module path. How a later
+version installs dependencies is an isolation decision (§13).
+
+## 11. Run records
+
+A run is an `ExecutionJob` with `kind = function`, recorded through the same
+`ExecutionStore` and retention as agent runs. Manual runs are attempted once:
+there is no automatic retry in version 1.
+
+The run record exposes:
+
+| Field | Meaning |
+|---|---|
+| `id` | Run id (`job-…`). |
+| `function_id`, `function_version` | What ran. |
+| `trigger` | `manual` in version 1. |
+| `status` | `queued`, `running`, `succeeded`, `failed`, `timed_out`, `cancelled` or `rejected`. |
+| `error` | For `failed` and `rejected`: a code and a sanitized message. |
+| `output` | The validated `result.output`, for `succeeded`. |
+| `correlation_id`, `origin`, `actor` | Who started it and the id its writes carry. |
+| `tool_calls` | The count, and per call the tool name, outcome and duration, without arguments or results. |
+| `usage` | Wall-clock time and peak memory, where the runner can measure it. |
+| `log` | The captured standard error, truncated per §8. |
+| `created_at`, `started_at`, `finished_at` | Timestamps. |
+
+Status meanings:
+
+- `rejected`: the run never started, because the manifest failed validation, the
+  function or a needed grant is not enabled, the input failed `input_schema`, or
+  the chain-depth limit was reached.
+- `failed`: the function returned `status: error`, exited without a result,
+  broke the protocol, exceeded memory or produced output that is too large or
+  fails `output_schema`.
+- `timed_out`: the wall-clock limit was reached.
+- `cancelled`: an operator cancelled the run.
+
+Records never contain secret values, credentials or tokens. Tool arguments and
+results are not recorded, because they may hold graph content the run record's
+readers should not see.
+
+`timed_out` and `rejected` are run-record statuses. In the `ExecutionStore`
+they are terminal jobs (`DEAD_LETTER` and `CANCELLED` respectively) with the
+status kept in the job result; the store's state machine does not change.
+
+## 12. Compatibility
+
+- `contract_version` is a single integer string. A host lists the versions it
+  supports and rejects others.
+- Within a contract version, a change that adds an optional field, a tool, a
+  grant, a trigger kind or a `write_target` value is **non-breaking**: existing
+  manifests keep loading and behaving the same.
+- Removing or changing the meaning of a field, a tool, a grant or a status is
+  **breaking** and needs a new contract version. A host may support more than
+  one contract version at a time.
+- The envelope's `schema_version` follows `EVENT_SUBSCRIPTIONS.md`; the
+  `invocation` block follows `contract_version`.
+
+## 13. Reserved for later versions
+
+These are deliberately outside version 1. Each is listed with the field or rule
+already reserved for it, so that adding it extends this contract instead of
+replacing it.
+
+| Capability | Reserved now | Constraint already fixed |
+|---|---|---|
+| Scheduled triggers | `triggers[].kind = "schedule"`, `retry` | Idempotency per fire time, as in `DURABLE_EXECUTION_CONTRACT.md` §5. |
+| Graph-change triggers | `triggers[].kind = "graph_change"`, the `entity` envelope field, `chain_depth` | §9: mandatory self-exclusion, bounded chain depth, forwarded correlation. |
+| Inbound webhook triggers | `triggers[].kind = "webhook"` | Authenticated by a bearer token the application generates per function. The token is shown once, stored only as a hash, can be rotated and revoked, and is bound to one function. |
+| Session-staged writes | `write_target = "session"` | Writes land in a session overlay and reach the graph only through that contract's review and merge (`SESSION_OVERLAY_CONTRACT.md`). |
+| Deletion | grant `graph:delete` | A separate grant, never implied by `graph:write`. |
+| Outbound network | `egress`, a broker HTTP tool | Through the broker only, with a per-function allowlist and the existing SSRF guard; never raw sockets. |
+| Secrets | `secrets` | References resolved by the broker at the point of use through the `SecretProvider` seam; never placed in the envelope, the environment of the function process, logs or run records. |
+| Third-party dependencies | — | Decided with the isolation runtime. |
+| Hosted management | — | Workspace-scoped storage, quotas and administration belong to a hosted layer, outside this repository. |
+
+The isolation runtime itself (hardened subprocess, container, microVM or
+WebAssembly) is not chosen by this contract. Every runner must satisfy §3 and §8.
