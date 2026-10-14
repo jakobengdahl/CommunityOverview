@@ -557,7 +557,7 @@ The current application still uses file-based graph persistence as the default r
 - early hosted-readiness work where the focus is on seams, contracts, and operational hooks
 
 For the long-term shared SaaS architecture, the target is different:
-- multiple graphs or workspaces should eventually be served within a shared application/service environment, each graph by its own core runtime process or processes — a core process binds exactly one graph, though federation can add search over others ([ADR 0009](./adr/0009-dual-mode-graph-storage-seam.md)), and routing a request to the process that serves its graph lives outside the core
+- multiple graphs or workspaces should eventually be served within a shared application/service environment, each graph by its own core runtime process or processes — a core process binds exactly one graph, though federation can add search over others ([ADR 0009](./adr/0009-dual-mode-graph-storage-seam.md)), and routing a request to a process that binds its graph lives outside the core
 - user access to graphs should be controlled through application-managed identity and authorization
 - the storage layer should eventually support shared persistence with row-based or equivalent record-level access constraints
 

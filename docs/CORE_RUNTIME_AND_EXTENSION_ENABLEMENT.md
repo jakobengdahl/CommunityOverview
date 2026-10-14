@@ -34,7 +34,7 @@ For the target SaaS model, tenant-aware operation should not imply a dedicated a
 The default target hosted architecture is:
 - one shared application/service environment per deployment tier or region
 - multiple graphs or customer workspaces served within that environment, each graph by its own core runtime process or processes (a shared persistence backend lets several processes bind the same graph; no process binds several graphs)
-- routing a request to a process that binds its graph done outside the core; the core's own request graph selection only narrows scope within that process's graph and its federation peers
+- routing a request to a process that binds its graph done outside the core; the `graph_id` a request declares never switches the store — it reaches the authorization context and the audit record, and any narrowing comes from the authorization decision, limited to the process's own graph and its federation peers
 - search scope, rendering scope, and mutation scope within a graph controlled by application identity and authorization
 - isolation enforced through configuration, one store per graph, authorization, and data-layer controls
 
