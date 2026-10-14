@@ -795,6 +795,10 @@ class TestExtensionAgreesWithType:
             ("page.HTML", b"hello <b>x</b>", "page.HTML.txt"),
             ("notes.md", b"# notes", "notes.md"),
             ("data.json", b'{"a": 1}', "data.json"),
+            ("invoice.rtf", b"{\\rtf1 hello}", "invoice.rtf.txt"),
+            ("host.rdp", b"full address:s:x", "host.rdp.txt"),
+            ("tool.py", b"print(1)", "tool.py.txt"),
+            ("README", b"hello", "README"),
             ("table.csv", b"a,b", "table.csv"),
         ],
     )
@@ -915,3 +919,31 @@ class TestContentDispositionHeader:
         response = client.get(f"/api/nodes/doc/attachments/{record['id']}")
         assert response.headers["content-type"] == "text/csv; charset=utf-8"
         assert response.headers["content-length"] == "8"
+
+
+class TestRequestContextReachesOffLoopRoutes:
+    def test_hook_sees_request_actor_on_every_route(self, storage, store):
+        actors = []
+
+        class ActorHook:
+            def evaluate(self, context):
+                actors.append((context.target, context.actor.get("actor_id")))
+                return GraphAuthorizationDecision(allowed=True)
+
+        record = _seed(store, "doc")
+        client = _client(
+            GraphService(
+                storage,
+                authorization_hook=ActorHook(),
+                attachment_settings=_settings(store),
+            )
+        )
+        headers = {"x-communityoverview-actor-id": "alice"}
+        client.get("/api/nodes/doc/attachments", headers=headers)
+        client.get(f"/api/nodes/doc/attachments/{record.id}", headers=headers)
+        client.delete(f"/api/nodes/doc/attachments/{record.id}", headers=headers)
+        assert actors == [
+            ("list_node_attachments", "alice"),
+            ("get_node_attachment", "alice"),
+            ("delete_node_attachment", "alice"),
+        ]

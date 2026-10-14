@@ -203,50 +203,36 @@ _TYPE_EXTENSIONS = {
     ODP: (".odp",),
     CSV: (".csv",),
 }
-# Plain text keeps its name (.md, .json, .log stay usable) unless the
-# extension makes a desktop open or run it as something active.
-_ACTIVE_TEXT_EXTENSIONS = frozenset(
+# Plain text keeps its extension only when it is one a desktop opens as inert
+# text; anything else (.bat, .js, .rtf, .rdp, .py, ...) gets ".txt" appended.
+# An allowlist rather than a denylist, because the set of extensions some
+# program runs or renders has no end.
+_INERT_TEXT_EXTENSIONS = frozenset(
     {
-        ".application",
-        ".bat",
-        ".cmd",
-        ".com",
-        ".command",
-        ".cpl",
-        ".desktop",
-        ".exe",
-        ".hta",
-        ".htm",
-        ".html",
-        ".inf",
-        ".iqy",
-        ".jar",
-        ".js",
-        ".jse",
-        ".lnk",
-        ".mht",
-        ".mhtml",
-        ".msc",
-        ".msi",
-        ".ps1",
-        ".psm1",
-        ".reg",
-        ".scf",
-        ".scr",
-        ".settingcontent-ms",
-        ".sh",
-        ".shtml",
-        ".slk",
-        ".svg",
-        ".url",
-        ".vbe",
-        ".vbs",
-        ".website",
-        ".wsf",
-        ".wsh",
-        ".xht",
-        ".xhtml",
-        ".xml",
+        "",
+        ".adoc",
+        ".bib",
+        ".cfg",
+        ".conf",
+        ".ini",
+        ".json",
+        ".jsonl",
+        ".log",
+        ".markdown",
+        ".md",
+        ".ndjson",
+        ".org",
+        ".rst",
+        ".srt",
+        ".tab",
+        ".tex",
+        ".text",
+        ".toml",
+        ".tsv",
+        ".txt",
+        ".vtt",
+        ".yaml",
+        ".yml",
     }
 )
 
@@ -270,9 +256,9 @@ def align_extension(name: str, content_type: str) -> str:
     _, dot, extension = name.rstrip(". ").rpartition(".")
     extension = f".{extension.lower()}" if dot else ""
     if content_type == TEXT:
-        if extension in _ACTIVE_TEXT_EXTENSIONS:
-            return _with_suffix(name, ".txt")
-        return name
+        if extension in _INERT_TEXT_EXTENSIONS:
+            return name
+        return _with_suffix(name, ".txt")
     allowed = _TYPE_EXTENSIONS.get(content_type)
     if allowed is None or extension in allowed:
         return name

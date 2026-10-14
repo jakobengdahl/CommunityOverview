@@ -209,7 +209,7 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | `ATTACHMENT_MAX_FILE_BYTES` | `26214400` (25 MiB) | Largest single file; `0` or less fails at boot |
 | `ATTACHMENT_MAX_FILES_PER_NODE` | `10` | Most files on one node; `0` or less fails at boot |
 | `ATTACHMENT_MAX_BYTES_PER_NODE` | `104857600` (100 MiB) | Most bytes on one node; `0` or less fails at boot |
-| `ATTACHMENT_ALLOWED_TYPES` | every detected type | Comma-separated MIME types narrowing the accepted set; a type the detector does not know fails at boot |
+| `ATTACHMENT_ALLOWED_TYPES` | every detected type | Comma-separated MIME types narrowing the accepted set; a type the detector does not know, or a value naming no type at all, fails at boot |
 | `HISTORY_MAX_EVENTS` | `100000` | Mutation-history records retained (file backend only — a non-file `GRAPH_BACKEND` keeps no history); `0` removes the count cap (age trimming, if configured, still applies) |
 | `HISTORY_MAX_AGE_DAYS` | *(unset)* | Drop history records older than this many days (file backend only); unset keeps them regardless of age |
 | `API_PREFIX` | `/api` | REST API URL prefix |
@@ -532,7 +532,9 @@ per-route checks).
 - **Names** are sanitised (path parts, control and bidi characters removed,
   255 UTF-8 bytes at most), then made to agree with the detected type:
   `report.docm` holding a Word document is stored as `report.docm.docx`, and a
-  text file named `run.bat` as `run.bat.txt`.
+  text file keeps its extension only when it is inert text (`.txt`, `.md`,
+  `.json`, `.log`, `.yaml` and similar), so `run.bat` is stored as
+  `run.bat.txt`.
 - **Deleting a node** removes its files after the graph delete succeeds.
   Archiving keeps them. REPLACE import does not touch the store.
 - **No MCP tool** exists for attachments yet; the service functions take bytes

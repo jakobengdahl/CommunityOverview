@@ -757,8 +757,10 @@ above are applied; the rest of the decision stands as written.
 - **§7, file-name sanitising, one more step:** after the type is detected
   (§5), a stored name whose extension does not belong to that type gets the
   type's extension appended (`report.docm` is stored as `report.docm.docx`),
-  and a `text/plain` name with an extension a desktop would run or render
-  (`.bat`, `.js`, `.hta`, `.html`, `.url` and similar) gets `.txt` appended.
+  and a `text/plain` name gets `.txt` appended unless its extension is one a
+  desktop opens as inert text (`.txt`, `.md`, `.json`, `.log`, `.yaml` and
+  similar, or none at all), so `.bat`, `.js`, `.hta`, `.rtf` or `.rdp` never
+  survive.
   Trailing dots and spaces are ignored when reading the extension. The bytes
   are unchanged; only the name the browser saves the download under is.
   Bidirectional formatting characters are removed with the control
