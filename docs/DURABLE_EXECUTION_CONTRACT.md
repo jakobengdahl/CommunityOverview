@@ -222,7 +222,9 @@ tests exercise them.
   (and unknown ids) without error. A job's age is measured from `finished_at`,
   falling back to `updated_at`. A run history record left `RUNNING` by a crashed
   process therefore keeps its content until something moves it to a terminal
-  state; the read window still hides it once it is old enough.
+  state. When a retention or export window is configured, the read window
+  hides it once it is old enough; with only redaction configured it stays
+  readable.
 - **Redaction** (`models.redact_job`, shared by all adapters) keeps `state`,
   every timestamp, `id`, `agent_id`, `kind`, `idempotency_key`,
   `correlation_id`, `attempts` and `dead_letter_reason`. It reduces
@@ -241,8 +243,10 @@ tests exercise them.
 The durable SQLite adapter adds `redacted_at` in schema version 2, an additive,
 forward-only migration of a version-1 file, run once inside a write transaction
 even when several processes open the file together. It enables
-`secure_delete` and checkpoints the WAL after a redact or purge that changed
-rows, so the removed content does not linger in free pages or the `-wal` file.
+`secure_delete`, so freed pages are overwritten, and after a redact or purge
+that changed rows it checkpoints the WAL so the removed content does not linger
+in the `-wal` file. The checkpoint is best effort: a concurrent reader holding
+an older snapshot delays it until a later checkpoint.
 Copies taken before a sweep (backups, disk snapshots) are outside its reach.
 
 ### Run-history retention policy
