@@ -1,7 +1,7 @@
 # ADR 0009 — Dual-mode graph storage: ratify the seam, keep one graph per runtime
 
-- **Status:** Proposed
-- **Date:** 2026-10-08
+- **Status:** Accepted (Option A — see Decision)
+- **Date:** 2026-10-14 (proposed 2026-10-08)
 - **Scope:** Open-source core only
 - **Related:** [`PERSISTENCE_BACKENDS.md`](../PERSISTENCE_BACKENDS.md) (the seam
   this ADR is about), [ADR 0008](0008-node-attachment-storage.md) (the adjacent
@@ -14,6 +14,34 @@
   `backend/core/storage_backends.py`, `backend/core/postgres_backend.py`,
   `backend/api_host/persistence.py`, `backend/runtime/request_context.py`,
   `backend/runtime/authorization.py`, `backend/service/access.py`
+
+## Decision
+
+Accepted on 2026-10-14: **Option A — one graph per core runtime process.**
+The existing persistence seam is the dual-mode storage abstraction; a core
+process binds exactly one graph at boot, for every backend; a hosted layer
+that serves many graphs runs several core processes and does the multiplexing
+outside the core. No graph resolver is built.
+
+The owner chose the option and did not answer the five sub-questions in
+[What this ADR does not decide](#what-this-adr-does-not-decide) one by one.
+Their state on acceptance is below. A *recommended default* is this ADR's own
+recommendation, kept because it is consistent with Option A; it holds until a
+later decision changes it, and should be revisited if one does. Where this ADR
+made no recommendation, the question stays open.
+
+| # | Sub-question | State on acceptance |
+|---|---|---|
+| 1 | Many graphs per core process, or per hosted service environment? | **Settled by the decision:** per hosted service environment, with one graph per core process. Answering "per process" would have been Option B. |
+| 2 | Enforce one-graph-per-runtime in code, state it publicly as the open-core boundary, or leave it a documented convention? | **Recommended default:** state it as a property of the persistence seam's contract (Proposal item 2), so a backend author reads it there rather than in the sizing notes. **Open:** whether to enforce it in code, and whether to state it as the open-core boundary. |
+| 3 | Should mutation history be made available under the shared backend? | **Recommended default:** the gap is the shared mode's to close, never closed by removing history from the file backend (Proposal item 3). **Open:** whether to close it, and at what cost. |
+| 4 | Does the unverified `graph_id` in attribution need fixing before there is a store identity to verify it against? | **Recommended default:** answer 1 — accept the field as caller-declared and read it that way (Proposal item 4). No check is added. |
+| 5 | Where does per-graph provisioning live? | **Recommended default:** outside the core, where [`EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md`](../EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md) already places tenant lifecycle management; the core does not grow it. |
+
+On acceptance, [`CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md`](../CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md)
+and the hosted-direction section of [`DATA_MANAGEMENT.md`](../DATA_MANAGEMENT.md)
+were amended to say one graph per core process. The rest of this record is the
+proposal as it was reviewed, with notes where acceptance changed a statement.
 
 ## Context
 
@@ -29,9 +57,9 @@ process serve more than one graph — and that is the only part of "hosted share
 storage" the existing seam does not reach. This ADR is therefore about the
 boundary, not about inventing a persistence abstraction that is already there.
 
-This ADR decides nothing on its own: it lands as a proposal so the owner can
-settle one question that the repository's own documents currently answer two
-different ways.
+This ADR decided nothing on its own: it landed as a proposal so the owner
+could settle one question that the repository's own documents then answered
+two different ways. The owner settled it for Option A (see Decision).
 
 ### What the code does today that constrains the answer
 
@@ -176,8 +204,10 @@ several would remove is the excuse for leaving it so.
 
 ### What the repository already commits to — and the tension
 
+At proposal time,
 [`CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md`](../CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md)
-says both of these, a few lines apart:
+said both of these, a few lines apart (the hosted half was amended on
+acceptance):
 
 - for standalone open-core operation, *"one deployment normally serves one
   graph"*;
@@ -366,7 +396,7 @@ writes through it.
 ## Proposal
 
 **Option A**, with one gap recorded and the boundary question referred to the
-owner.
+owner — who answered it for Option A on 2026-10-14 (see Decision).
 
 1. **Ratify the existing persistence seam as the dual-mode storage
    abstraction.** `GraphPersistenceBackend` + `IncrementalGraphPersistenceBackend`
@@ -508,11 +538,13 @@ owner.
    If the owner answers it the other way, Option B becomes the decision, this
    ADR is superseded, and the per-graph lifecycle work listed under Option B
    gets its own ADR. The costs are written down above so that conversation
-   starts from evidence.
+   starts from evidence. *(On acceptance: answered for Option A, so no
+   resolver is built; moving to Option B now takes a new ADR that supersedes
+   this one.)*
 
 ## Consequences
 
-If this proposal is accepted:
+With this proposal accepted:
 
 - The blocked hosted consumer can proceed against a seam that is already
   present and documented: a shared store behind `GRAPH_BACKEND=postgres`, with
@@ -522,11 +554,11 @@ If this proposal is accepted:
 - A hosted deployment serving many graphs runs a core runtime per graph behind
   its own router, and pays that process floor per graph. That is a real cost
   and the reason the boundary question is worth asking rather than assuming.
-- `CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md`'s hosted paragraph needs
-  amending to say that the shared runtime environment, not a single core
-  process, is what serves several graphs — or this ADR is the wrong answer.
-  That edit is deliberately not made here: it is the decision, and the
-  decision is the owner's.
+- `CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md`'s hosted paragraph is amended
+  to say that the shared runtime environment, not a single core process, is
+  what serves several graphs. At proposal time that edit was deliberately left
+  for the owner's decision; it was made on acceptance, together with the
+  matching sentence in `DATA_MANAGEMENT.md`.
 - Audit attribution gains no new guarantee, and gains an accurate
   description: an event's `graph_id` is documented as what the caller
   declared rather than as which graph the write landed in. Item 4 explains
@@ -590,7 +622,9 @@ that assessment would have to be made again for it.
 
 ## What this ADR does not decide
 
-Deliberately left open, because each is the owner's:
+Deliberately left open at proposal time, because each is the owner's. The
+state of each on acceptance is in the [Decision](#decision) table; the text
+below is the question as it was put.
 
 1. **Does the hosted target mean many graphs per core process, or many graphs
    per hosted service environment?** Everything above follows from this one

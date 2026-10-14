@@ -29,13 +29,14 @@ For standalone open-core operation, the baseline assumption remains:
 - the core does not require a built-in SaaS-style user directory or billing model
 - authentication can be handled externally by infrastructure or gateway controls such as IAP, reverse proxy auth, or equivalent perimeter patterns
 
-For the target SaaS model, tenant-aware operation should not imply one dedicated application stack per graph.
+For the target SaaS model, tenant-aware operation should not imply one dedicated application stack per graph. It does mean one graph per core runtime process: a core process binds exactly one graph at boot, whichever persistence backend it uses ([ADR 0009](./adr/0009-dual-mode-graph-storage-seam.md)). Several graphs are served by running several core processes; no core process binds more than one graph of its own (federation lets a process search other graphs, which does not change the one graph it binds).
 
 The default target hosted architecture is:
 - one shared application/service environment per deployment tier or region
-- multiple graphs or customer workspaces served by the same runtime instances
-- graph selection, search scope, rendering scope, and mutation scope controlled by application identity and authorization
-- isolation enforced through configuration, graph scoping, authorization, and data-layer controls
+- multiple graphs or customer workspaces served within that environment, each graph by its own core runtime process or processes (a shared persistence backend lets several processes serve the same graph; no process serves several graphs)
+- graph selection done outside the core, by a layer that routes each request to a process serving its graph
+- search scope, rendering scope, and mutation scope within a graph controlled by application identity and authorization
+- isolation enforced through configuration, one store per graph, authorization, and data-layer controls
 
 This means the core should prepare for:
 - shared-hosting deployments where a service layer manages users, teams, workspaces, and graph access outside the standalone core defaults
