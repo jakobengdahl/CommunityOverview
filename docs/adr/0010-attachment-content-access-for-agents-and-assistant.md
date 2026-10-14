@@ -13,7 +13,9 @@
   `backend/agents/governance/gate.py`, `backend/ui/chat_logic.py`,
   `backend/ui/chat_service.py`, `backend/ui/rest_api.py`,
   `backend/service/access.py`, `backend/runtime/authorization.py`,
-  `backend/api_host/mcp_mount.py`, `backend/service/mcp_tools.py`
+  `backend/api_host/mcp_mount.py`, `backend/service/mcp_tools.py`,
+  `backend/service/attachments.py`, `backend/core/attachment_store.py`,
+  `backend/core/attachment_types.py`
 
 ## Context
 
@@ -132,9 +134,29 @@ round. It does not implement anything.
 - **`lxml` is not a declared dependency.** It is installed only because
   `python-docx` requires it; `backend/requirements.txt` lists `pypdf` and
   `python-docx`.
-- **The store is not merged yet.** ADR 0008's `AttachmentStore`, sniffing
-  module and service layer are being implemented separately. The tools here
-  are thin wrappers over that service layer and land after it.
+- **The store and its service layer exist.** ADR 0008's `AttachmentStore`
+  (`backend/core/attachment_store.py`), type sniffing
+  (`backend/core/attachment_types.py`) and service layer
+  (`backend/service/attachments.py`, with ADR 0008's "Implementation notes")
+  are merged. `GraphService` already has methods named
+  `list_node_attachments`, `open_node_attachment`, `delete_node_attachment`
+  and an `async` `add_node_attachment(node_id, *, filename,
+  declared_content_type, content, content_length)`, all in the REST shape:
+  no envelope, errors as `{"success": false, "error_code": <code>, "error":
+  <message>}`. Listing evaluates the `list_node_attachments` target and
+  opening a file evaluates `get_node_attachment`. When no store is
+  configured, every function answers `attachments_unavailable`.
+- **Graph tools are dispatched by name.** `MCPLoader._execute_graph_tool`
+  calls `getattr(graph_service, tool_name)(**input_args)`, and
+  `ChatService._build_tools_map` maps chat tool names to `GraphService`
+  methods. A tool that shares its name with a REST-shaped method would reach
+  that method. The chat route calls the synchronous `ChatProcessor` loop on
+  the server's event-loop thread, and the Agent worker runs its loop in a
+  thread; neither can `await`.
+- **Agent calls carry no request identity.** Nothing in `backend/agents`
+  binds `use_request_authorization`, so the authorization hook sees no
+  request inputs for an Agent's tool call. The `/agents/*` read routes (run
+  history, proposals) bind none either.
 
 ## Decision
 
@@ -169,11 +191,31 @@ whose provider must not see stored files turn the switch off, or deny the
 
 ### 1. The five tools
 
-All five are `GraphService` methods. They are registered in
-`backend/service/mcp_tools.py` (MCP and `/execute_tool`), offered to the
-assistant through the chat tool definitions, and listed in
-`MCPLoader._get_graph_mcp_tools` so Agents reach them as `GRAPH__<name>`. Each is subject to the permission
-model in §2 on every call; nothing here is reachable when §2 says no.
+The five are synchronous tool wrappers in a new module,
+`backend/service/attachment_tools.py`, exposed on `GraphService` as
+`attachment_tool_list`, `attachment_tool_read`, `attachment_tool_search`,
+`attachment_tool_add` and `attachment_tool_delete`. The existing
+REST-shaped methods keep their names and behaviour. Every dispatcher maps
+the five *tool names* to the wrappers explicitly, never by `getattr` on the
+tool name: `register_mcp_tools` in `backend/service/mcp_tools.py` (MCP and
+`/execute_tool`), `ChatService._build_tools_map` (the assistant and kiosks)
+and `MCPLoader._execute_graph_tool` (Agents, as `GRAPH__<name>`, listed in
+`MCPLoader._get_graph_mcp_tools`). A regression test calls each tool name
+through each of the three dispatchers and checks that the response carries
+the tool shape (the envelope where §1 requires it), not the REST shape.
+
+`attachment_tool_add` decodes its arguments and then runs the service's
+`async` `add_node_attachment` to completion on a private event loop in a
+helper thread (`asyncio.run` inside a thread-pool worker), because every
+caller is synchronous and the chat caller is already on the server's event
+loop thread. The store needs no particular loop: its locks are thread locks
+and its blocking work goes through `asyncio.to_thread`.
+
+Each tool is subject to the permission model in §2 on every call; nothing
+here is reachable when §2 says no. When no attachment store is configured
+(the service would answer `attachments_unavailable`), none of the five is
+registered or offered to any caller; a call that still reaches a wrapper
+gets `attachments_unavailable`.
 
 Common rules:
 
@@ -185,14 +227,20 @@ Common rules:
   `federated_node`, matching the ADR 0008 §7 table.
 - `attachment_id` must match `^[0-9a-f]{32}$` and be in the node's index,
   else `not_found`.
-- Errors are `{"success": false, "error": "<code>", "message": "<text>"}`.
-  The `message` is a fixed text per code, never exception text, an argument
-  value or extracted content; an unexpected exception inside an attachment
-  tool is caught and returned as `failed` with its fixed message. Where ADR 0008 has a code for the condition (§4, §5, §7), the same code is
-  used. The codes new in this ADR are `not_found` (where REST answers `404`),
-  `too_many_nodes`, `invalid_arguments`, `attachment_too_large_for_tool`,
-  `busy` (no extraction slot, §1 `read_node_attachment`), `failed` (an
-  unexpected error) and `confirmation_required` (§5).
+- Errors use the service layer's shape: `{"success": false, "error_code":
+  "<code>", "error": "<message>"}`, the same keys as the access-denied
+  result below, so a caller always reads the code from `error_code`. The
+  message is the service layer's text for that code or a fixed text, never
+  exception text, extracted content or a file name; an unexpected exception
+  inside a wrapper is caught and returned as `failed` with a fixed message.
+  Where ADR 0008 or its service layer has a code for the condition (§4, §5,
+  §7, including `not_found` where REST answers `404`,
+  `attachments_unavailable` and `attachment_index_corrupt`), the same code
+  is used. The codes new in this ADR are `too_many_nodes`,
+  `invalid_arguments`,
+  `attachment_too_large_for_tool`, `busy` (no extraction slot, §1
+  `read_node_attachment`), `failed` (an unexpected error) and
+  `confirmation_required` (§5).
 - An authorization denial is the unchanged result of
   `access.build_access_denied_result`, with `"error_code": "access_denied"`,
   so `/execute_tool` keeps mapping it to `403`.
@@ -318,7 +366,9 @@ hits of a preceding `search_graph`.
   no files.
 - The total passage text in one response never exceeds
   `ATTACHMENT_RESULT_MAX_CHARS`; passages beyond it are dropped from the
-  tail.
+  tail, and the response then has `"passages_truncated": true` (otherwise
+  `false`). Boot refuses an `ATTACHMENT_RESULT_MAX_CHARS` smaller than
+  `ATTACHMENT_CHUNK_CHARS`, so at least one passage always fits.
 
 Authorization target: `read_node_attachment_content` (action read),
 evaluated once per call; visibility is checked per node.
@@ -346,7 +396,7 @@ evaluated once per call; visibility is checked per node.
 - Everything after decoding goes through the same service-layer path as the
   REST upload: the same sniffing, `allows_attachments` and archive rules,
   limits, staging, commit precondition and error codes. Every REST refusal
-  (`413`, `415`, `409`, `422`) has the identical `error` code here, and no
+  (`413`, `415`, `409`, `422`) has the identical `error_code` here, and no
   partial blob is left after any refusal.
 - Success returns the new record, in the list's record shape.
 
@@ -373,7 +423,13 @@ target as the REST delete.
 `read_node_attachment_content` is new and is deliberately distinct from the
 REST download's `get_node_attachment`. A hook can allow people to download
 files while refusing to put their text into a model's context, or the other
-way round.
+way round. For that to hold, each tool evaluates **only** the target in this
+table: read and search do not go through `open_node_attachment` or
+`list_node_attachments` (which evaluate `get_node_attachment` and
+`list_node_attachments`). They use a new service function that evaluates
+`read_node_attachment_content`, resolves and checks visibility of the node
+as `_authorize_and_resolve` does, and then reads the index and the bytes
+from the store directly.
 
 ### 2. Permission model
 
@@ -409,6 +465,11 @@ An Agent node gains `metadata.attachment_access` with values `none`, `read`,
 `read_write`; **the default is `none`**. A value outside the three is
 treated as `none`, and the Agent's config load logs a warning.
 
+Setting `metadata.attachment_access` is an ordinary `update_node` on the
+Agent node, under the authorization hook like any other edit: whoever may
+edit an Agent may grant it attachment access, so granting it is exactly as
+privileged as editing the Agent.
+
 It is enforced in `AutonomyGate.wrap` and `filter_tool_definitions`
 **independently of `tool_allowlist`**:
 
@@ -433,8 +494,25 @@ that binding lands **before or with** the write tools.
 The worker applies the attachment rules whether or not a proposal store is
 wired: withholding ungranted attachment tools, the taint rule (§5) and the
 mutating classification. A worker without a proposal store has no way to
-make a proposal, so it refuses `add_node_attachment` and
-`delete_node_attachment` outright.
+make a proposal, so in a tainted run it refuses every tool in
+`MUTATING_ORIGINAL_TOOLS` (graph writes and attachment writes alike), and in
+any run it refuses `add_node_attachment` and `delete_node_attachment`.
+Untainted graph writes in such a worker keep today's behaviour.
+
+**Who an Agent acts as.** An Agent's tool calls run inside an authorization
+context whose actor is the Agent (`{type: "agent", id: <Agent node id>}`),
+bound by the worker for the whole run, so the hook can decide
+`read_node_attachment_content` and the write targets for Agents separately
+from people. The hook-author documentation describes this actor. What an
+Agent reads can reappear in its run summary and its proposals; so the
+`/agents/*` read routes (`GET /agents/runs`, `/agents/runs/{id}`,
+`/agents/proposals`, `/agents/proposals/{id}`) run inside
+`use_request_authorization` and evaluate a new target, `read_agent_runs`
+(action read), in the same change that binds approve and reject. A hook that
+refuses a user `read_node_attachment_content` should refuse that user
+`read_agent_runs` for Agents that hold an attachment grant, and editing such
+Agents; with the default permissive hook, everyone who can reach the
+`/agents/*` routes can read what granted Agents quoted.
 
 #### Kiosks
 
@@ -539,11 +617,15 @@ lxml's parser options, `lxml` gets its own minimum-pinned line in
   documentation for the implementation states this requirement.
 - **The parent trusts nothing the child returns.** The parent reads at most
   `ATTACHMENT_EXTRACT_MAX_OUTPUT_BYTES` from the child's stdout and at most
-  64 KiB (a fixed constant) from its stderr; more on either is `failed` and
+  `ATTACHMENT_EXTRACT_STDERR_MAX_BYTES` (65,536, a named constant, not
+  configurable) from its stderr; more on either is `failed` and
   the child is killed. The stdout JSON is validated against the expected
   shape (segments of `{text, locator}` strings, a known status, a boolean
-  `truncated`), anything else is `failed`, and the character cap is
-  enforced again in the parent. stderr is discarded, never logged; the log
+  `truncated`), anything else is `failed`, and the character, segment and
+  locator caps are enforced again in the parent. The extractor emits at most
+  `ATTACHMENT_EXTRACT_MAX_SEGMENTS` segments (beyond it the result is
+  `truncated`), and a locator is at most `ATTACHMENT_LOCATOR_MAX_CHARS` (64,
+  a named constant) characters. stderr is discarded, never logged; the log
   records only the status and the exit code.
 - **Wall-clock timeout.** The child is killed after the timeout, and the
   result is `timeout`.
@@ -567,7 +649,8 @@ lxml's parser options, `lxml` gets its own minimum-pinned line in
 
 #### Limits and settings
 
-Every limit is a setting, except the fixed 64 KiB stderr cap above; a value
+Every limit is a setting, except the two named constants above
+(`ATTACHMENT_EXTRACT_STDERR_MAX_BYTES`, `ATTACHMENT_LOCATOR_MAX_CHARS`); a value
 of `0` or less is refused at boot, never read as "unlimited". The one exception is `ATTACHMENT_CHUNK_OVERLAP_CHARS`,
 which may be `0` and must be smaller than `ATTACHMENT_CHUNK_CHARS`, as
 `attachment_retrieval.chunk_segments` requires.
@@ -577,7 +660,8 @@ which may be `0` and must be smaller than `ATTACHMENT_CHUNK_CHARS`, as
 | `ATTACHMENT_EXTRACT_TIMEOUT_SECONDS` | `30` | wall clock per file (child process) |
 | `ATTACHMENT_EXTRACT_MEMORY_BYTES` | 1 GiB | address-space limit of the child |
 | `ATTACHMENT_EXTRACT_MAX_CHARS` | `1000000` | extracted characters per file; beyond it, `truncated` |
-| `ATTACHMENT_EXTRACT_MAX_OUTPUT_BYTES` | 16 MiB | bytes the parent reads from the child's stdout (UTF-8 JSON written without ASCII escaping, so at most 6 bytes per character, for up to `ATTACHMENT_EXTRACT_MAX_CHARS` characters plus locators); must be at least 8 × `ATTACHMENT_EXTRACT_MAX_CHARS`, checked at boot |
+| `ATTACHMENT_EXTRACT_MAX_OUTPUT_BYTES` | 16 MiB | bytes the parent reads from the child's stdout (UTF-8 JSON written without ASCII escaping, so at most 6 bytes per character, for up to `ATTACHMENT_EXTRACT_MAX_CHARS` characters plus segments); must be at least 6 × `ATTACHMENT_EXTRACT_MAX_CHARS` + 512 × `ATTACHMENT_EXTRACT_MAX_SEGMENTS` (a segment's locator and JSON framing fit in 512 bytes), checked at boot |
+| `ATTACHMENT_EXTRACT_MAX_SEGMENTS` | `10000` | segments (pages, sheets, slides, paragraphs) per file; beyond it, `truncated` |
 | `ATTACHMENT_EXTRACT_MAX_UNCOMPRESSED_BYTES` | 100 MiB | declared uncompressed total of a ZIP-based file |
 | `ATTACHMENT_EXTRACT_MAX_ZIP_RATIO` | `100` | compression ratio, whole archive and per member |
 | `ATTACHMENT_EXTRACT_ZIP_RATIO_MIN_MEMBER_BYTES` | 1 MiB | members smaller than this (uncompressed) are exempt from the per-member ratio test, so small XML parts are not false positives |
@@ -592,9 +676,9 @@ which may be `0` and must be smaller than `ATTACHMENT_CHUNK_CHARS`, as
 | `ATTACHMENT_RERANK_CANDIDATES` | `32` | chunks sent to the optional embedding re-rank |
 | `ATTACHMENT_CHUNK_CHARS` | `1200` | chunk size |
 | `ATTACHMENT_CHUNK_OVERLAP_CHARS` | `200` | chunk overlap; `0` or more and smaller than the chunk size |
-| `ATTACHMENT_RESULT_MAX_CHARS` | `24000` | passage text in one search response |
+| `ATTACHMENT_RESULT_MAX_CHARS` | `24000` | passage text in one search response; at least `ATTACHMENT_CHUNK_CHARS`, checked at boot |
 | `ATTACHMENT_READ_MAX_CHARS` | `50000` | upper bound for `max_chars` in `read_node_attachment` |
-| `ATTACHMENT_TEXT_CACHE_MAX_CHARS` | `20000000` | in-memory LRU of extraction results, keyed by the file's SHA-256, per server process |
+| `ATTACHMENT_TEXT_CACHE_MAX_CHARS` | `20000000` | in-memory LRU of extraction results, keyed by (namespace, node id, attachment id, SHA-256), per server process |
 | `ATTACHMENT_MCP_MAX_DECODED_BYTES` | `3000000` | decoded bytes accepted by `add_node_attachment` (§1) |
 | `ATTACHMENT_CONFIRMATION_TTL_SECONDS` | `600` | lifetime of a confirmation token (§5) |
 | `ATTACHMENT_PENDING_ACTIONS_PER_TURN` | `5` | pending actions one tainted turn may record (§5) |
@@ -617,9 +701,12 @@ waiting for a slot never produces it. `skipped_budget` and `busy` are never
 cached. Extraction
 slots are shared by all callers of one process: a search that cannot get a
 slot before its own timeout reports the remaining files as `skipped_budget`
-rather than waiting. Two nodes holding the same file share one cache
-entry; that reveals nothing, because a caller reaches it only through a node
-it may read.
+rather than waiting. The cache key includes the node and attachment, not
+only the SHA-256, so two nodes holding the same file have separate entries:
+a shared entry would make a cache hit (much faster than an extraction) an
+oracle for whether an identical file sits on a node the caller cannot see,
+the cross-node equality signal ADR 0008 rejected with content-addressed
+storage.
 
 ### 4. Retrieval
 
@@ -719,9 +806,9 @@ The model can neither confirm an action nor produce a confirmation by
 writing text.
 
 Being deny-by-default, a new chat tool is guarded until someone adds it to
-the permitted set. A regression test fails when the permitted set contains
-a tool that writes, so the classification is reviewed rather than
-inherited.
+the permitted set. A regression test asserts that the permitted set equals
+an exact list written out in the test, so adding any tool to it forces a
+reviewed edit of that test rather than an inherited classification.
 
 **The taint outlives the turn.** Quoted file text stays in the conversation
 history the client sends back, so the next user message is not clean. Each
@@ -756,13 +843,15 @@ involved. Same-origin images are not allowed either:
 `![](/any-path?d=<file text>)` would put the text into this server's and
 any proxy's access logs, outside the redaction of §6. A
 Markdown link can do the same with one click, because its text can hide its
-target. So a link to another origin is rendered with its full target URL as
-visible text and with `rel="noreferrer noopener"`. "Another origin" is
+target. So a link to another origin, and any link whose target carries a
+query string or a fragment, is rendered with its full target URL as
+visible text, and every link gets `rel="noreferrer noopener"`. "Another origin" is
 decided by resolving the URL against the page and comparing scheme, host
 and port. A test renders replies with a remote image, a same-origin image
 with a query string, and off-origin links written as absolute,
 protocol-relative (`//attacker.example/x`), backslash (`/\attacker.example`)
-and same-host-other-port URLs, and checks both rules for each. This
+and same-host-other-port URLs, and a same-origin link with a query
+string, and checks both rules for each. This
 change lands **before or with** the read tools.
 
 **Agents.** Every mutating `GRAPH` tool is already blocked or turned into a
@@ -776,8 +865,9 @@ result in the run has `untrusted_content: true`,
 - every tool outside the `GRAPH` integration is refused for the rest of the
   run;
 - a `GRAPH` tool runs only if its original name is in
-  `ATTACHMENT_TAINT_PERMITTED_TOOLS`; a mutating one is still turned into a
-  proposal, and any other is refused;
+  `ATTACHMENT_TAINT_PERMITTED_TOOLS` or is mutating; a mutating one is
+  still turned into a proposal (refused outright in a worker without a
+  proposal store, §2), and any other is refused;
 - every proposal the run creates is marked `tainted: true`, so the approver
   sees that file content was in the run's context.
 
@@ -801,16 +891,19 @@ structured log record, at INFO, to the `attachments.audit` logger:
 | `event` | `attachment_content_read`, `attachment_added` or `attachment_deleted` |
 | `tool` | the tool name |
 | `actor` | `{type, id}`: `user` (from the request actor, or `null` when unauthenticated), `agent` (the Agent id), `kiosk` (the collection short name) or `mcp` (the request actor) |
-| `node_id` | the node |
-| `attachment_id` | the file |
+| `node_id` | the node (`null` on a search-level record) |
+| `attachment_id` | the file (`null` on a search-level record) |
 | `sha256` | the stored file's SHA-256 |
 | `chars` | characters of extracted text returned to the caller (reads); `0` for writes |
 | `size` | bytes stored (`attachment_added` only) |
-| `outcome` | `ok` or the `error` code |
+| `outcome` | `ok` or the `error_code` |
 | `correlation_id` | the request's or run's correlation id, when it has one |
 
 A search call writes one record per file whose text contributed a returned
-passage. The record **never** contains extracted text, passage text, file
+passage. A search call that ends in an error (`access_denied`,
+`too_many_nodes`, `invalid_arguments`, …) or contributes no passage writes
+one record with `node_id`, `attachment_id` and `sha256` `null`, `chars: 0`
+and its `outcome`, so refused and empty searches are audited too. The record **never** contains extracted text, passage text, file
 bytes, the query or the file name.
 
 **No content in other logs.** The existing logging would otherwise defeat
@@ -889,10 +982,15 @@ binary bodies; the tools avoid it with bounded text or base64 arguments.
   characters), proposals — the quotation is kept too. The guarantee of D2 is
   that the server keeps no index or copy of extracted text of its own, not
   that no output ever quotes it.
-- **Proposals carry content.** An Agent's `add_node_attachment` proposal
-  stores its arguments, so the proposal store holds up to
-  `ATTACHMENT_MCP_MAX_DECODED_BYTES` of file content per such proposal until
-  it is decided.
+- **Proposals carry content.** An Agent's `add_node_attachment` proposal,
+  and a pending action (§5), stores its arguments. Both are validated before
+  they are recorded (exactly one of `content_text` and `content_base64`,
+  decoded size within `ATTACHMENT_MCP_MAX_DECODED_BYTES`); an invalid or
+  oversized call is refused with `invalid_arguments` or
+  `attachment_too_large_for_tool` and nothing is recorded. The stored
+  arguments are therefore at most about 4,000,000 characters (the base64 of
+  3,000,000 bytes) per proposal or pending action, held until decided or
+  expired.
 - **Cost.** A search call may start up to `ATTACHMENT_SEARCH_MAX_FILES`
   extractions, at most `ATTACHMENT_EXTRACT_CONCURRENCY` at once. Repeated
   questions over the same files hit the in-memory cache.
