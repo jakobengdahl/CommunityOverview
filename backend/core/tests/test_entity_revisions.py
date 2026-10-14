@@ -438,3 +438,65 @@ def test_expectations_on_some_of_the_deleted_nodes_are_enough(make_storage):
     )
     assert result["success"], result
     assert not storage.nodes
+
+
+def test_an_expectation_on_a_hidden_node_reveals_nothing_about_it(make_storage):
+    from backend.runtime.authorization import (
+        GraphAccessNarrowing,
+        GraphAuthorizationDecision,
+    )
+
+    class HidesTheLocalGraph:
+        def evaluate(self, context):
+            return GraphAuthorizationDecision(
+                allowed=True,
+                mode="fixed",
+                source="test",
+                graph_access=GraphAccessNarrowing(
+                    enabled=True, allow_local_graph=False, include_graph_ids=()
+                ),
+            )
+
+    storage = make_storage()
+    storage.add_nodes([_node("hidden")], [])
+    real = storage.nodes["hidden"].revision
+    result = mutations.delete_nodes(
+        storage,
+        HidesTheLocalGraph(),
+        ["hidden"],
+        confirmed=True,
+        expected_revisions={"hidden": real + 5},
+    )
+    assert result["error"] == "entity_revision_conflict"
+    assert result["current_revision"] is None
+    assert str(real) not in result["message"]
+    assert "hidden" in storage.nodes
+
+
+@pytest.mark.parametrize(
+    "sqlstate,refused",
+    [
+        ("22P05", True),
+        ("23505", True),
+        ("42501", True),
+        ("54000", True),
+        # A lost or uncertain commit is never a refusal: these must be read back.
+        ("40001", False),
+        ("40P01", False),
+        ("40003", False),
+        ("08006", False),
+        ("57P01", False),
+        ("53300", False),
+        (None, False),
+    ],
+)
+def test_only_a_statement_refusal_counts_as_refused_outright(sqlstate, refused):
+    from backend.core.storage_backends import WriteRefusedByStore, refused_outright
+
+    class Failure(Exception):
+        pass
+
+    failure = Failure("x")
+    failure.sqlstate = sqlstate
+    assert refused_outright(failure) is refused
+    assert refused_outright(WriteRefusedByStore("x")) is True

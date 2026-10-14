@@ -494,3 +494,23 @@ def test_a_failed_write_whose_entity_someone_else_moved_is_unknown(instances, sc
         assert storage.nodes["n"].name == "theirs"
     finally:
         other.close()
+
+
+def test_a_driver_refusal_of_any_kind_is_refused_at_once(instances, monkeypatch):
+    storage = instances()
+    storage.add_nodes([_node("n")], [])
+    backend = storage._persistence_backend
+    storage.WRITE_RESOLVE_DELAY_SECONDS = 30.0
+
+    def driver_refuses(operations, write_token):
+        raise psycopg.ProgrammingError("the driver could not adapt a parameter")
+
+    monkeypatch.setattr(backend, "_apply_batch_once", driver_refuses)
+
+    def never_asked(keys):
+        raise AssertionError("a refused write read its evidence back")
+
+    backend.read_write_evidence = never_asked
+    with pytest.raises(GraphWriteFailed):
+        storage.update_node("n", {"name": "x"})
+    assert storage.nodes["n"].name == "n"
