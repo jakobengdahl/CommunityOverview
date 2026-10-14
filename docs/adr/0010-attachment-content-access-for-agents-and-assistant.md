@@ -290,12 +290,13 @@ untrusted content and taints the turn or run like a read does.
 Authorization target: `list_node_attachments` (action read), the same target
 the REST list uses.
 
-#### `read_node_attachment(node_id, attachment_id, offset=0, max_chars=20000)` — read content
+#### `read_node_attachment(node_id, attachment_id, offset=0, max_chars=ATTACHMENT_READ_DEFAULT_CHARS)` — read content
 
 Returns a window of one file's extracted text. `offset` counts characters
 into the file's extracted text (segments concatenated in document order, as
 the extractor emits them). `max_chars` is clamped to
-`ATTACHMENT_READ_MAX_CHARS`. A negative `offset` or a `max_chars` below 1
+`ATTACHMENT_READ_MAX_CHARS`; its default, `ATTACHMENT_READ_DEFAULT_CHARS`
+(20,000, a named constant), is clamped the same way. A negative `offset` or a `max_chars` below 1
 is `invalid_arguments`; an `offset` at or past `total_chars` returns empty
 `segments` and `next_offset: null`.
 
@@ -466,7 +467,7 @@ not waste turns) and, authoritatively, where the call is executed.
 
 | Setting | Values | Default | Meaning |
 |---|---|---|---|
-| `ATTACHMENT_CONTENT_ACCESS` | `off`, `read`, `read_write` | `read_write` | Instance ceiling for every caller. `off` is the single switch that stops attachment tools — and so any attachment text reaching any LLM — for the assistant, Agents, kiosks and MCP alike. The default grants nothing by itself; it only does not cap. Agents' `FS` integration could otherwise read the stored blobs past this switch, so boot refuses an `AGENTS_WORKSPACE_DIR` that contains, or lies inside, the attachment root (`ATTACHMENT_DIR` or the store's default root). |
+| `ATTACHMENT_CONTENT_ACCESS` | `off`, `read`, `read_write` | `read_write` | Instance ceiling for every caller. `off` is the single switch that stops attachment tools — and so any attachment text reaching any LLM — for the assistant, Agents, kiosks and MCP alike. The default grants nothing by itself; it only does not cap. Agents' `FS` integration could otherwise read the stored blobs past this switch, so boot refuses an Agent workspace that contains, or lies inside, the attachment root: it compares the `realpath` of the effective workspace (`agent_workspace_dir()`, default included, not only `AGENTS_WORKSPACE_DIR`) with the `realpath` of the effective attachment root (`ATTACHMENT_DIR` or the store's default root), in both directions. |
 | `ASSISTANT_ATTACHMENT_ACCESS` | `off`, `read`, `read_write` | `read` | What the interactive assistant gets (D1). Writes need an explicit `read_write`. |
 | `MCP_ATTACHMENT_TOOLS` | `off`, `read`, `read_write` | `off` | Which attachment tools the MCP mount registers for external MCP clients. `off` registers none. |
 
@@ -484,11 +485,17 @@ An Agent node gains `metadata.attachment_access` with values `none`, `read`,
 `read_write`; **the default is `none`**. A value outside the three is
 treated as `none`, and the Agent's config load logs a warning.
 
-Setting or changing `metadata.attachment_access` — through `add_nodes`,
-`update_node` or a graph import — additionally evaluates a dedicated mutate
+Every write that creates an Agent node with `metadata.attachment_access`
+other than `none`, or changes that field — `add_nodes`, `update_node`, a
+graph import, or any later path — additionally evaluates a dedicated mutate
 target, `grant_agent_attachment_access`, and the write is refused unless it
-allows. The hook context carries no resource id, so this target is what
-lets a hook keep people who may edit nodes from granting Agents file
+allows. The check lives in one shared helper in the service's mutation
+layer that every such path calls, not in each route. Adoption
+(`adopt_federated_node`) copies a remote node's metadata, so it strips
+`attachment_access` from the copy: a federated source never brings a grant
+with it, and a test adopts a granted remote Agent node and checks the local
+copy has none. The hook context carries no resource id, so this target is
+what lets a hook keep people who may edit nodes from granting Agents file
 access.
 
 It is enforced in `AutonomyGate.wrap` and `filter_tool_definitions`
@@ -522,9 +529,14 @@ Untainted graph writes in such a worker keep today's behaviour.
 
 **Who an Agent acts as.** An Agent's tool calls run inside an authorization
 context whose actor is the Agent (`{type: "agent", id: <Agent node id>}`),
-bound by the worker for the whole run, so the hook can decide
-`read_node_attachment_content` and the write targets for Agents separately
-from people. The hook-author documentation describes this actor. What an
+bound by the worker for the whole run (through the override arguments of
+`use_request_authorization`, so the actor's source is `override`), so the
+hook can decide `read_node_attachment_content` and the write targets for
+Agents separately from people. Because request actors otherwise come from
+client-settable headers (`backend/runtime/request_context.py`), the actor
+type `agent` is reserved: the resolver ignores a header-supplied `agent`
+type and treats such a request as an ordinary user request, and a test
+checks it. The hook-author documentation describes this actor. What an
 Agent reads can reappear in its run summary and its proposals; so the
 `/agents/*` read routes (`GET /agents/runs`, `/agents/runs/{id}`,
 `/agents/proposals`, `/agents/proposals/{id}`) run inside
@@ -565,7 +577,16 @@ read attachments also sets `ASSISTANT_ATTACHMENT_ACCESS=off` or denies
 `ASSISTANT_ATTACHMENT_ACCESS`, capped by the ceiling. So do `/ui/chat` with
 a `collection_short_name` that resolves to no collection (the same session a
 client gets by omitting the name), `/ui/chat/simple` and the analysis step of
-`/ui/upload`. The assistant acts under the requesting user's own access:
+`/ui/upload`.
+
+Attachment tools are offered, and run, only when the turn's model call uses
+the instance's own configured provider credentials. `/ui/chat` accepts a
+request `api_key` (and `provider`) override; a turn that supplies its own
+`api_key` is not "the configured LLM provider" of D1, so it gets no
+attachment tools, in the assistant and kiosks alike. Choosing among
+providers and model profiles the instance itself configures is unaffected.
+
+The assistant acts under the requesting user's own access:
 each of these three routes runs its `ChatService` call inside
 `use_request_authorization(headers=request.headers)`, so the authorization
 hook sees the same inputs it sees for that user's REST calls. Binding all
@@ -582,7 +603,10 @@ not enough on its own: the MCP mount applies no `SAFE_TOOLS` filter, and
 with `MCP_AUTH_ENABLED=false` the auth middleware skips both `/mcp` and
 `/execute_tool` while `auth_active` stays true. So boot refuses
 `MCP_ATTACHMENT_TOOLS` other than `off` unless the MCP paths are
-authenticated (authentication on and `MCP_AUTH_ENABLED` not `false`). Both
+authenticated: `compute_auth_active(config)` is true and
+`config.mcp_auth_enabled is not False` (the variable parses anything but
+`true` — `0`, `no`, an empty value — as `False`; a boot test uses
+`MCP_AUTH_ENABLED=0`). Both
 routes already run inside `use_request_authorization`, so the hook decides
 per request.
 
@@ -676,8 +700,9 @@ lxml's parser options, `lxml` gets its own minimum-pinned line in
 
 #### Limits and settings
 
-Every limit is a setting, except the two named constants above
-(`ATTACHMENT_EXTRACT_STDERR_MAX_BYTES`, `ATTACHMENT_LOCATOR_MAX_CHARS`); a value
+Every limit is a setting, except three named constants
+(`ATTACHMENT_EXTRACT_STDERR_MAX_BYTES`, `ATTACHMENT_LOCATOR_MAX_CHARS`
+above and `ATTACHMENT_READ_DEFAULT_CHARS` in §1); a value
 of `0` or less is refused at boot, never read as "unlimited". The one exception is `ATTACHMENT_CHUNK_OVERLAP_CHARS`,
 which may be `0` and must be smaller than `ATTACHMENT_CHUNK_CHARS`, as
 `attachment_retrieval.chunk_segments` requires.
@@ -877,7 +902,17 @@ tainted treatment:
   conversations set the same key.
 
 The web client stores the latest `conversation_state` per conversation and
-sends it back. It does that in the one shared request function
+sends it back, together with exactly the messages it sent and received:
+the user message as sent to the model (with any selection context, kept as
+the message's `llmContent`), and each reply's `content` unchanged.
+Display-only entries — client-made error notices, "delete cancelled",
+"(no response)" placeholders and `system` messages — are kept out of the
+replayed history. Today's `ChatPanel.jsx` and `CollectKioskView.jsx` do not
+do this (they replay the display text and insert client-made assistant
+messages), so that change is part of this work; without it every such
+conversation would stay tainted. Component tests check that a turn with a
+canvas selection, and a turn after a cancelled delete, are each followed by
+a turn the server still treats as clean. It does that in the one shared request function
 (`api.sendChatMessage`), not at each call site. `sendChatMessage` is
 stateless today, so every call site passes a conversation key
 (`options.conversationId`); `api.js` keeps the latest token in a
@@ -953,7 +988,7 @@ structured log record, at INFO, to the `attachments.audit` logger:
 |---|---|
 | `event` | `attachment_content_read`, `attachment_added` or `attachment_deleted` |
 | `tool` | the tool name |
-| `actor` | `{type, id}`: `user` (from the request actor, or `null` when unauthenticated), `agent` (the Agent id), `kiosk` (the collection short name) or `mcp` (the request actor) |
+| `actor` | `{type, id}`, the type taken from the bound caller kind, never from headers: `user` (from the request actor, or `null` when unauthenticated), `agent` (the Agent id), `kiosk` (the collection short name) or `mcp` (the request actor) |
 | `node_id` | the node, only once it has resolved to a visible node; otherwise `null` |
 | `attachment_id` | the file, only when it matches the id pattern and is in the node's index; otherwise `null` |
 | `sha256` | the stored file's SHA-256 |
@@ -986,7 +1021,9 @@ this. The sites that write tool arguments or model text are:
   response), its `Event … failed: …` line and the failure summary it hands
   to `record_failure`, in `backend/agents/worker.py`;
 - the Agent LLM client's `LLM call failed: …` line in
-  `backend/agents/llm_client.py`.
+  `backend/agents/llm_client.py`;
+- `ChatProcessor`'s `Error in process_message: …` line in
+  `backend/ui/chat_logic.py`.
 
 At each of them, the five attachment tools are always logged by name and
 argument sizes only (`query` length, `content_text`/`content_base64`
