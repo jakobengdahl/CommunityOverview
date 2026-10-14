@@ -956,12 +956,13 @@ def test_g7_odt_tracked_deletions_are_not_paragraphs():
 
 def test_g7_pptx_alternate_content_is_read_once():
     _mc = "http://schemas.openxmlformats.org/markup-compatibility/2006"
-    copy = "<a:p><a:r><a:t>EQUATION</a:t></a:r></a:p>"
+    choice = "<a:p><a:r><a:t>EQUATION</a:t></a:r></a:p>"
+    fallback = "<a:p><a:r><a:t>FALLBACK_COPY</a:t></a:r></a:p>"
     data = _pptx([["Title"]])
     slide = zipfile.ZipFile(io.BytesIO(data)).read("ppt/slides/slide1.xml").decode()
     alternate = (
         f'<mc:AlternateContent xmlns:mc="{_mc}"><mc:Choice Requires="a14"><p:sp><p:txBody>'
-        f"{copy}</p:txBody></p:sp></mc:Choice><mc:Fallback><p:sp><p:txBody>{copy}"
+        f"{choice}</p:txBody></p:sp></mc:Choice><mc:Fallback><p:sp><p:txBody>{fallback}"
         "</p:txBody></p:sp></mc:Fallback></mc:AlternateContent>"
     )
     slide = slide.replace("</p:spTree>", alternate + "</p:spTree>")
@@ -1147,3 +1148,22 @@ def test_g1_a_process_the_child_leaves_behind_does_not_hold_the_call_open():
     )
     assert result.status == ae.STATUS_FAILED
     assert time.monotonic() - started < 3
+
+
+def test_g7_docx_breaks_text_boxes_and_alternate_content_read_as_current_text():
+    _mc = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+    inner = (
+        "<w:p><w:r><w:t>a</w:t><w:br/><w:t>b</w:t><w:cr/><w:t>c</w:t></w:r>"
+        f'<w:r><mc:AlternateContent xmlns:mc="{_mc}"><mc:Choice Requires="wps">'
+        "<w:p><w:r><w:t>BOX</w:t></w:r></w:p></mc:Choice>"
+        "<mc:Fallback><w:p><w:r><w:t>FALLBACK_COPY</w:t></w:r></w:p></mc:Fallback>"
+        "</mc:AlternateContent></w:r><w:r><w:t>after</w:t></w:r>"
+        "<w:moveFrom><w:r><w:t>MOVED_AWAY</w:t></w:r></w:moveFrom></w:p>"
+    )
+    assert _texts(extract(_docx_with_body(inner), ae.DOCX)) == ["a\nb\nc\nBOX\nafter"]
+
+
+def test_g7_docx_table_cells_read_tracked_insertions():
+    cell = "<w:p><w:r><w:t>cell </w:t></w:r><w:ins><w:r><w:t>INSERTED</w:t></w:r></w:ins></w:p>"
+    inner = f"<w:tbl><w:tblGrid><w:gridCol/></w:tblGrid><w:tr><w:tc>{cell}</w:tc></w:tr></w:tbl>"
+    assert _texts(extract(_docx_with_body(inner), ae.DOCX)) == ["cell INSERTED"]
