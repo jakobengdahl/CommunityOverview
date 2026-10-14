@@ -1105,3 +1105,45 @@ def test_g7_docx_nested_table_keeps_every_row():
 
 def test_g5_a_pdf_whose_pages_hold_only_whitespace_is_no_text_layer():
     assert extract(_pdf([" ", "  "]), ae.PDF).status == ae.STATUS_NO_TEXT_LAYER
+
+
+# --- Review round 3 regressions ----------------------------------------------
+
+
+def test_g3_docx_relationships_part_typed_as_an_image_is_still_scanned():
+    data = _docx()
+    types = zipfile.ZipFile(io.BytesIO(data)).read("[Content_Types].xml").decode()
+    types = types.replace(
+        "</Types>",
+        '<Override PartName="/word/_rels/document.xml.rels" ContentType="image/png"/></Types>',
+    )
+    data = _replace_member(data, "[Content_Types].xml", types)
+    rels = (
+        zipfile.ZipFile(io.BytesIO(data)).read("word/_rels/document.xml.rels").decode()
+    )
+    rels = rels.replace("?>", '?><!DOCTYPE Relationships [<!ENTITY x "boom">]>', 1)
+    data = _replace_member(data, "word/_rels/document.xml.rels", rels)
+    assert extract(data, ae.DOCX).detail == "xml_dtd"
+
+
+def test_g7_docx_non_breaking_hyphens_and_positional_tabs_are_kept():
+    inner = (
+        "<w:p><w:r><w:t>non</w:t><w:noBreakHyphen/><w:t>breaking</w:t>"
+        '<w:ptab w:relativeTo="margin" w:alignment="right" w:leader="none"/><w:t>end</w:t></w:r></w:p>'
+    )
+    assert _texts(extract(_docx_with_body(inner), ae.DOCX)) == ["non-breaking\tend"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX")
+def test_g1_a_process_the_child_leaves_behind_does_not_hold_the_call_open():
+    code = (
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        "sys.exit(0)"
+    )
+    started = time.monotonic()
+    result = ae._run_worker(
+        b"x", ae.TEXT, ExtractionLimits(timeout_seconds=3), _fake_worker(code)
+    )
+    assert result.status == ae.STATUS_FAILED
+    assert time.monotonic() - started < 3

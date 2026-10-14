@@ -35,6 +35,7 @@ import io
 import json
 import os
 import posixpath
+import signal
 import subprocess
 import sys
 import threading
@@ -150,6 +151,8 @@ def _run_worker(
         # The child parses untrusted bytes; it gets none of the server's
         # environment (credentials, API keys).
         env={},
+        # Its own process group, so anything it spawns is killed with it.
+        start_new_session=os.name == "posix",
     )
     reply = bytearray()
     overflow = threading.Event()
@@ -190,13 +193,17 @@ def _run_worker(
             except subprocess.TimeoutExpired:
                 if overflow.is_set() or time.monotonic() >= deadline:
                     timed_out = not overflow.is_set()
-                    proc.kill()
+                    _kill_group(proc)
                     proc.wait()
                     break
     finally:
+        # A process the child left behind could hold the pipes open and keep
+        # the threads blocked; nothing of the child's may outlive the call.
+        _kill_group(proc)
         for thread in threads:
             thread.join(timeout=5)
-        proc.stdout.close()
+        if not threads[1].is_alive():
+            proc.stdout.close()
     if timed_out:
         return ExtractionResult(STATUS_TIMEOUT, detail="wall_clock")
     if overflow.is_set():
@@ -207,6 +214,16 @@ def _run_worker(
         return _from_wire(json.loads(bytes(reply)), limits)
     except (ValueError, KeyError, TypeError, RecursionError):
         return ExtractionResult(STATUS_FAILED, detail="worker_output")
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    if os.name != "posix":
+        proc.kill()
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass  # the group is already gone
 
 
 def _valid_locator(locator) -> bool:
@@ -569,11 +586,14 @@ def _refuse_docx_dtds(members: dict[str, bytes]) -> None:
         extension = posixpath.splitext(lowered)[1].lstrip(".")
         ctype = overrides.get("/" + lowered) or defaults.get(extension, "")
         ctype = ctype.lower()
-        # python-docx keeps images (SVG included) as opaque bytes; only parts it
-        # parses need the check, and an SVG exporter's DOCTYPE is routine.
-        if ctype.startswith("image/"):
-            continue
-        if lowered.endswith((".xml", ".rels")) or ctype.endswith("xml"):
+        # python-docx parses relationship parts by name, whatever their type.
+        if lowered.endswith(".rels"):
+            _parse_xml(body)
+        # It keeps images (SVG included) as opaque bytes; only parts it parses
+        # need the check, and an SVG exporter's DOCTYPE is routine.
+        elif not ctype.startswith("image/") and (
+            lowered.endswith(".xml") or ctype.endswith("xml")
+        ):
             _parse_xml(body)
 
 
@@ -613,14 +633,17 @@ def _docx_paragraph_text(paragraph) -> str:
                 continue
             if name == "t":
                 parts.append(child.text or "")
-            elif name == "tab":
+            elif name in ("tab", "ptab"):
                 parts.append("\t")
             elif name in ("br", "cr"):
                 parts.append("\n")
+            elif name == "noBreakHyphen":
+                parts.append("-")
             elif name == "p":  # a text-box paragraph inside this one
                 if parts:
                     parts.append("\n")
                 walk(child)
+                parts.append("\n")
             else:
                 walk(child)
 
