@@ -18,11 +18,15 @@ All unset means history is kept forever and nothing is ever swept. A value that
 is not an integer from 1 to ``MAX_DAYS`` (``MAX_SWEEP_INTERVAL_HOURS`` for the
 interval) is a configuration error raised at startup.
 
-The sweep only ever touches terminal runs: a queued or running run is never
-redacted or purged. It runs once when the agent registry starts and then every
-interval; a failed sweep is logged and never breaks the agent runtime. Each
-sweep writes one audit record carrying only the policy, cutoffs and counts —
-never a run's id or content.
+The sweep redacts and purges only terminal runs. A run still ``RUNNING`` whose
+last update is older than the retention (one its process crashed out of, so
+nothing will ever finalize it) is first abandoned — dead-lettered with a fixed,
+content-free reason — and then redacted and purged like any other terminal run
+in the same sweep. A run younger than the retention, or any run while retention
+is unset, is never abandoned. It runs once when the agent registry starts and
+then every interval; a failed sweep is logged and never breaks the agent
+runtime. Each sweep writes one audit record carrying only the policy, cutoffs
+and counts — never a run's id or content.
 
 Run a sweep by hand with::
 
@@ -182,6 +186,7 @@ class SweepReport:
     redact_after_days: Optional[int]
     redact_cutoff: Optional[datetime]
     purge_cutoff: Optional[datetime]
+    abandoned: int
     redacted: int
     purged: int
 
@@ -193,6 +198,7 @@ class SweepReport:
             "redact_after_days": self.redact_after_days,
             "redact_cutoff": _iso(self.redact_cutoff),
             "purge_cutoff": _iso(self.purge_cutoff),
+            "abandoned": self.abandoned,
             "redacted": self.redacted,
             "purged": self.purged,
         }
@@ -206,7 +212,8 @@ def sweep(
     dry_run: bool = False,
 ) -> SweepReport:
     """
-    Redact, then purge, the terminal runs the policy has aged out.
+    Abandon runs left running past the retention, then redact, then purge the
+    terminal runs the policy has aged out.
 
     Idempotent: a second sweep at the same ``now`` changes nothing. With
     ``dry_run`` the counts are what a real sweep would change, and the store is
@@ -224,16 +231,28 @@ def sweep(
         else None
     )
 
-    redacted = purged = 0
+    abandoned = redacted = purged = 0
+    if purge_cutoff is not None:
+        ids = [job.id for job in store.list_running_older_than(purge_cutoff)]
+        abandoned = (
+            len(ids) if dry_run else store.abandon(ids, cutoff=purge_cutoff, now=now)
+        )
+    # An abandoned run is unredacted and finished before the purge cutoff, which
+    # is never later than the redact cutoff, so a real sweep redacts and purges
+    # it below; a dry run, which abandons nothing, counts it in by hand.
     if redact_cutoff is not None:
         ids = [
             job.id
             for job in store.list_terminal_older_than(redact_cutoff, redacted=False)
         ]
         redacted = len(ids) if dry_run else store.redact(ids, now=now)
+        if dry_run:
+            redacted += abandoned
     if purge_cutoff is not None:
         ids = [job.id for job in store.list_terminal_older_than(purge_cutoff)]
         purged = len(ids) if dry_run else store.purge(ids)
+        if dry_run:
+            purged += abandoned
 
     report = SweepReport(
         swept_at=now,
@@ -242,6 +261,7 @@ def sweep(
         redact_after_days=policy.redact_after_days,
         redact_cutoff=redact_cutoff,
         purge_cutoff=purge_cutoff,
+        abandoned=abandoned,
         redacted=redacted,
         purged=purged,
     )
@@ -317,7 +337,10 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="report what would be redacted and purged without changing anything",
+        help=(
+            "report what would be abandoned, redacted and purged without "
+            "changing anything"
+        ),
     )
     args = parser.parse_args(argv)
 

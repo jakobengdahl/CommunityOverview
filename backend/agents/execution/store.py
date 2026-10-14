@@ -179,6 +179,30 @@ class ExecutionStore(Protocol):
         """
         ...
 
+    def list_running_older_than(self, cutoff: datetime) -> List[ExecutionJob]:
+        """
+        Return RUNNING jobs last updated strictly before ``cutoff``
+        (``updated_at``), oldest first: the candidates ``abandon`` would move.
+        """
+        ...
+
+    def abandon(
+        self,
+        job_ids: Sequence[str],
+        *,
+        cutoff: datetime,
+        now: Optional[datetime] = None,
+    ) -> int:
+        """
+        Dead-letter each listed job that is still RUNNING and was last updated
+        strictly before ``cutoff``, with ``models.ABANDONED_REASON`` as its
+        reason and its last update as ``finished_at`` (so retention ages it
+        from when it was last seen alive, not from now). Skips (without error)
+        ids that are unknown, not RUNNING or updated since ``cutoff``, so a
+        repeat call changes nothing. Returns how many jobs were abandoned.
+        """
+        ...
+
     def redact(
         self,
         job_ids: Sequence[str],

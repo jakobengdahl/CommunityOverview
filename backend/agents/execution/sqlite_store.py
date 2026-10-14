@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import List, Optional, Sequence, Union
 
 from .models import (
+    ABANDONED_REASON,
     ExecutionJob,
     ExecutionKind,
     ExecutionState,
@@ -512,6 +513,60 @@ class SqliteExecutionStore:
                 (*_TERMINAL_VALUES, _to_epoch(cutoff), want, want),
             ).fetchall()
             return [self._row_to_job(row) for row in rows]
+
+    def list_running_older_than(self, cutoff: datetime) -> List[ExecutionJob]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM execution_jobs
+                WHERE state = ? AND updated_at < ?
+                ORDER BY updated_at ASC
+                """,
+                (ExecutionState.RUNNING.value, _to_epoch(cutoff)),
+            ).fetchall()
+            return [self._row_to_job(row) for row in rows]
+
+    def abandon(
+        self,
+        job_ids: Sequence[str],
+        *,
+        cutoff: datetime,
+        now: Optional[datetime] = None,
+    ) -> int:
+        now = now or utcnow()
+        # The RUNNING/age guard lives in the SQL, so a run finalized or touched
+        # since it was listed (by this or another process) is left alone.
+        params = [
+            (
+                ExecutionState.DEAD_LETTER.value,
+                ABANDONED_REASON,
+                _to_epoch(now),
+                job_id,
+                ExecutionState.RUNNING.value,
+                _to_epoch(cutoff),
+            )
+            for job_id in dict.fromkeys(job_ids)
+        ]
+        if not params:
+            return 0
+        with self._lock:
+            try:
+                cur = self._conn.executemany(
+                    """
+                    UPDATE execution_jobs SET
+                        state = ?, dead_letter_reason = ?,
+                        lease_owner = NULL, lease_expiry = NULL,
+                        finished_at = updated_at, updated_at = ?
+                    WHERE id = ? AND state = ? AND updated_at < ?
+                    """,
+                    params,
+                )
+                count = cur.rowcount
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+        return count
 
     def redact(
         self,
