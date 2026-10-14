@@ -1004,3 +1004,29 @@ class TestLateChecks:
         assert result["error_code"] == "not_found"
         assert store.list(NS, "doc") == []
         assert _tmp_is_empty(store)
+
+
+class TestAlignExtensionUnit:
+    @pytest.mark.parametrize(
+        "name, content_type, expected",
+        [
+            ("x.bat.", TEXT, "x.bat.txt"),
+            ("x.bat . ", TEXT, "x.bat.txt"),
+            ("a.pdf .", PDF, "a.pdf ."),
+            ("x.png", "image/jpeg", "x.png.jpg"),
+            ("photo.jpeg", "image/jpeg", "photo.jpeg"),
+        ],
+    )
+    def test_align_extension(self, name, content_type, expected):
+        from backend.service.attachments import align_extension
+
+        assert align_extension(name, content_type) == expected
+
+    def test_truncation_never_leaves_a_partial_character(self):
+        from backend.service.attachments import align_extension
+
+        name = "\U0001f600" * 63 + ".bin"  # 256 bytes before the suffix
+        result = align_extension(name, PDF)
+        assert result.endswith(".pdf")
+        assert len(result.encode("utf-8")) <= 255
+        assert "�" not in result
