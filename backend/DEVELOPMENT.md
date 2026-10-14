@@ -533,8 +533,8 @@ per-route checks).
   255 UTF-8 bytes at most), then made to agree with the detected type:
   `report.docm` holding a Word document is stored as `report.docm.docx`, and a
   text file keeps its extension only when it is inert text (`.txt`, `.md`,
-  `.json`, `.log`, `.yaml` and similar), so `run.bat` is stored as
-  `run.bat.txt`.
+  `.json`, `.log`, `.yaml` and similar) or has none (`README` stays
+  `README`), so `run.bat` is stored as `run.bat.txt`.
 - **Deleting a node** removes its files after the graph delete succeeds.
   Archiving keeps them. REPLACE import does not touch the store.
 - **No MCP tool** exists for attachments yet; the service functions take bytes

@@ -973,14 +973,21 @@ class TestLateChecks:
         assert consumed == []
 
     def test_node_becoming_invisible_mid_upload_stores_nothing(self, storage, store):
-        class FlipHook:
-            narrowed = False
+        class NarrowingHook:
+            """Local graph only: a node tagged with another graph is invisible."""
 
             def evaluate(self, context):
-                return GraphAuthorizationDecision(allowed=True)
+                return GraphAuthorizationDecision(
+                    allowed=True,
+                    graph_access=GraphAccessNarrowing(
+                        enabled=True, allow_local_graph=True
+                    ),
+                )
 
         service = GraphService(
-            storage, authorization_hook=FlipHook(), attachment_settings=_settings(store)
+            storage,
+            authorization_hook=NarrowingHook(),
+            attachment_settings=_settings(store),
         )
 
         async def body():
@@ -989,26 +996,11 @@ class TestLateChecks:
             storage.update_node("doc", {"metadata": {"origin_graph_id": "elsewhere"}})
             yield b"second"
 
-        import backend.service.attachments as ops
-
-        original = ops._node_still_accepts_uploads
-
-        def narrowed(storage_, node_id, graph_access):
-            return original(
-                storage_,
-                node_id,
-                GraphAccessNarrowing(enabled=True, allow_local_graph=True),
+        result = asyncio.run(
+            service.add_node_attachment(
+                "doc", filename="a.txt", declared_content_type=None, content=body()
             )
-
-        ops._node_still_accepts_uploads = narrowed
-        try:
-            result = asyncio.run(
-                service.add_node_attachment(
-                    "doc", filename="a.txt", declared_content_type=None, content=body()
-                )
-            )
-        finally:
-            ops._node_still_accepts_uploads = original
+        )
         assert result["error_code"] == "not_found"
         assert store.list(NS, "doc") == []
         assert _tmp_is_empty(store)
