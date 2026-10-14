@@ -338,7 +338,7 @@ system that started it.
 | Size of one tool call or response | 1 MiB | The call is refused with `invalid_arguments`, or the response is replaced by a `tool_failed` error. |
 | Size of `result.output` | 256 KiB | The run ends `failed` with `output_too_large`. |
 | Captured log | 256 KiB | Further log output is dropped and the truncation is recorded. |
-| Concurrent runs per function | 1 | A further invocation waits in the queue. |
+| Concurrent runs per function | 1 | A further invocation is `rejected` with `busy`. |
 
 - The maximums in this table are contract maximums. An operator may lower any
   of them for an instance; no setting raises one. These limits keep functions
@@ -409,9 +409,14 @@ version installs dependencies is an isolation decision (§13).
 
 ## 11. Run records
 
-A run is an `ExecutionJob` with `kind = function`, recorded through the same
-`ExecutionStore` and retention as agent runs. Manual runs are attempted once:
-there is no automatic retry in version 1.
+A run is an `ExecutionJob` with `kind = function`, recorded in the run-history
+store that agent runs use, with the same retention. Like an agent run record,
+it is history, not queued work: it is enqueued already `RUNNING` when the run
+starts and is never claimed, leased or reclaimed by a worker. That store's
+retry policy allows one attempt, so a run is executed at most once: there is
+no automatic retry in version 1, and a host crash never re-executes a run whose
+writes may already have landed. A record a crash leaves `RUNNING` is closed by
+the run-history retention sweep, which abandons it with a fixed reason.
 
 The run record exposes:
 
@@ -420,7 +425,7 @@ The run record exposes:
 | `id` | Run id (`job-…`). |
 | `function_id`, `function_version` | What ran. |
 | `trigger` | `manual` in version 1. |
-| `status` | `queued`, `running`, `succeeded`, `failed`, `timed_out`, `cancelled` or `rejected`. |
+| `status` | `running`, `succeeded`, `failed`, `timed_out`, `cancelled` or `rejected`. |
 | `error` | For `failed` and `rejected`: a code and a sanitized message. |
 | `output` | The validated `result.output`, for `succeeded`. |
 | `correlation_id`, `origin`, `actor` | Who started it and the id its writes carry. |
@@ -455,6 +460,7 @@ Run-level error codes are a closed set:
 | `rejected` | `access_denied` | The invoking actor lacks the access §5.1 requires. |
 | `rejected` | `invalid_input` | `input` failed `input_schema`. |
 | `rejected` | `chain_depth_exceeded` | The chain-depth limit was reached (§9). |
+| `rejected` | `busy` | Another run of the same function is in progress (§8). |
 | `failed` | `function_error` | The function returned `status: error`; its code and message are kept, sanitized. |
 | `failed` | `no_result` | The process exited without sending `result`. |
 | `failed` | `protocol_error` | The function broke the protocol (§6.2). |
@@ -463,14 +469,15 @@ Run-level error codes are a closed set:
 | `failed` | `invalid_output` | `result.output` failed `output_schema`. |
 | `timed_out` | `timeout` | The wall-clock limit was reached (§8). |
 
-The store's state machine does not change. In the `ExecutionStore`:
+The store's states and methods do not change. In the run-history store:
 
-- `succeeded` is `SUCCEEDED`;
-- `failed` and `timed_out` are `DEAD_LETTER`, with `dead_letter_reason` starting
-  with the code (`timeout: …`), so that the run-history view can tell
-  `timed_out` from `failed`;
-- `rejected` and `cancelled` are `CANCELLED`, with the outcome and code kept in
-  the job `result` that `cancel` stores.
+- `succeeded` is `SUCCEEDED`, recorded with `complete`;
+- `failed` and `timed_out` are `DEAD_LETTER`, recorded with `fail`, whose
+  `error` (stored as `last_error`) starts with the code (`timeout: …`). The
+  run-history view reads the code from that prefix to tell `timed_out` from
+  `failed`;
+- `rejected` and `cancelled` are `CANCELLED`, recorded with `cancel`, whose
+  `result` keeps the outcome and code.
 
 ## 12. Compatibility
 

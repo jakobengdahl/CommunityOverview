@@ -86,8 +86,10 @@ implements them rather than designs them.
 ### 6. Reuse the durable execution seam
 
 A run is an `ExecutionJob` with a new `function` kind, idempotent on
-`fn:<function_id>:<key>`, recorded with the same retention as agent runs.
-Manual runs are attempted once.
+`fn:<function_id>:<key>`, recorded as history in the run-history store that
+agent runs use: enqueued already running, never claimed or reclaimed, with a
+one-attempt retry policy. A run is therefore executed at most once, and a host
+crash never re-executes one.
 
 ## Consequences
 
