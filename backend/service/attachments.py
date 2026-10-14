@@ -96,7 +96,9 @@ _BYTES_CHUNK = 1024 * 1024
 # Bidirectional formatting controls. They are not Cc characters, but they
 # reorder how a name displays ("invoice<RLO>fdp.exe"), so they are removed with
 # the other control characters.
-_BIDI_CONTROLS = frozenset("؜‎‏‪‫‬‭‮⁦⁧⁨⁩")
+_BIDI_CONTROLS = frozenset(
+    "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+)
 
 
 @dataclass(frozen=True)
