@@ -1208,3 +1208,15 @@ def test_g1_a_worker_that_cannot_be_started_is_failed_not_raised():
         b"x", ae.TEXT, ExtractionLimits(), ["/nonexistent/interpreter"]
     )
     assert result == ae.ExtractionResult(ae.STATUS_FAILED, detail="worker_spawn")
+
+
+def test_g7_docx_horizontally_merged_cell_is_reported_once():
+    data = _docx(paragraphs=[], table=[["MERGED", ""], ["a", "b"]])
+    document = docx.Document(io.BytesIO(data))
+    grid = document.tables[0]
+    grid.cell(0, 0).merge(grid.cell(0, 1))
+    grid.cell(0, 0).paragraphs[-1].text = ""
+    out = io.BytesIO()
+    document.save(out)
+    result = extract(out.getvalue(), ae.DOCX)
+    assert _texts(result) == ["MERGED\na\tb"]
