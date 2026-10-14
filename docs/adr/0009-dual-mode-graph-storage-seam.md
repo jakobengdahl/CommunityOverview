@@ -309,11 +309,15 @@ unchanged.
   - It reads against the hosted sentence in
     `CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md`, so that document has to be
     amended or the hosted layer has to accept a core runtime per graph.
+    *(On acceptance: both — that document was amended, and the hosted layer
+    runs a core runtime per graph.)*
   - The hosted layer pays per-graph process overhead (~50–61 MB floor each)
     and per-graph operational surface. For many small graphs that is the
     expensive shape. (Connections are not a differentiator: at
     `pool_size + 1` per graph held they cost the same under either option.)
   - It leaves the property enforced nowhere: two prose sentences and no check.
+    *(Still enforced nowhere on acceptance; the amended documents add prose,
+    not a check.)*
 
 ### Option B — A graph-resolver seam above the persistence seam
 
@@ -323,8 +327,9 @@ instead of a single store. Standalone binds a single-entry resolver that
 always returns the same store.
 
 - **For:**
-  - Delivers literally what the hosted target sentence describes: several
-    graphs on the same runtime instances.
+  - Delivers literally what the hosted target sentence, as it then read,
+    described: several graphs on the same runtime instances. *(That sentence
+    was amended on acceptance.)*
   - Amortises the process floor (~50–61 MB) across graphs, and a lazy,
     evictable registry bounds memory by resident graphs rather than by owned
     graphs — subject to the connection ceiling below, which it does not
