@@ -452,13 +452,13 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | POST | `/api/search` | Search nodes |
 | GET | `/api/nodes/{id}` | Get node details |
 | POST | `/api/nodes/{id}/related` | Get related nodes |
-| POST | `/api/nodes` | Add nodes and edges |
-| PATCH | `/api/nodes/{id}` | Update a node |
-| DELETE | `/api/nodes` | Delete nodes |
+| POST | `/api/nodes` | Add nodes and edges (`expect_absent` optional; see *Entity revisions*) |
+| PATCH | `/api/nodes/{id}` | Update a node (`expected_revision` optional) |
+| DELETE | `/api/nodes` | Delete nodes (`expected_revisions` optional) |
 | POST | `/api/nodes/archive` | Archive/unarchive nodes (`archived` flag; hide-by-default vs. permanent delete) |
 | POST | `/api/edges` | Add edges |
-| PATCH | `/api/edges/{id}` | Update an edge |
-| DELETE | `/api/edges/{id}` | Delete an edge |
+| PATCH | `/api/edges/{id}` | Update an edge (`expected_revision` optional) |
+| DELETE | `/api/edges/{id}` | Delete an edge (`expected_revision` optional) |
 | POST | `/api/edges/archive` | Archive/unarchive edges (`archived` flag) |
 | GET | `/api/history` | Recent graph mutation history (newest first; `limit`, `offset`) |
 | GET | `/api/nodes/{id}/history` | Mutation history for a single node |
@@ -723,6 +723,35 @@ Example — set one metadata key and remove another, only if the node is unchang
   "expected_updated_at": "2026-08-13T09:15:04.123456+00:00"
 }
 ```
+
+### Entity revisions
+
+Every node and edge a read returns carries `revision`: a server-owned stamp
+from one graph-wide counter, moved by every write and never reused
+([`SESSION_OVERLAY_CONTRACT.md` §4](../docs/SESSION_OVERLAY_CONTRACT.md#4-entity-revisions)).
+A `revision` a caller sends is dropped — never stored, never folded into
+`metadata`. A write may carry an expectation:
+
+| Request | Field | Holds when |
+|---|---|---|
+| `PATCH /api/nodes/{id}`, MCP `update_node` | `expected_revision` | the node's revision still equals it |
+| `PATCH /api/edges/{id}`, `DELETE /api/edges/{id}` | `expected_revision` | the edge's revision still equals it |
+| `DELETE /api/nodes`, MCP `delete_nodes` | `expected_revisions` (id → revision) | every listed node still has it |
+| `POST /api/nodes`, MCP `add_nodes` | `expect_absent` | no node or edge in the request exists yet |
+
+`expected_updated_at` keeps working; when both it and `expected_revision` are
+given, both must hold. A refused or failed write answers with an `error`
+code and a `message`:
+
+| `error` | HTTP | Meaning |
+|---|---|---|
+| `entity_revision_conflict` | 409 | the expectation did not hold; carries `entity_kind`, `entity_id`, `current_revision` (null when absent). Nothing was written. |
+| `write_failed` | 502 | shared store only: the write did not land, confirmed on two reads. Nothing changed. |
+| `write_outcome_unknown` | 503 | shared store only: whether it landed could not be told. Re-read before retrying. |
+
+Over MCP the same fields come back with `success: false`. Archive and the
+bulk edge delete accept expectations in `GraphStorage` but not yet over the
+API.
 
 ### Custom REST Interfaces (config-driven)
 

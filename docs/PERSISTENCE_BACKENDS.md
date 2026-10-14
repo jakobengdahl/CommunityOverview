@@ -67,6 +67,7 @@ class BackendCapabilities:
     transactions: bool = False
     change_notification: bool = False
     store_traversal: bool = False
+    revision_enforcement: bool = False
 ```
 
 | Flag | Means | Consequence in `GraphStorage` |
@@ -75,6 +76,7 @@ class BackendCapabilities:
 | `transactions` | `apply_batch` lands all of its operations or none | a multi-entity mutation arrives as one batch; without it, as a snapshot |
 | `change_notification` | the backend can report changes made by another instance | `GraphStorage` subscribes before its first load, holds what arrives until the load returns, then refreshes what each reported entity touches; see *Reporting external changes* |
 | `store_traversal` | `traverse` is implemented | `get_related_nodes` asks the store for the reachable ids instead of walking the in-memory graph — but only while the store is current; see *Answering a traversal from the store* |
+| `revision_enforcement` | the store assigns entity revisions and checks expectations itself; `apply_batch` takes a write token and returns revisions, and `read_write_evidence` is implemented | every write waits for the store, and a failed one is resolved on its own evidence; see *Entity revisions* |
 
 Everything defaults to `False`; `SNAPSHOT_ONLY` is that default.
 
@@ -83,8 +85,9 @@ The declaration is checked once, when `GraphStorage` is constructed
 implementing all six methods of the incremental contract is refused there
 with a `TypeError`
 naming the missing ones — better than failing on the first mutation, after
-the in-memory graph has already changed. `change_notification` and
-`store_traversal` are checked the same way, and for the same reason stated
+the in-memory graph has already changed. `change_notification`,
+`store_traversal` and `revision_enforcement` are checked the same way (the
+last also requires `incremental_writes` and `transactions`), and for the same reason stated
 twice over: a missing `start_change_notification` would fail at first use, and
 a missing `traverse` would not fail at all — every traversal would warn and fall back
 to the walk, quietly, for the life of the process.
@@ -440,6 +443,9 @@ Two things hold on both paths, because neither has anything to arbitrate:
 
 ### A local write that failed
 
+This section describes a backend that does not declare
+`revision_enforcement`; for one that does, see *Entity revisions*.
+
 A failed entity write - or a failed whole-graph write, the same way - leaves
 the backend's on-disk image behind what memory holds, and `GraphStorage`
 heals the gap by re-issuing the whole graph on the next write, `flush()` or
@@ -466,6 +472,63 @@ prove the refresh path end to end — including two `GraphStorage` instances
 writing one store at the same time. Because it dispatches rather than
 delivers inline, the contract has a `settle_notifications` hook; any backend
 whose reports are not delivered before the write returns has to override it.
+
+## Entity revisions
+
+Every node and edge carries `revision`: a stamp from one graph-wide counter,
+taken by every write the storage applies and never reused, including across
+a delete and a re-creation under the same id. A write may carry an
+expectation — `expected_revision` on an update, archive change or delete,
+`expect_absent` on a create — and is refused with `entity_revision_conflict`
+when it does not hold. The normative description is
+[`SESSION_OVERLAY_CONTRACT.md` §4](SESSION_OVERLAY_CONTRACT.md#4-entity-revisions);
+this section is what it asks of a backend.
+
+**A single-writer store** (the file backend, or any backend that does not
+declare `revision_enforcement`) keeps nothing new. `GraphStorage` holds the
+counter and checks expectations against its own model. What it needs
+persisted is a **reservation**: `revision_reservation` in the graph metadata,
+the ceiling below which values may already have been handed out. It is raised
+by a block (`REVISION_RESERVATION_BLOCK`, 1000) before any value at or above
+it is used, durably and waited for, so a crash skips values rather than
+repeating one; a load starts the counter at the reservation or one past the
+highest revision held, whichever is higher. A backend may implement
+`reserve_revisions(ceiling)` to make that write cheap — the file backend
+records it with a checkpoint of its own, never a journal record, so an older
+build can still replay its journal. Without it the reservation travels in a
+whole-graph save. Writes keep today's fire-and-forget path, except that one
+carrying an expectation is waited for. A whole-graph replace (an import)
+restamps every entity with fresh values. Expectations are never written to
+the journal: they are a condition of a write, not part of it.
+
+**A shared store** declares `revision_enforcement`, and then:
+
+- `apply_batch(operations, write_token=None)` assigns each upsert the next
+  value of the store's own counter in the statement that writes it, checks
+  each operation's `expected_revision` / `expect_absent` in that same
+  statement, and returns the stored revisions in operation order (`None` for
+  a delete). An expectation that does not hold raises
+  `EntityRevisionConflict` and rolls the whole batch back. Every entity the
+  batch writes stores `write_token`, which is server-internal and never part
+  of an entity a read returns.
+- `read_write_evidence(keys)` returns, for each `(kind, id)`, the stored
+  revision and write token, or `None` when the entity is absent — read in one
+  snapshot.
+
+`GraphStorage` then waits for every write while holding the storage lock,
+stamps the revisions the store returned onto memory, and only then fires the
+write's events. A refused expectation undoes the change in memory without an
+event. Any other failure is decided on the write's evidence, read twice with
+a delay (`WRITE_RESOLVE_DELAY_SECONDS`) between: every upserted entity
+carrying the token means it landed and the call completes; every touched
+entity unchanged on both reads means it did not, memory is undone and the
+call fails with `write_failed`; anything else — including any delete, whose
+success no token can confirm — fails with `write_outcome_unknown` after the
+graph is re-read from the store. None of these set the whole-graph resync
+that *A local write that failed* describes: that path does not exist for a
+store that enforces revisions. A backend that declares `change_notification`
+without `revision_enforcement` gets per-instance revisions, which are not
+unique across instances; `GraphStorage` warns about it at construction.
 
 ## Answering a traversal from the store
 
@@ -922,9 +985,13 @@ app role that owns nothing but DML on tables an operator provisioned — the
 ordinary least-privilege setup on managed PostgreSQL — dies at boot against a
 store it has every permission it actually needs on.
 
-To provision it that way, create these three tables and their two indexes,
-and grant the app role `USAGE` on the schema plus
-`SELECT, INSERT, UPDATE, DELETE` on the tables. The grants cover the app's
+To provision it that way, create these three tables, their two indexes and
+the revision sequence, and grant the app role `USAGE` on the schema,
+`SELECT, INSERT, UPDATE, DELETE` on the tables, and `USAGE, SELECT, UPDATE`
+on the sequence (`nextval` on every write, `setval` on a whole-graph save).
+A store provisioned before entity revisions needs only the sequence and its
+grant added; an app role that may create in its schema creates it itself at
+boot. The grants cover the app's
 reads and writes; they do not cover maintenance. A role that owns nothing
 cannot `ANALYZE`, and PostgreSQL answers that with a warning rather than an
 error - the backend now logs it as a WARNING, but keeping the statistics
@@ -965,6 +1032,9 @@ CREATE TABLE <schema>.graph_metadata (
 -- REINDEX INDEX CONCURRENTLY is what repairs it.
 CREATE INDEX graph_edges_source_idx ON <schema>.graph_edges ((doc->>'source'));
 CREATE INDEX graph_edges_target_idx ON <schema>.graph_edges ((doc->>'target'));
+
+-- The graph-wide revision counter (see "Entity revisions").
+CREATE SEQUENCE <schema>.graph_revision_seq;
 ```
 
 #### Keeping scopes apart
@@ -1162,8 +1232,27 @@ id is not the same batch reordered — so a deadlocked batch is retried
 (`DEADLOCK_RETRIES`, three times), which is safe precisely because the batch
 is atomic: the aborted transaction left nothing behind. Retries are bounded,
 and under heavy contention from many instances a batch can still exhaust
-them; the error then propagates and `GraphStorage` heals by re-issuing the
-whole graph, which is the pre-entity behaviour rather than a new hazard.
+them; the error then propagates to the caller, which resolves it on the
+write's evidence (see *Entity revisions*) rather than re-issuing the whole
+graph.
+
+The backend declares `revision_enforcement`. One sequence per schema,
+`graph_revision_seq`, is the graph-wide counter: every upsert takes
+`nextval` in the statement that writes it, laid over the payload together
+with the write's token (`_write_token` inside `doc`, stripped from every
+read). An update or delete with an expectation is a conditional statement
+(`... AND COALESCE((doc->>'revision')::bigint, 0) = %s`) and a create
+expecting absence is `ON CONFLICT DO NOTHING`; no row back is the refusal.
+Every write therefore waits for the store — the cost is measured in
+[`CAPACITY.md`](CAPACITY.md#write-latency-with-entity-revisions). A batch's
+edge upserts hold their endpoint rows `FOR KEY SHARE` until commit, so a node
+delete on another instance, which locks the row it removes, is ordered
+against them; `KEY SHARE` rather than `SHARE` so an ordinary update of the
+node does not wait on someone drawing an edge to it. A whole-graph save keeps the revisions it is handed and raises
+the sequence past the highest, under the save's exclusive lock; it does not
+restamp, so an import into a PostgreSQL store keeps the revisions its
+document carries (the restamp §4.2 asks of an import is done only on a
+single-writer store so far).
 
 `checkpoint()` is a no-op here. The file backend needs it because it appends
 to a journal and rewrites the graph only periodically; a database has no
