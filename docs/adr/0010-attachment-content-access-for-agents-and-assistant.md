@@ -215,8 +215,10 @@ and `MCPLoader._execute_graph_tool` (Agents, as `GRAPH__<name>`, listed in
 only the names `_get_graph_mcp_tools` lists and refuses any other name as
 an unknown graph tool, so an Agent cannot reach the REST-shaped methods
 (`open_node_attachment`, `get_node_attachment_record` and the rest) by
-naming them; a test calls `GRAPH__open_node_attachment` and
-`GRAPH__get_node_attachment_record` and checks the refusal. A regression
+naming them; a test calls `_execute_graph_tool` directly (below the
+loader's tool-cache lookup, which already rejects unlisted names) with
+`open_node_attachment` and `get_node_attachment_record` and checks the
+unknown-graph-tool refusal. A regression
 test calls each tool name
 through each of the three dispatchers and checks that the response carries
 the tool shape (the envelope where §1 requires it), not the REST shape.
@@ -568,7 +570,15 @@ under `propose` and `act_after_approval` they become proposals and are not
 executed. There is no Agent level at which an attachment write runs without
 a human approval. When an approved proposal is applied, the service-layer
 checks (authorization hook, visibility, limits, type) run again at that
-time; the ceiling (`ATTACHMENT_CONTENT_ACCESS`) is re-checked too. So that
+time; the ceiling (`ATTACHMENT_CONTENT_ACCESS`) is re-checked too. The
+proposing Agent's grant is re-resolved from storage as well, as on the
+kiosk confirmation path: an `add_node_attachment` or
+`delete_node_attachment` proposal applies only if the proposing Agent still
+exists and its current `attachment_access` is `read_write`; otherwise the
+apply refuses with `access_denied` and records that as the apply result, so
+revoking the grant or deleting the Agent also stops writes already queued.
+A test approves a queued attachment proposal after the grant is narrowed to
+`read` and after the Agent is deleted, and checks both refusals. So that
 the hook sees the approver, `POST /agents/proposals/{id}/approve` and
 `…/reject` run inside `use_request_authorization(headers=request.headers)`;
 that binding lands **before or with** the write tools.
@@ -604,11 +614,16 @@ an entry whose stored grant flag or `tainted` is set, the routes evaluate
 `read_node_attachment_content` as well and require every recorded node to
 be visible under the reader's own graph narrowing
 (`access.is_node_visible`); otherwise they leave the entry out (or answer
-`access_denied` on the detail routes). The decision rests on the stored
+`access_denied` on the detail routes). `POST /agents/proposals/{id}/approve`
+and `…/reject` return the whole proposal (its `input_args`, `apply_result`
+and `apply_error`), so for such a proposal they run the same check as the
+detail route (`read_agent_runs`, `read_node_attachment_content`, every
+recorded node visible) and answer `access_denied` before deciding: nobody
+approves, rejects or reads back content they may not read. The decision rests on the stored
 values, so revoking a grant or deleting the Agent does not release earlier
 output. A hook that already refuses a user file text thereby keeps that
 user from reading it through Agent output, without knowing the new target.
-Tests list and fetch runs and proposals of a granted Agent, before and
+Tests list, fetch, approve and reject runs and proposals of a granted Agent, before and
 after the grant is revoked and the Agent deleted, under a hook that
 refuses `read_node_attachment_content` and under a narrowing that hides a
 recorded node.
@@ -1017,9 +1032,13 @@ hashed, as a fixed non-empty text the server chooses; the client replays
 it unchanged and no longer substitutes "(no response)". Today's `ChatPanel.jsx` and `CollectKioskView.jsx` do not
 do this (they replay the display text and insert client-made assistant
 messages), so that change is part of this work; without it every such
-conversation would stay tainted. Component tests check that a turn with a
-canvas selection, and a turn after a cancelled delete, are each followed by
-a turn the server still treats as clean. It does that in the one shared request function
+conversation would stay tainted. Component tests check, against a
+recorded request, that after a turn with a canvas selection and after a
+cancelled delete the next request's `messages` equal exactly the earlier
+request's `messages` plus the returned `content` plus the new user message,
+and that `conversation_state` is sent back; a server test feeds that
+recorded payload shape to `/ui/chat` and checks the turn is treated as
+clean. It does that in the one shared request function
 (`api.sendChatMessage`), not at each call site. `sendChatMessage` is
 stateless today, so every call site passes a conversation key
 (`options.conversationId`); `api.js` keeps the latest token in a
@@ -1095,8 +1114,8 @@ structured log record, at INFO, to the `attachments.audit` logger:
 |---|---|
 | `event` | `attachment_content_read`, `attachment_added` or `attachment_deleted` |
 | `tool` | the tool name |
-| `actor` | `{type, id}`, the type taken from the bound caller kind, never from headers: `user` (from the request actor, or `null` when unauthenticated), `agent` (the Agent id), `kiosk` (the collection short name) or `mcp` (the request actor) |
-| `on_behalf_of` | the bound request actor `{type, id}` (or `null`) when it differs from `actor`: the requesting user of a kiosk call, and the approver of a write applied from an approved proposal (where `actor` stays the proposing Agent) |
+| `actor` | `{type, id}`, the type taken from the bound caller kind, never from headers: `user` (from the request actor, or `null` when unauthenticated), `agent` (the Agent id), `kiosk` (the collection short name) or `mcp` (the request actor; calls through `/execute_tool` audit as `mcp` too) |
+| `on_behalf_of` | set only for a kiosk call (the requesting user, the bound request actor `{type, id}` or `null`) and for a write applied from an approved proposal (the approver, where `actor` stays the proposing Agent); `null` for every other record, including `user` and `mcp` records |
 | `node_id` | the node, only once it has resolved to a visible node; otherwise `null` |
 | `attachment_id` | the file, only when it matches the id pattern and is in the node's index; otherwise `null` |
 | `sha256` | the stored file's SHA-256 |
