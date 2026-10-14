@@ -171,7 +171,9 @@ Extracted attachment text may be sent to the configured LLM provider:
 - **for unattended Agents and for kiosks only with an explicit grant**
   (§2);
 - **never, for anyone, when the instance switch is off**
-  (`ATTACHMENT_CONTENT_ACCESS=off`, §2).
+  (`ATTACHMENT_CONTENT_ACCESS=off`, §2), through any attachment tool; files
+  the REST routes serve without authentication stay reachable to any HTTP
+  client (§2).
 
 The rationale: the user could download the file and paste it into the chat,
 and `/ui/upload` already sends document text to the provider. Deployments
@@ -467,7 +469,7 @@ not waste turns) and, authoritatively, where the call is executed.
 
 | Setting | Values | Default | Meaning |
 |---|---|---|---|
-| `ATTACHMENT_CONTENT_ACCESS` | `off`, `read`, `read_write` | `read_write` | Instance ceiling for every caller. `off` is the single switch that stops attachment tools — and so any attachment text reaching any LLM — for the assistant, Agents, kiosks and MCP alike. The default grants nothing by itself; it only does not cap. Agents' `FS` integration could otherwise read the stored blobs past this switch, so boot refuses an Agent workspace that contains, or lies inside, the attachment root: it compares the `realpath` of the effective workspace (`agent_workspace_dir()`, default included, not only `AGENTS_WORKSPACE_DIR`) with the `realpath` of the effective attachment root (`ATTACHMENT_DIR` or the store's default root), in both directions. |
+| `ATTACHMENT_CONTENT_ACCESS` | `off`, `read`, `read_write` | `read_write` | Instance ceiling for every caller. `off` is the single switch that stops attachment tools — and so any attachment text reaching any LLM — for the assistant, Agents, kiosks and MCP alike. The default grants nothing by itself; it only does not cap. `off` stops the tools; it cannot stop HTTP clients from using the REST download routes, so a deployment whose REST attachment routes answer without authentication exposes the files to any client that reaches them, an Agent's `WEB` fetch included. A deployment relying on `off` to keep files from every LLM enables authentication. Agents' `FS` integration could otherwise read the stored blobs past this switch, so boot refuses an Agent workspace that contains, or lies inside, the attachment root: it compares the `realpath` of the effective workspace (`agent_workspace_dir()`, default included, not only `AGENTS_WORKSPACE_DIR`) with the `realpath` of the effective attachment root (`ATTACHMENT_DIR` or the store's default root), in both directions. |
 | `ASSISTANT_ATTACHMENT_ACCESS` | `off`, `read`, `read_write` | `read` | What the interactive assistant gets (D1). Writes need an explicit `read_write`. |
 | `MCP_ATTACHMENT_TOOLS` | `off`, `read`, `read_write` | `off` | Which attachment tools the MCP mount registers for external MCP clients. `off` registers none. |
 
@@ -485,16 +487,31 @@ An Agent node gains `metadata.attachment_access` with values `none`, `read`,
 `read_write`; **the default is `none`**. A value outside the three is
 treated as `none`, and the Agent's config load logs a warning.
 
-Every write that creates an Agent node with `metadata.attachment_access`
-other than `none`, or changes that field — `add_nodes`, `update_node`, a
-graph import, or any later path — additionally evaluates a dedicated mutate
-target, `grant_agent_attachment_access`, and the write is refused unless it
-allows. The check lives in one shared helper in the service's mutation
-layer that every such path calls, not in each route. Adoption
-(`adopt_federated_node`) copies a remote node's metadata, so it strips
-`attachment_access` from the copy: a federated source never brings a grant
-with it, and a test adopts a granted remote Agent node and checks the local
-copy has none. The hook context carries no resource id, so this target is
+Editing a granted Agent is wielding its grant: its prompts, skills and
+subscription decide what it reads and where the text goes. So a dedicated
+mutate target, `grant_agent_attachment_access`, is evaluated, and the write
+refused unless it allows, on every write — `add_nodes` (its nodes and
+edges), `update_node`, `delete_nodes`, `delete_edges` touching it, a graph
+import, or any later path — to:
+
+- an Agent node whose stored or resulting `metadata.attachment_access` is
+  not `none` (creating a grant, changing it, or editing anything on an
+  Agent that holds one);
+- a Skill node that a granted Agent references (through
+  `metadata.skill_node_ids` or a `USES_SKILL` edge).
+
+The check lives in one shared helper in the service's mutation layer that
+every such path calls, not in each route. Skills an Agent loads from
+`skills_urls` are outside the graph; whoever controls those URLs steers a
+granted Agent, so granting an Agent that uses them trusts those URLs as
+much as the Agent's editors. The hook-author documentation states this.
+
+Adoption (`adopt_federated_node`) writes two local nodes from a remote
+node's metadata: the adopted copy and the local `federated::…` reference
+node. It strips `attachment_access` from both, so a federated source never
+brings a grant with it. Independently, the Agent config treats an Agent
+whose id starts with `federated::` as `attachment_access: none`. A test
+adopts a granted remote Agent node and checks both local nodes. The hook context carries no resource id, so this target is
 what lets a hook keep people who may edit nodes from granting Agents file
 access.
 
@@ -541,12 +558,15 @@ Agent reads can reappear in its run summary and its proposals; so the
 `/agents/*` read routes (`GET /agents/runs`, `/agents/runs/{id}`,
 `/agents/proposals`, `/agents/proposals/{id}`) run inside
 `use_request_authorization` and evaluate a new target, `read_agent_runs`
-(action read), in the same change that binds approve and reject. The hook
-context names no Agent, so the decision is for all Agents at once: a hook
-that refuses a user `read_node_attachment_content` refuses that user
-`read_agent_runs` (and `grant_agent_attachment_access`) as well. With the
-default permissive hook, everyone who can reach the `/agents/*` routes can
-read what granted Agents quoted.
+(action read), in the same change that binds approve and reject. For runs
+and proposals of an Agent whose `attachment_access` is not `none`, the
+routes evaluate `read_node_attachment_content` as well and leave those
+entries out (or answer `access_denied` on the detail routes) unless both
+allow; so a hook that already refuses a user file text keeps that user from
+reading it through Agent output, without knowing the new target. The hook
+context names no Agent, so each decision covers all granted Agents at once.
+With the default permissive hook, everyone who can reach the `/agents/*`
+routes can read what granted Agents quoted.
 
 #### Kiosks
 
@@ -592,6 +612,12 @@ each of these three routes runs its `ChatService` call inside
 hook sees the same inputs it sees for that user's REST calls. Binding all
 three is part of the permission work and lands **before or with** the read
 tools; without it a per-user hook could not tell users apart.
+
+Extraction and search can take seconds, so these routes and
+`POST /execute_tool` run the chat call (or the tool) off the server's event
+loop, through `asyncio.to_thread`, which carries the bound authorization
+context with it. An attachment tool therefore never blocks other requests
+for its timeouts.
 
 #### External MCP clients and `/execute_tool`
 
@@ -772,7 +798,9 @@ attachments, extracts each (or takes it from the cache) within the per-call
 budgets, turns each file's segments into
 `attachment_retrieval.Segment(text, locator, source={node_id, attachment_id,
 filename})`, and calls `rank_passages(query, segments, top_k=…,
-rerank_candidates=…, vector_store=…)` once over all of them. The
+chunk_size=ATTACHMENT_CHUNK_CHARS, overlap=ATTACHMENT_CHUNK_OVERLAP_CHARS,
+rerank_candidates=ATTACHMENT_RERANK_CANDIDATES, vector_store=…)` once over
+all of them. The
 `vector_store` is the process's existing store; `rank_passages` uses it only
 if its model is already loaded (D2). The guarantees of that module carry
 over: every passage keeps its own locator and source, equal scores keep
@@ -827,8 +855,11 @@ Every other tool — every write (`add_nodes`, `update_node`, `delete_nodes`,
 tool name and arguments, a server-minted, single-use token, and the caller
 context of the turn — caller kind, the resolved collection (for a kiosk),
 the effective allowlist, the request actor and, for a kiosk, the ids of the
-nodes the turn touched (so a confirmed `save_collection_response` links to
-them as it would have in the turn).
+nodes the turn touched. Pending actions from one turn share that one
+touched-ids list: a confirmed node write adds the ids it creates or updates
+to it, and a confirmed `save_collection_response` links to the list as it
+stands at confirmation, so it links to what the turn's writes produced
+once they are confirmed. The cards are shown in recorded order.
 
 Pending actions are bounded. A token expires
 `ATTACHMENT_CONFIRMATION_TTL_SECONDS` (default `600`) after it is minted.
@@ -905,9 +936,11 @@ The web client stores the latest `conversation_state` per conversation and
 sends it back, together with exactly the messages it sent and received:
 the user message as sent to the model (with any selection context, kept as
 the message's `llmContent`), and each reply's `content` unchanged.
-Display-only entries — client-made error notices, "delete cancelled",
-"(no response)" placeholders and `system` messages — are kept out of the
-replayed history. Today's `ChatPanel.jsx` and `CollectKioskView.jsx` do not
+Display-only entries — client-made error notices, "delete cancelled" and
+`system` messages — are kept out of the replayed history. A reply with no
+text (the model only called a tool such as `present_form`) is returned, and
+hashed, as a fixed non-empty text the server chooses; the client replays
+it unchanged and no longer substitutes "(no response)". Today's `ChatPanel.jsx` and `CollectKioskView.jsx` do not
 do this (they replay the display text and insert client-made assistant
 messages), so that change is part of this work; without it every such
 conversation would stay tainted. Component tests check that a turn with a
