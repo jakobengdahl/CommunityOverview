@@ -60,10 +60,12 @@ User functions are deliberately narrow:
 
 ## 3. Invariants
 
-These hold for every run and every runner, with one qualification: the
-confinement in invariant 2 holds in full only at isolation level `full`, and a
-runner reports which parts of it it could not enforce (§3.1). An
-implementation slice is tested against them.
+These hold for every run and every runner, with one qualification: invariant 2,
+and invariants 4, 6 and 7 insofar as they rest on it, hold in full only at
+isolation level `full`. Below it, a function may reach files and process
+information directly instead of through the broker, and a runner reports which
+controls it could not enforce (§3.1). An implementation slice is tested against
+them.
 
 1. **No in-process code.** Function code never runs inside the application
    process and never receives a reference to an application object, module,
@@ -96,7 +98,7 @@ reports the controls it enforces:
 | Control | Enforced means |
 |---|---|
 | `filesystem` | The process can read only the runtime, the helper library and the function's directory, and write only its working directory. |
-| `network` | The process can create no socket, so it can reach neither the network nor any local socket. |
+| `network` | The process can create no socket other than a connected pair (`socketpair`), so it can reach neither the network nor any socket outside the run. |
 | `processes` | The process can start no other process and cannot leave its session, so termination reaches everything it runs. |
 | `isolation` | The process cannot signal, trace or read the memory or `/proc` entries of any process outside the run, the application included. |
 
@@ -106,8 +108,10 @@ controls, and `degraded` otherwise. Independent of the level, every runner:
 - runs the function in a separate process with an empty environment and no
   inherited file descriptors besides its standard streams;
 - enforces the wall-clock limit and terminates everything the run started
-  (invariant 5); where it cannot prevent new processes (`processes` missing), it
-  must still collect and terminate them, or report itself unavailable;
+  (invariant 5); where it cannot prevent new processes (`processes` missing), a
+  per-run supervisor process that adopts orphaned descendants terminates every
+  descendant before the run is recorded as finished, or the runner reports
+  itself unavailable;
 - applies the memory limit (§8) and reads the process's output with the size
   limits of §8, terminating the run when they are exceeded rather than
   buffering further.
@@ -390,8 +394,10 @@ system that started it.
   the manifest (§4.3). The limit a run gets is the smaller of the manifest
   value and the instance value.
 - The memory limit may be enforced as a limit on the process's address space.
-  The helper library (§10) reports an allocation failure as `memory_exceeded`
-  rather than as a function error.
+  The helper library (§10) reports an allocation failure as a `result` with
+  `status: error` and code `memory_exceeded`, which the host records as
+  `failed` with `memory_exceeded`. A process that exits without a result after
+  reaching the limit is recorded the same way wherever the runner can tell.
 - Termination is forced. The runner does not wait for the function to clean up,
   and writes the function made before it was terminated stay in the graph.
   Functions that make several writes should make them idempotent, so that a
@@ -532,8 +538,10 @@ The store's states and methods do not change. In the run-history store:
 - `contract_version` is a single integer string. A host lists the versions it
   supports and rejects others. The text of a contract version does not change
   once a host implements it, so two hosts that support the same version accept
-  and run the same manifests the same way.
-- Any change to what a manifest may contain or what a run may do, including
+  and run the same manifests the same way. Until a host implements a version,
+  its text may be amended in place.
+- Once a version is implemented, any change to what a manifest may contain or
+  what a run may do, including
   enabling a capability reserved in §13, is a new contract version.
 - A new version is **additive** when every manifest valid under the previous
   version is valid under it and behaves the same: adding a tool, a grant, a

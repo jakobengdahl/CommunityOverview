@@ -101,8 +101,18 @@ and no third-party dependency.
 ### 2. Runners report an isolation level, and instances set a floor
 
 A runner probes the host when it starts and reports which of the contract's
-controls it enforces (`filesystem`, `network`, `processes`, `isolation`;
-contract §3.1). With all four, its level is `full`; otherwise `degraded`.
+controls it enforces (contract §3.1). With all four, its level is `full`;
+otherwise `degraded`. For the default runner on x86-64 and arm64 Linux:
+
+| Control | Enforced by | Requires |
+|---|---|---|
+| `filesystem` | Landlock filesystem rules | Landlock ABI 3 (Linux 6.2), for truncation |
+| `network` | seccomp: `socket` denied | seccomp filter mode, a system-call table for the architecture |
+| `processes` | seccomp: `fork`, `vfork`, non-thread `clone`, `setsid`, `setpgid` denied | as `network` |
+| `isolation` | seccomp: `ptrace`, cross-process memory access denied; Landlock: signals scoped, `/proc` outside the allowed paths | as `network`, plus Landlock ABI 6 (Linux 6.12) |
+
+TCP bind and connect are also denied through Landlock (ABI 4) where available,
+as a second layer under the seccomp rule.
 
 By default an instance runs functions at either level. At `degraded`, the host
 logs a warning naming the missing controls and every run record carries them.
@@ -111,8 +121,12 @@ keeps functions usable on development machines and on hosts without Landlock,
 while letting an operator require full confinement.
 
 Whatever the level, a runner terminates everything a run started and reads its
-output within the contract's limits. Where it cannot prevent new processes, it
-collects them (for example as a child subreaper) or reports itself unavailable.
+output within the contract's limits. Where it cannot prevent new processes, a
+per-run supervisor process, registered as a child subreaper, adopts orphaned
+descendants and kills them all before the run is recorded as finished; where
+even that is unavailable, the runner reports itself unavailable. At `degraded`
+without the `processes` control, a run also shares the application user's
+process limit, so a fork loop can exhaust it.
 
 ### 3. The runner is a replaceable seam
 
@@ -139,14 +153,15 @@ deployments that run code from mutually untrusted authors.
 Contract §3 now qualifies invariant 2 by isolation level and §3.1 defines the
 levels; §8 allows the memory limit to be an address-space limit; §11 adds the
 `isolation` field and the `isolation_below_minimum` code; invariant 5 now
-covers every process a run starts. No host implements contract version 1 yet,
-so its text is amended in place rather than bumped (contract §12).
+covers every process a run starts; §12 now states that text may be amended
+until a host implements it. No host implements contract version 1 yet, so its
+text is amended in place rather than bumped.
 
 ## Consequences
 
 - Functions can run on any Linux host the application runs on, with no new
-  dependency and no privileges, and with full confinement where the kernel
-  provides Landlock (ABI 6 or later).
+  dependency and no privileges, and with full confinement on x86-64 and arm64
+  where the kernel provides seccomp and Landlock ABI 6 (Linux 6.12) or later.
 - A function cannot start subprocesses or call native tools; it is plain code
   that talks to the broker. Threads work.
 - At level `degraded`, which is the default floor, a function can read what the
