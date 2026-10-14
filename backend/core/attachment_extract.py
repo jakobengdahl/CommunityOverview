@@ -13,8 +13,12 @@ citation can point at, plus a status:
 ``failed``           the file could not be parsed
 
 The input is untrusted, so the parsing runs in a child interpreter (this file
-run as a script) that the parent kills at the wall-clock limit and that runs
-under address-space and CPU rlimits where the platform has them. ZIP-based
+run as a script) that the parent kills, with its process group, at the
+wall-clock limit and that runs under address-space and CPU rlimits where the
+platform has them. The parent bounds what it reads back and releases its pipe
+ends on return, so even a compromised child cannot hold the caller's memory,
+threads or descriptors past the call (a process that leaves the group on
+purpose is outside what a process group can kill). ZIP-based
 formats are checked against declared member sizes and compression ratios
 before anything is decompressed, and XML is parsed without DTDs, entity
 expansion or network access. Dispatch is by the sniffed content type alone:
@@ -142,18 +146,109 @@ def _run_worker(
 ) -> ExtractionResult:
     header = json.dumps({"content_type": ctype, "limits": asdict(limits)}).encode()
     payload = len(header).to_bytes(4, "big") + header + data
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            # The child parses untrusted bytes; it gets none of the server's
+            # environment (credentials, API keys).
+            env={},
+            # Its own process group, so anything it spawns is killed with it.
+            start_new_session=os.name == "posix",
+        )
+    except OSError:  # out of processes, file descriptors or memory
+        return ExtractionResult(STATUS_FAILED, detail="worker_spawn")
+    exchange = _exchange_posix if os.name == "posix" else _exchange_threads
+    try:
+        reply, outcome = exchange(proc, payload, limits)
+    finally:
+        _kill_group(proc)
+        proc.wait()
+    if outcome == "timeout":
+        return ExtractionResult(STATUS_TIMEOUT, detail="wall_clock")
+    if outcome == "overflow":
+        return ExtractionResult(STATUS_FAILED, detail="worker_output")
+    if proc.returncode != 0:
+        return ExtractionResult(STATUS_FAILED, detail=f"worker_exit_{proc.returncode}")
+    try:
+        return _from_wire(json.loads(bytes(reply)), limits)
+    except (ValueError, KeyError, TypeError, RecursionError):
+        return ExtractionResult(STATUS_FAILED, detail="worker_output")
+
+
+def _exchange_posix(proc: subprocess.Popen, payload: bytes, limits: ExtractionLimits):
+    """Feed the payload and read the reply without blocking or threads.
+
+    Returns ``(reply, outcome)`` with outcome ``"exited"``, ``"timeout"`` or
+    ``"overflow"``. Both pipe ends are always closed before returning, so
+    nothing a hostile child leaves behind (even a process that escaped its
+    group) can hold this, the server's, process's threads, descriptors or
+    memory beyond the call.
+    """
+    import selectors
+
     cap = _max_reply_bytes(limits)
-    proc = subprocess.Popen(
-        argv,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        # The child parses untrusted bytes; it gets none of the server's
-        # environment (credentials, API keys).
-        env={},
-        # Its own process group, so anything it spawns is killed with it.
-        start_new_session=os.name == "posix",
-    )
+    deadline = time.monotonic() + limits.timeout_seconds
+    reply = bytearray()
+    view = memoryview(payload)
+    written = 0
+    pipes = {proc.stdin.fileno(): proc.stdin, proc.stdout.fileno(): proc.stdout}
+    in_fd, out_fd = proc.stdin.fileno(), proc.stdout.fileno()
+    selector = selectors.DefaultSelector()
+    for fd, event in ((in_fd, selectors.EVENT_WRITE), (out_fd, selectors.EVENT_READ)):
+        os.set_blocking(fd, False)
+        selector.register(fd, event)
+
+    def close(fd: int) -> None:
+        if fd in pipes:
+            selector.unregister(fd)
+            pipes.pop(fd).close()
+
+    try:
+        while out_fd in pipes:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return reply, "timeout"
+            events = selector.select(min(remaining, 0.05))
+            for key, _ in events:
+                if key.fd == out_fd:
+                    chunk = os.read(out_fd, 65536)
+                    if not chunk:
+                        close(out_fd)
+                    elif len(reply) + len(chunk) > cap:
+                        return reply, "overflow"
+                    else:
+                        reply.extend(chunk)
+                elif key.fd in pipes:
+                    try:
+                        written += os.write(in_fd, view[written : written + 65536])
+                    except BlockingIOError:
+                        continue
+                    except OSError:  # the child closed its end or exited
+                        written = len(view)
+                    if written >= len(view):
+                        close(in_fd)
+            if not events and proc.poll() is not None:
+                # The child has exited and nothing is readable: whatever still
+                # holds the pipe open is not the child, so its reply is complete.
+                break
+        # End of output can come a moment before the exit status does.
+        try:
+            proc.wait(timeout=max(deadline - time.monotonic(), 0))
+        except subprocess.TimeoutExpired:
+            return reply, "timeout"
+        return reply, "exited"
+    finally:
+        for fd in list(pipes):
+            close(fd)
+        selector.close()
+
+
+def _exchange_threads(proc: subprocess.Popen, payload: bytes, limits: ExtractionLimits):
+    """Fallback for platforms without non-blocking pipes (Windows)."""
+    cap = _max_reply_bytes(limits)
     reply = bytearray()
     overflow = threading.Event()
 
@@ -169,8 +264,6 @@ def _run_worker(
                 pass
 
     def drain() -> None:
-        # Read the reply incrementally and stop past the cap, so a child that
-        # floods stdout cannot grow this (the server's) process's memory.
         while True:
             chunk = proc.stdout.read1(65536)
             if not chunk:
@@ -181,39 +274,28 @@ def _run_worker(
             reply.extend(chunk)
 
     threads = [threading.Thread(target=fn, daemon=True) for fn in (feed, drain)]
-    for thread in threads:
-        thread.start()
     deadline = time.monotonic() + limits.timeout_seconds
-    timed_out = False
     try:
+        for thread in threads:
+            thread.start()
         while True:
             try:
                 proc.wait(timeout=0.05)
                 break
             except subprocess.TimeoutExpired:
-                if overflow.is_set() or time.monotonic() >= deadline:
-                    timed_out = not overflow.is_set()
-                    _kill_group(proc)
-                    proc.wait()
-                    break
+                if overflow.is_set():
+                    return reply, "overflow"
+                if time.monotonic() >= deadline:
+                    return reply, "timeout"
+        threads[1].join(timeout=5)
+        return reply, "overflow" if overflow.is_set() else "exited"
     finally:
-        # A process the child left behind could hold the pipes open and keep
-        # the threads blocked; nothing of the child's may outlive the call.
         _kill_group(proc)
         for thread in threads:
-            thread.join(timeout=5)
+            if thread.ident is not None:
+                thread.join(timeout=5)
         if not threads[1].is_alive():
             proc.stdout.close()
-    if timed_out:
-        return ExtractionResult(STATUS_TIMEOUT, detail="wall_clock")
-    if overflow.is_set():
-        return ExtractionResult(STATUS_FAILED, detail="worker_output")
-    if proc.returncode != 0:
-        return ExtractionResult(STATUS_FAILED, detail=f"worker_exit_{proc.returncode}")
-    try:
-        return _from_wire(json.loads(bytes(reply)), limits)
-    except (ValueError, KeyError, TypeError, RecursionError):
-        return ExtractionResult(STATUS_FAILED, detail="worker_output")
 
 
 def _kill_group(proc: subprocess.Popen) -> None:

@@ -1167,3 +1167,44 @@ def test_g7_docx_table_cells_read_tracked_insertions():
     cell = "<w:p><w:r><w:t>cell </w:t></w:r><w:ins><w:r><w:t>INSERTED</w:t></w:r></w:ins></w:p>"
     inner = f"<w:tbl><w:tblGrid><w:gridCol/></w:tblGrid><w:tr><w:tc>{cell}</w:tc></w:tr></w:tbl>"
     assert _texts(extract(_docx_with_body(inner), ae.DOCX)) == ["cell INSERTED"]
+
+
+# --- Review round 4 regressions ----------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX")
+@pytest.mark.parametrize("held", ["stdout", "stdin"])
+def test_g1_a_process_that_escapes_the_group_cannot_hold_parent_resources(held):
+    import os
+    import threading
+
+    close_stdout = "import os; os.close(1); " if held == "stdin" else ""
+    code = (
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, '-c', "
+        f"'{close_stdout}import time; time.sleep(8)'], start_new_session=True)\n"
+        "sys.exit(0)"
+    )
+    fds_before = (
+        len(os.listdir("/proc/self/fd")) if os.path.isdir("/proc/self/fd") else None
+    )
+    threads_before = threading.active_count()
+    started = time.monotonic()
+    result = ae._run_worker(
+        b"x" * (4 * 1024 * 1024),
+        ae.TEXT,
+        ExtractionLimits(timeout_seconds=3),
+        _fake_worker(code),
+    )
+    assert result.status in (ae.STATUS_FAILED, ae.STATUS_TIMEOUT)
+    assert time.monotonic() - started < 4
+    assert threading.active_count() == threads_before
+    if fds_before is not None:
+        assert len(os.listdir("/proc/self/fd")) == fds_before
+
+
+def test_g1_a_worker_that_cannot_be_started_is_failed_not_raised():
+    result = ae._run_worker(
+        b"x", ae.TEXT, ExtractionLimits(), ["/nonexistent/interpreter"]
+    )
+    assert result == ae.ExtractionResult(ae.STATUS_FAILED, detail="worker_spawn")
