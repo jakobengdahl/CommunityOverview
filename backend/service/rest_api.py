@@ -20,7 +20,7 @@ Usage:
 import asyncio
 import json
 import logging
-from typing import TYPE_CHECKING, List, Optional, Dict, Any
+from typing import TYPE_CHECKING, Annotated, List, Optional, Dict, Any
 from urllib.parse import quote
 from fastapi import (
     APIRouter,
@@ -198,6 +198,14 @@ class AddNodesRequest(BaseModel):
     edges: List[Dict[str, Any]] = Field(
         default_factory=list, description="Edges to add"
     )
+    expect_absent: bool = Field(
+        False,
+        description=(
+            "Every create expects no entity with its id to exist; otherwise "
+            "nothing is added and the request fails with 409 "
+            "entity_revision_conflict."
+        ),
+    )
     # Event context (optional, for webhooks/loop prevention)
     event_origin: Optional[str] = Field(
         None, description="Source of mutation (web-ui, mcp, system, agent:<id>)"
@@ -229,6 +237,14 @@ class UpdateNodeRequest(BaseModel):
             "The update is rejected with 409 if the node changed since then."
         ),
     )
+    expected_revision: Optional[int] = Field(
+        None,
+        ge=0,
+        description=(
+            "The node's `revision` as the caller last read it. The update is "
+            "rejected with 409 entity_revision_conflict if it has moved."
+        ),
+    )
     # Event context (optional, for webhooks/loop prevention)
     event_origin: Optional[str] = Field(
         None, description="Source of mutation (web-ui, mcp, system, agent:<id>)"
@@ -248,6 +264,14 @@ class DeleteNodesRequest(BaseModel):
         ..., max_length=10, description="Node IDs to delete (max 10)"
     )
     confirmed: bool = Field(False, description="Confirmation flag")
+    expected_revisions: Optional[Dict[str, Annotated[int, Field(ge=0)]]] = Field(
+        None,
+        max_length=10,
+        description=(
+            "Node id -> the revision it must still have. Any mismatch deletes "
+            "nothing and fails with 409 entity_revision_conflict."
+        ),
+    )
     # Event context (optional, for webhooks/loop prevention)
     event_origin: Optional[str] = Field(
         None, description="Source of mutation (web-ui, mcp, system, agent:<id>)"
@@ -316,6 +340,11 @@ class UpdateEdgeRequest(BaseModel):
     updates: Dict[str, Any] = Field(
         ..., description="Fields to update (type, label, metadata)"
     )
+    expected_revision: Optional[int] = Field(
+        None,
+        ge=0,
+        description="The edge's `revision` as last read; 409 if it has moved.",
+    )
     event_origin: Optional[str] = Field(None, description="Source of mutation")
     event_session_id: Optional[str] = Field(
         None, description="Session ID for loop prevention"
@@ -328,6 +357,11 @@ class UpdateEdgeRequest(BaseModel):
 class DeleteEdgeRequest(BaseModel):
     """Request model for deleting a single edge."""
 
+    expected_revision: Optional[int] = Field(
+        None,
+        ge=0,
+        description="The edge's `revision` as last read; 409 if it has moved.",
+    )
     event_origin: Optional[str] = Field(None, description="Source of mutation")
     event_session_id: Optional[str] = Field(
         None, description="Session ID for loop prevention"
@@ -516,11 +550,36 @@ def _fetch_and_optimize_image(image_data: Optional[str], image_url: Optional[str
     return optimize_image(raw)
 
 
+# A direct write's refusal (docs/SESSION_OVERLAY_CONTRACT.md §16.3) and the
+# status it is answered with.
+_WRITE_ERROR_STATUS = {
+    "entity_revision_conflict": 409,
+    "write_failed": 502,
+    "write_outcome_unknown": 503,
+}
+
+
 def _raise_for_access_denied(result: Dict[str, Any]) -> None:
+    """Raise for a refusal the generic status checks would misreport: access
+    denied, and a write refused by its expectation or by the store."""
     if result.get("error_code") == "access_denied":
         raise HTTPException(
             status_code=403, detail=result.get("message") or result.get("error")
         )
+    status = _WRITE_ERROR_STATUS.get(result.get("error"))
+    if status is not None and result.get("success") is False:
+        detail = {
+            key: result[key]
+            for key in (
+                "error",
+                "message",
+                "entity_kind",
+                "entity_id",
+                "current_revision",
+            )
+            if key in result
+        }
+        raise HTTPException(status_code=status, detail=detail)
 
 
 async def _read_body_within_cap(
@@ -703,6 +762,7 @@ def _register_node_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_origin=request.event_origin,
                 event_session_id=request.event_session_id,
                 event_correlation_id=request.event_correlation_id,
+                expect_absent=request.expect_absent,
             )
         _raise_for_access_denied(result)
         if not result.get("success", True):
@@ -723,6 +783,7 @@ def _register_node_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_correlation_id=request.event_correlation_id,
                 metadata_merge=request.metadata_merge,
                 expected_updated_at=request.expected_updated_at,
+                expected_revision=request.expected_revision,
             )
         _raise_for_access_denied(result)
         if result.get("conflict"):
@@ -743,6 +804,7 @@ def _register_node_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_origin=request.event_origin,
                 event_session_id=request.event_session_id,
                 event_correlation_id=request.event_correlation_id,
+                expected_revisions=request.expected_revisions,
             )
         _raise_for_access_denied(result)
         if not result.get("success", True):
@@ -803,6 +865,7 @@ def _register_edge_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_origin=request.event_origin,
                 event_session_id=request.event_session_id,
                 event_correlation_id=request.event_correlation_id,
+                expected_revision=request.expected_revision,
             )
         _raise_for_access_denied(result)
         if not result.get("success", True):
@@ -822,6 +885,7 @@ def _register_edge_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_origin=request.event_origin if request else None,
                 event_session_id=request.event_session_id if request else None,
                 event_correlation_id=request.event_correlation_id if request else None,
+                expected_revision=request.expected_revision if request else None,
             )
         _raise_for_access_denied(result)
         if not result.get("success", True):

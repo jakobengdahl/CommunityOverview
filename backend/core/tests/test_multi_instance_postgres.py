@@ -422,18 +422,18 @@ class TestTwoInstancesWritingTheSameEntity:
 
         backend._resolve = watch.__get__(backend)
 
-        real_upsert = type(backend).upsert_node
+        real_batch = type(backend).apply_batch
         released = []
 
-        def stall(self, node):
+        def stall(self, operations, write_token=None):
             # Held until the test releases it, so the peer's announcement is
-            # in hand while this instance's own write is still queued - which
-            # is the whole interleaving. A timeout here would let the write
-            # through early and fail the assertion below for a reason that has
-            # nothing to do with the property, so whether the wait was
-            # released or expired is recorded and checked.
+            # in hand while this instance's own write is still in flight -
+            # which is the whole interleaving. A timeout here would let the
+            # write through early and fail the assertion below for a reason
+            # that has nothing to do with the property, so whether the wait
+            # was released or expired is recorded and checked.
             released.append(slow.wait(CONVERGE_TIMEOUT))
-            return real_upsert(self, node)
+            return real_batch(self, operations, write_token=write_token)
 
         # The release is gated on the announcement being in hand, not on a
         # wall clock. Released as soon as the peer's write commits, the window
@@ -451,8 +451,14 @@ class TestTwoInstancesWritingTheSameEntity:
             return real_deliver(self, change)
 
         backend._deliver = note.__get__(backend)
-        backend.upsert_node = stall.__get__(backend)
-        one.update_node("contested", {"name": "Mine"})
+        backend.apply_batch = stall.__get__(backend)
+        # On its own thread: a write to this store waits for the store
+        # (SESSION_OVERLAY_CONTRACT.md §4.4), so the call is in flight, holding
+        # this instance's lock, for as long as the stall lasts.
+        mine = threading.Thread(
+            target=lambda: one.update_node("contested", {"name": "Mine"})
+        )
+        mine.start()
         two.update_node("contested", {"name": "Theirs"})
         _drain(two)
         assert arrived.wait(CONVERGE_TIMEOUT), (
@@ -460,6 +466,7 @@ class TestTwoInstancesWritingTheSameEntity:
             "interleaving this case is about did not happen"
         )
         slow.set()
+        mine.join(CONVERGE_TIMEOUT)
         _drain(one)
         _assert_nothing_failed(one, two)
         assert released == [True], (
@@ -493,9 +500,11 @@ class TestTwoInstancesWritingTheSameEntity:
         change. So an answer that agrees with what is held is applied as
         nothing at all.
 
-        Constructed by writing the held value back to the store verbatim,
-        which is the same thing the interleaving above produces and is
-        deterministic."""
+        Constructed by announcing the entity without writing it, so the store
+        answers with exactly what this instance holds - the same thing the
+        interleaving above produces, and deterministic. (Writing the held
+        value back would not do: the store stamps every write it applies
+        with a fresh revision, so that is a change.)"""
         one, two = instances(), instances()
         one.add_nodes(
             [Node(id="c", type=NodeType.ACTOR, name="Mine", embedding=[0.5, 0.25])], []
@@ -520,8 +529,14 @@ class TestTwoInstancesWritingTheSameEntity:
         try:
             reader = PostgresGraphPersistenceBackend(DSN, schema=schema)
             try:
-                doc = {n["id"]: n for n in reader.load_graph_data()["nodes"]}["c"]
-                reader.upsert_node(doc)
+                with psycopg.connect(DSN, autocommit=True) as conn:
+                    conn.execute(
+                        "SELECT pg_notify(%s, %s)",
+                        (
+                            reader._channel,
+                            reader._encode([EntityOperation.delete_node("c")]),
+                        ),
+                    )
                 # The assertion is an ABSENCE, so it needs a barrier rather
                 # than a wait: a second write, announced on the same channel
                 # after the first, whose arrival proves the first was already

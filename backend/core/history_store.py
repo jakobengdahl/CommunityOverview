@@ -57,6 +57,11 @@ _REVERSE_CHUNK_BYTES = 64 * 1024
 # instead of its raw id.
 _HISTORY_DISPLAY_KEYS = frozenset({"name", "label"})
 
+# Moves on every write, so it is in every update's patch, and says nothing a
+# reader of the history wants to see as a change. Kept in create and delete
+# snapshots; left out of an update's patch, and so out of its projection.
+_HISTORY_PATCH_SILENT_KEYS = frozenset({"revision"})
+
 # Never durable in history, at any size. Vectors belong in the embedding
 # sidecar; a copy here would put them back into every mutation record.
 _HISTORY_EXCLUDED_KEYS = frozenset({"embedding"})
@@ -140,13 +145,20 @@ def event_to_history_record(event: "Event") -> Dict[str, Any]:
     before = _without_excluded(event.entity.before)
     after = _without_excluded(event.entity.after)
     patch = _without_excluded(event.entity.patch)
+    # Whether the event carried a patch at all, before the silent keys go: a
+    # write that changed nothing but its revision leaves an empty patch, and
+    # must still be projected, or its snapshots would show the revision as
+    # the change.
+    projected = bool(patch)
+    if isinstance(patch, dict) and _HISTORY_PATCH_SILENT_KEYS.intersection(patch):
+        patch = {k: v for k, v in patch.items() if k not in _HISTORY_PATCH_SILENT_KEYS}
 
     # An update's patch already names every field that changed, and the history
     # views read only those fields plus the display name off the snapshots. The
     # rest of a full before/after pair is bulk no reader looks at, so keep the
     # projection and drop it. Creates and deletes carry no patch and keep their
     # whole snapshot: it is the only description of what appeared or vanished.
-    if patch:
+    if projected:
         retained = frozenset(patch) | _HISTORY_DISPLAY_KEYS
         before = _project(before, retained)
         after = _project(after, retained)

@@ -17,6 +17,21 @@ Usage:
     python3 scripts/measure_capacity.py                         # file backend
     python3 scripts/measure_capacity.py --sizes 5000,20000
     CO_TEST_POSTGRES_DSN=... python3 scripts/measure_capacity.py --postgres
+    CO_TEST_POSTGRES_DSN=... python3 scripts/measure_capacity.py --postgres --writes
+    CO_TEST_POSTGRES_DSN=... python3 scripts/measure_capacity.py --postgres --writes \
+        --code-root /path/to/another/checkout      # "before": an older build
+
+`--writes` measures what a write costs its caller instead of what the graph
+costs to hold: p50/p95 of a single `update_node`, of `add_nodes` with 100 and
+with 1000 nodes, and of two reads taken while another thread writes
+continuously, against the same reads taken idle. It exists because entity
+revisions (docs/SESSION_OVERLAY_CONTRACT.md §4.4) make every write to a shared
+store wait for the store, where it used to return once queued.
+
+`--code-root` runs the measuring processes against another checkout's
+`backend/` - the way to get a "before" figure from a build without that
+change, using this same harness. Only public `GraphStorage` calls are made,
+so any build since the PostgreSQL backend landed can be measured.
 
 What it does NOT measure, and why: semantic search. The base install carries
 no ML stack by deliberate policy (`requirements-ml.txt` is separate), so
@@ -28,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import random
 import shutil
@@ -41,7 +57,10 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT))
+# The code under measurement. Defaults to the checkout this script is in;
+# `--code-root` points the measuring processes at another one.
+CODE_ROOT = Path(os.environ.get("CO_CAPACITY_CODE_ROOT") or REPO_ROOT)
+sys.path.insert(0, str(CODE_ROOT))
 
 DEFAULT_SIZES = (5_000, 20_000, 50_000)
 
@@ -271,6 +290,134 @@ def measure_one(
     return result
 
 
+def _percentiles(samples_ms: List[float]) -> Dict[str, float]:
+    """p50 and p95 of a sample, nearest-rank, in milliseconds.
+
+    Nearest-rank rather than interpolated so each figure is a latency some
+    call actually had. With fewer than 20 samples p95 is the maximum, which
+    is what it should say about so few.
+    """
+    ordered = sorted(samples_ms)
+
+    def rank(q: float) -> float:
+        index = min(len(ordered), max(1, math.ceil(q * len(ordered)))) - 1
+        return round(ordered[index], 2)
+
+    return {"p50": rank(0.50), "p95": rank(0.95)}
+
+
+def _timed(fn) -> float:
+    started = time.perf_counter()
+    fn()
+    return (time.perf_counter() - started) * 1000
+
+
+def measure_writes(
+    backend_kind: str,
+    size: int,
+    dsn: str | None,
+    workdir: str,
+    schema: str,
+    hub: str,
+    updates: int = 200,
+    reads: int = 200,
+) -> Dict[str, Any]:
+    """What a write costs the caller, and what it costs a reader meanwhile.
+
+    Every figure is the caller's own wall clock around one public call, which
+    is the latency a REST or MCP request sees beneath its own overhead. Runs
+    in its own process against a seeded store, like `measure_one`.
+    """
+    import threading
+
+    from backend.core.models import Node
+    from backend.core.storage import GraphStorage
+
+    storage = GraphStorage(
+        persistence_backend=_backend_factory(backend_kind, workdir, schema, dsn)()
+    )
+    rng = random.Random(7)
+    node_ids = list(storage.nodes)
+
+    def drain() -> None:
+        # A build that queues writes would otherwise carry this phase's
+        # backlog into the next one's timings.
+        storage._io_executor.submit(lambda: None).result()
+
+    update_ms = [
+        _timed(
+            lambda i=i: storage.update_node(
+                rng.choice(node_ids), {"summary": f"capacity update {i}"}
+            )
+        )
+        for i in range(updates)
+    ]
+    drain()
+
+    def batch(count: int, tag: str) -> List[Node]:
+        return [
+            Node(
+                id=f"{tag}-{uuid.uuid4().hex[:12]}",
+                type="Actor",
+                name=" ".join(rng.sample(WORDS, 4)),
+                description=" ".join(rng.choices(WORDS, k=25)),
+            )
+            for _ in range(count)
+        ]
+
+    add_100_ms = []
+    for _ in range(10):
+        nodes = batch(100, "b100")
+        add_100_ms.append(_timed(lambda: storage.add_nodes(nodes, [])))
+        drain()
+    add_1000_ms = []
+    for _ in range(5):
+        nodes = batch(1000, "b1000")
+        add_1000_ms.append(_timed(lambda: storage.add_nodes(nodes, [])))
+        drain()
+
+    def read_search() -> None:
+        storage.search_nodes(RARE_TOKEN, limit=20)
+
+    def read_traverse() -> None:
+        storage.get_related_nodes(hub, depth=1)
+
+    idle_search = [_timed(read_search) for _ in range(reads)]
+    idle_traverse = [_timed(read_traverse) for _ in range(reads)]
+
+    stop = threading.Event()
+    written = [0]
+
+    def writer() -> None:
+        while not stop.is_set():
+            storage.update_node(rng.choice(node_ids), {"summary": "concurrent"})
+            written[0] += 1
+
+    thread = threading.Thread(target=writer, daemon=True)
+    thread.start()
+    try:
+        busy_search = [_timed(read_search) for _ in range(reads)]
+        busy_traverse = [_timed(read_traverse) for _ in range(reads)]
+    finally:
+        stop.set()
+        thread.join()
+    drain()
+    storage.shutdown_events()
+
+    return {
+        "backend": backend_kind,
+        "nodes": size,
+        "update_node_ms": _percentiles(update_ms),
+        "add_nodes_100_ms": _percentiles(add_100_ms),
+        "add_nodes_1000_ms": _percentiles(add_1000_ms),
+        "search_idle_ms": _percentiles(idle_search),
+        "search_under_writes_ms": _percentiles(busy_search),
+        "traverse_d1_idle_ms": _percentiles(idle_traverse),
+        "traverse_d1_under_writes_ms": _percentiles(busy_traverse),
+        "concurrent_writes": written[0],
+    }
+
+
 def _spawn(phase: str, payload: Dict[str, Any], dsn: str | None) -> Dict[str, Any]:
     """Run one phase in a fresh interpreter and read its JSON line back."""
     argv = [
@@ -280,6 +427,7 @@ def _spawn(phase: str, payload: Dict[str, Any], dsn: str | None) -> Dict[str, An
         json.dumps(payload),
     ]
     env = dict(os.environ)
+    env["CO_CAPACITY_CODE_ROOT"] = str(CODE_ROOT)
     if dsn:
         env["CO_TEST_POSTGRES_DSN"] = dsn
     completed = subprocess.run(argv, capture_output=True, text=True, env=env)
@@ -295,7 +443,9 @@ def _spawn(phase: str, payload: Dict[str, Any], dsn: str | None) -> Dict[str, An
     raise SystemExit(f"{phase} produced no result for {payload['backend']}")
 
 
-def _run_worker(backend_kind: str, size: int, dsn: str | None) -> Dict[str, Any]:
+def _run_worker(
+    backend_kind: str, size: int, dsn: str | None, writes: bool = False
+) -> Dict[str, Any]:
     """One (backend, size) pair, as two processes and a cleanup.
 
     The seeding process builds the fixture and exits; the measuring process
@@ -313,6 +463,8 @@ def _run_worker(backend_kind: str, size: int, dsn: str | None) -> Dict[str, Any]
     }
     try:
         seeded = _spawn("--seed", payload, dsn)
+        if writes:
+            return _spawn("--measure-writes", {**payload, "hub": seeded["hub"]}, dsn)
         measured = _spawn(
             "--measure",
             {**payload, "hub": seeded["hub"], "edges": seeded["edges"]},
@@ -406,6 +558,30 @@ def _print_table(rows: List[Dict[str, Any]]) -> None:
         print(_marginal(subset))
 
 
+WRITE_COLUMNS = (
+    ("update_node_ms", "update_node"),
+    ("add_nodes_100_ms", "add_nodes 100"),
+    ("add_nodes_1000_ms", "add_nodes 1000"),
+    ("search_idle_ms", "search idle"),
+    ("search_under_writes_ms", "search under writes"),
+    ("traverse_d1_idle_ms", "traverse d1 idle"),
+    ("traverse_d1_under_writes_ms", "traverse d1 under writes"),
+)
+
+
+def _print_write_table(rows: List[Dict[str, Any]]) -> None:
+    print(f"\nCode measured: {CODE_ROOT}\n")
+    print("| backend | nodes | operation | p50 ms | p95 ms |")
+    print("|---|---:|---|---:|---:|")
+    for row in rows:
+        for key, label in WRITE_COLUMNS:
+            figures = row[key]
+            print(
+                f"| {row['backend']} | {row['nodes']:,} | {label} "
+                f"| {figures['p50']} | {figures['p95']} |"
+            )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sizes", default=",".join(str(s) for s in DEFAULT_SIZES))
@@ -415,12 +591,26 @@ def main() -> int:
         help="also measure the PostgreSQL backend (needs CO_TEST_POSTGRES_DSN)",
     )
     parser.add_argument("--json", action="store_true", help="emit raw JSON rows")
+    parser.add_argument(
+        "--writes",
+        action="store_true",
+        help="measure write latency and reads under writes instead (default size 5000)",
+    )
+    parser.add_argument(
+        "--code-root",
+        metavar="PATH",
+        help="measure the backend/ of another checkout (a 'before' figure)",
+    )
     # The two phases are internal: the driver re-invokes this file with one of
     # them and a JSON payload. Kept out of --help because running a phase by
     # hand against a directory the driver did not create measures nothing.
     parser.add_argument("--seed", metavar="JSON", help=argparse.SUPPRESS)
     parser.add_argument("--measure", metavar="JSON", help=argparse.SUPPRESS)
+    parser.add_argument("--measure-writes", metavar="JSON", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.code_root:
+        global CODE_ROOT
+        CODE_ROOT = Path(args.code_root).resolve()
 
     dsn_env = os.environ.get("CO_TEST_POSTGRES_DSN")
     if args.seed:
@@ -449,7 +639,24 @@ def main() -> int:
             )
         )
         return 0
+    if args.measure_writes:
+        job = json.loads(args.measure_writes)
+        print(
+            json.dumps(
+                measure_writes(
+                    job["backend"],
+                    job["size"],
+                    dsn_env,
+                    job["workdir"],
+                    job["schema"],
+                    job["hub"],
+                )
+            )
+        )
+        return 0
 
+    if args.writes and "--sizes" not in sys.argv:
+        args.sizes = "5000"
     sizes = [int(s) for s in args.sizes.split(",") if s.strip()]
     backends = ["file"]
     dsn = os.environ.get("CO_TEST_POSTGRES_DSN")
@@ -462,10 +669,12 @@ def main() -> int:
     for backend_kind in backends:
         for size in sizes:
             print(f"measuring {backend_kind} at {size:,} nodes ...", file=sys.stderr)
-            rows.append(_run_worker(backend_kind, size, dsn))
+            rows.append(_run_worker(backend_kind, size, dsn, writes=args.writes))
 
     if args.json:
         print(json.dumps(rows, indent=2))
+    elif args.writes:
+        _print_write_table(rows)
     else:
         _print_table(rows)
     return 0

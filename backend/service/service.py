@@ -267,6 +267,7 @@ class GraphService:
         event_origin: Optional[str] = None,
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
+        expect_absent: bool = False,
     ) -> Dict[str, Any]:
         return mutations.add_nodes(
             self._storage,
@@ -276,6 +277,7 @@ class GraphService:
             event_origin=event_origin,
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
+            expect_absent=expect_absent,
         )
 
     def resolve_teleport(
@@ -327,6 +329,7 @@ class GraphService:
         event_correlation_id: Optional[str] = None,
         metadata_merge: bool = False,
         expected_updated_at: Optional[str] = None,
+        expected_revision: Optional[int] = None,
     ) -> Dict[str, Any]:
         return mutations.update_node(
             self._storage,
@@ -338,6 +341,7 @@ class GraphService:
             event_correlation_id=event_correlation_id,
             metadata_merge=metadata_merge,
             expected_updated_at=expected_updated_at,
+            expected_revision=expected_revision,
         )
 
     def delete_nodes(
@@ -347,6 +351,7 @@ class GraphService:
         event_origin: Optional[str] = None,
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
+        expected_revisions: Optional[Dict[str, int]] = None,
     ) -> Dict[str, Any]:
         result = mutations.delete_nodes(
             self._storage,
@@ -356,6 +361,7 @@ class GraphService:
             event_origin=event_origin,
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
+            expected_revisions=expected_revisions,
         )
         # After the graph delete, never before: a crash in between leaves an
         # orphan attachment directory, not a live node without its files.
@@ -429,6 +435,7 @@ class GraphService:
         event_origin: Optional[str] = None,
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
+        expected_revision: Optional[int] = None,
     ) -> Dict[str, Any]:
         return mutations.update_edge(
             self._storage,
@@ -438,6 +445,7 @@ class GraphService:
             event_origin=event_origin,
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
+            expected_revision=expected_revision,
         )
 
     def delete_edge(
@@ -446,6 +454,7 @@ class GraphService:
         event_origin: Optional[str] = None,
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
+        expected_revision: Optional[int] = None,
     ) -> Dict[str, Any]:
         return mutations.delete_edge(
             self._storage,
@@ -454,6 +463,7 @@ class GraphService:
             event_origin=event_origin,
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
+            expected_revision=expected_revision,
         )
 
     def delete_edges(
