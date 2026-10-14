@@ -29,12 +29,12 @@ For standalone open-core operation, the baseline assumption remains:
 - the core does not require a built-in SaaS-style user directory or billing model
 - authentication can be handled externally by infrastructure or gateway controls such as IAP, reverse proxy auth, or equivalent perimeter patterns
 
-For the target SaaS model, tenant-aware operation should not imply one dedicated application stack per graph. It does mean one graph per core runtime process: a core process binds exactly one graph at boot, whichever persistence backend it uses ([ADR 0009](./adr/0009-dual-mode-graph-storage-seam.md)). Several graphs are served by running several core processes; no core process binds more than one graph of its own (federation lets a process search other graphs, which does not change the one graph it binds).
+For the target SaaS model, tenant-aware operation should not imply a dedicated application stack (its own environment, gateway and database server) per graph. Within the shared environment, though, each graph is bound by its own core runtime process or processes: a core process binds exactly one graph at boot, whichever persistence backend it uses ([ADR 0009](./adr/0009-dual-mode-graph-storage-seam.md)). Several graphs are served by running several core processes; no core process binds more than one graph of its own (federation lets a process search other graphs, which does not change the one graph it binds).
 
 The default target hosted architecture is:
 - one shared application/service environment per deployment tier or region
-- multiple graphs or customer workspaces served within that environment, each graph by its own core runtime process or processes (a shared persistence backend lets several processes serve the same graph; no process serves several graphs)
-- graph selection done outside the core, by a layer that routes each request to a process serving its graph
+- multiple graphs or customer workspaces served within that environment, each graph by its own core runtime process or processes (a shared persistence backend lets several processes bind the same graph; no process binds several graphs)
+- routing a request to a process that binds its graph done outside the core; the core's own request graph selection only narrows scope within that process's graph and its federation peers
 - search scope, rendering scope, and mutation scope within a graph controlled by application identity and authorization
 - isolation enforced through configuration, one store per graph, authorization, and data-layer controls
 
@@ -115,7 +115,7 @@ Target outcomes:
 - clear separation between shared application settings and per-context settings
 - safer loading of context-specific graph, schema, prompt, and auth-related configuration
 - easier automation of context provisioning outside the core
-- support for graph- or workspace-scoped configuration inside a shared hosted service, not only one-config-per-deployment assumptions
+- support for per-process graph or workspace configuration within a shared hosted environment, not only one-config-per-deployment assumptions
 
 Likely core changes:
 - stronger config layering rules
@@ -130,7 +130,7 @@ Target outcomes:
 - pluggable identity context for requests
 - clean boundaries between application roles and infrastructure access
 - ability to layer in stronger operator or admin models later
-- graph-scoped authorization decisions so shared service instances can restrict which graphs, nodes, and edges a user can access
+- graph-scoped authorization decisions so a core instance can restrict which graphs (its own and federated peers), nodes, and edges a user can access
 - workspace-aware graph selection that can work with personal workspaces and team workspaces managed by an external service layer
 
 Likely core changes:

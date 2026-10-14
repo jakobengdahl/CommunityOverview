@@ -1,6 +1,6 @@
 # ADR 0009 — Dual-mode graph storage: ratify the seam, keep one graph per runtime
 
-- **Status:** Accepted (Option A — see Decision)
+- **Status:** Accepted
 - **Date:** 2026-10-14 (proposed 2026-10-08)
 - **Scope:** Open-source core only
 - **Related:** [`PERSISTENCE_BACKENDS.md`](../PERSISTENCE_BACKENDS.md) (the seam
@@ -36,7 +36,7 @@ made no recommendation, the question stays open.
 | 2 | Enforce one-graph-per-runtime in code, state it publicly as the open-core boundary, or leave it a documented convention? | **Recommended default:** state it as a property of the persistence seam's contract (Proposal item 2), so a backend author reads it there rather than in the sizing notes. **Open:** whether to enforce it in code, and whether to state it as the open-core boundary. |
 | 3 | Should mutation history be made available under the shared backend? | **Recommended default:** the gap is the shared mode's to close, never closed by removing history from the file backend (Proposal item 3). **Open:** whether to close it, and at what cost. |
 | 4 | Does the unverified `graph_id` in attribution need fixing before there is a store identity to verify it against? | **Recommended default:** answer 1 — accept the field as caller-declared and read it that way (Proposal item 4). No check is added. |
-| 5 | Where does per-graph provisioning live? | **Recommended default:** outside the core, where [`EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md`](../EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md) already places tenant lifecycle management; the core does not grow it. |
+| 5 | Where does per-graph provisioning live? | **Open.** This ADR made no recommendation. It is unchanged by this ADR: [`EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md`](../EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md) already places tenant lifecycle management outside the core, and nothing here asks the core to grow it. |
 
 On acceptance, [`CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md`](../CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md)
 and the hosted-direction section of [`DATA_MANAGEMENT.md`](../DATA_MANAGEMENT.md)
@@ -560,8 +560,10 @@ With this proposal accepted:
   for the owner's decision; it was made on acceptance, together with the
   matching sentence in `DATA_MANAGEMENT.md`.
 - Audit attribution gains no new guarantee, and gains an accurate
-  description: an event's `graph_id` is documented as what the caller
-  declared rather than as which graph the write landed in. Item 4 explains
+  description: an event's `graph_id` is to be read as what the caller
+  declared rather than as which graph the write landed in (the recommended
+  default for sub-question 4). This ADR is where that reading is stated; no
+  consumer-facing event or attribution document states it yet. Item 4 explains
   why the core cannot currently promise the stronger reading, so a consumer
   of the audit trail is not left inferring it.
 - Nothing changes for an existing standalone deployment. No migration, no new
