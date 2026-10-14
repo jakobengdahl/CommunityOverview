@@ -82,8 +82,10 @@ round. It does not implement anything.
   integration kinds have no executor today, but any added later falls under
   the same rule.
 - **Agent runs write summaries.** The Agent worker logs each tool call's
-  input, per-turn reasoning text and the final response (truncated), and the
-  run history stores up to 500 characters of the run's final summary.
+  input, per-turn reasoning text and the final response (truncated). The run
+  history stores up to 500 characters of a successful run's final summary,
+  but a failed run's error or summary untruncated (`record_failure`), and
+  the worker logs a failed event's exception text.
 - **Chat replies render Markdown with remote images.**
   `frontend/web/src/components/MarkdownMessage.jsx` renders assistant text
   with `react-markdown` and its default URL transform, which strips unsafe
@@ -173,8 +175,10 @@ Extracted attachment text may be sent to the configured LLM provider:
 
 The rationale: the user could download the file and paste it into the chat,
 and `/ui/upload` already sends document text to the provider. Deployments
-whose provider must not see stored files turn the switch off, or deny the
-`read_node_attachment_content` target in their authorization hook.
+whose provider must not see stored files turn the switch off, or deny in
+their authorization hook the `read_node_attachment_content` target (file
+content) and the `list_node_attachments` target (file names, which the list
+tool also puts into the model's context).
 
 ### D2 — Embeddings are local only (owner decision)
 
@@ -206,10 +210,17 @@ the tool shape (the envelope where §1 requires it), not the REST shape.
 
 `attachment_tool_add` decodes its arguments and then runs the service's
 `async` `add_node_attachment` to completion on a private event loop in a
-helper thread (`asyncio.run` inside a thread-pool worker), because every
-caller is synchronous and the chat caller is already on the server's event
-loop thread. The store needs no particular loop: its locks are thread locks
-and its blocking work goes through `asyncio.to_thread`.
+helper thread, because every caller is synchronous and the chat caller is
+already on the server's event loop thread. The store needs no particular
+loop: its locks are thread locks and its blocking work goes through
+`asyncio.to_thread`. Request authorization lives in a `ContextVar`
+(`backend/runtime/authorization.py`), which a thread-pool worker does not
+inherit, so the helper submits `contextvars.copy_context().run(asyncio.run,
+coro)`: the hook evaluation, `uploaded_by` and the commit-time visibility
+re-check all see the caller's bound inputs. A regression test runs an add
+inside `use_request_authorization` with a known actor through each
+dispatcher, the confirmation route (§5) and proposal apply, and checks
+that a recording hook sees that actor and that `uploaded_by` is it.
 
 Each tool is subject to the permission model in §2 on every call; nothing
 here is reachable when §2 says no. When no attachment store is configured
@@ -230,7 +241,8 @@ Common rules:
 - Errors use the service layer's shape: `{"success": false, "error_code":
   "<code>", "error": "<message>"}`, the same keys as the access-denied
   result below, so a caller always reads the code from `error_code`. The
-  message is the service layer's text for that code or a fixed text, never
+  message is a fixed text per code — the wrapper replaces the service
+  layer's message, which can echo the node id — never an argument value,
   exception text, extracted content or a file name; an unexpected exception
   inside a wrapper is caught and returned as `failed` with a fixed message.
   Where ADR 0008 or its service layer has a code for the condition (§4, §5,
@@ -239,15 +251,18 @@ Common rules:
   is used. The codes new in this ADR are `too_many_nodes`,
   `invalid_arguments`,
   `attachment_too_large_for_tool`, `busy` (no extraction slot, §1
-  `read_node_attachment`), `failed` (an unexpected error) and
-  `confirmation_required` (§5).
+  `read_node_attachment`), `failed` (an unexpected error),
+  `confirmation_required` and `confirmation_unknown` (§5).
 - An authorization denial is the unchanged result of
   `access.build_access_denied_result`, with `"error_code": "access_denied"`,
   so `/execute_tool` keeps mapping it to `403`.
 - Every response that carries extracted text or stored file names
   (`list_node_attachments`, `read_node_attachment`,
   `search_node_attachments`) has `"untrusted_content": true` and the
-  envelope in §5.
+  envelope in §5. Write results (`add_node_attachment`,
+  `delete_node_attachment`) carry no envelope and do not taint: they echo
+  only the caller's own arguments (the stored name is the sanitised name
+  the caller sent).
 
 #### `list_node_attachments(node_id)` — read
 
@@ -317,9 +332,11 @@ nothing cached, and the same call can be retried.
   `too_large`, `timeout`, `failed` (§3). For anything but `ok`, `segments`
   is empty and `total_chars` is `0`.
 - `truncated` is `true` when the extractor stopped at the per-file character
-  cap (§3); the text after the cap is not reachable through any offset.
+  cap or the segment cap (§3); the text after the cap is not reachable
+  through any offset.
 
-Authorization target: `read_node_attachment_content` (action read).
+Authorization targets: `get_node_attachment` and
+`read_node_attachment_content` (action read), both required.
 
 #### `search_node_attachments(query, node_ids, top_k=8)` — read content
 
@@ -370,8 +387,9 @@ hits of a preceding `search_graph`.
   `false`). Boot refuses an `ATTACHMENT_RESULT_MAX_CHARS` smaller than
   `ATTACHMENT_CHUNK_CHARS`, so at least one passage always fits.
 
-Authorization target: `read_node_attachment_content` (action read),
-evaluated once per call; visibility is checked per node.
+Authorization targets: `get_node_attachment` and
+`read_node_attachment_content` (action read), both required, evaluated once
+per call; visibility is checked per node.
 
 #### `add_node_attachment(node_id, filename, content_text=None, content_base64=None, content_type=None)` — write
 
@@ -415,21 +433,22 @@ target as the REST delete.
 | Tool | Action | Target |
 |---|---|---|
 | `list_node_attachments` | read | `list_node_attachments` |
-| `read_node_attachment` | read | `read_node_attachment_content` |
-| `search_node_attachments` | read | `read_node_attachment_content` |
+| `read_node_attachment` | read | `get_node_attachment` and `read_node_attachment_content` |
+| `search_node_attachments` | read | `get_node_attachment` and `read_node_attachment_content` |
 | `add_node_attachment` | mutate | `add_node_attachment` |
 | `delete_node_attachment` | mutate | `delete_node_attachment` |
 
 `read_node_attachment_content` is new and is deliberately distinct from the
-REST download's `get_node_attachment`. A hook can allow people to download
-files while refusing to put their text into a model's context, or the other
-way round. For that to hold, each tool evaluates **only** the target in this
-table: read and search do not go through `open_node_attachment` or
-`list_node_attachments` (which evaluate `get_node_attachment` and
-`list_node_attachments`). They use a new service function that evaluates
-`read_node_attachment_content`, resolves and checks visibility of the node
-as `_authorize_and_resolve` does, and then reads the index and the bytes
-from the store directly.
+REST download's `get_node_attachment`, so a hook can allow people to
+download files while refusing to put their text into a model's context.
+Read and search require **both** targets to allow: they evaluate
+`get_node_attachment` and then `read_node_attachment_content`, and refuse
+with `access_denied` unless both pass. A deployment's existing hook that
+refuses some users downloads therefore keeps refusing them file text after
+an upgrade, even if it does not know the new target. They use a new
+service function that evaluates the two targets, resolves the node and
+checks its visibility as `_authorize_and_resolve` does, and then reads the
+index and the bytes from the store directly.
 
 ### 2. Permission model
 
@@ -447,7 +466,7 @@ not waste turns) and, authoritatively, where the call is executed.
 
 | Setting | Values | Default | Meaning |
 |---|---|---|---|
-| `ATTACHMENT_CONTENT_ACCESS` | `off`, `read`, `read_write` | `read_write` | Instance ceiling for every caller. `off` is the single switch that stops attachment tools — and so any attachment text reaching any LLM — for the assistant, Agents, kiosks and MCP alike. The default grants nothing by itself; it only does not cap. |
+| `ATTACHMENT_CONTENT_ACCESS` | `off`, `read`, `read_write` | `read_write` | Instance ceiling for every caller. `off` is the single switch that stops attachment tools — and so any attachment text reaching any LLM — for the assistant, Agents, kiosks and MCP alike. The default grants nothing by itself; it only does not cap. Agents' `FS` integration could otherwise read the stored blobs past this switch, so boot refuses an `AGENTS_WORKSPACE_DIR` that contains, or lies inside, the attachment root (`ATTACHMENT_DIR` or the store's default root). |
 | `ASSISTANT_ATTACHMENT_ACCESS` | `off`, `read`, `read_write` | `read` | What the interactive assistant gets (D1). Writes need an explicit `read_write`. |
 | `MCP_ATTACHMENT_TOOLS` | `off`, `read`, `read_write` | `off` | Which attachment tools the MCP mount registers for external MCP clients. `off` registers none. |
 
@@ -465,10 +484,12 @@ An Agent node gains `metadata.attachment_access` with values `none`, `read`,
 `read_write`; **the default is `none`**. A value outside the three is
 treated as `none`, and the Agent's config load logs a warning.
 
-Setting `metadata.attachment_access` is an ordinary `update_node` on the
-Agent node, under the authorization hook like any other edit: whoever may
-edit an Agent may grant it attachment access, so granting it is exactly as
-privileged as editing the Agent.
+Setting or changing `metadata.attachment_access` — through `add_nodes`,
+`update_node` or a graph import — additionally evaluates a dedicated mutate
+target, `grant_agent_attachment_access`, and the write is refused unless it
+allows. The hook context carries no resource id, so this target is what
+lets a hook keep people who may edit nodes from granting Agents file
+access.
 
 It is enforced in `AutonomyGate.wrap` and `filter_tool_definitions`
 **independently of `tool_allowlist`**:
@@ -508,11 +529,12 @@ Agent reads can reappear in its run summary and its proposals; so the
 `/agents/*` read routes (`GET /agents/runs`, `/agents/runs/{id}`,
 `/agents/proposals`, `/agents/proposals/{id}`) run inside
 `use_request_authorization` and evaluate a new target, `read_agent_runs`
-(action read), in the same change that binds approve and reject. A hook that
-refuses a user `read_node_attachment_content` should refuse that user
-`read_agent_runs` for Agents that hold an attachment grant, and editing such
-Agents; with the default permissive hook, everyone who can reach the
-`/agents/*` routes can read what granted Agents quoted.
+(action read), in the same change that binds approve and reject. The hook
+context names no Agent, so the decision is for all Agents at once: a hook
+that refuses a user `read_node_attachment_content` refuses that user
+`read_agent_runs` (and `grant_agent_attachment_access`) as well. With the
+default permissive hook, everyone who can reach the `/agents/*` routes can
+read what granted Agents quoted.
 
 #### Kiosks
 
@@ -555,9 +577,14 @@ tools; without it a per-user hook could not tell users apart.
 `MCP_ATTACHMENT_TOOLS`, capped by the ceiling, decides which attachment tools
 `register_mcp_tools` registers at all. It filters the tool map itself, not
 only the mount, so the MCP mount and `POST /execute_tool` always expose the
-same set. None of the attachment tools is added to `SAFE_TOOLS`, so
-`/execute_tool` refuses them when authentication is off. Both routes already
-run inside `use_request_authorization`, so the hook decides per request.
+same set. None of the attachment tools is added to `SAFE_TOOLS`. That is
+not enough on its own: the MCP mount applies no `SAFE_TOOLS` filter, and
+with `MCP_AUTH_ENABLED=false` the auth middleware skips both `/mcp` and
+`/execute_tool` while `auth_active` stays true. So boot refuses
+`MCP_ATTACHMENT_TOOLS` other than `off` unless the MCP paths are
+authenticated (authentication on and `MCP_AUTH_ENABLED` not `false`). Both
+routes already run inside `use_request_authorization`, so the hook decides
+per request.
 
 #### Per-caller access table
 
@@ -570,8 +597,8 @@ per-node visibility on every call.
 | Interactive assistant | `ASSISTANT_ATTACHMENT_ACCESS` | `read` — a named default set by D1, logged at boot; not inferred from a missing check | only with `read_write` |
 | Agent | `metadata.attachment_access`, and the allowlist when non-empty | `none` — no attachment tool, even with an empty allowlist | only with `read_write`, and then always a proposal or blocked |
 | Kiosk | non-empty `tool_allowlist` naming the tool | none — no attachment tool | only when the allowlist names the write tool and the target node's type has `update` in `node_type_permissions` |
-| External MCP client | `MCP_ATTACHMENT_TOOLS` | `off` — not registered | only with `read_write` |
-| `POST /execute_tool` | `MCP_ATTACHMENT_TOOLS` (same tool map), and authentication on | `off` — not in the map; with authentication off, refused as not in `SAFE_TOOLS` | only with `read_write` |
+| External MCP client | `MCP_ATTACHMENT_TOOLS`, allowed only with the MCP paths authenticated | `off` — not registered | only with `read_write` |
+| `POST /execute_tool` | `MCP_ATTACHMENT_TOOLS` (same tool map), same boot rule | `off` — not in the map | only with `read_write` |
 
 No row grants an attachment tool because an allowlist is empty or a setting
 is absent, except the assistant's `read`, which is the owner's explicit
@@ -683,6 +710,11 @@ which may be `0` and must be smaller than `ATTACHMENT_CHUNK_CHARS`, as
 | `ATTACHMENT_CONFIRMATION_TTL_SECONDS` | `600` | lifetime of a confirmation token (§5) |
 | `ATTACHMENT_PENDING_ACTIONS_PER_TURN` | `5` | pending actions one tainted turn may record (§5) |
 | `ATTACHMENT_PENDING_ACTIONS_MAX` | `1000` | pending actions held per server process, oldest evicted first (§5) |
+| `ATTACHMENT_CONVERSATION_STATE_TTL_SECONDS` | `86400` | age after which a `conversation_state` token no longer vouches for a clean conversation (§5) |
+
+`ATTACHMENT_CONVERSATION_STATE_KEY` (§5) is a secret, not a limit: it comes
+from the environment like other secrets, and when it is unset each process
+generates a random key at boot.
 
 The extractor's input is already bounded by `ATTACHMENT_MAX_FILE_BYTES`
 (ADR 0008 §4). The chunking, re-rank and top-k defaults are those of
@@ -741,8 +773,8 @@ assistant's system prompt states the same rule.
 **Taint guard (assistant and kiosk).** In the chat routes, a *turn* is one
 `ChatService.process_message` call: one user message and the tool loop it
 starts. A turn is **tainted** once any tool result in it has
-`untrusted_content: true`, and from its start when the request says the
-conversation is already tainted (below).
+`untrusted_content: true`, and from its start when the request continues a
+conversation the server cannot vouch is clean (below).
 
 In a tainted turn, only the tools in `ATTACHMENT_TAINT_PERMITTED_TOOLS` run.
 That set is a fixed constant in code, not a setting, and lists only tools
@@ -779,9 +811,13 @@ One turn records at most `ATTACHMENT_PENDING_ACTIONS_PER_TURN` (default `5`);
 further refused calls in that turn get `confirmation_required` with no
 pending action. The in-memory store holds at most
 `ATTACHMENT_PENDING_ACTIONS_MAX` (default `1000`) per server process and
-evicts the oldest first. Pending actions are not persisted. An expired,
-evicted, already used or unknown token is refused by the confirmation
-route.
+evicts the oldest first. Pending actions are not persisted and live in the
+process that minted them, so a deployment that runs several server
+processes routes a conversation's requests to one process (sticky
+sessions) or runs a single worker. An expired, evicted, already used or
+unknown token — including one minted by another process — is refused by
+the confirmation route with error `confirmation_unknown`, which the UI
+shows as "send the request again".
 
 - **What the model sees.** Its tool result carries only
   `confirmation_required` and a short message. The token and the bound
@@ -793,8 +829,11 @@ route.
   that file content was in the conversation.
 - **How it runs.** Only a UI action of the user's runs it, by posting the
   token to a confirmation route of the chat router. That route refuses when
-  the confirming request's actor differs from the recorded one. Otherwise it
-  re-resolves the recorded caller context and executes exactly the bound
+  the confirming request's actor differs from the recorded one, and when
+  the recorded caller context no longer resolves to the same thing: a
+  kiosk whose collection is now missing, renamed or unreadable (including
+  the fail-closed path) is refused, never run as the ordinary assistant.
+  Otherwise it re-resolves the recorded caller context and executes exactly the bound
   tool and arguments, once, inside `use_request_authorization` for the
   confirming request, through the same path the turn would have used: the
   §2 permission layers, the allowlist gate and, for a kiosk, the
@@ -811,26 +850,45 @@ an exact list written out in the test, so adding any tool to it forces a
 reviewed edit of that test rather than an inherited classification.
 
 **The taint outlives the turn.** Quoted file text stays in the conversation
-history the client sends back, so the next user message is not clean. Each
-chat response therefore carries `untrusted_content_used: true` when its turn
-was tainted. The web client keeps that as a conversation-level flag and sends
-`conversation_tainted: true` with every later request of that conversation;
-the server treats such a request as tainted from its start. The client
-attaches it in the one shared request function (`api.sendChatMessage`),
-not at each call site. `sendChatMessage` is stateless today, so every call
-site passes a conversation key (`options.conversationId`); `api.js` keeps
-the taint flags in a module-level map by that key, sets the flag when a
-response carries `untrusted_content_used: true`, and sends it on every
-later request with the same key. The chat panel and the kiosk view each
-generate a fresh key when they start a new conversation (clearing the chat,
-opening a kiosk), which is what "a new conversation" means here. A test at
-the `api.js` level checks that a request without a key is refused by the
+history the client sends back, so the next user message is not clean. The
+server, not the client, decides whether a request continues a tainted
+conversation, and a client that drops or alters what it was given gets the
+tainted treatment:
+
+- Each chat response carries `conversation_state`, a token the server signs
+  (HMAC-SHA-256) over: whether the conversation is tainted, the request
+  actor, the time it was issued, and a SHA-256 over the conversation as the
+  server saw it after this turn (the role and content of every message it
+  received, plus the reply it returned). It also carries
+  `untrusted_content_used: true` when the turn was tainted, for the UI.
+- A request whose `messages` hold no earlier assistant message is a new
+  conversation and starts clean. Any other request is treated as tainted
+  from its start **unless** it carries a `conversation_state` with a valid
+  signature, the same actor, an issue time within
+  `ATTACHMENT_CONVERSATION_STATE_TTL_SECONDS` (default `86400`), a hash
+  equal to that of its own messages up to and including the last assistant
+  message, and `tainted: false`. So a dropped, forged, expired or replayed
+  older token, or edited history, all count as tainted. Once tainted, the
+  server only ever issues tainted tokens for that conversation.
+- The signing key is `ATTACHMENT_CONVERSATION_STATE_KEY`. When it is unset,
+  each process generates a random key at boot; a token signed by another
+  process then fails verification, which errs towards tainted (more
+  confirmations, never fewer). Several processes that should share
+  conversations set the same key.
+
+The web client stores the latest `conversation_state` per conversation and
+sends it back. It does that in the one shared request function
+(`api.sendChatMessage`), not at each call site. `sendChatMessage` is
+stateless today, so every call site passes a conversation key
+(`options.conversationId`); `api.js` keeps the latest token in a
+module-level map by that key and sends it on every later request with the
+same key. The chat panel and the kiosk view each generate a fresh key when
+they start a new conversation (clearing the chat, opening a kiosk). A test
+at the `api.js` level checks that a request without a key is refused by the
 function, and a test per component checks that every `sendChatMessage`
 call site — chat, approve, reject, confirm, form submit, kiosk messages and
-the kiosk kickstart — passes the conversation's key. The flag lives in
-the user's own client, which is adequate here: the adversary is the file
-content, not the user's browser, and a client that drops the flag removes
-protection only from its own user. A new conversation starts clean.
+the kiosk kickstart — passes the conversation's key. Server tests cover
+each case of the second bullet.
 
 **Rendering.** Assistant and kiosk replies are rendered without loading
 remote resources: the chat Markdown renderer
@@ -843,15 +901,20 @@ involved. Same-origin images are not allowed either:
 `![](/any-path?d=<file text>)` would put the text into this server's and
 any proxy's access logs, outside the redaction of §6. A
 Markdown link can do the same with one click, because its text can hide its
-target. So a link to another origin, and any link whose target carries a
-query string or a fragment, is rendered with its full target URL as
-visible text, and every link gets `rel="noreferrer noopener"`. "Another origin" is
+target, and a same-origin path can carry text into this server's access
+logs as well as a query string can. So every link whose visible text is not
+exactly its target URL is rendered with its full target URL as visible text
+beside it, and every link gets `rel="noreferrer noopener"`. Links to
+another origin are additionally marked as external. "Another origin" is
 decided by resolving the URL against the page and comparing scheme, host
 and port. A test renders replies with a remote image, a same-origin image
 with a query string, and off-origin links written as absolute,
 protocol-relative (`//attacker.example/x`), backslash (`/\attacker.example`)
-and same-host-other-port URLs, and a same-origin link with a query
-string, and checks both rules for each. This
+and same-host-other-port URLs, a same-origin link with a query string and
+one with only a path, and KaTeX input using `\href`, `\url` and
+`\includegraphics` (safe today only because `rehype-katex` runs with
+KaTeX's default `trust: false`), and checks for each that no element with a
+remote `src` is rendered and that every link's target is visible. This
 change lands **before or with** the read tools.
 
 **Agents.** Every mutating `GRAPH` tool is already blocked or turned into a
@@ -891,8 +954,8 @@ structured log record, at INFO, to the `attachments.audit` logger:
 | `event` | `attachment_content_read`, `attachment_added` or `attachment_deleted` |
 | `tool` | the tool name |
 | `actor` | `{type, id}`: `user` (from the request actor, or `null` when unauthenticated), `agent` (the Agent id), `kiosk` (the collection short name) or `mcp` (the request actor) |
-| `node_id` | the node (`null` on a search-level record) |
-| `attachment_id` | the file (`null` on a search-level record) |
+| `node_id` | the node, only once it has resolved to a visible node; otherwise `null` |
+| `attachment_id` | the file, only when it matches the id pattern and is in the node's index; otherwise `null` |
 | `sha256` | the stored file's SHA-256 |
 | `chars` | characters of extracted text returned to the caller (reads); `0` for writes |
 | `size` | bytes stored (`attachment_added` only) |
@@ -920,14 +983,19 @@ this. The sites that write tool arguments or model text are:
 - the Agent LLM client's `Tool … failed: …` warning in
   `backend/agents/llm_client.py`;
 - the Agent worker's execution trace (tool inputs, per-turn reasoning, final
-  response) in `backend/agents/worker.py`.
+  response), its `Event … failed: …` line and the failure summary it hands
+  to `record_failure`, in `backend/agents/worker.py`;
+- the Agent LLM client's `LLM call failed: …` line in
+  `backend/agents/llm_client.py`.
 
 At each of them, the five attachment tools are always logged by name and
 argument sizes only (`query` length, `content_text`/`content_base64`
 length), and no line records an attachment tool's result or exception
 text; their errors carry only the code and its fixed message (§1). In a tainted turn
-or run (§5), every tool call is logged that way, and reasoning and response
-text are not logged. A regression test covers every site.
+or run (§5), every tool call is logged that way, reasoning and response
+text are not logged, exception text is not logged, and a failed run's
+stored failure summary is a fixed text with the error class only, never
+truncated model output. A regression test covers every site.
 
 ### 7. Amendment to ADR 0008 §7
 
@@ -978,8 +1046,9 @@ binary bodies; the tools avoid it with bounded text or base64 arguments.
   history and the attachments themselves, which ADR 0008 owns.
 - **Model output can keep quoted text.** The model's own replies and
   summaries may quote passages. Where those are kept — the conversation in
-  the user's client, Agent run history (its final summary, up to 500
-  characters), proposals — the quotation is kept too. The guarantee of D2 is
+  the user's client, Agent run history (a successful run's final summary,
+  up to 500 characters; a tainted failed run stores only a fixed text, §6),
+  proposals — the quotation is kept too. The guarantee of D2 is
   that the server keeps no index or copy of extracted text of its own, not
   that no output ever quotes it.
 - **Proposals carry content.** An Agent's `add_node_attachment` proposal,
