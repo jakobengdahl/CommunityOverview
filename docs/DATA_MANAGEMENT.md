@@ -13,7 +13,14 @@ data/
     graph.journal.ndjson    # Mutations not yet folded into graph.json (see below)
     graph.embeddings.bin    # Embedding vectors for that graph (see below)
     graph.history.ndjson    # Mutation history sidecar
+    graph.attachments/      # Files attached to nodes (see below)
 ```
+
+`graph.attachments/` is the node attachment store
+([ADR 0008](adr/0008-node-attachment-storage.md)): one directory per node,
+named by a hash of the node id, holding an `index.json` and the files under
+server-minted ids. It is never part of `graph.json` or `GET /export`, so back
+it up on its own; `ATTACHMENT_DIR` moves it (see `backend/DEVELOPMENT.md`).
 
 ## How It Works
 
@@ -550,7 +557,7 @@ The current application still uses file-based graph persistence as the default r
 - early hosted-readiness work where the focus is on seams, contracts, and operational hooks
 
 For the long-term shared SaaS architecture, the target is different:
-- multiple graphs or workspaces should eventually be served by shared application/service instances
+- multiple graphs or workspaces should eventually be served within a shared application/service environment, each graph by its own core runtime process or processes — a core process binds exactly one graph, though federation can add search over others ([ADR 0009](./adr/0009-dual-mode-graph-storage-seam.md)), and routing a request to a process that binds its graph lives outside the core
 - user access to graphs should be controlled through application-managed identity and authorization
 - the storage layer should eventually support shared persistence with row-based or equivalent record-level access constraints
 

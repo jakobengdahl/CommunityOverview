@@ -88,6 +88,10 @@ data/active/sessions/
 *.history.ndjson
 *.journal.ndjson
 
+# Node attachment store - user files, written beside whichever graph file is
+# in use (ADR 0008), so match it by name too.
+*.attachments/
+
 # Embedding sidecar - derived data, written next to whichever graph file is in
 # use, so match it by name rather than by any one of those locations.
 *.embeddings.bin

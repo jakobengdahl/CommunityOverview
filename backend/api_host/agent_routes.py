@@ -72,11 +72,18 @@ def register_agent_routes(
 
         Each run records the trigger, agent, status, timestamps, correlation,
         attempts and terminal outcome, persisted behind the execution-store
-        seam so it survives a restart.
+        seam so it survives a restart. Only runs inside the configured read
+        window (export window, else retention) are returned.
         """
         return agent_registry.list_runs(
             agent_id=agent_id, kind=kind, status=status, limit=limit
         )
+
+    # Registered before /agents/runs/{run_id} so it is not read as a run id.
+    @app.get("/agents/runs/retention-policy")
+    async def agents_runs_retention_policy() -> Dict[str, Any]:
+        """Get the effective run-history retention policy and the last sweep."""
+        return agent_registry.get_run_retention_policy()
 
     @app.get("/agents/runs/{run_id}")
     async def agents_run_detail(run_id: str) -> Dict[str, Any]:

@@ -24,6 +24,7 @@ from .models import (
     ExecutionKind,
     ExecutionState,
     RetryPolicy,
+    redact_job,
     utcnow,
 )
 from .store import JobNotFoundError
@@ -192,6 +193,7 @@ class InMemoryExecutionStore:
         agent_id: Optional[str] = None,
         kind: Optional[ExecutionKind] = None,
         limit: Optional[int] = None,
+        created_after=None,
     ) -> List[ExecutionJob]:
         state_set = set(states) if states else None
         with self._lock:
@@ -201,11 +203,54 @@ class InMemoryExecutionStore:
                 if (state_set is None or job.state in state_set)
                 and (agent_id is None or job.agent_id == agent_id)
                 and (kind is None or job.kind == kind)
+                and (created_after is None or job.created_at > created_after)
             ]
         jobs.sort(key=lambda j: j.created_at, reverse=True)
         if limit is not None:
             jobs = jobs[:limit]
         return jobs
+
+    # ------------------------------------------------------------------
+    # Retention
+    # ------------------------------------------------------------------
+
+    def list_terminal_older_than(
+        self, cutoff, *, redacted: Optional[bool] = None
+    ) -> List[ExecutionJob]:
+        with self._lock:
+            jobs = [
+                job.copy()
+                for job in self._jobs.values()
+                if job.is_terminal
+                and job.terminal_at < cutoff
+                and (redacted is None or (job.redacted_at is not None) == redacted)
+            ]
+        jobs.sort(key=lambda j: j.terminal_at)
+        return jobs
+
+    def redact(self, job_ids: Sequence[str], *, now=None) -> int:
+        now = now or utcnow()
+        count = 0
+        with self._lock:
+            for job_id in set(job_ids):
+                job = self._jobs.get(job_id)
+                if job is None or not job.is_terminal or job.redacted_at is not None:
+                    continue
+                redact_job(job, now)
+                count += 1
+        return count
+
+    def purge(self, job_ids: Sequence[str]) -> int:
+        count = 0
+        with self._lock:
+            for job_id in set(job_ids):
+                job = self._jobs.get(job_id)
+                if job is None or not job.is_terminal:
+                    continue
+                del self._jobs[job_id]
+                self._by_key.pop(job.idempotency_key, None)
+                count += 1
+        return count
 
     # ------------------------------------------------------------------
     # Internal helpers (call under self._lock)
