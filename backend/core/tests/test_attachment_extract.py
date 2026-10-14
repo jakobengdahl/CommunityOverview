@@ -836,3 +836,78 @@ def test_g7_odt_comment_metadata_is_not_spliced_into_paragraph_text():
         "<text:p>Comment</text:p></office:annotation> text</text:p></office:text>"
     )
     assert _texts(extract(_odf(ae.ODT, body), ae.ODT)) == ["Body text", "Comment"]
+
+
+# --- Mutation-review survivors closed ----------------------------------------
+
+
+def test_g1_a_worker_exiting_non_zero_is_failed_even_with_valid_output():
+    code = (
+        'import sys; sys.stdout.write(\'{"status": "ok", "segments": [], '
+        '"truncated": false}\'); sys.exit(1)'
+    )
+    result = ae._run_worker(b"x", ae.TEXT, ExtractionLimits(), _fake_worker(code))
+    assert result == ae.ExtractionResult(ae.STATUS_FAILED, detail="worker_exit_1")
+
+
+def test_g1_an_unknown_worker_status_is_failed():
+    code = 'print(\'{"status": "bogus", "segments": [], "truncated": false}\')'
+    result = ae._run_worker(b"x", ae.TEXT, ExtractionLimits(), _fake_worker(code))
+    assert result == ae.ExtractionResult(ae.STATUS_FAILED, detail="worker_output")
+
+
+def test_g1_the_child_runs_under_its_address_space_limit():
+    data = b"word " * (10 * 1024 * 1024)  # 50 MiB of text, decoded to a larger str
+    limits = ExtractionLimits(
+        max_input_bytes=len(data), memory_limit_bytes=100 * 1024 * 1024
+    )
+    result = extract(data, ae.TEXT, limits)
+    assert result.status == ae.STATUS_FAILED
+
+
+def test_g2_total_ratio_is_checked_when_every_member_is_under_the_floor():
+    data = _zip({f"m{i}.xml": b"\0" * 600_000 for i in range(5)})
+    result = extract(data, ae.ODT)
+    assert (result.status, result.detail) == (ae.STATUS_TOO_LARGE, "zip_ratio")
+
+
+def test_g2_member_ratio_is_checked_when_the_total_ratio_is_low():
+    import os
+
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as archive:
+        archive.writestr("bomb.xml", b"\0" * 2_000_000, zipfile.ZIP_DEFLATED)
+        archive.writestr("noise.bin", os.urandom(3_000_000), zipfile.ZIP_STORED)
+    result = extract(out.getvalue(), ae.ODT)
+    assert (result.status, result.detail) == (ae.STATUS_TOO_LARGE, "zip_ratio")
+
+
+def test_g3_docx_dtd_in_a_relationships_part_is_refused():
+    rels = _rels([]).replace("?>", '?><!DOCTYPE x [<!ENTITY a "b">]>', 1)
+    data = _replace_member(_docx(), "word/_rels/document.xml.rels", rels)
+    assert extract(data, ae.DOCX).detail == "xml_dtd"
+
+
+def test_g3_xml_nested_past_the_parser_depth_limit_is_refused():
+    deep = "<a>" * 300 + "</a>" * 300
+    body = f"<office:text><text:p>{deep}</text:p></office:text>"
+    assert extract(_odf(ae.ODT, body), ae.ODT).status == ae.STATUS_FAILED
+
+
+def test_g4_bounded_join_terminates_on_endless_parts():
+    import itertools
+
+    assert len(ae._bounded_join(itertools.repeat("x"), "\n", 100)) == 101
+
+
+def test_g4_a_single_sheet_far_over_the_cap_is_cut_exactly():
+    rows = [[f"i:row{i:05d}"] for i in range(2000)]
+    result = extract(_xlsx({"Big": rows}), ae.XLSX, ExtractionLimits(max_chars=1000))
+    assert _total_chars(result) == 1000
+    assert result.truncated is True
+
+
+def test_g7_odf_space_runs_are_capped():
+    body = '<office:text><text:p>a<text:s text:c="900000000"/>b</text:p></office:text>'
+    result = extract(_odf(ae.ODT, body), ae.ODT)
+    assert _texts(result) == ["a" + " " * 100 + "b"]
