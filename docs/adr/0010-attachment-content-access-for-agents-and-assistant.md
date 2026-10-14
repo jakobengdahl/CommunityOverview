@@ -217,9 +217,9 @@ the tool shape (the envelope where §1 requires it), not the REST shape.
 
 `attachment_tool_add` decodes its arguments and then runs the service's
 `async` `add_node_attachment` to completion on a private event loop in a
-helper thread, because every caller is synchronous and some run on the
-server's event-loop thread (the MCP mount, the confirmation and approve
-routes). The store needs no particular
+helper thread, because every caller is synchronous and runs in a worker
+thread (§2: no attachment tool runs on the event loop), where nothing can
+`await`. The store needs no particular
 loop: its locks are thread locks and its blocking work goes through
 `asyncio.to_thread`. Request authorization lives in a `ContextVar`
 (`backend/runtime/authorization.py`), which a thread-pool worker does not
@@ -530,10 +530,16 @@ documentation states both.
 
 Adoption (`adopt_federated_node`) writes two local nodes from a remote
 node's metadata: the adopted copy and the local `federated::…` reference
-node. It strips `attachment_access` from both, so a federated source never
+node. It strips `attachment_access` from both, and removes attachment tool
+names from a copied `tool_allowlist` on both, so a federated source never
 brings a grant with it. Independently, the Agent config treats an Agent
-whose id starts with `federated::` as `attachment_access: none`. A test
-adopts a granted remote Agent node and checks both local nodes. The hook context carries no resource id, so this target is
+whose id starts with `federated::` as `attachment_access: none`, and a
+collection whose id starts with `federated::` (a cached remote node, which
+`search_graph` returns when federation is on, or a reference node) never
+grants an attachment tool, whatever its allowlist says. Tests adopt a
+granted remote Agent and a remote collection whose allowlist names an
+attachment tool and check both local nodes, and check that a cached remote
+collection grants nothing. The hook context carries no resource id, so this target is
 what lets a hook keep people who may edit nodes from granting Agents file
 access.
 
@@ -583,7 +589,8 @@ Agent reads can reappear in its run summary and its proposals; so the
 (action read), in the same change that binds approve and reject. Each run
 record and each proposal stores, when it is written, whether the Agent
 held a grant when the run started, whether the run read attachment content
-(`tainted`), and the ids of the nodes whose attachment content it read. For
+(`tainted`), and the ids of every node whose attachment tool result
+(list, read or search) the run received. For
 an entry whose stored grant flag or `tainted` is set, the routes evaluate
 `read_node_attachment_content` as well and require every recorded node to
 be visible under the reader's own graph narrowing
@@ -618,19 +625,24 @@ target node's type has `update` in the collection's
 
 Naming an attachment tool in a collection's `tool_allowlist` is a grant,
 so that write evaluates `grant_attachment_access` (above, under Agents).
-`ChatService` caches resolved collections for the life of the process; the
-cache is invalidated on every write to an `ActiveKnowledgeCollection` node,
-and the confirmation route (§5) resolves the collection without the cache,
-so a revoked allowlist entry or permission is refused on the next turn and
-on confirmation. A test revokes an entry and checks both.
+`ChatService` caches resolved collections for the life of the process, and
+another server process never sees this process's writes to the cache. So
+every attachment decision for a kiosk — offering a tool, executing it, and
+confirming a pending action (§5) — resolves the collection from storage
+without the cache, and a revoked allowlist entry or permission is refused
+on the next turn on every process. A test revokes an entry through storage
+directly (as another process would) and checks the next turn and a
+confirmation.
 
 Because the kiosk is a client-selected mode of `/ui/chat` (Context), its
 allowlist governs what the kiosk's model is offered, not what a determined
-client can reach. A deployment that serves a kiosk to people who must not
-read attachments sets `ASSISTANT_ATTACHMENT_ACCESS=off` (for clients that
-call `/ui/chat` without the collection), keeps attachment tools out of
-that kiosk's allowlist, and lets only trusted people hold
-`grant_attachment_access`; or it denies `read_node_attachment_content` in
+client can reach: the client names the collection, so anyone who can
+reach `/ui/chat` and knows or guesses another collection's short name gets
+that collection's tools under their own access. A deployment that serves a
+kiosk to people who must not read attachments sets
+`ASSISTANT_ATTACHMENT_ACCESS=off` (for clients that call `/ui/chat` without
+a collection) and keeps attachment tools out of **every** collection's
+allowlist on the instance; or it denies `read_node_attachment_content` in
 its authorization hook, which closes every path at once.
 
 #### The interactive assistant
@@ -656,8 +668,9 @@ three is part of the permission work and lands **before or with** the read
 tools; without it a per-user hook could not tell users apart.
 
 Extraction and search can take seconds, so no attachment tool runs on the
-server's event loop. These routes and `POST /execute_tool` run the chat
-call (or the tool) through `asyncio.to_thread`, which carries the bound
+server's event loop. These routes, `POST /execute_tool`, the confirmation
+route (§5) and proposal apply on the approve route run the chat call (or
+the tool) through `asyncio.to_thread`, which carries the bound
 authorization context with it. The MCP mount calls synchronous tools
 directly on the loop (`mcp` 1.x), so the five tools are registered with
 the MCP server as `async` shims that call the synchronous wrapper through
@@ -1094,6 +1107,16 @@ this. The sites that write tool arguments or model text are:
 
 - `ChatProcessor`'s tool-call line (`Executing tool: … with input: …`, full
   input at INFO) in `backend/ui/chat_logic.py`;
+- `search_graph`'s `SEARCH: query='…'` line in `backend/service/queries.py`
+  (`search_graph` is permitted in tainted turns and runs, so an injected
+  passage can put file text into its query); in a tainted turn or run it
+  logs the query's length only;
+- the route-level `logger.exception` lines of `/ui/chat` and
+  `/ui/chat/simple` in `backend/ui/rest_api.py`, and the governance lines
+  `failed to record proposal` (`backend/agents/governance/gate.py`) and
+  `applying proposal … failed` (`backend/agents/governance/manager.py`),
+  which log exception text from calls that can carry attachment arguments;
+  they log the error class only;
 - `ChatProcessor`'s tool-error paths, which put `str(e)` into the tool
   result and the log, in `backend/ui/chat_logic.py`;
 - `MCPLoader`'s tool-call line and its graph-tool error line, both through
