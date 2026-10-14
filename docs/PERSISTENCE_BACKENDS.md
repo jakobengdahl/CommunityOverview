@@ -489,7 +489,7 @@ declare `revision_enforcement`) keeps nothing new. `GraphStorage` holds the
 counter and checks expectations against its own model. What it needs
 persisted is a **reservation**: `revision_reservation` in the graph metadata,
 the ceiling below which values may already have been handed out. It is raised
-by a block (`REVISION_RESERVATION_BLOCK`, 1000) before any value at or above
+by a block (`REVISION_RESERVATION_BLOCK`, 100,000) before any value at or above
 it is used, durably and waited for, so a crash skips values rather than
 repeating one; a load starts the counter at the reservation or one past the
 highest revision held, whichever is higher. A backend may implement

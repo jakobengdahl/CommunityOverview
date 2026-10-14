@@ -251,9 +251,12 @@ class GraphStorage:
 
     # How far a single-writer store's revision reservation is raised at a
     # time (docs/SESSION_OVERLAY_CONTRACT.md §4.2). Each raise is one durable
-    # write of its own; a crash skips at most this many values, never reuses
-    # one.
-    REVISION_RESERVATION_BLOCK = 1000
+    # write of its own - on the file backend a checkpoint of the whole graph -
+    # so the block is large: at 1,000 every 1,000-node add_nodes paid for a
+    # checkpoint, measured as more than doubling its latency. A crash or a
+    # restart skips at most this many values and never reuses one; revisions
+    # are only compared, so skipped values cost nothing.
+    REVISION_RESERVATION_BLOCK = 100_000
 
     # How long a shared-store write that failed is given to finish landing
     # before the second evidence read (§4.4). It has to exceed the store's own
