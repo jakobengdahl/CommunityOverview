@@ -37,10 +37,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Sequence, Union
 
-from .models import ExecutionJob, ExecutionKind, ExecutionState, RetryPolicy, utcnow
+from .models import (
+    ExecutionJob,
+    ExecutionKind,
+    ExecutionState,
+    RetryPolicy,
+    redact_job,
+    utcnow,
+)
 from .store import JobNotFoundError
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
+
+_TERMINAL_VALUES = (
+    ExecutionState.SUCCEEDED.value,
+    ExecutionState.DEAD_LETTER.value,
+    ExecutionState.CANCELLED.value,
+)
+
 
 _CREATE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS execution_jobs (
@@ -71,6 +85,9 @@ CREATE INDEX IF NOT EXISTS idx_execution_jobs_runnable
 CREATE INDEX IF NOT EXISTS idx_execution_jobs_created
     ON execution_jobs (created_at);
 """
+
+# v2 (retention): when the job's content was stripped. Additive, forward-only.
+_MIGRATE_V2 = "ALTER TABLE execution_jobs ADD COLUMN redacted_at REAL"
 
 
 def _to_epoch(dt: Optional[datetime]) -> Optional[float]:
@@ -103,8 +120,15 @@ class SqliteExecutionStore:
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        # busy_timeout first so every later statement, including the migration's
+        # BEGIN IMMEDIATE, waits for a concurrent opener instead of failing.
+        # (The one-time WAL switch of a brand-new file is not covered: SQLite
+        # does not run the busy handler for it.)
         self._conn.execute("PRAGMA busy_timeout=5000")
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        # Overwrite freed pages so purged or redacted content does not linger
+        # in the file.
+        self._conn.execute("PRAGMA secure_delete=ON")
         self._migrate()
 
     # ------------------------------------------------------------------
@@ -112,13 +136,29 @@ class SqliteExecutionStore:
     # ------------------------------------------------------------------
 
     def _migrate(self) -> None:
+        # One write transaction, re-reading the version inside it, so processes
+        # opening the same file concurrently migrate it exactly once.
         with self._lock:
-            version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-            if version < _SCHEMA_VERSION:
-                self._conn.executescript(_CREATE_SCHEMA)
-                # PRAGMA does not accept bound parameters.
-                self._conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+                if version < 1:
+                    for statement in _CREATE_SCHEMA.split(";"):
+                        if statement.strip():
+                            self._conn.execute(statement)
+                if version < 2 and "redacted_at" not in self._columns():
+                    self._conn.execute(_MIGRATE_V2)
+                if version < _SCHEMA_VERSION:
+                    # PRAGMA does not accept bound parameters.
+                    self._conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
                 self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def _columns(self) -> set:
+        rows = self._conn.execute("PRAGMA table_info(execution_jobs)").fetchall()
+        return {row["name"] for row in rows}
 
     def close(self) -> None:
         """Close the underlying connection. The database file persists."""
@@ -137,8 +177,8 @@ class SqliteExecutionStore:
                     id, agent_id, kind, idempotency_key, payload, state, attempts,
                     run_at, lease_owner, lease_expiry, correlation_id, session_id,
                     origin, last_error, dead_letter_reason, result,
-                    created_at, updated_at, started_at, finished_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    created_at, updated_at, started_at, finished_at, redacted_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(idempotency_key) DO NOTHING
                 """,
                 self._to_row(job),
@@ -423,6 +463,7 @@ class SqliteExecutionStore:
         agent_id: Optional[str] = None,
         kind: Optional[ExecutionKind] = None,
         limit: Optional[int] = None,
+        created_after: Optional[datetime] = None,
     ) -> List[ExecutionJob]:
         clauses = []
         params: list = []
@@ -436,6 +477,9 @@ class SqliteExecutionStore:
         if kind is not None:
             clauses.append("kind = ?")
             params.append(kind.value)
+        if created_after is not None:
+            clauses.append("created_at > ?")
+            params.append(_to_epoch(created_after))
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         # WHERE holds only fixed column clauses and "?" placeholders; values are bound.
         sql = f"SELECT * FROM execution_jobs {where} ORDER BY created_at DESC"  # nosec B608
@@ -445,6 +489,99 @@ class SqliteExecutionStore:
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
             return [self._row_to_job(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # Retention
+    # ------------------------------------------------------------------
+
+    def list_terminal_older_than(
+        self,
+        cutoff: datetime,
+        *,
+        redacted: Optional[bool] = None,
+    ) -> List[ExecutionJob]:
+        want = None if redacted is None else int(redacted)
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM execution_jobs
+                WHERE state IN (?,?,?) AND COALESCE(finished_at, updated_at) < ?
+                  AND (? IS NULL OR (redacted_at IS NOT NULL) = ?)
+                ORDER BY COALESCE(finished_at, updated_at) ASC
+                """,
+                (*_TERMINAL_VALUES, _to_epoch(cutoff), want, want),
+            ).fetchall()
+            return [self._row_to_job(row) for row in rows]
+
+    def redact(
+        self,
+        job_ids: Sequence[str],
+        *,
+        now: Optional[datetime] = None,
+    ) -> int:
+        now = now or utcnow()
+        count = 0
+        with self._lock:
+            try:
+                for job_id in dict.fromkeys(job_ids):
+                    job = self._get_by_id(job_id)
+                    if (
+                        job is None
+                        or not job.is_terminal
+                        or job.redacted_at is not None
+                    ):
+                        continue
+                    redact_job(job, now)
+                    # The terminal/unredacted guard is repeated in SQL so a row
+                    # changed by another process since the read is left alone.
+                    cur = self._conn.execute(
+                        """
+                        UPDATE execution_jobs SET
+                            payload = ?, result = ?, last_error = NULL,
+                            session_id = NULL, origin = NULL, redacted_at = ?
+                        WHERE id = ? AND redacted_at IS NULL
+                          AND state IN (?,?,?)
+                        """,
+                        (
+                            json.dumps(job.payload),
+                            json.dumps(job.result) if job.result is not None else None,
+                            _to_epoch(now),
+                            job_id,
+                            *_TERMINAL_VALUES,
+                        ),
+                    )
+                    count += cur.rowcount
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+            if count:
+                self._checkpoint()
+        return count
+
+    def purge(self, job_ids: Sequence[str]) -> int:
+        params = [(job_id, *_TERMINAL_VALUES) for job_id in dict.fromkeys(job_ids)]
+        if not params:
+            return 0
+        with self._lock:
+            try:
+                cur = self._conn.executemany(
+                    "DELETE FROM execution_jobs WHERE id = ? AND state IN (?,?,?)",
+                    params,
+                )
+                count = cur.rowcount
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+            if count:
+                self._checkpoint()
+        return count
+
+    def _checkpoint(self) -> None:
+        # Fold the WAL back into the file so pre-redaction/purge page images do
+        # not linger in the -wal file. Best effort: a busy reader only delays it.
+        self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     # ------------------------------------------------------------------
     # Internal helpers (call under self._lock)
@@ -486,6 +623,7 @@ class SqliteExecutionStore:
             _to_epoch(job.updated_at),
             _to_epoch(job.started_at),
             _to_epoch(job.finished_at),
+            _to_epoch(job.redacted_at),
         )
 
     @staticmethod
@@ -512,4 +650,5 @@ class SqliteExecutionStore:
         job.updated_at = _from_epoch(row["updated_at"])
         job.started_at = _from_epoch(row["started_at"])
         job.finished_at = _from_epoch(row["finished_at"])
+        job.redacted_at = _from_epoch(row["redacted_at"])
         return job

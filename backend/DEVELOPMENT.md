@@ -221,6 +221,10 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | `AGENTS_ENABLED` | `false` | Enable the AI agent system |
 | `AGENTS_LLM_PROVIDER` | - | LLM provider for agents (`openai` or `claude`) |
 | `AGENTS_SCHEDULER_ENABLED` | `false` | Enable in-process time-based scheduler (off for scale-to-zero) |
+| `AGENTS_RUN_HISTORY_RETENTION_DAYS` | - (keep forever) | Purge terminal AgentRuns older than this many days (minimum 7). See `docs/DURABLE_EXECUTION_CONTRACT.md` §8a |
+| `AGENTS_RUN_HISTORY_REDACT_AFTER_DAYS` | - (never) | Strip the content of terminal AgentRuns older than this many days (at most the retention) |
+| `AGENTS_RUN_HISTORY_EXPORT_MAX_DAYS` | retention | How far back `GET /agents/runs` reads (at most the retention) |
+| `AGENTS_RUN_HISTORY_SWEEP_INTERVAL_HOURS` | `24` | Hours between retention sweeps |
 | `AGENTS_WORKSPACE_DIR` | `~/.communityoverview/agent-workspace` | Root the agent's filesystem tools are confined to. Use an absolute path (or one starting with `~`): a relative path resolves against the process's working directory, which can differ between the places that read the setting. Must be a directory the service user owns and others cannot write to, or the FS tools refuse it — so prefer a private path over a shared one. A uid with no home (a container run as an arbitrary uid) falls back to a per-uid directory under the system temp dir |
 
 ## Building Frontend
@@ -493,7 +497,8 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | GET | `/api/views/{name}` | Get a saved view |
 | GET | `/api/views` | List saved views |
 | GET | `/agents/schedules` | List all agent schedules (for external scheduler reconciliation) |
-| GET | `/agents/runs` | List durable AgentRun history (filter by `agent_id`, `kind`, `status`, `limit`), newest-first |
+| GET | `/agents/runs` | List durable AgentRun history (filter by `agent_id`, `kind`, `status`, `limit`), newest-first, limited to the retention read window |
+| GET | `/agents/runs/retention-policy` | Effective run-history retention policy and the last sweep's content-free record |
 | GET | `/agents/runs/{run_id}` | Get a single AgentRun by id |
 | GET | `/agents/proposals` | List agent proposals (filter by `agent_id`, `status`, `limit`), newest-first |
 | GET | `/agents/proposals/{proposal_id}` | Get a single proposal by id |
