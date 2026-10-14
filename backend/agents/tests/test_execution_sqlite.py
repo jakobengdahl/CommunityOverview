@@ -118,10 +118,52 @@ def test_migration_is_idempotent_across_reopens(tmp_path):
     second = SqliteExecutionStore(db)
     try:
         version = second._conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 1
+        assert version == 2
         assert len(second.list_jobs()) == 1
     finally:
         second.close()
+
+
+def test_v1_database_migrates_forward_keeping_rows(tmp_path):
+    """A schema-v1 file gains redacted_at (unset) and keeps every job."""
+    import sqlite3
+
+    from backend.agents.execution.sqlite_store import _CREATE_SCHEMA
+
+    db = tmp_path / "execution.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(_CREATE_SCHEMA)
+    conn.execute(
+        "INSERT INTO execution_jobs (id, agent_id, kind, idempotency_key, state,"
+        " run_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+        ("job-v1", "a1", "event", "k1", "succeeded", 1.0, 1.0, 1.0),
+    )
+    conn.execute("PRAGMA user_version=1")
+    conn.commit()
+    conn.close()
+
+    store = SqliteExecutionStore(db)
+    try:
+        assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        job = store.get("job-v1")
+        assert job is not None and job.redacted_at is None
+        assert store.redact(["job-v1"], now=T0) == 1
+        assert store.get("job-v1").redacted_at == T0
+    finally:
+        store.close()
+
+
+def test_purge_matches_quote_bearing_id_literally(tmp_path):
+    store = SqliteExecutionStore(tmp_path / "execution.db")
+    try:
+        target = store.enqueue(_job(idempotency_key="t"))
+        store.complete(target.id, now=T0)
+        hostile = f"{target.id}' OR '1'='1"
+        assert store.purge([hostile]) == 0
+        assert store.get(target.id) is not None
+        assert store.purge([target.id]) == 1
+    finally:
+        store.close()
 
 
 def test_list_jobs_binds_every_filter_value(tmp_path):

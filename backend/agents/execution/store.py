@@ -154,9 +154,50 @@ class ExecutionStore(Protocol):
         agent_id: Optional[str] = None,
         kind: Optional[ExecutionKind] = None,
         limit: Optional[int] = None,
+        created_after: Optional[datetime] = None,
     ) -> List[ExecutionJob]:
         """
         Return jobs matching the filters, newest-first by ``created_at``. This is
         the inspection surface durable AgentRun history builds on.
+        ``created_after`` keeps only jobs created strictly after that instant.
+        """
+        ...
+
+    # -- retention ------------------------------------------------------------
+
+    def list_terminal_older_than(
+        self,
+        cutoff: datetime,
+        *,
+        redacted: Optional[bool] = None,
+    ) -> List[ExecutionJob]:
+        """
+        Return terminal jobs that reached their terminal state strictly before
+        ``cutoff`` (``finished_at``, falling back to ``updated_at``), oldest
+        first. ``redacted`` True/False keeps only redacted / unredacted jobs.
+        Non-terminal jobs are never returned.
+        """
+        ...
+
+    def redact(
+        self,
+        job_ids: Sequence[str],
+        *,
+        now: Optional[datetime] = None,
+    ) -> int:
+        """
+        Strip the content of each listed job per ``models.redact_job`` and stamp
+        ``redacted_at``. Skips (without error) ids that are unknown, non-terminal
+        or already redacted, so a repeat call changes nothing. Returns how many
+        jobs were redacted.
+        """
+        ...
+
+    def purge(self, job_ids: Sequence[str]) -> int:
+        """
+        Permanently delete each listed terminal job. Skips ids that are unknown
+        or non-terminal. A purged job's ``idempotency_key`` is forgotten, so a
+        later ``enqueue`` with that key creates a new job. Returns how many
+        jobs were deleted.
         """
         ...
