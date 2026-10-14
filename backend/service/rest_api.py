@@ -1786,11 +1786,14 @@ def _attachment_download_headers(record: Dict[str, Any]) -> Dict[str, str]:
 
 
 def _register_attachment_endpoints(router: APIRouter, service: GraphService) -> None:
+    # The store reads files and takes OS locks, so its calls run off the event
+    # loop. asyncio.to_thread copies the context, so the request authorization
+    # bound below reaches the service call.
     @router.get("/nodes/{node_id}/attachments")
     async def list_node_attachments(node_id: str, request: Request) -> Dict[str, Any]:
         """List a node's attachments, the limits, and whether uploads are allowed."""
         with use_request_authorization(headers=request.headers):
-            result = service.list_node_attachments(node_id)
+            result = await asyncio.to_thread(service.list_node_attachments, node_id)
         _raise_for_attachment_error(result)
         return {
             "attachments": result["attachments"],
@@ -1828,7 +1831,9 @@ def _register_attachment_endpoints(router: APIRouter, service: GraphService) -> 
     ) -> StreamingResponse:
         """Stream one attachment back, always as a download."""
         with use_request_authorization(headers=request.headers):
-            result = service.open_node_attachment(node_id, attachment_id)
+            result = await asyncio.to_thread(
+                service.open_node_attachment, node_id, attachment_id
+            )
         _raise_for_attachment_error(result)
         record = result["attachment"]
         stream = result["stream"]
@@ -1848,7 +1853,9 @@ def _register_attachment_endpoints(router: APIRouter, service: GraphService) -> 
     ) -> Dict[str, Any]:
         """Delete one attachment from a node."""
         with use_request_authorization(headers=request.headers):
-            result = service.delete_node_attachment(node_id, attachment_id)
+            result = await asyncio.to_thread(
+                service.delete_node_attachment, node_id, attachment_id
+            )
         _raise_for_attachment_error(result)
         return {"success": True}
 

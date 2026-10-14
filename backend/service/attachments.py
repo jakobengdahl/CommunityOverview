@@ -14,6 +14,7 @@ service uses: ``{"success": True, ...}``, or ``{"success": False,
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import unicodedata
 from dataclasses import dataclass
@@ -39,10 +40,23 @@ from backend.core.attachment_store import (
     AttachmentStore,
     AttachmentTooLarge,
     NewAttachment,
+    StagedUpload,
     is_valid_attachment_id,
 )
 from backend.core.attachment_types import (
+    CSV,
+    DOCX,
+    JPEG,
+    ODP,
+    ODS,
+    ODT,
+    PDF,
+    PNG,
+    PPTX,
     SUPPORTED_TYPES,
+    TEXT,
+    WEBP,
+    XLSX,
     UnsupportedAttachmentType,
     check_allowed,
     detect_attachment_type,
@@ -170,6 +184,99 @@ def sanitize_filename(raw: Optional[str]) -> str:
     if len(encoded) > MAX_FILENAME_BYTES:
         name = encoded[:MAX_FILENAME_BYTES].decode("utf-8", errors="ignore")
     return name or DEFAULT_FILENAME
+
+
+# The extensions a file of each detected type may keep. A name whose last
+# extension is not one of these gets the first one appended, so what the
+# browser saves cannot open as something else: "report.docm" (macros) is saved
+# as "report.docm.docx", and Office does not run macros from a .docx.
+_TYPE_EXTENSIONS = {
+    PDF: (".pdf",),
+    PNG: (".png",),
+    JPEG: (".jpg", ".jpeg"),
+    WEBP: (".webp",),
+    DOCX: (".docx",),
+    XLSX: (".xlsx",),
+    PPTX: (".pptx",),
+    ODT: (".odt",),
+    ODS: (".ods",),
+    ODP: (".odp",),
+    CSV: (".csv",),
+}
+# Plain text keeps its name (.md, .json, .log stay usable) unless the
+# extension makes a desktop open or run it as something active.
+_ACTIVE_TEXT_EXTENSIONS = frozenset(
+    {
+        ".application",
+        ".bat",
+        ".cmd",
+        ".com",
+        ".command",
+        ".cpl",
+        ".desktop",
+        ".exe",
+        ".hta",
+        ".htm",
+        ".html",
+        ".inf",
+        ".iqy",
+        ".jar",
+        ".js",
+        ".jse",
+        ".lnk",
+        ".mht",
+        ".mhtml",
+        ".msc",
+        ".msi",
+        ".ps1",
+        ".psm1",
+        ".reg",
+        ".scf",
+        ".scr",
+        ".settingcontent-ms",
+        ".sh",
+        ".shtml",
+        ".slk",
+        ".svg",
+        ".url",
+        ".vbe",
+        ".vbs",
+        ".website",
+        ".wsf",
+        ".wsh",
+        ".xht",
+        ".xhtml",
+        ".xml",
+    }
+)
+
+
+def _with_suffix(name: str, suffix: str) -> str:
+    base = name.rstrip(". ")
+    encoded = base.encode("utf-8")
+    room = MAX_FILENAME_BYTES - len(suffix.encode("utf-8"))
+    if len(encoded) > room:
+        base = encoded[:room].decode("utf-8", errors="ignore")
+    return base + suffix
+
+
+def align_extension(name: str, content_type: str) -> str:
+    """Make the stored name's extension agree with the detected type.
+
+    The bytes are never changed; only the display name, which is what a
+    browser saves the download under. Trailing dots and spaces are ignored
+    when reading the extension, because Windows drops them when saving.
+    """
+    _, dot, extension = name.rstrip(". ").rpartition(".")
+    extension = f".{extension.lower()}" if dot else ""
+    if content_type == TEXT:
+        if extension in _ACTIVE_TEXT_EXTENSIONS:
+            return _with_suffix(name, ".txt")
+        return name
+    allowed = _TYPE_EXTENSIONS.get(content_type)
+    if allowed is None or extension in allowed:
+        return name
+    return _with_suffix(name, allowed[0])
 
 
 def _sanitize_declared_content_type(raw: Optional[str]) -> str:
@@ -448,39 +555,36 @@ async def add_node_attachment(
         return _cap_breach(cap_is_file_limit, limits)
 
     stored_name = sanitize_filename(filename)
+    uploaded_by = _current_actor_id(target)
+    declared = _sanitize_declared_content_type(declared_content_type)
     try:
         staged = await store.stage(namespace, node.id, chunks, cap)
     except AttachmentTooLarge:
         return _cap_breach(cap_is_file_limit, limits)
 
+    # Whatever happens from here - a refusal, an error, a cancelled request -
+    # the staged file goes. After a successful commit it has already been
+    # moved into place, and the discard is a no-op.
     try:
-        with staged.open() as staged_file:
-            content_type = detect_attachment_type(staged_file, stored_name)
-        check_allowed(content_type, settings.allowed_types)
-    except UnsupportedAttachmentType:
-        store.discard(staged)
-        return _error(
-            ATTACHMENT_ERROR_UNSUPPORTED_TYPE,
-            "This file type cannot be attached.",
-        )
-    except BaseException:
-        store.discard(staged)
-        raise
-
-    precondition = _node_still_accepts_uploads(storage, node.id, graph_access)
-    try:
+        try:
+            content_type = await asyncio.to_thread(
+                _sniff_staged, staged, stored_name, settings.allowed_types
+            )
+        except UnsupportedAttachmentType:
+            return _error(
+                ATTACHMENT_ERROR_UNSUPPORTED_TYPE,
+                "This file type cannot be attached.",
+            )
         record = await store.commit(
             staged,
             NewAttachment(
-                filename=stored_name,
-                declared_content_type=_sanitize_declared_content_type(
-                    declared_content_type
-                ),
+                filename=align_extension(stored_name, content_type),
+                declared_content_type=declared,
                 content_type=content_type,
-                uploaded_by=_current_actor_id(target),
+                uploaded_by=uploaded_by,
             ),
             limits,
-            precondition,
+            _node_still_accepts_uploads(storage, node.id, graph_access),
         )
     except AttachmentNodeGone:
         return _not_found(node_id)
@@ -498,7 +602,18 @@ async def add_node_attachment(
     except AttachmentIndexCorrupt:
         logger.exception("Attachment index unreadable for a node")
         return _index_corrupt()
+    finally:
+        store.discard(staged)
     return {"success": True, "attachment": serialize_attachment(record)}
+
+
+def _sniff_staged(
+    staged: StagedUpload, stored_name: str, allowed_types: FrozenSet[str]
+) -> str:
+    with staged.open() as staged_file:
+        content_type = detect_attachment_type(staged_file, stored_name)
+    check_allowed(content_type, allowed_types)
+    return content_type
 
 
 def _node_still_accepts_uploads(

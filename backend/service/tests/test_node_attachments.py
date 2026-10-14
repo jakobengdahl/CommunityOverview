@@ -699,3 +699,148 @@ class TestNonHttpCallers:
 
         result = asyncio.run(run())
         assert result["attachment"]["uploaded_by"] == "user-1"
+
+
+class TestRefusalsReadNoBody:
+    """Every pre-check refusal answers before the body iterator is touched."""
+
+    def _upload_counting(self, service, node_id):
+        consumed = []
+
+        async def body():
+            consumed.append(True)
+            yield PDF_BYTES
+
+        result = asyncio.run(
+            service.add_node_attachment(
+                node_id, filename="a.pdf", declared_content_type=None, content=body()
+            )
+        )
+        return result, consumed
+
+    @pytest.mark.parametrize(
+        "node_id, code",
+        [
+            (FEDERATED_ID, "federated_node"),
+            ("actor", "attachments_not_allowed"),
+            ("old", "node_archived"),
+            ("missing", "not_found"),
+        ],
+    )
+    def test_node_refusals(self, service, node_id, code):
+        result, consumed = self._upload_counting(service, node_id)
+        assert result["error_code"] == code
+        assert consumed == []
+
+    def test_denied_authorization(self, storage, store):
+        service = GraphService(
+            storage,
+            authorization_hook=_DenyHook(),
+            attachment_settings=_settings(store),
+        )
+        result, consumed = self._upload_counting(service, "doc")
+        assert result["error_code"] == "access_denied"
+        assert consumed == []
+
+
+class TestStagedFileCleanup:
+    def test_unexpected_commit_failure_removes_the_staged_file(
+        self, service, store, monkeypatch
+    ):
+        async def broken_commit(*args, **kwargs):
+            raise RuntimeError("disk on fire")
+
+        monkeypatch.setattr(store, "commit", broken_commit)
+        with pytest.raises(RuntimeError):
+            asyncio.run(
+                service.add_node_attachment(
+                    "doc",
+                    filename="a.pdf",
+                    declared_content_type=None,
+                    content=PDF_BYTES,
+                )
+            )
+        assert _tmp_is_empty(store)
+        assert store.list(NS, "doc") == []
+
+    def test_cancelled_upload_removes_the_staged_file(
+        self, service, store, monkeypatch
+    ):
+        async def cancelled_commit(*args, **kwargs):
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(store, "commit", cancelled_commit)
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(
+                service.add_node_attachment(
+                    "doc",
+                    filename="a.pdf",
+                    declared_content_type=None,
+                    content=PDF_BYTES,
+                )
+            )
+        assert _tmp_is_empty(store)
+
+
+class TestExtensionAgreesWithType:
+    @pytest.mark.parametrize(
+        "filename, data, stored",
+        [
+            ("report.pdf", PDF_BYTES, "report.pdf"),
+            ("REPORT.PDF", PDF_BYTES, "REPORT.PDF"),
+            ("report.exe", PDF_BYTES, "report.exe.pdf"),
+            ("report", PDF_BYTES, "report.pdf"),
+            ("run.bat", b"echo hi", "run.bat.txt"),
+            ("run.bat. ", b"echo hi", "run.bat.txt"),
+            ("page.HTML", b"hello <b>x</b>", "page.HTML.txt"),
+            ("notes.md", b"# notes", "notes.md"),
+            ("data.json", b'{"a": 1}', "data.json"),
+            ("table.csv", b"a,b", "table.csv"),
+        ],
+    )
+    def test_stored_name(self, client, filename, data, stored):
+        response = _upload(client, "doc", data, filename)
+        assert response.status_code == 201
+        assert response.json()["filename"] == stored
+
+    def test_macro_document_name_is_saved_as_its_plain_type(self, storage, store):
+        client = _client(
+            GraphService(
+                storage,
+                attachment_settings=_settings(
+                    store, limits=AttachmentLimits(max_file_bytes=10_000)
+                ),
+            )
+        )
+        import io
+        import zipfile
+
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("[Content_Types].xml", "<Types/>")
+            archive.writestr("word/document.xml", "<x/>")
+            archive.writestr("word/vbaProject.bin", "macro")
+        response = _upload(client, "doc", buffer.getvalue(), "budget.docm")
+        assert response.status_code == 201
+        assert response.json()["filename"] == "budget.docm.docx"
+
+    def test_appended_extension_keeps_the_name_within_255_bytes(self, client):
+        response = _upload(client, "doc", b"x", "a" * 251 + ".bat")
+        name = response.json()["filename"]
+        assert name.endswith(".txt")
+        assert len(name.encode("utf-8")) <= 255
+
+
+class TestNodeDeleteIsolation:
+    def test_failing_attachment_cleanup_never_fails_the_node_delete(
+        self, service, store, monkeypatch
+    ):
+        _seed(store, "doc")
+
+        def broken(*args, **kwargs):
+            raise OSError("read-only filesystem")
+
+        monkeypatch.setattr(store, "delete_node", broken)
+        result = service.delete_nodes(["doc"], confirmed=True)
+        assert result["deleted_node_ids"] == ["doc"]
+        assert service.storage.get_node("doc") is None

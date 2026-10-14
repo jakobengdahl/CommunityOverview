@@ -154,3 +154,60 @@ def test_allowed_types_narrow_the_table():
 def test_allowed_types_outside_the_table_are_refused():
     with pytest.raises(ValueError, match="text/html"):
         parse_allowed_types("application/pdf,text/html")
+
+
+def test_corrupt_deflated_member_is_refused_not_an_error():
+    data = bytearray(
+        _zip_deflated({"mimetype": types.ODT * 4, "content.xml": "<x/>" * 50})
+    )
+    # Corrupt the first member's compressed data (just after its local header).
+    name_length = int.from_bytes(data[26:28], "little")
+    extra_length = int.from_bytes(data[28:30], "little")
+    start = 30 + name_length + extra_length
+    for offset in range(start, start + 6):
+        data[offset] ^= 0xFF
+    with pytest.raises(UnsupportedAttachmentType):
+        _detect(bytes(data), "file.odt")
+
+
+def _zip_deflated(members: dict) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+    return buffer.getvalue()
+
+
+def test_archive_with_an_oversized_central_directory_is_refused():
+    members = {"[Content_Types].xml": "<Types/>", "word/document.xml": "<x/>"}
+    # Enough empty members that the directory exceeds the 1 MiB cap.
+    count = types.MAX_ZIP_CENTRAL_DIRECTORY_BYTES // 40
+    members.update({f"pad/{i:08d}": "" for i in range(count)})
+    data = _zip(members)
+    assert types._central_directory_is_bounded(io.BytesIO(data)) is False
+    with pytest.raises(UnsupportedAttachmentType):
+        _detect(data, "doc.docx")
+
+
+def test_archive_just_under_the_directory_cap_is_still_detected():
+    members = {"[Content_Types].xml": "<Types/>", "word/document.xml": "<x/>"}
+    members.update({f"pad/{i:04d}": "" for i in range(1000)})
+    assert _detect(_zip(members), "doc.docx") == types.DOCX
+
+
+def test_zip64_archive_is_refused():
+    data = _zip({"[Content_Types].xml": "<Types/>", "word/document.xml": "<x/>"})
+    assert _detect(data, "doc.docx") == types.DOCX
+    # A ZIP64 end-record locator sits immediately before the end record.
+    position = data.rfind(b"PK\x05\x06")
+    locator = b"PK\x06\x07" + b"\x00" * 16
+    zip64 = data[:position] + locator + data[position:]
+    # Checked before zipfile parses anything, not left to zipfile's own error.
+    assert types._central_directory_is_bounded(io.BytesIO(zip64)) is False
+    with pytest.raises(UnsupportedAttachmentType):
+        _detect(zip64, "doc.docx")
+
+
+def test_allowed_types_naming_no_type_is_refused():
+    with pytest.raises(ValueError, match="names no type"):
+        parse_allowed_types(" , ")

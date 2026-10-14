@@ -240,3 +240,46 @@ def test_limits_refuse_zero_or_negative_values():
         for value in (0, -1, True):
             with pytest.raises(ValueError):
                 AttachmentLimits(**{field: value})
+
+
+def test_failed_index_write_on_delete_keeps_record_and_blob(store, monkeypatch):
+    record = _upload(store, "n1", b"keep me")
+
+    def broken(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "_write_index", broken)
+    with pytest.raises(OSError):
+        store.delete(NS, "n1", record.id)
+    # Index first, then blob: the record is still there and still readable.
+    with store.open_read(NS, "n1", record.id) as handle:
+        assert handle.read() == b"keep me"
+
+
+def test_failed_index_write_on_commit_leaves_no_record_and_no_blob(store, monkeypatch):
+    existing = _upload(store, "n1", b"first")
+
+    def broken(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "_write_index", broken)
+    with pytest.raises(OSError):
+        _upload(store, "n1", b"second")
+    assert store.list(NS, "n1") == [existing]
+    blobs = store.root / hashed_key(NS) / hashed_key("n1") / "blobs"
+    assert [p.name for p in blobs.iterdir()] == [existing.id]
+    assert _tmp_entries(store) == []
+
+
+def test_commit_moves_the_blob_before_writing_the_index(store, monkeypatch):
+    seen = []
+    original = store._write_index
+
+    def spying(namespace, node_id, records):
+        blobs = store.root / hashed_key(namespace) / hashed_key(node_id) / "blobs"
+        seen.append(all((blobs / r.id).is_file() for r in records))
+        return original(namespace, node_id, records)
+
+    monkeypatch.setattr(store, "_write_index", spying)
+    _upload(store, "n1")
+    assert seen == [True]

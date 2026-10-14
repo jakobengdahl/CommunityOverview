@@ -9,6 +9,7 @@ the table is refused: HTML, SVG, XML, executables, bare ZIP and other archives.
 from __future__ import annotations
 
 import codecs
+import os
 import zipfile
 from typing import BinaryIO, FrozenSet, Iterable, Optional
 
@@ -40,6 +41,14 @@ _ODF_TYPES = (ODT, ODS, ODP)
 # longer is not one of them, so it is never read in full.
 _ODF_MIMETYPE_READ_LIMIT = 128
 _ZIP_LOCAL_HEADER = b"PK\x03\x04"
+_EOCD_SIGNATURE = b"PK\x05\x06"
+_ZIP64_LOCATOR_SIGNATURE = b"PK\x06\x07"
+_EOCD_MIN_LENGTH = 22
+_ZIP64_LOCATOR_LENGTH = 20
+# The end record is 22 bytes plus a comment of at most 65535 bytes.
+_EOCD_MAX_SEARCH = _EOCD_MIN_LENGTH + 0xFFFF
+# Roughly ten thousand members; a real office document is far below this.
+MAX_ZIP_CENTRAL_DIRECTORY_BYTES = 1024 * 1024
 _TEXT_READ_CHUNK = 64 * 1024
 _UTF8_BOM = b"\xef\xbb\xbf"
 _WHITESPACE = " \t\r\n\f\v"
@@ -58,6 +67,13 @@ def parse_allowed_types(value: Optional[str]) -> FrozenSet[str]:
     if value is None or not value.strip():
         return SUPPORTED_TYPES
     requested = {item.strip().lower() for item in value.split(",") if item.strip()}
+    if not requested:
+        # "," would otherwise boot with an empty allowlist that refuses every
+        # upload; refuse it at boot as the other unusable values are.
+        raise ValueError(
+            f"ATTACHMENT_ALLOWED_TYPES={value!r} names no type. Unset it to "
+            "allow every supported type."
+        )
     unknown = sorted(requested - SUPPORTED_TYPES)
     if unknown:
         raise ValueError(
@@ -68,7 +84,43 @@ def parse_allowed_types(value: Optional[str]) -> FrozenSet[str]:
     return frozenset(requested)
 
 
+def _central_directory_is_bounded(source: BinaryIO) -> bool:
+    """Whether the archive's central directory is small enough to parse.
+
+    ``zipfile`` reads the whole central directory up front, sized by the end
+    record and not by its entry count, so an archive of a few hundred thousand
+    empty members costs seconds and hundreds of MB to open. Real office
+    documents have tens to hundreds of members, so the size recorded in the
+    end record is checked before ``zipfile`` sees the file. ZIP64 archives are
+    refused outright: their end record can redirect to another size, and no
+    supported document under the per-file limit needs one.
+    """
+    source.seek(0, os.SEEK_END)
+    size = source.tell()
+    tail_length = min(size, _EOCD_MAX_SEARCH)
+    source.seek(size - tail_length)
+    tail = source.read(tail_length)
+    position = tail.rfind(_EOCD_SIGNATURE)
+    if position < 0 or position + _EOCD_MIN_LENGTH > len(tail):
+        return False
+    # zipfile looks for the ZIP64 locator immediately before the end record.
+    end_record_offset = size - tail_length + position
+    if end_record_offset >= _ZIP64_LOCATOR_LENGTH:
+        source.seek(end_record_offset - _ZIP64_LOCATOR_LENGTH)
+        if source.read(4) == _ZIP64_LOCATOR_SIGNATURE:
+            return False
+    entries = int.from_bytes(tail[position + 10 : position + 12], "little")
+    directory_size = int.from_bytes(tail[position + 12 : position + 16], "little")
+    return (
+        entries != 0xFFFF
+        and directory_size != 0xFFFFFFFF
+        and directory_size <= MAX_ZIP_CENTRAL_DIRECTORY_BYTES
+    )
+
+
 def _detect_zip_type(source: BinaryIO) -> str:
+    if not _central_directory_is_bounded(source):
+        raise UnsupportedAttachmentType("archive directory too large or unreadable")
     source.seek(0)
     try:
         with zipfile.ZipFile(source) as archive:
@@ -87,10 +139,10 @@ def _detect_zip_type(source: BinaryIO) -> str:
                     declared_text = ""
                 if declared_text in _ODF_TYPES:
                     matches.add(declared_text)
-    except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError, EOFError) as exc:
-        raise UnsupportedAttachmentType("unreadable ZIP archive") from exc
-    except (NotImplementedError, RuntimeError, ValueError) as exc:
-        # Unsupported compression, encrypted members, malformed headers.
+    except Exception as exc:
+        # Malformed headers, unsupported compression, encrypted members and
+        # corrupt member data (zlib/lzma/bz2 errors) all mean the same thing:
+        # not a document this detector accepts.
         raise UnsupportedAttachmentType("unreadable ZIP archive") from exc
     if len(matches) != 1:
         # None: a bare archive. Several: an ambiguous one (ADR 0008 sec 5).

@@ -526,8 +526,13 @@ per-route checks).
 - **Types** are detected from the bytes: PDF, PNG, JPEG, WebP, DOCX, XLSX,
   PPTX, ODT, ODS, ODP, and UTF-8 text (`text/csv` for a `.csv` name, otherwise
   `text/plain`). Text whose first non-blank character is `<` is refused, as are
-  HTML, SVG, XML, executables and bare archives. The client's `Content-Type`
-  is stored for diagnosis only and never served.
+  HTML, SVG, XML, executables, bare archives and archives with an oversized
+  (over 1 MiB) or ZIP64 central directory. The client's `Content-Type` is
+  stored for diagnosis only and never served.
+- **Names** are sanitised (path parts, control and bidi characters removed,
+  255 UTF-8 bytes at most), then made to agree with the detected type:
+  `report.docm` holding a Word document is stored as `report.docm.docx`, and a
+  text file named `run.bat` as `run.bat.txt`.
 - **Deleting a node** removes its files after the graph delete succeeds.
   Archiving keeps them. REPLACE import does not touch the store.
 - **No MCP tool** exists for attachments yet; the service functions take bytes
