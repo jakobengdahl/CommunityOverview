@@ -448,3 +448,15 @@ class ExecutionStoreContractTests:
         ids = [j.id for j in store.list_jobs(created_after=T0)]
         assert ids == [new.id]
         assert edge.id not in ids and old.id not in ids
+
+    def test_list_terminal_older_than_is_strict_and_uses_finished_at(self, store):
+        cutoff = T0 - timedelta(days=30)
+        at_cutoff = self._finished(store, "edge", cutoff)
+        older = self._finished(store, "older", cutoff - timedelta(seconds=1))
+        oldest = self._finished(store, "oldest", cutoff - timedelta(days=1))
+        # Redaction stamps redacted_at but leaves updated_at/finished_at alone,
+        # so age keeps being measured from finished_at.
+        store.redact([older.id], now=T0)
+        ids = [j.id for j in store.list_terminal_older_than(cutoff)]
+        assert ids == [oldest.id, older.id]
+        assert at_cutoff.id not in ids

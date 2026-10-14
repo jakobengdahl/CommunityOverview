@@ -77,7 +77,40 @@ class TestRetentionPolicy:
 
     def test_retention_below_floor_is_raised_to_floor(self):
         policy = RetentionPolicy.from_env({"AGENTS_RUN_HISTORY_RETENTION_DAYS": "1"})
-        assert policy.retention_days == RETENTION_FLOOR_DAYS
+        assert policy.retention_days == RETENTION_FLOOR_DAYS == 7
+        assert RetentionPolicy.from_values(retention_days=6).retention_days == 7
+        assert policy.to_dict()["retention_floor_days"] == 7
+
+    def test_blank_values_mean_unset(self):
+        policy = RetentionPolicy.from_env(
+            {
+                "AGENTS_RUN_HISTORY_RETENTION_DAYS": "",
+                "AGENTS_RUN_HISTORY_EXPORT_MAX_DAYS": "  ",
+            }
+        )
+        assert policy == RetentionPolicy()
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "retention_days",
+            "redact_after_days",
+            "export_max_days",
+            "sweep_interval_hours",
+        ],
+    )
+    def test_from_values_rejects_zero(self, field):
+        with pytest.raises(ValueError):
+            RetentionPolicy.from_values(**{field: 0})
+
+    def test_redact_only_policy_sweeps(self):
+        assert RetentionPolicy.from_values(redact_after_days=10).sweeps
+
+    def test_policy_reports_effective_export_window(self):
+        assert (
+            RetentionPolicy.from_values(retention_days=30).to_dict()["export_max_days"]
+            == 30
+        )
 
     def test_redact_and_export_are_clamped_to_retention(self):
         policy = RetentionPolicy.from_env(
@@ -172,6 +205,22 @@ class TestSweep:
         assert store.get(old_failed.id) is None
         assert store.get(young.id) is not None
         assert store.get(stuck.id).state == ExecutionState.RUNNING
+
+    def test_purge_cutoff_is_exactly_retention_days(self, store):
+        policy = RetentionPolicy.from_values(retention_days=30)
+        inside = _run(store, "inside", finished_days_ago=30 - 1 / 24)
+        outside = _run(store, "outside", finished_days_ago=30 + 1 / 24)
+        report = sweep(store, policy, now=T0)
+        assert report.purge_cutoff == T0 - timedelta(days=30)
+        assert store.get(inside.id) is not None
+        assert store.get(outside.id) is None
+
+    def test_dry_run_after_sweep_reports_nothing_left(self, store):
+        policy = RetentionPolicy.from_values(redact_after_days=7)
+        _run(store, "a", finished_days_ago=8)
+        sweep(store, policy, now=T0)
+        report = sweep(store, policy, now=T0, dry_run=True)
+        assert report.redacted == 0
 
     def test_redacts_before_purge_and_keeps_accounting(self, store):
         policy = RetentionPolicy.from_values(retention_days=30, redact_after_days=7)
@@ -294,6 +343,24 @@ class TestRetentionSweeper:
         assert store.get(old.id) is None
         assert sweeper.last_report.purged == 1
 
+    def test_loop_waits_the_interval_in_seconds_between_sweeps(self):
+        sweeper = RetentionSweeper(
+            _store(),
+            RetentionPolicy.from_values(retention_days=30, sweep_interval_hours=2),
+            clock=lambda: T0,
+        )
+        waits = []
+
+        def fake_wait(seconds):
+            waits.append(seconds)
+            if len(waits) == 3:
+                sweeper._stop.set()
+            return sweeper._stop.is_set()
+
+        sweeper._stop.wait = fake_wait
+        sweeper._loop()
+        assert waits == [7200, 7200, 7200]
+
     def test_unset_policy_starts_no_thread(self):
         sweeper = RetentionSweeper(MagicMock(), RetentionPolicy())
         sweeper.start()
@@ -384,6 +451,29 @@ class TestRegistryReadWindow:
         assert registry.get_run(old.id) is None
         assert registry.get_run(new.id)["id"] == new.id
 
+    def test_run_created_exactly_at_cutoff_is_outside_the_window(self):
+        from backend.agents.run_history import AgentRunRecorder
+
+        store = _store()
+        job = store.enqueue(
+            ExecutionJob(
+                agent_id="a1",
+                kind=ExecutionKind.EVENT,
+                idempotency_key="k",
+                created_at=T0,
+            )
+        )
+        recorder = AgentRunRecorder(store)
+        assert recorder.get_run(job.id, created_after=T0) is None
+        assert recorder.get_run(job.id, created_after=T0 - timedelta(seconds=1))
+
+    def test_redacted_run_view_carries_redacted_at(self):
+        store = _store()
+        old = _run(store, "old", finished_days_ago=10)
+        store.redact([old.id], now=T0)
+        registry = self._registry(store, RetentionPolicy())
+        assert registry.get_run(old.id)["redacted_at"] == "2026-01-01T12:00:00Z"
+
     def test_unset_policy_reads_everything(self):
         store = _store()
         old = _run(store, "old", finished_days_ago=10_000)
@@ -397,6 +487,7 @@ class TestRegistryReadWindow:
         registry = self._registry(store, RetentionPolicy.from_values(retention_days=30))
         registry.start()
         registry.stop()
+        assert registry._retention_sweeper._thread is None
         assert store.get(old.id) is None
         last = registry.get_run_retention_policy()["last_sweep"]
         assert last["purged"] == 1
