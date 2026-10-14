@@ -619,6 +619,14 @@ nothing and `HISTORY_MAX_EVENTS` and `HISTORY_MAX_AGE_DAYS` become inert. That
 is stated under *Vectors and history* above and is repeated here because this
 is the section an operator reads before flipping the switch.
 
+Node attachments need a directory. The attachment store
+([ADR 0008](adr/0008-node-attachment-storage.md)) is a second seam beside this
+one and keeps its files on disk whatever `GRAPH_BACKEND` says. With `file` it
+defaults to a directory beside the graph file; with `postgres` there is no
+graph file, so `ATTACHMENT_DIR` must name a root that every instance serving
+the schema shares. Until it is set, the attachment routes answer
+`503 attachments_unavailable` and the rest of the instance runs unchanged.
+
 ### Importing an existing graph file
 
 Use `scripts/graph_file_to_postgres.py` to copy an existing `graph.json` into
