@@ -73,6 +73,12 @@ Four findings shape the decision:
    has to be denied outright; a connected pair from `socketpair` remains
    available.
 
+The address-space limit suits CPython but not Node.js: Node.js 22 failed to
+start under a 256 MiB address-space limit and started under 1 GiB, because its
+JavaScript engine reserves address space up front. The Node.js runtime
+therefore enforces the memory limit through the engine's heap limit under a
+larger address-space ceiling (contract §8).
+
 Two properties could not be verified here: whether Landlock is available on
 platforms that run applications under a user-space kernel, and how the
 address-space limit interacts with native extensions that reserve large
@@ -92,7 +98,8 @@ runtime, the helper library and the function's directory; full access to the
 working directory; TCP bind and connect denied; signals and abstract Unix
 sockets scoped to the run); and a seccomp filter. The filter denies creating sockets of
 any family (`socketpair` remains), allows `clone` only for threads, makes `clone3` unavailable so the C
-library falls back to `clone`, and denies `fork`, `vfork`, `setsid`, `setpgid`,
+library falls back to `clone`, and denies `fork` and `vfork` (on architectures
+that have them), `setsid`, `setpgid`,
 `ptrace`, cross-process memory access, namespace and mount calls, `bpf`,
 `userfaultfd`, `perf_event_open`, `io_uring` and module loading. It rejects
 other architectures' system-call conventions outright. It needs no privileges
@@ -108,7 +115,7 @@ otherwise `degraded`. For the default runner on x86-64 and arm64 Linux:
 |---|---|---|
 | `filesystem` | Landlock filesystem rules | Landlock ABI 3 (Linux 6.2), for truncation |
 | `network` | seccomp: `socket` denied | seccomp filter mode, a system-call table for the architecture |
-| `processes` | seccomp: `fork`, `vfork`, non-thread `clone`, `setsid`, `setpgid` denied | as `network` |
+| `processes` | seccomp: non-thread `clone`, `fork` and `vfork` where the architecture has them, `setsid`, `setpgid` denied | as `network` |
 | `isolation` | seccomp: `ptrace`, cross-process memory access denied; Landlock: signals scoped, `/proc` outside the allowed paths | as `network`, plus Landlock ABI 6 (Linux 6.12) |
 
 TCP bind and connect are also denied through Landlock (ABI 4) where available,
@@ -120,11 +127,13 @@ An instance that sets `isolation_minimum: full` rejects runs below it. This
 keeps functions usable on development machines and on hosts without Landlock,
 while letting an operator require full confinement.
 
-Whatever the level, a runner terminates everything a run started and reads its
-output within the contract's limits. Where it cannot prevent new processes, a
-per-run supervisor process, registered as a child subreaper, adopts orphaned
-descendants and kills them all before the run is recorded as finished; where
-even that is unavailable, the runner reports itself unavailable. At `degraded`
+Whatever the level, a runner reads a run's output within the contract's
+limits and terminates the run's process. Where it cannot prevent new processes,
+a per-run supervisor process, registered as a child subreaper, adopts orphaned
+descendants and kills them all before the run is recorded as finished. Without
+the `isolation` control the function runs as the same user as that supervisor
+and can kill it, so at `degraded` termination of descendants is best-effort; a
+run whose supervisor dies is recorded as `failed` with `runner_lost`. At `degraded`
 without the `processes` control, a run also shares the application user's
 process limit, so a fork loop can exhaust it.
 
@@ -150,7 +159,8 @@ deployments that run code from mutually untrusted authors.
 
 ### 4. The contract text is amended, not versioned
 
-Contract §3 now qualifies invariant 2 by isolation level and §3.1 defines the
+Contract §3 now qualifies invariant 2, invariants 4, 6 and 7 insofar as they
+rest on it, and the process-termination part of invariant 5 by isolation level and §3.1 defines the
 levels; §8 allows the memory limit to be an address-space limit; §11 adds the
 `isolation` field and the `isolation_below_minimum` code; invariant 5 now
 covers every process a run starts; §12 now states that text may be amended

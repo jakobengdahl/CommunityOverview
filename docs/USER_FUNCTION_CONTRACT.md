@@ -61,9 +61,11 @@ User functions are deliberately narrow:
 ## 3. Invariants
 
 These hold for every run and every runner, with one qualification: invariant 2,
-and invariants 4, 6 and 7 insofar as they rest on it, hold in full only at
-isolation level `full`. Below it, a function may reach files and process
-information directly instead of through the broker, and a runner reports which
+invariants 4, 6 and 7 insofar as they rest on it, and the part of invariant 5
+that covers processes a run starts, hold in full only at isolation level
+`full`. Below it, a function may reach files and process information directly
+instead of through the broker, and, without the `processes` and `isolation`
+controls, a process it starts may escape termination; a runner reports which
 controls it could not enforce (§3.1). An implementation slice is tested against
 them.
 
@@ -110,8 +112,10 @@ controls, and `degraded` otherwise. Independent of the level, every runner:
 - enforces the wall-clock limit and terminates everything the run started
   (invariant 5); where it cannot prevent new processes (`processes` missing), a
   per-run supervisor process that adopts orphaned descendants terminates every
-  descendant before the run is recorded as finished, or the runner reports
-  itself unavailable;
+  descendant it can see before the run is recorded as finished. Without the
+  `isolation` control the function can kill that supervisor, so this
+  termination is best-effort, and a runner that loses its supervisor records
+  the run as `failed` with `runner_lost`;
 - applies the memory limit (§8) and reads the process's output with the size
   limits of §8, terminating the run when they are exceeded rather than
   buffering further.
@@ -393,7 +397,9 @@ system that started it.
   `memory_mib`, `max_tool_calls`). A value above the contract maximum rejects
   the manifest (§4.3). The limit a run gets is the smaller of the manifest
   value and the instance value.
-- The memory limit may be enforced as a limit on the process's address space.
+- The memory limit may be enforced as a limit on the process's address space,
+  or, for a runtime that reserves address space it does not use, as the
+  runtime's own heap limit under a larger address-space ceiling.
   The helper library (§10) reports an allocation failure as a `result` with
   `status: error` and code `memory_exceeded`, which the host records as
   `failed` with `memory_exceeded`. A process that exits without a result after
@@ -515,7 +521,8 @@ Run-level error codes are a closed set:
 | `rejected` | `chain_depth_exceeded` | The chain-depth limit was reached (§9). |
 | `rejected` | `busy` | Another run of the same function is in progress (§8). |
 | `rejected` | `isolation_below_minimum` | The runner's isolation level is below the instance's `isolation_minimum` (§3.1). |
-| `failed` | `function_error` | The function returned `status: error`; its code and message are kept, sanitized. |
+| `failed` | `function_error` | The function returned `status: error`; its code and message are kept, sanitized. A result with code `memory_exceeded` is recorded as `memory_exceeded` instead (§8); the code is reported by the function's own process. |
+| `failed` | `runner_lost` | The runner lost control of the run, for example because its supervisor process died (§3.1). |
 | `failed` | `no_result` | The process exited without sending `result`. |
 | `failed` | `protocol_error` | The function broke the protocol (§6.2). |
 | `failed` | `memory_exceeded` | The memory limit was reached (§8). |
