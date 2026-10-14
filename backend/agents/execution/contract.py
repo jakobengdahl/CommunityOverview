@@ -325,3 +325,138 @@ class ExecutionStoreContractTests:
         assert [j.id for j in ordered] == [newer.id, older.id]
         # limit keeps the newest.
         assert [j.id for j in store.list_jobs(limit=1)] == [newer.id]
+
+    # -- retention: list / redact / purge -------------------------------------
+
+    def _finished(self, store, key, finished_at, **kw) -> ExecutionJob:
+        """Enqueue a job and drive it to SUCCEEDED at ``finished_at``."""
+        job = store.enqueue(
+            _job(
+                idempotency_key=key,
+                run_at=finished_at - timedelta(seconds=5),
+                payload={
+                    "agent_name": "Agent One",
+                    "event": {
+                        "event_type": "node.update",
+                        "origin": {"actor": {"actor_id": "user-7"}},
+                        "entity": {
+                            "kind": "node",
+                            "id": "n1",
+                            "type": "Actor",
+                            "data": {"after": {"name": "secret content"}},
+                        },
+                    },
+                    "other": "dropped",
+                },
+                correlation_id="corr-1",
+                session_id="sess-1",
+                origin="ui",
+                last_error="boom with content",
+                **kw,
+            )
+        )
+        store.claim_next("w", now=finished_at - timedelta(seconds=1))
+        return store.complete(
+            job.id,
+            result={"handled": True, "summary": "content summary", "turns": 2},
+            now=finished_at,
+        )
+
+    def test_list_terminal_older_than_skips_non_terminal_and_younger(self, store):
+        old = self._finished(store, "old", T0 - timedelta(days=10))
+        self._finished(store, "young", T0 - timedelta(days=1))
+        store.enqueue(_job(idempotency_key="pending", run_at=T0 - timedelta(days=30)))
+        store.enqueue(_job(idempotency_key="running", run_at=T0 - timedelta(days=30)))
+        # Claims one of the two old non-terminal jobs; both stay non-terminal.
+        store.claim_next("w", now=T0 - timedelta(days=30))
+        found = store.list_terminal_older_than(T0 - timedelta(days=5))
+        assert [j.id for j in found] == [old.id]
+
+    def test_redact_strips_content_and_keeps_accounting_fields(self, store):
+        job = self._finished(store, "r", T0)
+        assert store.redact([job.id], now=T0 + timedelta(days=1)) == 1
+        red = store.get(job.id)
+        assert red.payload == {
+            "agent_name": "Agent One",
+            "event": {
+                "event_type": "node.update",
+                "entity": {"kind": "node", "id": "n1", "type": "Actor"},
+            },
+        }
+        assert red.result == {"handled": True, "summary": None, "turns": 2}
+        assert red.last_error is None
+        assert red.session_id is None
+        assert red.origin is None
+        assert red.redacted_at == T0 + timedelta(days=1)
+        # Accounting fields survive.
+        assert red.state == ExecutionState.SUCCEEDED
+        assert red.agent_id == job.agent_id
+        assert red.correlation_id == "corr-1"
+        assert red.attempts == job.attempts
+        assert red.created_at == job.created_at
+        assert red.started_at == job.started_at
+        assert red.finished_at == job.finished_at
+        assert red.updated_at == job.updated_at
+
+    def test_redact_is_idempotent(self, store):
+        job = self._finished(store, "r", T0)
+        store.redact([job.id], now=T0 + timedelta(days=1))
+        assert store.redact([job.id], now=T0 + timedelta(days=2)) == 0
+        assert store.get(job.id).redacted_at == T0 + timedelta(days=1)
+        assert (
+            store.list_terminal_older_than(T0 + timedelta(days=3), redacted=False) == []
+        )
+        assert [
+            j.id
+            for j in store.list_terminal_older_than(
+                T0 + timedelta(days=3), redacted=True
+            )
+        ] == [job.id]
+
+    def test_redact_and_purge_never_touch_non_terminal_jobs(self, store):
+        pending = store.enqueue(_job(idempotency_key="p", payload={"x": "keep"}))
+        running = store.enqueue(_job(idempotency_key="r", payload={"x": "keep"}))
+        store.claim_next("w", now=T0)
+        ids = [pending.id, running.id]
+        assert store.redact(ids, now=T0) == 0
+        assert store.purge(ids) == 0
+        for job_id in ids:
+            kept = store.get(job_id)
+            assert kept is not None
+            assert kept.payload == {"x": "keep"}
+            assert kept.redacted_at is None
+
+    def test_redact_and_purge_ignore_unknown_ids(self, store):
+        assert store.redact(["missing"], now=T0) == 0
+        assert store.purge(["missing"]) == 0
+
+    def test_purge_deletes_and_forgets_idempotency_key(self, store):
+        job = self._finished(store, "once", T0)
+        keep = self._finished(store, "keep", T0)
+        assert store.purge([job.id]) == 1
+        assert store.get(job.id) is None
+        assert store.get(keep.id) is not None
+        assert store.purge([job.id]) == 0
+        again = store.enqueue(_job(idempotency_key="once"))
+        assert again.id != job.id
+        assert again.state == ExecutionState.PENDING
+
+    def test_list_jobs_created_after_is_exclusive(self, store):
+        old = store.enqueue(_job(idempotency_key="old", run_at=T0 - timedelta(days=2)))
+        edge = store.enqueue(_job(idempotency_key="edge", run_at=T0))
+        new = store.enqueue(_job(idempotency_key="new", run_at=T0 + timedelta(days=1)))
+        ids = [j.id for j in store.list_jobs(created_after=T0)]
+        assert ids == [new.id]
+        assert edge.id not in ids and old.id not in ids
+
+    def test_list_terminal_older_than_is_strict_and_uses_finished_at(self, store):
+        cutoff = T0 - timedelta(days=30)
+        at_cutoff = self._finished(store, "edge", cutoff)
+        older = self._finished(store, "older", cutoff - timedelta(seconds=1))
+        oldest = self._finished(store, "oldest", cutoff - timedelta(days=1))
+        # Redaction stamps redacted_at but leaves updated_at/finished_at alone,
+        # so age keeps being measured from finished_at.
+        store.redact([older.id], now=T0)
+        ids = [j.id for j in store.list_terminal_older_than(cutoff)]
+        assert ids == [oldest.id, older.id]
+        assert at_cutoff.id not in ids
