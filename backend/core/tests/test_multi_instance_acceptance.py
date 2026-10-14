@@ -297,32 +297,23 @@ class TestCriterion4RestartKeepsAcknowledgedWrites:
         )
         assert second.nodes[node_id].name == "Survivor"
 
-    def test_a_flushed_write_is_in_the_store_before_the_instance_stops(
+    def test_an_acknowledged_write_is_in_the_store_when_the_call_returns(
         self, instances, schema, monkeypatch
     ):
         """The rollout case: the instance is killed, not stopped politely.
 
-        Reading the store through a fresh backend, while the writer is still
-        running, is not by itself enough. `add_nodes` hands the write to a
-        single background worker and returns, and that worker finishes in
-        about a millisecond - less than it takes this test to open a second
-        connection. So the node is there either way, and the test passes by
-        winning a race rather than by exercising `flush()`.
+        A store that enforces revisions makes every write synchronous
+        (SESSION_OVERLAY_CONTRACT.md §4.4), so the acknowledgement is the
+        write call itself returning - not a later `flush()`. An instance
+        killed straight after `add_nodes` returns has nothing queued to lose.
 
-        Holding the worker removes that race - but a hold measured in seconds
-        only moves it, and in the wrong direction: on a runner slower than the
-        hold, the test would not go red, it would go quietly vacuous. So the
-        hold is paired with a check of the precondition it exists to create.
-        If the write has already landed by the time `flush()` is called, this
-        test cannot tell a working `flush()` from a no-op, and it now says so
-        and fails rather than passing for no reason.
-
-        The other half is `applied`, which records that the real write ran
-        before `flush()` returned. That is what makes a no-op `flush()` fail
-        deterministically instead of racing the reader's connect - and it
-        fails safe if the patch below is ever bypassed (a rename that stops
-        production routing through `_do_apply` leaves `applied` unset, so the
-        test goes red rather than silently testing nothing).
+        Reading the store through a fresh backend proves nothing on its own:
+        a write the worker finishes in a millisecond is there either way, and
+        the test would pass by winning a race. So the worker is held, and
+        `applied` records that the real write ran before the call returned. A
+        call that went back to queueing and returning would leave it unset,
+        and so would a rename that stops production routing through
+        `_do_apply` - the test fails rather than silently testing nothing.
         """
         from backend.core.postgres_backend import PostgresGraphPersistenceBackend
 
@@ -342,34 +333,15 @@ class TestCriterion4RestartKeepsAcknowledgedWrites:
 
         first.add_nodes([_node(node_id, "Acknowledged")], [])
 
-        assert not applied.is_set(), (
-            "the write landed before flush() was even called, so this test "
-            "cannot distinguish a working flush() from a no-op. Either "
-            "add_nodes() no longer defers the write to the executor - in "
-            "which case this test needs rethinking, not retuning - or the "
-            "worker hold is too short for this machine, in which case raise "
-            "WORKER_HOLD_S. Check which before reaching for the constant; "
-            "the gap being measured is normally microseconds against a "
-            "300 ms budget, so a slow runner is the less likely of the two"
-        )
-
-        first.flush()
-
         assert applied.is_set(), (
-            "flush() returned before the write it acknowledged had run. "
-            "Either flush() does not wait, or production no longer routes "
-            "through _do_apply and the hold above did nothing"
+            "add_nodes() returned before the write it acknowledged had run. "
+            "Either writes to this store went back to being queued, or "
+            "production no longer routes through _do_apply and the hold "
+            "above did nothing"
         )
-
-        # A second, independent statement of the same property: whatever the
-        # worker is doing, flush() must not return with the write still
-        # queued. Not redundant - setting `_last_write = None` satisfies this
-        # one while doing no work, and running the write satisfies the one
-        # above; only together do they pin flush().
         pending = first._last_write
         assert pending is None or pending.done(), (
-            "flush() returned while the write it acknowledged was still "
-            "queued on the executor"
+            "add_nodes() returned while its write was still queued"
         )
 
         reader = PostgresGraphPersistenceBackend(DSN, schema=schema)
@@ -377,9 +349,8 @@ class TestCriterion4RestartKeepsAcknowledgedWrites:
             stored = reader.load_graph_data()
         finally:
             reader.close()
-
         assert any(n["id"] == node_id for n in stored["nodes"]), (
-            "flush() returned but the write was not in the store, so an "
+            "add_nodes() returned but the write was not in the store, so an "
             "instance killed mid-rollout loses a write it acknowledged"
         )
 

@@ -176,6 +176,21 @@ def _dbname() -> str:
     return psycopg.conninfo.conninfo_to_dict(DSN).get("dbname", "postgres")
 
 
+def _provision_revision_sequence(conn, schema: str, role: str) -> None:
+    """The operator's half of entity revisions, as PERSISTENCE_BACKENDS.md
+    prescribes it: the sequence, and what the app role needs on it."""
+    conn.execute(
+        psycopg.sql.SQL("CREATE SEQUENCE {}.graph_revision_seq").format(
+            psycopg.sql.Identifier(schema)
+        )
+    )
+    conn.execute(
+        psycopg.sql.SQL(
+            "GRANT USAGE, SELECT, UPDATE ON SEQUENCE {}.graph_revision_seq TO {}"
+        ).format(psycopg.sql.Identifier(schema), psycopg.sql.Identifier(role))
+    )
+
+
 def _dsn_as_role(user: str, password: str) -> str:
     parts = psycopg.conninfo.conninfo_to_dict(DSN)
     parts["user"] = user
@@ -429,7 +444,16 @@ def _rendered(query):
 # empties a table writes as surely as an UPDATE does - `TRUNCATE` inside
 # `checkpoint()` would be invisible to a three-verb filter. `FOR UPDATE`
 # would match by accident on the word UPDATE; `FOR SHARE` would not.
-_WRITING = ("INSERT", "UPDATE", "DELETE", "TRUNCATE", "MERGE", "COPY", "FOR SHARE")
+_WRITING = (
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "TRUNCATE",
+    "MERGE",
+    "COPY",
+    "FOR SHARE",
+    "FOR KEY SHARE",
+)
 
 
 def _writing_statements(issued):
@@ -438,6 +462,28 @@ def _writing_statements(issued):
         for text in (_rendered(q) for q, _ in issued)
         if any(verb in text.upper() for verb in _WRITING)
     ]
+
+
+def _endpoint_locks_first(writes, operations):
+    """The writing statements without the batch's endpoint locks, which are
+    checked here: one primary-key lock per endpoint an edge upsert names and
+    the batch does not upsert itself, all first, all on graph_nodes (§11.3 -
+    an edge write holds its endpoints). What remains is one statement per
+    operation."""
+    upserted = {
+        op.entity_id for op in operations if op.kind == "node" and op.action == "upsert"
+    }
+    endpoints = {
+        op.payload[end]
+        for op in operations
+        if op.kind == "edge" and op.action == "upsert"
+        for end in ("source", "target")
+    } - upserted
+    locks = [text for text in writes if "FOR KEY SHARE" in text.upper()]
+    assert len(locks) == len(endpoints), (endpoints, writes)
+    assert writes[: len(locks)] == locks, writes
+    assert all(_tables_named(text) == {"graph_nodes"} for text in locks), locks
+    return writes[len(locks) :]
 
 
 def _tables_named(text):
@@ -1485,6 +1531,7 @@ class TestPostgresBootsForALeastPrivilegeRole:
                     " ON ALL TABLES IN SCHEMA {} TO {}"
                 ).format(psycopg.sql.Identifier(schema), psycopg.sql.Identifier(name))
             )
+            _provision_revision_sequence(conn, schema, name)
 
         low_dsn = _dsn_as_role(name, password)
         backend = PostgresGraphPersistenceBackend(low_dsn, schema=schema)
@@ -1494,6 +1541,44 @@ class TestPostgresBootsForALeastPrivilegeRole:
         backend.save_graph_data(snapshot([node_payload("a")]))
         assert backend.exists()
         assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
+
+    def test_a_store_provisioned_without_the_revision_sequence_says_what_is_missing(
+        self, lowpriv, backends
+    ):
+        """A store provisioned before entity revisions, for a role that may
+        not create: the boot fails, naming the sequence to add, rather than
+        with the server's bare "permission denied for schema"."""
+        name, schema, password = lowpriv
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            for table, columns in (
+                ("graph_nodes", "id text PRIMARY KEY, doc jsonb NOT NULL"),
+                ("graph_edges", "id text PRIMARY KEY, doc jsonb NOT NULL"),
+                (
+                    "graph_metadata",
+                    "only_row boolean PRIMARY KEY DEFAULT true CHECK (only_row),"
+                    " doc jsonb NOT NULL",
+                ),
+            ):
+                conn.execute(
+                    psycopg.sql.SQL("CREATE TABLE {}.{} ({})").format(
+                        psycopg.sql.Identifier(schema),
+                        psycopg.sql.Identifier(table),
+                        psycopg.sql.SQL(columns),
+                    )
+                )
+            conn.execute(
+                psycopg.sql.SQL(
+                    "GRANT SELECT, INSERT, UPDATE, DELETE"
+                    " ON ALL TABLES IN SCHEMA {} TO {}"
+                ).format(psycopg.sql.Identifier(schema), psycopg.sql.Identifier(name))
+            )
+
+        backend = PostgresGraphPersistenceBackend(
+            _dsn_as_role(name, password), schema=schema
+        )
+        backends.append(backend)
+        with pytest.raises(RuntimeError, match="graph_revision_seq"):
+            backend.exists()
 
     def test_a_role_that_owns_nothing_is_not_warned_about_indexes_it_has(
         self, lowpriv, backends, reported
@@ -1540,6 +1625,7 @@ class TestPostgresBootsForALeastPrivilegeRole:
                     " ON ALL TABLES IN SCHEMA {} TO {}"
                 ).format(psycopg.sql.Identifier(schema), psycopg.sql.Identifier(name))
             )
+            _provision_revision_sequence(conn, schema, name)
 
         low_dsn = _dsn_as_role(name, password)
         backend = PostgresGraphPersistenceBackend(low_dsn, schema=schema)
@@ -2317,6 +2403,7 @@ class TestPostgresDeclaresWhatItImplements:
             transactions=True,
             change_notification=True,
             store_traversal=True,
+            revision_enforcement=True,
         )
 
     def test_an_entity_write_can_be_a_backends_first_call(self, schema, backends):
@@ -2502,7 +2589,12 @@ class TestPostgresEntityWritesTouchOneRow:
 
         issued = _statements_issued(lambda: action(backend))
 
-        writes = _writing_statements(issued)
+        writes = _endpoint_locks_first(
+            _writing_statements(issued),
+            [EntityOperation.upsert_edge(edge_payload("e0", "n0", "n1"))]
+            if write == "upsert_edge"
+            else [],
+        )
         named = [_tables_named(text) for text in writes]
         assert named == expected, (
             f"{write} should issue {len(expected)} writing statement(s) naming "
@@ -2537,11 +2629,10 @@ class TestPostgresEntityWritesTouchOneRow:
         print(_pg_length_seed_banner())
         backend = self._seeded(schema, backends)
 
-        issued = _statements_issued(
-            lambda: backend.apply_batch(self._long_batch(length))
-        )
+        batch = self._long_batch(length)
+        issued = _statements_issued(lambda: backend.apply_batch(batch))
 
-        writes = _writing_statements(issued)
+        writes = _endpoint_locks_first(_writing_statements(issued), batch)
         named = [_tables_named(text) for text in writes]
         assert named == self._long_batch_tables(length), (
             f"a batch of {length} should issue one writing statement per "
@@ -3134,14 +3225,14 @@ class TestPostgresBatchesSurviveADeadlock:
         real_apply = backend._apply_batch_once
         attempts = []
 
-        def flaky(operations):
+        def flaky(operations, *rest):
             attempts.append(1)
             # The documented count, not `backend.DEADLOCK_RETRIES`: a test
             # that reads the bound off the thing it is pinning passes for
             # every value of it, including zero.
             if len(attempts) <= DOCUMENTED_DEADLOCK_RETRIES:
                 raise psycopg.errors.DeadlockDetected("injected")
-            return real_apply(operations)
+            return real_apply(operations, *rest)
 
         backend._apply_batch_once = flaky
         backend.apply_batch([EntityOperation.upsert_node(node_payload("a"))])
@@ -3180,11 +3271,11 @@ class TestPostgresBatchesSurviveADeadlock:
         real_apply_one = backend._apply_one
         applied = []
 
-        def fail_on_the_last(conn, operation):
+        def fail_on_the_last(conn, operation, *rest):
             applied.append(operation)
             if len(applied) == length:
                 raise RuntimeError("injected, at the end of the batch")
-            real_apply_one(conn, operation)
+            real_apply_one(conn, operation, *rest)
 
         backend._apply_one = fail_on_the_last
         with pytest.raises(RuntimeError):
@@ -3222,17 +3313,17 @@ class TestPostgresBatchesSurviveADeadlock:
         attempts = []
         applied = []
 
-        def flaky(operations):
+        def flaky(operations, *rest):
             attempts.append(1)
             # Twice, not once: a re-sort applied only from the second
             # retry onward survives a single injected deadlock.
             if len(attempts) <= 2:
                 raise psycopg.errors.DeadlockDetected("injected")
-            return real_apply(operations)
+            return real_apply(operations, *rest)
 
-        def record(conn, operation):
+        def record(conn, operation, *rest):
             applied.append((operation.action, operation.kind, operation.entity_id))
-            real_apply_one(conn, operation)
+            real_apply_one(conn, operation, *rest)
 
         backend._apply_batch_once = flaky
         backend._apply_one = record
@@ -3282,7 +3373,7 @@ class TestPostgresBatchesSurviveADeadlock:
         cap = DOCUMENTED_DEADLOCK_RETRIES + 5
         attempts = []
 
-        def always(operations):
+        def always(operations, *rest):
             attempts.append(1)
             if len(attempts) > cap:
                 # BaseException on purpose: an `except Exception` in the
@@ -3326,7 +3417,7 @@ class TestPostgresBatchesSurviveADeadlock:
 
         real_apply_one = backend._apply_one
 
-        def always_deadlocks(conn, operation):
+        def always_deadlocks(conn, operation, *rest):
             raise psycopg.errors.DeadlockDetected("injected")
 
         backend._apply_one = always_deadlocks
@@ -3357,7 +3448,7 @@ class TestPostgresBatchesSurviveADeadlock:
 
         attempts = []
 
-        def always_a_different_error(operations):
+        def always_a_different_error(operations, *rest):
             attempts.append(1)
             raise psycopg.errors.UniqueViolation("injected, not a deadlock")
 
@@ -3522,8 +3613,8 @@ class TestPostgresEntityWritesDoNotSerialiseAgainstEachOther:
         paused, release = threading.Event(), threading.Event()
         real_apply_one = holder._apply_one
 
-        def hold_open(conn, operation):
-            real_apply_one(conn, operation)
+        def hold_open(conn, operation, *rest):
+            real_apply_one(conn, operation, *rest)
             paused.set()
             release.wait(30)
 
@@ -4878,9 +4969,9 @@ class TestPostgresAnnouncesOnlyWhatCommitted:
         real_apply_one = type(writer)._apply_one
         rows_written = []
 
-        def note_row(self, conn, operation):
+        def note_row(self, conn, operation, *rest):
             rows_written.append(operation)
-            return real_apply_one(self, conn, operation)
+            return real_apply_one(self, conn, operation, *rest)
 
         def announce_then_die(self, conn, operations):
             real_announce(self, conn, operations)
@@ -7435,6 +7526,7 @@ class TestTheOptionalScopeSeam:
                         psycopg.sql.Identifier(schema), psycopg.sql.Identifier(name)
                     )
                 )
+                _provision_revision_sequence(conn, schema, name)
             yield _dsn_as_role(name, password), schema
         finally:
             with psycopg.connect(DSN, autocommit=True) as conn:

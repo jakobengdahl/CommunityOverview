@@ -493,8 +493,13 @@ class PersistenceBackendContract:
         backend.upsert_node(replacement)
 
         nodes = by_id(factory().load_graph_data(), "nodes")
-        assert nodes["a"] == replacement
-        assert "embedding" not in nodes["a"]  # replaced whole, not patched
+        stored = dict(nodes["a"])
+        if capabilities_of(backend).revision_enforcement:
+            # The store lays its own revision over the payload (§4.4); that
+            # one key is the store's, everything else is the replacement.
+            assert isinstance(stored.pop("revision"), int)
+        assert stored == replacement
+        assert "embedding" not in stored  # replaced whole, not patched
         assert by_id(factory().load_graph_data(), "edges")["e"]["source"] == "a"
 
     def test_a_delete_removes_and_deleting_the_absent_is_not_an_error(self, factory):
@@ -689,12 +694,21 @@ class PersistenceBackendContract:
             calls.append("snapshot"),
             real_save(data),
         )
+        enforcing = capabilities_of(backend).revision_enforcement
         if incremental:
             real_upsert = backend.upsert_node
             backend.upsert_node = lambda node: (
                 calls.append("upsert"),
                 real_upsert(node),
             )
+        if enforcing:
+            # A store that assigns revisions always gets apply_batch, which
+            # is the call that carries the write token and returns them.
+            real_batch = backend.apply_batch
+            backend.apply_batch = lambda operations, write_token=None: (
+                calls.append("upsert"),
+                real_batch(operations, write_token=write_token),
+            )[1]
 
         storage = GraphStorage(persistence_backend=backend)
         try:
