@@ -271,3 +271,31 @@ def test_concurrent_opens_of_a_v1_file_migrate_once(tmp_path):
         s.close()
     assert errors == []
     assert len(stores) == 4
+
+
+@pytest.mark.parametrize("operation", ["redact", "purge"])
+def test_removed_content_leaves_no_trace_in_db_or_wal(tmp_path, operation):
+    """secure_delete + WAL checkpoint: the marker is gone from every file."""
+    import os
+
+    marker = "MARKER-7f3a9c-unique-content"
+    db = tmp_path / "execution.db"
+    store = SqliteExecutionStore(db)
+    try:
+        assert store._conn.execute("PRAGMA secure_delete").fetchone()[0] == 1
+        job = store.enqueue(
+            _job(idempotency_key="m", payload={"event": {"summary": marker * 50}})
+        )
+        store.complete(job.id, result={"summary": marker}, now=T0)
+        store._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        if operation == "redact":
+            assert store.redact([job.id], now=T0) == 1
+        else:
+            assert store.purge([job.id]) == 1
+        wal = str(db) + "-wal"
+        assert not os.path.exists(wal) or os.path.getsize(wal) == 0
+        for path in (db, wal):
+            if os.path.exists(path):
+                assert marker.encode() not in open(path, "rb").read()
+    finally:
+        store.close()

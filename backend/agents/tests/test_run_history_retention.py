@@ -215,6 +215,15 @@ class TestSweep:
         assert store.get(inside.id) is not None
         assert store.get(outside.id) is None
 
+    def test_redact_cutoff_is_exactly_redact_after_days(self, store):
+        policy = RetentionPolicy.from_values(redact_after_days=10)
+        inside = _run(store, "inside", finished_days_ago=10 - 1 / 24)
+        outside = _run(store, "outside", finished_days_ago=10 + 1 / 24)
+        report = sweep(store, policy, now=T0)
+        assert report.redact_cutoff == T0 - timedelta(days=10)
+        assert store.get(inside.id).redacted_at is None
+        assert store.get(outside.id).redacted_at is not None
+
     def test_dry_run_after_sweep_reports_nothing_left(self, store):
         policy = RetentionPolicy.from_values(redact_after_days=7)
         _run(store, "a", finished_days_ago=8)
@@ -298,6 +307,32 @@ class TestRedactJob:
         job = self._job({}, {"handled": True, "turns": 3, "message": SECRET})
         redact_job(job, T0)
         assert job.result == {"handled": True, "turns": 3, "message": None}
+
+    @pytest.mark.parametrize("result", ["free text " + SECRET, [SECRET]])
+    def test_non_dict_result_is_dropped(self, result):
+        from backend.agents.execution.models import redact_job
+
+        job = self._job({}, result)
+        redact_job(job, T0)
+        assert job.result is None
+
+    def test_booleans_are_not_kept_as_identifiers(self):
+        from backend.agents.execution.models import redact_job
+
+        job = self._job({"event": {"event_type": False, "entity": {"id": True}}}, None)
+        redact_job(job, T0)
+        assert job.payload["event"] == {
+            "event_type": None,
+            "entity": {"kind": None, "id": None, "type": None},
+        }
+
+    def test_terminal_age_prefers_finished_at_over_updated_at(self):
+        job = self._job({}, None)
+        job.finished_at = T0 - timedelta(days=40)
+        job.updated_at = T0
+        assert job.terminal_at == T0 - timedelta(days=40)
+        job.finished_at = None
+        assert job.terminal_at == T0
 
     def test_non_scalar_or_long_kept_fields_are_dropped(self):
         from backend.agents.execution.models import redact_job
