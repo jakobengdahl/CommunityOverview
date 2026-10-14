@@ -120,8 +120,10 @@ class SqliteExecutionStore:
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        # busy_timeout first: switching to WAL takes a lock that concurrent
-        # openers of the same file must wait for rather than fail on.
+        # busy_timeout first so every later statement, including the migration's
+        # BEGIN IMMEDIATE, waits for a concurrent opener instead of failing.
+        # (The one-time WAL switch of a brand-new file is not covered: SQLite
+        # does not run the busy handler for it.)
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute("PRAGMA journal_mode=WAL")
         # Overwrite freed pages so purged or redacted content does not linger
