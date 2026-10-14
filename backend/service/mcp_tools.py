@@ -620,6 +620,7 @@ def register_mcp_tools(
         edges: List[Dict[str, Any]],
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
+        expect_absent: bool = False,
     ) -> Dict[str, Any]:
         """
         Add new nodes and edges to the graph
@@ -639,6 +640,9 @@ def register_mcp_tools(
             edges: List of edge objects (source, target, type). Type is optional.
             event_session_id: Optional session ID for webhook loop prevention
             event_correlation_id: Optional correlation ID for chaining events
+            expect_absent: When True, every node and edge must not exist yet;
+                if one does, nothing is added and the result carries
+                error="entity_revision_conflict".
 
         Returns:
             Dict with result (added_node_ids, added_edge_ids, success, message)
@@ -649,6 +653,7 @@ def register_mcp_tools(
             event_origin="mcp",
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
+            expect_absent=expect_absent,
         )
 
     @register_tool
@@ -659,6 +664,7 @@ def register_mcp_tools(
         expected_updated_at: Optional[str] = None,
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
+        expected_revision: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Update an existing node
@@ -679,6 +685,9 @@ def register_mcp_tools(
                 `current_updated_at` so you can re-read and retry.
             event_session_id: Optional session ID for webhook loop prevention
             event_correlation_id: Optional correlation ID for chaining events
+            expected_revision: Optional. The node's `revision` as you last
+                read it; if it has moved, nothing is written and the result
+                has error="entity_revision_conflict" and `current_revision`.
 
         Returns:
             Dict with updated node or error
@@ -691,6 +700,7 @@ def register_mcp_tools(
             event_correlation_id=event_correlation_id,
             metadata_merge=metadata_merge,
             expected_updated_at=expected_updated_at,
+            expected_revision=expected_revision,
         )
 
     @register_tool
@@ -699,6 +709,7 @@ def register_mcp_tools(
         confirmed: bool = False,
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
+        expected_revisions: Optional[Dict[str, int]] = None,
     ) -> Dict[str, Any]:
         """
         Delete nodes from the graph (max 10 at a time)
@@ -710,6 +721,9 @@ def register_mcp_tools(
             confirmed: Must be True to execute deletion
             event_session_id: Optional session ID for webhook loop prevention
             event_correlation_id: Optional correlation ID for chaining events
+            expected_revisions: Optional map of node id -> the `revision` it
+                must still have. Any mismatch deletes nothing and returns
+                error="entity_revision_conflict".
 
         Returns:
             Dict with result (deleted_node_ids, affected_edge_ids, success, message)
@@ -720,6 +734,7 @@ def register_mcp_tools(
             event_origin="mcp",
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
+            expected_revisions=expected_revisions,
         )
 
     @register_tool
