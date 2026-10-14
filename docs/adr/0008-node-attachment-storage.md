@@ -744,6 +744,32 @@ The UI task builds against these rules:
 - **Strings:** all of them go under an `attachments.` prefix in both
   `frontend/web/src/i18n/en.json` and `sv.json`.
 
+## Implementation notes
+
+Recorded when the store and the REST API landed. They change how two rules
+above are applied; the rest of the decision stands as written.
+
+- **§11, PostgreSQL without `ATTACHMENT_DIR`:** the instance boots, logs a
+  warning, and the attachment routes answer `503 attachments_unavailable`.
+  Refusing boot would stop every existing PostgreSQL deployment from starting
+  on upgrade. The safety property the rule protects still holds: no
+  per-instance local directory is ever invented.
+- **§7, file-name sanitising, one more step:** after the type is detected
+  (§5), a stored name whose extension does not belong to that type gets the
+  type's extension appended (`report.docm` is stored as `report.docm.docx`),
+  and a `text/plain` name gets `.txt` appended unless its extension is one a
+  desktop opens as inert text (`.txt`, `.md`, `.json`, `.log`, `.yaml` and
+  similar, or none at all), so `.bat`, `.js`, `.hta`, `.rtf` or `.rdp` never
+  survive.
+  Trailing dots and spaces are ignored when reading the extension. The bytes
+  are unchanged; only the name the browser saves the download under is.
+  Bidirectional formatting characters are removed with the control
+  characters in step 3.
+- **§5, archives:** a ZIP whose central directory is larger than 1 MiB, or
+  that uses ZIP64, is refused before it is parsed. A real office document
+  needs neither, and parsing a directory of hundreds of thousands of empty
+  members costs seconds and hundreds of MB.
+
 ## Consequences
 
 - **Purely additive.** There is a new module, new routes, a new script, and

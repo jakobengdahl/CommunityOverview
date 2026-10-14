@@ -203,6 +203,13 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | `GRAPH_POSTGRES_SCHEMA` | `public` | Schema holding the graph tables; one database can serve several graphs |
 | `GRAPH_POSTGRES_POOL_SIZE` | *(backend default)* | Pooled connections per instance, on top of one dedicated `LISTEN` connection; must be at least 1 |
 | `GRAPH_POSTGRES_SCOPE` | *(unset)* | Opaque identifier tagging this instance's rows and narrowing the rows it reads (`postgres` only). Unset keeps no scopes apart; set-but-empty, or set without `GRAPH_BACKEND=postgres`, fails at boot. See [PERSISTENCE_BACKENDS.md](../docs/PERSISTENCE_BACKENDS.md) |
+| `ATTACHMENT_DIR` | `<graph stem>.attachments` next to the graph | Root of the node attachment store. Required for attachments with `GRAPH_BACKEND=postgres` (every instance serving the schema must share it); without it the attachment routes answer `503 attachments_unavailable` |
+| `ATTACHMENT_NAMESPACE` | graph file stem, or `pg:<GRAPH_POSTGRES_SCHEMA>` | Separates graphs sharing one attachment root; keep it for the graph's life |
+| `ATTACHMENT_BACKEND` | `file` | Attachment store backend; an unrecognised value fails at boot |
+| `ATTACHMENT_MAX_FILE_BYTES` | `26214400` (25 MiB) | Largest single file; `0` or less fails at boot |
+| `ATTACHMENT_MAX_FILES_PER_NODE` | `10` | Most files on one node; `0` or less fails at boot |
+| `ATTACHMENT_MAX_BYTES_PER_NODE` | `104857600` (100 MiB) | Most bytes on one node; `0` or less fails at boot |
+| `ATTACHMENT_ALLOWED_TYPES` | every detected type | Comma-separated MIME types narrowing the accepted set; a type the detector does not know, or a value naming no type at all, fails at boot |
 | `HISTORY_MAX_EVENTS` | `100000` | Mutation-history records retained (file backend only — a non-file `GRAPH_BACKEND` keeps no history); `0` removes the count cap (age trimming, if configured, still applies) |
 | `HISTORY_MAX_AGE_DAYS` | *(unset)* | Drop history records older than this many days (file backend only); unset keeps them regardless of age |
 | `API_PREFIX` | `/api` | REST API URL prefix |
@@ -456,6 +463,10 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | PATCH | `/api/nodes/{id}` | Update a node |
 | DELETE | `/api/nodes` | Delete nodes |
 | POST | `/api/nodes/archive` | Archive/unarchive nodes (`archived` flag; hide-by-default vs. permanent delete) |
+| GET | `/api/nodes/{id}/attachments` | List a node's attached files: `{attachments, limits, uploads_allowed}`. A `federated::` node lists empty with `uploads_allowed: false`. See [Node attachments](#node-attachments) |
+| POST | `/api/nodes/{id}/attachments?filename=<name>` | Attach one file; the body is the raw bytes (not multipart). `201` with the new record. Refusals: `413 attachment_too_large`, `409 node_attachment_limit`, `415 unsupported_attachment_type`, `422 attachments_not_allowed`, `422 federated_node`, `409 node_archived` |
+| GET | `/api/nodes/{id}/attachments/{attachment_id}` | Download one file, streamed, always as `Content-Disposition: attachment` with `nosniff`, a sandboxing CSP and `no-store` |
+| DELETE | `/api/nodes/{id}/attachments/{attachment_id}` | Delete one file: `{success: true}` |
 | POST | `/api/edges` | Add edges |
 | PATCH | `/api/edges/{id}` | Update an edge |
 | DELETE | `/api/edges/{id}` | Delete an edge |
@@ -489,6 +500,45 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | POST | `/agents/proposals/{proposal_id}/approve` | Approve a proposal (applies the action for act_after_approval agents) |
 | POST | `/agents/proposals/{proposal_id}/reject` | Reject a proposal |
 | POST | `/agents/{id}/trigger` | Fire a scheduled agent immediately (used by GCP Cloud Scheduler) |
+
+### Node attachments
+
+Files attached to a node live in their own store beside the graph, never in
+the graph document, `GET /export`, mutation history or federation. The design
+is [ADR 0008](../docs/adr/0008-node-attachment-storage.md); the code is
+`backend/core/attachment_store.py` (the store), `backend/core/attachment_types.py`
+(type detection) and `backend/service/attachments.py` (authorization and the
+per-route checks).
+
+- **Uploads need the schema flag.** A node type accepts uploads only with
+  `allows_attachments: true` (see [PROFILES.md](../docs/PROFILES.md)). Files
+  already attached stay listable, downloadable and deletable when the flag is
+  off, and when the node is archived.
+- **Authorization** runs in the service layer on every request: the read
+  routes are `read` on `list_node_attachments` / `get_node_attachment`, upload
+  and delete are `mutate` on `add_node_attachment` / `delete_node_attachment`.
+  A node the caller cannot see answers `404`, exactly like a missing one.
+- **Limits** (the `ATTACHMENT_MAX_*` settings above) are checked from
+  `Content-Length` before the body is read, again while it streams, and once
+  more under the per-node lock at commit. The smaller of the per-file limit
+  and the node's remaining byte budget decides the error: the per-file limit
+  is `413 attachment_too_large`, the node budget `409 node_attachment_limit`.
+- **Types** are detected from the bytes: PDF, PNG, JPEG, WebP, DOCX, XLSX,
+  PPTX, ODT, ODS, ODP, and UTF-8 text (`text/csv` for a `.csv` name, otherwise
+  `text/plain`). Text whose first non-blank character is `<` is refused, as are
+  HTML, SVG, XML, executables, bare archives and archives with an oversized
+  (over 1 MiB) or ZIP64 central directory. The client's `Content-Type` is
+  stored for diagnosis only and never served.
+- **Names** are sanitised (path parts, control and bidi characters removed,
+  255 UTF-8 bytes at most), then made to agree with the detected type:
+  `report.docm` holding a Word document is stored as `report.docm.docx`, and a
+  text file keeps its extension only when it is inert text (`.txt`, `.md`,
+  `.json`, `.log`, `.yaml` and similar) or has none (`README` stays
+  `README`), so `run.bat` is stored as `run.bat.txt`.
+- **Deleting a node** removes its files after the graph delete succeeds.
+  Archiving keeps them. REPLACE import does not touch the store.
+- **No MCP tool** exists for attachments yet; the service functions take bytes
+  or an async iterator, so one can be added without going through HTTP.
 
 ### Generic search filters (`/api/search` and the `search_graph` MCP tool)
 

@@ -120,6 +120,36 @@ class AppConfig:
         )
     )
 
+    # Node attachments (docs/adr/0008-node-attachment-storage.md). Read raw and
+    # validated by build_attachment_settings, which refuses a bad value at boot
+    # with the variable named, rather than failing here on the first int().
+    attachment_backend: Optional[str] = field(
+        default_factory=lambda: os.getenv("ATTACHMENT_BACKEND")
+    )
+    # Root of the attachment store. Unset puts it beside the graph file
+    # (<stem>.attachments); the PostgreSQL backend has no graph file, so there
+    # attachments stay unavailable until this is set.
+    attachment_dir: Optional[str] = field(
+        default_factory=lambda: os.getenv("ATTACHMENT_DIR")
+    )
+    # Separates graphs sharing one attachment root. Unset: the graph file's
+    # stem, or pg:<GRAPH_POSTGRES_SCHEMA>. A graph keeps its namespace for life.
+    attachment_namespace: Optional[str] = field(
+        default_factory=lambda: os.getenv("ATTACHMENT_NAMESPACE")
+    )
+    attachment_max_file_bytes: Optional[str] = field(
+        default_factory=lambda: os.getenv("ATTACHMENT_MAX_FILE_BYTES")
+    )
+    attachment_max_files_per_node: Optional[str] = field(
+        default_factory=lambda: os.getenv("ATTACHMENT_MAX_FILES_PER_NODE")
+    )
+    attachment_max_bytes_per_node: Optional[str] = field(
+        default_factory=lambda: os.getenv("ATTACHMENT_MAX_BYTES_PER_NODE")
+    )
+    attachment_allowed_types: Optional[str] = field(
+        default_factory=lambda: os.getenv("ATTACHMENT_ALLOWED_TYPES")
+    )
+
     # Server configuration
     # Container default, matching the Dockerfile; HOST overrides it. The socket
     # is bound by the uvicorn CLI, not by this field.

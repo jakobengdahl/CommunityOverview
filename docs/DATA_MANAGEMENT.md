@@ -13,7 +13,14 @@ data/
     graph.journal.ndjson    # Mutations not yet folded into graph.json (see below)
     graph.embeddings.bin    # Embedding vectors for that graph (see below)
     graph.history.ndjson    # Mutation history sidecar
+    graph.attachments/      # Files attached to nodes (see below)
 ```
+
+`graph.attachments/` is the node attachment store
+([ADR 0008](adr/0008-node-attachment-storage.md)): one directory per node,
+named by a hash of the node id, holding an `index.json` and the files under
+server-minted ids. It is never part of `graph.json` or `GET /export`, so back
+it up on its own; `ATTACHMENT_DIR` moves it (see `backend/DEVELOPMENT.md`).
 
 ## How It Works
 
