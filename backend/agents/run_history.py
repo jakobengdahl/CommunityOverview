@@ -14,7 +14,9 @@ not go through the store's ``claim_next`` queue, the recorder never claims: it
 enqueues the run already in ``RUNNING`` state (so attribution stays with that
 specific job id, even when several workers record concurrently) and finalizes
 it by id. A run whose process dies mid-flight is left ``RUNNING`` — a truthful
-record of what was in flight at the crash.
+record of what was in flight at the crash — until a configured retention
+outlives it: the retention sweep then abandons it (dead-letter, fixed reason)
+and ages it out like any other run (``run_history_retention``).
 
 The store is created with ``RetryPolicy(max_attempts=1)`` so a failed run moves
 straight to a terminal state (surfaced as ``failed``) rather than being

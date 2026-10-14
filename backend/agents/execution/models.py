@@ -262,6 +262,9 @@ class ExecutionJob:
         return self.finished_at or self.updated_at
 
 
+# The fixed, content-free reason ``abandon`` records on a job it dead-letters.
+ABANDONED_REASON = "abandoned: still running past the retention window"
+
 _MAX_KEPT_LEN = 200
 
 

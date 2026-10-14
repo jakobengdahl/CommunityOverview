@@ -20,6 +20,7 @@ from datetime import timedelta
 from typing import Dict, List, Optional, Sequence
 
 from .models import (
+    ABANDONED_REASON,
     ExecutionJob,
     ExecutionKind,
     ExecutionState,
@@ -228,6 +229,33 @@ class InMemoryExecutionStore:
         jobs.sort(key=lambda j: j.terminal_at)
         return jobs
 
+    def list_running_older_than(self, cutoff) -> List[ExecutionJob]:
+        with self._lock:
+            jobs = [
+                job.copy()
+                for job in self._jobs.values()
+                if self._abandonable(job, cutoff)
+            ]
+        jobs.sort(key=lambda j: j.updated_at)
+        return jobs
+
+    def abandon(self, job_ids: Sequence[str], *, cutoff, now=None) -> int:
+        now = now or utcnow()
+        count = 0
+        with self._lock:
+            for job_id in set(job_ids):
+                job = self._jobs.get(job_id)
+                if job is None or not self._abandonable(job, cutoff):
+                    continue
+                job.state = ExecutionState.DEAD_LETTER
+                job.dead_letter_reason = ABANDONED_REASON
+                job.lease_owner = None
+                job.lease_expiry = None
+                job.finished_at = job.updated_at
+                job.updated_at = now
+                count += 1
+        return count
+
     def redact(self, job_ids: Sequence[str], *, now=None) -> int:
         now = now or utcnow()
         count = 0
@@ -261,6 +289,10 @@ class InMemoryExecutionStore:
         if job is None:
             raise JobNotFoundError(job_id)
         return job
+
+    @staticmethod
+    def _abandonable(job: ExecutionJob, cutoff) -> bool:
+        return job.state == ExecutionState.RUNNING and job.updated_at < cutoff
 
     @staticmethod
     def _lease_expired(job: ExecutionJob, now) -> bool:

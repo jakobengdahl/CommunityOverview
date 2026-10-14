@@ -17,7 +17,13 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from .models import ExecutionJob, ExecutionKind, ExecutionState, RetryPolicy
+from .models import (
+    ABANDONED_REASON,
+    ExecutionJob,
+    ExecutionKind,
+    ExecutionState,
+    RetryPolicy,
+)
 from .store import ExecutionStore, JobNotFoundError
 
 T0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
@@ -460,3 +466,106 @@ class ExecutionStoreContractTests:
         ids = [j.id for j in store.list_terminal_older_than(cutoff)]
         assert ids == [oldest.id, older.id]
         assert at_cutoff.id not in ids
+
+    # -- retention: abandoning orphaned RUNNING jobs ----------------------------
+
+    def _orphan(self, store, key, last_seen, **kw) -> ExecutionJob:
+        """A job recorded RUNNING at ``last_seen`` that nothing will finalize."""
+        return store.enqueue(
+            _job(
+                idempotency_key=key,
+                run_at=last_seen,
+                state=ExecutionState.RUNNING,
+                attempts=1,
+                lease_owner="agent-1",
+                updated_at=last_seen,
+                started_at=last_seen,
+                payload={"event": {"entity": {"data": "secret content"}}},
+                session_id="sess-1",
+                **kw,
+            )
+        )
+
+    def test_list_running_older_than_is_strict_and_skips_other_states(self, store):
+        cutoff = T0 - timedelta(days=30)
+        oldest = self._orphan(store, "oldest", cutoff - timedelta(days=2))
+        older = self._orphan(store, "older", cutoff - timedelta(seconds=1))
+        self._orphan(store, "edge", cutoff)
+        self._orphan(store, "young", cutoff + timedelta(days=1))
+        store.enqueue(
+            _job(idempotency_key="pending", run_at=cutoff - timedelta(days=9))
+        )
+        self._finished(store, "done", cutoff - timedelta(days=9))
+        ids = [j.id for j in store.list_running_older_than(cutoff)]
+        assert ids == [oldest.id, older.id]
+
+    def test_list_running_older_than_measures_a_claimed_job_from_its_last_update(
+        self, store
+    ):
+        job = store.enqueue(_job(idempotency_key="c", run_at=T0 - timedelta(days=60)))
+        store.claim_next("w", now=T0 - timedelta(days=60))
+        assert store.renew_lease(job.id, "w", now=T0 - timedelta(days=1))
+        assert store.list_running_older_than(T0 - timedelta(days=30)) == []
+        assert [j.id for j in store.list_running_older_than(T0)] == [job.id]
+
+    def test_abandon_dead_letters_with_fixed_reason_and_last_update_as_finish(
+        self, store
+    ):
+        last_seen = T0 - timedelta(days=40)
+        job = self._orphan(store, "o", last_seen)
+        assert store.abandon([job.id], cutoff=T0 - timedelta(days=30), now=T0) == 1
+        out = store.get(job.id)
+        assert out.state == ExecutionState.DEAD_LETTER
+        assert out.dead_letter_reason == ABANDONED_REASON
+        assert out.finished_at == last_seen
+        assert out.updated_at == T0
+        assert out.lease_owner is None and out.lease_expiry is None
+        # Abandoning only finalizes; content goes with redaction/purge.
+        assert out.payload == job.payload
+        assert out.session_id == "sess-1"
+        assert out.created_at == job.created_at
+        assert out.started_at == job.started_at
+        assert out.attempts == job.attempts
+        # It now ages out like any terminal job, from its last update.
+        assert [
+            j.id for j in store.list_terminal_older_than(T0 - timedelta(days=30))
+        ] == [job.id]
+
+    def test_abandon_never_touches_young_pending_or_terminal_jobs(self, store):
+        cutoff = T0 - timedelta(days=30)
+        edge = self._orphan(store, "edge", cutoff)
+        young = self._orphan(store, "young", cutoff + timedelta(days=1))
+        pending = store.enqueue(
+            _job(idempotency_key="pending", run_at=cutoff - timedelta(days=9))
+        )
+        done = self._finished(store, "done", cutoff - timedelta(days=9))
+        ids = [edge.id, young.id, pending.id, done.id, "missing"]
+        assert store.abandon(ids, cutoff=cutoff, now=T0) == 0
+        for job in (edge, young):
+            assert store.get(job.id).state == ExecutionState.RUNNING
+        assert store.get(pending.id).state == ExecutionState.PENDING
+        kept = store.get(done.id)
+        assert kept.state == ExecutionState.SUCCEEDED
+        assert kept.dead_letter_reason is None
+        assert kept.finished_at == done.finished_at
+
+    def test_abandon_rechecks_age_at_write_time(self, store):
+        job = store.enqueue(_job(idempotency_key="c", run_at=T0 - timedelta(days=60)))
+        store.claim_next("w", now=T0 - timedelta(days=60))
+        cutoff = T0 - timedelta(days=30)
+        listed = [j.id for j in store.list_running_older_than(cutoff)]
+        assert listed == [job.id]
+        # The run shows life between the listing and the write.
+        assert store.renew_lease(job.id, "w", now=T0 - timedelta(days=1))
+        assert store.abandon(listed, cutoff=cutoff, now=T0) == 0
+        assert store.get(job.id).state == ExecutionState.RUNNING
+
+    def test_abandon_is_idempotent_and_sticky_over_late_finalization(self, store):
+        job = self._orphan(store, "o", T0 - timedelta(days=40))
+        cutoff = T0 - timedelta(days=30)
+        assert store.abandon([job.id, job.id], cutoff=cutoff, now=T0) == 1
+        once = store.get(job.id).to_dict()
+        assert store.abandon([job.id], cutoff=T0 + timedelta(days=1), now=T0) == 0
+        store.complete(job.id, result={"late": True}, now=T0)
+        store.fail(job.id, error="late", now=T0)
+        assert store.get(job.id).to_dict() == once

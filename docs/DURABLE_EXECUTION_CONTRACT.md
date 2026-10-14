@@ -181,6 +181,8 @@ is required.
 | `get(job_id)` | Fetch by id, or `None`. |
 | `list_jobs(states, agent_id, kind, limit, created_after)` | Inspection surface, newest-first; the basis for durable run history. `created_after` keeps jobs created strictly after it. |
 | `list_terminal_older_than(cutoff, redacted)` | Terminal jobs whose `finished_at` (else `updated_at`) is before `cutoff`, oldest first; optionally only redacted / unredacted ones. |
+| `list_running_older_than(cutoff)` | `RUNNING` jobs whose `updated_at` is before `cutoff`, oldest first. |
+| `abandon(job_ids, cutoff, now)` | Dead-letter each job still `RUNNING` and last updated before `cutoff`, with a fixed reason and its last update as `finished_at` (§8a); returns the count. |
 | `redact(job_ids, now)` | Strip each terminal, unredacted job's content (§8a) and stamp `redacted_at`; returns the count. |
 | `purge(job_ids)` | Delete each terminal job; returns the count. |
 
@@ -214,17 +216,25 @@ later slice.
 
 ## 8a. Retention, redaction and purge
 
-Terminal jobs can be aged out. The store operations are `list_terminal_older_than`,
-`redact` and `purge` (§8); every adapter implements them and the shared contract
-tests exercise them.
+Terminal jobs can be aged out. The store operations are
+`list_terminal_older_than`, `redact`, `purge`, `list_running_older_than` and
+`abandon` (§8); every adapter implements them and the shared contract tests
+exercise them.
 
 - **Only terminal jobs.** `redact` and `purge` skip `PENDING` and `RUNNING` jobs
   (and unknown ids) without error. A job's age is measured from `finished_at`,
-  falling back to `updated_at`. A run history record left `RUNNING` by a crashed
-  process therefore keeps its content until something moves it to a terminal
-  state. When a retention or export window is configured, the read window
-  hides it once it is old enough; with only redaction configured it stays
-  readable.
+  falling back to `updated_at`.
+- **Abandoning orphaned runs.** A job left `RUNNING` by a crashed process is
+  never finalized by anyone, so on its own it would keep its content forever.
+  `abandon` moves a job that is still `RUNNING` and was last updated before a
+  cutoff to `DEAD_LETTER` with the fixed, content-free reason
+  `abandoned: still running past the retention window`. Its `finished_at` is
+  set to its last update, so it ages from when it was last seen alive and the
+  same sweep can redact and purge it. A `RUNNING` job updated at or after the
+  cutoff, and every `PENDING` job, is left alone; the guard is re-checked at
+  write time, so a run finalized since it was listed is not touched. A late
+  `complete` or `fail` for an abandoned job is a no-op (terminal states are
+  sticky).
 - **Redaction** (`models.redact_job`, shared by all adapters) keeps `state`,
   every timestamp, `id`, `agent_id`, `kind`, `idempotency_key`,
   `correlation_id`, `attempts` and `dead_letter_reason`. It reduces
@@ -256,21 +266,34 @@ Durable AgentRun history applies these operations through
 
 | Variable | Effect |
 |---|---|
-| `AGENTS_RUN_HISTORY_RETENTION_DAYS` | Purge terminal runs older than this. Minimum 7 days; a smaller value is raised to 7. |
+| `AGENTS_RUN_HISTORY_RETENTION_DAYS` | Purge terminal runs older than this, after first abandoning runs still `RUNNING` whose last update is older than this. Minimum 7 days; a smaller value is raised to 7. |
 | `AGENTS_RUN_HISTORY_REDACT_AFTER_DAYS` | Redact terminal runs older than this. Clamped to the retention, so redaction precedes or coincides with purge. |
 | `AGENTS_RUN_HISTORY_EXPORT_MAX_DAYS` | How far back `GET /agents/runs` reads (by `created_at`). Clamped to, and defaulting to, the retention. |
 | `AGENTS_RUN_HISTORY_SWEEP_INTERVAL_HOURS` | Hours between sweeps (default 24). |
 
-With none set, history is kept forever and nothing is redacted or purged. A
-value that is not an integer from 1 to 36500 (1 to 87600 for the interval)
+With none set, history is kept forever and nothing is abandoned, redacted or
+purged. The sweep's guarantees:
+
+- A run still `RUNNING` and last updated within the effective retention is
+  never touched; a `RUNNING` run older than it is abandoned and then redacted
+  (when redaction is configured) and purged in the same sweep. A queued run is
+  never touched. With only `AGENTS_RUN_HISTORY_REDACT_AFTER_DAYS` set, nothing
+  is abandoned, so an orphaned `RUNNING` run keeps its content and stays
+  readable; set a retention to age such runs out.
+- Nothing is purged younger than the effective retention, which is never below
+  the floor; redaction precedes or coincides with purge.
+- A second sweep at the same instant changes nothing.
+
+A value that is not an integer from 1 to 36500 (1 to 87600 for the interval)
 fails startup; leave a window unset rather than very large to keep history
-forever. The sweep runs when the
-agent registry starts (also when agents are disabled, since it governs data
+forever. The sweep runs when the agent registry starts (also when agents are disabled, since it governs data
 already at rest) and then every interval; a failing sweep is logged and never
 stops the runtime. `python -m backend.agents.run_history_retention [--dry-run]`
 runs one sweep against `AGENTS_RUN_HISTORY_DB` by hand. Each sweep logs one
 audit record (logger `backend.agents.run_history_retention.audit`) holding only
-the policy, the cutoffs and the redacted/purged counts — no run ids or content.
+the policy, the cutoffs and the abandoned/redacted/purged counts — no run ids
+or content. A `--dry-run` reports the same counts without changing anything;
+its redacted and purged counts include the runs it would abandon.
 `GET /agents/runs/retention-policy` returns the effective policy and the last
 sweep's record.
 

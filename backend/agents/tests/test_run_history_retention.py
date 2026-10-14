@@ -17,6 +17,8 @@ from backend.agents.execution import (
     SqliteExecutionStore,
 )
 from backend.agents.execution.contract import T0
+from backend.agents.execution.models import ABANDONED_REASON
+from backend.agents.run_history import AgentRunRecorder
 from backend.agents.run_history_retention import (
     RETENTION_FLOOR_DAYS,
     RetentionPolicy,
@@ -36,7 +38,10 @@ def _store(kind="memory", tmp_path=None):
 
 
 def _run(store, key, *, finished_days_ago, state=ExecutionState.SUCCEEDED):
-    """A run that reached ``state`` ``finished_days_ago`` days before T0."""
+    """
+    A run that reached ``state`` ``finished_days_ago`` days before T0; a run left
+    RUNNING was last updated then.
+    """
     finished = T0 - timedelta(days=finished_days_ago)
     job = ExecutionJob(
         agent_id="a1",
@@ -56,6 +61,7 @@ def _run(store, key, *, finished_days_ago, state=ExecutionState.SUCCEEDED):
         session_id=SECRET,
         run_at=finished - timedelta(seconds=5),
         created_at=finished - timedelta(seconds=5),
+        updated_at=finished,
     )
     stored = store.enqueue(job)
     if state == ExecutionState.SUCCEEDED:
@@ -201,15 +207,15 @@ class TestSweep:
             store, "old-failed", finished_days_ago=31, state=ExecutionState.DEAD_LETTER
         )
         young = _run(store, "young", finished_days_ago=29)
-        stuck = _run(
-            store, "stuck", finished_days_ago=400, state=ExecutionState.RUNNING
+        running = _run(
+            store, "running", finished_days_ago=29, state=ExecutionState.RUNNING
         )
         report = sweep(store, policy, now=T0)
         assert report.purged == 2
         assert store.get(old_ok.id) is None
         assert store.get(old_failed.id) is None
         assert store.get(young.id) is not None
-        assert store.get(stuck.id).state == ExecutionState.RUNNING
+        assert store.get(running.id).state == ExecutionState.RUNNING
 
     def test_purge_cutoff_is_exactly_retention_days(self, store):
         policy = RetentionPolicy.from_values(retention_days=30)
@@ -271,10 +277,28 @@ class TestSweep:
         policy = RetentionPolicy.from_values(retention_days=30, redact_after_days=7)
         _run(store, "a", finished_days_ago=8)
         _run(store, "b", finished_days_ago=40)
+        _run(store, "stuck", finished_days_ago=40, state=ExecutionState.RUNNING)
         before = [j.to_dict() for j in store.list_jobs()]
         report = sweep(store, policy, now=T0, dry_run=True)
-        assert (report.redacted, report.purged) == (2, 1)
+        assert (report.abandoned, report.redacted, report.purged) == (1, 3, 2)
         assert [j.to_dict() for j in store.list_jobs()] == before
+
+    @pytest.mark.parametrize("redact_after_days", [None, 7])
+    def test_dry_run_counts_match_the_real_sweep(self, store, redact_after_days):
+        policy = RetentionPolicy.from_values(
+            retention_days=30, redact_after_days=redact_after_days
+        )
+        _run(store, "a", finished_days_ago=8)
+        _run(store, "b", finished_days_ago=40)
+        _run(store, "stuck", finished_days_ago=40, state=ExecutionState.RUNNING)
+        _run(store, "live", finished_days_ago=1, state=ExecutionState.RUNNING)
+        dry = sweep(store, policy, now=T0, dry_run=True)
+        real = sweep(store, policy, now=T0)
+        assert (dry.abandoned, dry.redacted, dry.purged) == (
+            real.abandoned,
+            real.redacted,
+            real.purged,
+        )
 
     def test_audit_record_carries_counts_but_no_content_or_ids(self, store, caplog):
         policy = RetentionPolicy.from_values(retention_days=30, redact_after_days=7)
@@ -291,9 +315,128 @@ class TestSweep:
         ]
         assert len(audit) == 1
         record = json.loads(audit[0].split(" ", 3)[3])
+        assert record["abandoned"] == 0
         assert record["redacted"] == 2 and record["purged"] == 1
         for leaked in (SECRET, a.id, b.id, "corr", "n1"):
             assert leaked not in audit[0]
+
+
+class TestAbandonOrphanedRuns:
+    def test_running_past_retention_is_abandoned_redacted_and_purged(self, store):
+        policy = RetentionPolicy.from_values(retention_days=30, redact_after_days=7)
+        stuck = _run(
+            store, "stuck", finished_days_ago=400, state=ExecutionState.RUNNING
+        )
+        report = sweep(store, policy, now=T0)
+        assert (report.abandoned, report.redacted, report.purged) == (1, 1, 1)
+        assert store.get(stuck.id) is None
+        assert SECRET not in json.dumps([j.to_dict() for j in store.list_jobs()])
+
+    def test_abandoned_run_is_purged_in_the_same_sweep_without_redaction(self, store):
+        policy = RetentionPolicy.from_values(retention_days=30)
+        stuck = _run(store, "stuck", finished_days_ago=31, state=ExecutionState.RUNNING)
+        report = sweep(store, policy, now=T0)
+        assert (report.abandoned, report.redacted, report.purged) == (1, 0, 1)
+        assert store.get(stuck.id) is None
+
+    def test_running_younger_than_retention_is_never_touched(self, store):
+        policy = RetentionPolicy.from_values(retention_days=30, redact_after_days=7)
+        inside = _run(
+            store,
+            "inside",
+            finished_days_ago=30 - 1 / 24,
+            state=ExecutionState.RUNNING,
+        )
+        before = store.get(inside.id).to_dict()
+        report = sweep(store, policy, now=T0)
+        assert (report.abandoned, report.redacted, report.purged) == (0, 0, 0)
+        assert store.get(inside.id).to_dict() == before
+
+    def test_abandon_cutoff_is_exactly_retention_days(self, store):
+        policy = RetentionPolicy.from_values(retention_days=30)
+        edge = store.enqueue(
+            ExecutionJob(
+                agent_id="a1",
+                kind=ExecutionKind.EVENT,
+                idempotency_key="edge",
+                state=ExecutionState.RUNNING,
+                run_at=T0 - timedelta(days=30),
+                created_at=T0 - timedelta(days=30),
+                updated_at=T0 - timedelta(days=30),
+            )
+        )
+        report = sweep(store, policy, now=T0)
+        assert report.abandoned == 0
+        assert store.get(edge.id).state == ExecutionState.RUNNING
+
+    @pytest.mark.parametrize(
+        "policy",
+        [RetentionPolicy(), RetentionPolicy.from_values(redact_after_days=7)],
+        ids=["unset", "redact-only"],
+    )
+    def test_without_retention_nothing_is_abandoned(self, store, policy):
+        stuck = _run(
+            store, "stuck", finished_days_ago=10_000, state=ExecutionState.RUNNING
+        )
+        before = store.get(stuck.id).to_dict()
+        report = sweep(store, policy, now=T0)
+        assert report.abandoned == 0
+        assert store.get(stuck.id).to_dict() == before
+
+    def test_queued_run_is_never_abandoned(self, store):
+        policy = RetentionPolicy.from_values(retention_days=30)
+        queued = store.enqueue(
+            ExecutionJob(
+                agent_id="a1",
+                kind=ExecutionKind.EVENT,
+                idempotency_key="queued",
+                run_at=T0 - timedelta(days=400),
+                created_at=T0 - timedelta(days=400),
+                updated_at=T0 - timedelta(days=400),
+            )
+        )
+        assert sweep(store, policy, now=T0).abandoned == 0
+        assert store.get(queued.id).state == ExecutionState.PENDING
+
+    def test_abandoned_run_without_purge_reads_as_failed_with_fixed_reason(self):
+        # Abandoning alone (no sweep purge yet) leaves a content-free reason.
+        store = _store()
+        recorder = AgentRunRecorder(store)
+        run_id = recorder.record_start(
+            "a1",
+            "One",
+            {"event_type": "node.update", "summary": SECRET},
+            now=T0 - timedelta(days=40),
+        )
+        cutoff = T0 - timedelta(days=30)
+        assert store.abandon([run_id], cutoff=cutoff, now=T0) == 1
+        run = recorder.get_run(run_id)
+        assert run["status"] == "failed"
+        assert run["error"] == ABANDONED_REASON
+        assert run["finished_at"] == "2025-11-22T12:00:00Z"
+
+    def test_crashed_recorder_run_ages_out(self, store):
+        """The motivating case: a run recorded at start, never finalized."""
+        recorder = AgentRunRecorder(store)
+        run_id = recorder.record_start(
+            "a1",
+            "One",
+            {"event_type": "node.update", "entity": {"data": SECRET}},
+            now=T0 - timedelta(days=31),
+        )
+        report = sweep(store, RetentionPolicy.from_values(retention_days=30), now=T0)
+        assert report.abandoned == 1 and report.purged == 1
+        assert store.get(run_id) is None
+
+    def test_sweep_with_abandoned_runs_is_idempotent(self, store):
+        policy = RetentionPolicy.from_values(retention_days=30, redact_after_days=7)
+        _run(store, "stuck", finished_days_ago=400, state=ExecutionState.RUNNING)
+        _run(store, "live", finished_days_ago=1, state=ExecutionState.RUNNING)
+        sweep(store, policy, now=T0)
+        before = [j.to_dict() for j in store.list_jobs()]
+        again = sweep(store, policy, now=T0)
+        assert (again.abandoned, again.redacted, again.purged) == (0, 0, 0)
+        assert [j.to_dict() for j in store.list_jobs()] == before
 
 
 class TestRedactJob:
@@ -427,13 +570,20 @@ class TestCli:
 
     def test_dry_run_leaves_database_untouched(self, tmp_path, monkeypatch, capsys):
         db, job_id = self._db(tmp_path)
+        store = SqliteExecutionStore(db)
+        stuck = _run(
+            store, "stuck", finished_days_ago=4000, state=ExecutionState.RUNNING
+        )
+        store.close()
         monkeypatch.setenv("AGENTS_RUN_HISTORY_DB", str(db))
         monkeypatch.setenv("AGENTS_RUN_HISTORY_RETENTION_DAYS", "30")
         assert main(["--dry-run"]) == 0
-        assert json.loads(capsys.readouterr().out)["purged"] == 1
+        out = json.loads(capsys.readouterr().out)
+        assert (out["abandoned"], out["purged"]) == (1, 2)
         store = SqliteExecutionStore(db)
         try:
             assert store.get(job_id) is not None
+            assert store.get(stuck.id).state == ExecutionState.RUNNING
         finally:
             store.close()
 

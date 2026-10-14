@@ -221,7 +221,7 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | `AGENTS_ENABLED` | `false` | Enable the AI agent system |
 | `AGENTS_LLM_PROVIDER` | - | LLM provider for agents (`openai` or `claude`) |
 | `AGENTS_SCHEDULER_ENABLED` | `false` | Enable in-process time-based scheduler (off for scale-to-zero) |
-| `AGENTS_RUN_HISTORY_RETENTION_DAYS` | - (keep forever) | Purge terminal AgentRuns older than this many days (minimum 7). See `docs/DURABLE_EXECUTION_CONTRACT.md` §8a |
+| `AGENTS_RUN_HISTORY_RETENTION_DAYS` | - (keep forever) | Purge terminal AgentRuns older than this many days (minimum 7); runs left running longer than this are first abandoned (dead-lettered) so they age out too. See `docs/DURABLE_EXECUTION_CONTRACT.md` §8a |
 | `AGENTS_RUN_HISTORY_REDACT_AFTER_DAYS` | - (never) | Strip the content of terminal AgentRuns older than this many days (at most the retention) |
 | `AGENTS_RUN_HISTORY_EXPORT_MAX_DAYS` | retention | How far back `GET /agents/runs` reads (at most the retention) |
 | `AGENTS_RUN_HISTORY_SWEEP_INTERVAL_HOURS` | `24` | Hours between retention sweeps |
