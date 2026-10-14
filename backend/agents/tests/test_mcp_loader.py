@@ -779,13 +779,19 @@ class _StubHttpxModule:
         self._transport = transport
 
     def Client(self, **kwargs):
+        # The mock takes the place of the walker's own transport. Which client
+        # must carry the address-pinning one is asserted per walker, by the
+        # *_client_is_configured_* tests; any other transport is refused here.
+        supplied = kwargs.pop("transport", None)
+        assert supplied is None or isinstance(supplied, delivery._PinnedTransport)
         return httpx.Client(transport=self._transport, **kwargs)
 
     def get(self, *args, **kwargs):
         """Route module-level httpx.get (used by _execute_search_tool) through
         the mock transport, honouring the caller's follow_redirects and timeout
-        exactly as httpx.get would."""
-        with self.Client() as client:
+        exactly as httpx.get would. Not a hop-validating walker, so it is built
+        without the pinned-transport check Client() applies."""
+        with httpx.Client(transport=self._transport) as client:
             return client.get(*args, **kwargs)
 
 
@@ -1316,17 +1322,24 @@ class TestConnectHttpInfoQuery:
 
         MCPLoader([integration])._connect_http(integration)
 
-        assert len(client_kwargs) == 1
-        assert client_kwargs[0]["timeout"] == 5
-        assert client_kwargs[0]["follow_redirects"] is False
+        # Two clients: one for the operator-configured first request, one
+        # (address-pinned) for the hops.
+        assert len(client_kwargs) == 2
+        # The configured address is the operator's and connects by name; every
+        # hop goes out on the address-pinned client.
+        assert "transport" not in client_kwargs[0]
+        assert isinstance(client_kwargs[1]["transport"], delivery._PinnedTransport)
+        for kwargs in client_kwargs:
+            assert kwargs["timeout"] == 5
+            assert kwargs["follow_redirects"] is False
 
-        # A subset assertion admits anything it does not name, so the keys that
-        # would quietly undo the guard are asserted ABSENT rather than merely
-        # unmentioned: verify=False drops certificate checking, proxy routes the
-        # request somewhere else entirely, and trust_env picks a proxy up from
-        # the environment.
-        for forbidden in ("verify", "proxy", "proxies", "trust_env"):
-            assert forbidden not in client_kwargs[0]
+            # A subset assertion admits anything it does not name, so the keys
+            # that would quietly undo the guard are asserted ABSENT rather than
+            # merely unmentioned: verify=False drops certificate checking, proxy
+            # routes the request somewhere else entirely, and trust_env picks a
+            # proxy up from the environment.
+            for forbidden in ("verify", "proxy", "proxies", "trust_env"):
+                assert forbidden not in kwargs
 
     @pytest.mark.parametrize("hop_target", NON_HTTP_HOP_TARGETS)
     @pytest.mark.parametrize("status_code", REDIRECT_STATUSES)
@@ -2186,6 +2199,8 @@ class TestFetchToolSSRFGuard:
         assert len(client_kwargs) == 1
         assert client_kwargs[0]["timeout"] == 30
         assert client_kwargs[0]["follow_redirects"] is False
+        # Every connection the agent's URL leads to is address-pinned.
+        assert isinstance(client_kwargs[0]["transport"], delivery._PinnedTransport)
 
         # A subset assertion admits anything it does not name, so the keys that
         # would quietly undo the guard are asserted ABSENT rather than merely

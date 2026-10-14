@@ -38,7 +38,11 @@ from urllib.parse import urlparse, urljoin
 import httpx2 as httpx
 from pydantic import BaseModel, Field
 
-from backend.core.events.delivery import MAX_REDIRECTS, is_safe_url
+from backend.core.events.delivery import (
+    MAX_REDIRECTS,
+    async_pinned_transport,
+    is_safe_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -657,7 +661,9 @@ class SkillsLoader:
             if age < self._config.cache_ttl_seconds:
                 return text
         max_bytes = self._config.max_skill_content_bytes
-        async with httpx.AsyncClient(follow_redirects=False, timeout=15) as client:
+        async with httpx.AsyncClient(
+            follow_redirects=False, timeout=15, transport=async_pinned_transport()
+        ) as client:
             current_url = url
             hop_headers = dict(headers or {})
             for _ in range(MAX_REDIRECTS):

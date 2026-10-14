@@ -85,6 +85,8 @@ def _install_transport(monkeypatch, handler):
             self._transport = transport
 
         def Client(self, **kwargs):
+            # The mock replaces image_ingest's own (address-pinning) transport.
+            kwargs.pop("transport", None)
             return httpx.Client(transport=self._transport, **kwargs)
 
     monkeypatch.setattr(

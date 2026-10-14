@@ -32,7 +32,7 @@ from dataclasses import dataclass
 import httpx2 as httpx
 from PIL import Image, UnidentifiedImageError
 
-from .events.delivery import MAX_REDIRECTS, is_safe_url
+from .events.delivery import MAX_REDIRECTS, is_safe_url, pinned_transport
 
 # SVG/GIF/etc are rejected: SVG can carry script content, GIF animation is
 # not preserved by the optimizer (a re-encode would silently drop frames).
@@ -177,7 +177,9 @@ def fetch_image_bytes(
         # so tests can substitute a mock transport by monkeypatching the
         # module-level `httpx` name, the same pattern federation/manager.py
         # uses for its AsyncClient.
-        with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+        with httpx.Client(
+            timeout=timeout, follow_redirects=False, transport=pinned_transport()
+        ) as client:
             current_url = url
             for _ in range(MAX_REDIRECTS):
                 with client.stream("GET", current_url) as response:

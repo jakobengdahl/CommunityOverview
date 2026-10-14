@@ -18,7 +18,11 @@ from dataclasses import dataclass, field
 import httpx2 as httpx
 
 from .config import MCPIntegration, MCPTransport, agent_workspace_dir
-from backend.core.events.delivery import MAX_REDIRECTS, is_safe_url
+from backend.core.events.delivery import (
+    MAX_REDIRECTS,
+    is_safe_url,
+    pinned_transport,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -274,8 +278,19 @@ class MCPLoader:
             # it has a trusted_domains allowlist to match. Here the initial
             # address is the operator's own choice, and refusing it would break
             # the default install.
+            #
+            # So the first request goes out on a client that connects by name,
+            # as before, and every hop on one whose transport connects only to
+            # an address it has just checked: a hop that passed is_safe_url
+            # cannot then resolve to an internal address at connect time.
 
-            with httpx.Client(timeout=5, follow_redirects=False) as client:
+            with (
+                httpx.Client(timeout=5, follow_redirects=False) as configured,
+                httpx.Client(
+                    timeout=5, follow_redirects=False, transport=pinned_transport()
+                ) as pinned,
+            ):
+                client = configured
                 current_url = info_url
                 for _ in range(MAX_REDIRECTS):
                     # Streamed so a redirect's body is never buffered: the walk
@@ -295,6 +310,7 @@ class MCPLoader:
                                     f"Redirected to unsafe URL: {next_url}"
                                 )
                             current_url = next_url
+                            client = pinned
                             continue
                         if response.status_code == 200:
                             raw, over_cap = _read_capped(response, MAX_INFO_BODY_BYTES)
@@ -927,7 +943,11 @@ class MCPLoader:
                 return {"error": "URL is not safe to fetch"}
 
             try:
-                with httpx.Client(timeout=30, follow_redirects=False) as client:
+                with httpx.Client(
+                    timeout=30,
+                    follow_redirects=False,
+                    transport=pinned_transport(),
+                ) as client:
                     current_url = url
                     for _ in range(MAX_REDIRECTS):
                         # Streamed so a redirect's body is never buffered: the

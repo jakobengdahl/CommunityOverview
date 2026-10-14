@@ -14,6 +14,9 @@ import queue
 import time
 from typing import Optional, Callable
 from datetime import datetime, timezone
+import asyncio
+import typing
+import httpcore2
 import httpx2 as httpx
 import urllib.parse
 import socket
@@ -72,6 +75,33 @@ def _is_safe_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     )
 
 
+def _public_addresses(hostname: str) -> list[str]:
+    """Resolve *hostname* and return its addresses if every one is public.
+
+    getaddrinfo returns both A and AAAA records, and every one is checked, so a
+    hostname with a public IPv4 and an internal IPv6 (or vice versa) is still
+    refused (fail-closed). Returns an empty list when the name is refused or
+    has no answers; resolution errors propagate. An IP literal is judged as
+    itself, without DNS.
+    """
+    try:
+        literal_ip = ipaddress.ip_address(hostname)
+    except ValueError:
+        literal_ip = None
+    if literal_ip is not None:
+        return [str(literal_ip)] if _is_safe_ip(literal_ip) else []
+
+    addresses: list[str] = []
+    for addr_info in socket.getaddrinfo(hostname, None):
+        # Strip the zone ID that may appear in IPv6 link-local addresses
+        ip = ipaddress.ip_address(addr_info[4][0].split("%")[0])
+        if not _is_safe_ip(ip):
+            return []
+        if str(ip) not in addresses:
+            addresses.append(str(ip))
+    return addresses
+
+
 def is_safe_url(url: str) -> bool:
     """
     Validates a URL to prevent SSRF attacks.
@@ -79,6 +109,11 @@ def is_safe_url(url: str) -> bool:
     Ensures the scheme is http or https and that every IP address the hostname
     resolves to (IPv4 and IPv6) is publicly routable.  All resolved addresses
     must pass; a single internal address causes rejection (fail-closed).
+
+    This answers for the moment it is called only: a name can resolve
+    differently when the request later connects (DNS rebinding). The clients
+    built with pinned_transport() / async_pinned_transport() close that gap by
+    re-checking at connect time and connecting to the address they checked.
     """
     try:
         parsed = urllib.parse.urlparse(url)
@@ -89,35 +124,158 @@ def is_safe_url(url: str) -> bool:
         if not hostname:
             return False
 
-        # If the hostname is already an IP literal, validate it directly instead
-        # of going through DNS resolution.
-        try:
-            literal_ip = ipaddress.ip_address(hostname)
-        except ValueError:
-            literal_ip = None
-
-        if literal_ip is not None:
-            return _is_safe_ip(literal_ip)
-
-        # Resolve hostname — getaddrinfo returns both A and AAAA records.
-        # We check every resolved address so that a hostname that has both a
-        # public IPv4 and an internal IPv6 (or vice-versa) is still rejected.
-        addr_infos = socket.getaddrinfo(hostname, None)
-        if not addr_infos:
-            return False
-
-        for addr_info in addr_infos:
-            ip_str = addr_info[4][0]
-            # Strip the zone ID that may appear in IPv6 link-local addresses
-            ip_str = ip_str.split("%")[0]
-            ip = ipaddress.ip_address(ip_str)
-            if not _is_safe_ip(ip):
-                return False
-
-        return True
+        return bool(_public_addresses(hostname))
     except (ValueError, socket.gaierror, OSError, Exception) as e:
         logger.warning(f"URL validation failed for {url}: {e}")
         return False
+
+
+class UnsafeAddressError(httpcore2.ConnectError):
+    """Raised at connect time when the host does not resolve to only public
+    addresses. A ConnectError subclass, so httpx surfaces it as
+    httpx.ConnectError and every caller's existing network-error path applies.
+    """
+
+
+def _pinned_targets(host: str) -> list[str]:
+    try:
+        addresses = _public_addresses(host)
+    except (ValueError, OSError) as exc:
+        raise UnsafeAddressError(f"Could not resolve {host}: {exc}") from exc
+    if not addresses:
+        raise UnsafeAddressError(
+            f"Refused to connect to {host}: it resolves to a restricted address"
+        )
+    return addresses
+
+
+class _PinnedBackend(httpcore2.NetworkBackend):
+    """Resolves once per connection, validates every answer, and connects to a
+    validated address literal, so the address checked is the address used.
+
+    The URL is never rewritten: httpcore still takes the Host header and the
+    TLS server name from the request's own host.
+    """
+
+    def __init__(self) -> None:
+        self._inner = httpcore2.SyncBackend()
+
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: typing.Iterable[httpcore2.SOCKET_OPTION] | None = None,
+    ) -> httpcore2.NetworkStream:
+        last_error: Exception | None = None
+        # Every address is already validated, so falling through to the next
+        # one on a connect failure keeps the fallback a by-name connect had.
+        for address in _pinned_targets(host):
+            try:
+                return self._inner.connect_tcp(
+                    address,
+                    port,
+                    timeout=timeout,
+                    local_address=local_address,
+                    socket_options=socket_options,
+                )
+            except (httpcore2.ConnectError, httpcore2.ConnectTimeout) as exc:
+                last_error = exc
+        assert last_error is not None
+        raise last_error
+
+    def sleep(self, seconds: float) -> None:
+        self._inner.sleep(seconds)
+
+
+class _AsyncPinnedBackend(httpcore2.AsyncNetworkBackend):
+    """The async counterpart of _PinnedBackend; resolution runs in a thread.
+
+    The lookup is held to the connect timeout. Checked addresses are then
+    tried one at a time, each with the full timeout, as _PinnedBackend and
+    socket.create_connection do -- not raced, as the by-name connect this
+    replaces does -- so a name with N unreachable addresses can take up to
+    N times the timeout before the next one answers.
+    """
+
+    def __init__(self) -> None:
+        self._inner = httpcore2.AnyIOBackend()
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: typing.Iterable[httpcore2.SOCKET_OPTION] | None = None,
+    ) -> httpcore2.AsyncNetworkStream:
+        try:
+            addresses = await asyncio.wait_for(
+                asyncio.to_thread(_pinned_targets, host), timeout
+            )
+        except TimeoutError as exc:
+            raise httpcore2.ConnectTimeout(f"Timed out resolving {host}") from exc
+        last_error: Exception | None = None
+        for address in addresses:
+            try:
+                return await self._inner.connect_tcp(
+                    address,
+                    port,
+                    timeout=timeout,
+                    local_address=local_address,
+                    socket_options=socket_options,
+                )
+            except (httpcore2.ConnectError, httpcore2.ConnectTimeout) as exc:
+                last_error = exc
+        assert last_error is not None
+        raise last_error
+
+    async def sleep(self, seconds: float) -> None:
+        await self._inner.sleep(seconds)
+
+
+class _PinnedTransport(httpx.HTTPTransport):
+    # HTTPTransport keeps no network-backend option, so the pool it routes
+    # requests through (self._pool) is built here with the same TLS and limit
+    # defaults it would otherwise use. That attribute is httpx2's own; the
+    # rebinding tests in tests/test_pinned_transport.py go through the real
+    # transport and fail if a future httpx2 stops using it.
+    def __init__(self) -> None:
+        self._pool = httpcore2.ConnectionPool(
+            ssl_context=httpx.create_ssl_context(),
+            max_connections=100,
+            max_keepalive_connections=20,
+            keepalive_expiry=5.0,
+            network_backend=_PinnedBackend(),
+        )
+
+
+class _AsyncPinnedTransport(httpx.AsyncHTTPTransport):
+    def __init__(self) -> None:
+        self._pool = httpcore2.AsyncConnectionPool(
+            ssl_context=httpx.create_ssl_context(),
+            max_connections=100,
+            max_keepalive_connections=20,
+            keepalive_expiry=5.0,
+            network_backend=_AsyncPinnedBackend(),
+        )
+
+
+def pinned_transport() -> httpx.HTTPTransport:
+    """A transport for the hop-validating walkers below: it connects only to an
+    address it has just resolved and checked, closing the window in which a
+    name passes is_safe_url and then resolves elsewhere at connect time.
+
+    An explicit transport also means the client takes no proxy from the
+    environment; a proxy would resolve the name itself and undo the pin.
+    """
+    return _PinnedTransport()
+
+
+def async_pinned_transport() -> httpx.AsyncHTTPTransport:
+    """The AsyncClient counterpart of pinned_transport()."""
+    return _AsyncPinnedTransport()
 
 
 # The redirect cap for the five paths that walk redirects by hand and
@@ -422,7 +580,11 @@ class DeliveryWorker:
         current_method = "POST"
         current_url = url
 
-        with httpx.Client(timeout=self._timeout, follow_redirects=False) as client:
+        with httpx.Client(
+            timeout=self._timeout,
+            follow_redirects=False,
+            transport=pinned_transport(),
+        ) as client:
             for _ in range(MAX_REDIRECTS):
                 if current_method == "POST":
                     response = client.post(
