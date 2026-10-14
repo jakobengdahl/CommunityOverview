@@ -1262,3 +1262,38 @@ def test_g1_a_selector_that_cannot_be_created_is_failed_not_raised(monkeypatch):
     assert extract(b"hi", ae.TEXT) == ae.ExtractionResult(
         ae.STATUS_FAILED, detail="worker_io"
     )
+
+
+_OK_REPLY = '{"status": "ok", "segments": [{"text": "done", "locator": {}}], "truncated": false}'
+
+
+def test_g1_a_reply_whose_writer_closes_stdout_before_exiting_is_kept():
+    code = (
+        f"import os, sys, time; sys.stdout.write({_OK_REPLY!r}); sys.stdout.flush(); "
+        "os.close(1); time.sleep(0.3)"
+    )
+    result = ae._run_worker(
+        b"x", ae.TEXT, ExtractionLimits(timeout_seconds=10), _fake_worker(code)
+    )
+    assert _texts(result) == ["done"]
+
+
+def test_g1_a_child_that_closes_stdout_and_hangs_times_out():
+    code = "import os, time; os.close(1); time.sleep(30)"
+    result = ae._run_worker(
+        b"x", ae.TEXT, ExtractionLimits(timeout_seconds=1), _fake_worker(code)
+    )
+    assert result == ae.ExtractionResult(ae.STATUS_TIMEOUT, detail="wall_clock")
+
+
+@pytest.mark.parametrize("code", ["pass", "import time; time.sleep(30)"])
+def test_g1_a_payload_larger_than_the_pipe_is_never_blocking(code):
+    started = time.monotonic()
+    result = ae._run_worker(
+        b"x" * (4 * 1024 * 1024),
+        ae.TEXT,
+        ExtractionLimits(timeout_seconds=1),
+        _fake_worker(code),
+    )
+    assert result.status in (ae.STATUS_FAILED, ae.STATUS_TIMEOUT)
+    assert time.monotonic() - started < 4
