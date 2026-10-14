@@ -192,6 +192,10 @@ class Node(BaseModel):
     embedding: Optional[List[float]] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # Server-owned: the storage stamps it on every write it applies, from one
+    # graph-wide counter (docs/SESSION_OVERLAY_CONTRACT.md §4). 0 means
+    # "present, never written under revisions" - what a legacy entity loads as.
+    revision: int = Field(default=0, ge=0)
 
     @field_validator("type", mode="before")
     @classmethod
@@ -274,6 +278,8 @@ class Edge(BaseModel):
         default=False
     )  # Lifecycle flag: archived edges are hidden from search/traversal by default
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # Server-owned; see Node.revision.
+    revision: int = Field(default=0, ge=0)
 
     @field_validator("type", mode="before")
     @classmethod

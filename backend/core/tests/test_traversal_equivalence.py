@@ -1059,59 +1059,50 @@ class TestTheRoutingItselfIsCovered:
             "asked to traverse"
         )
 
-    def test_a_failed_write_closes_the_guard_even_though_the_future_is_done(
-        self, schema
-    ):
-        """A write that raised leaves the Future `done()` while the store is
-        genuinely behind, so `done()` alone is not enough - the resync flag is
-        the only thing holding the freshness guarantee in that window.
+    def test_a_failed_write_leaves_no_gap_for_the_guard_to_cover(self, schema):
+        """A store that enforces revisions waits for every write and resolves
+        a failed one before the call returns (SESSION_OVERLAY_CONTRACT.md
+        §4.4), so the window the resync flag used to guard - a Future done
+        while the store is behind - no longer opens: the write is undone in
+        memory, nothing is owed, and the store's answer and the walk agree.
         """
         from backend.core.postgres_backend import PostgresGraphPersistenceBackend
         from backend.core.storage import GraphStorage
+        from backend.core.storage_backends import GraphWriteFailed
 
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         storage = GraphStorage(persistence_backend=backend)
+        storage.WRITE_RESOLVE_DELAY_SECONDS = 0.0
         try:
             storage.add_nodes(
                 [Node(id="a", type=NodeType.ACTOR, name="a")],
                 [],
             )
-            storage.flush()
 
             def _refuse(*args, **kwargs):
                 raise RuntimeError("write refused")
 
             backend.apply_batch = _refuse
-            storage.add_nodes(
-                [Node(id="b", type=NodeType.ACTOR, name="b")],
-                [
-                    Edge(
-                        id="ab",
-                        source="a",
-                        target="b",
-                        type=RelationshipType.RELATES_TO,
-                    )
-                ],
-            )
-            write = storage._last_write
-            if write is not None:
-                # Drain it; the exception is the point, not a problem here.
-                try:
-                    write.result()
-                except Exception:
-                    pass
-                assert write.done()
+            with pytest.raises(GraphWriteFailed):
+                storage.add_nodes(
+                    [Node(id="b", type=NodeType.ACTOR, name="b")],
+                    [
+                        Edge(
+                            id="ab",
+                            source="a",
+                            target="b",
+                            type=RelationshipType.RELATES_TO,
+                        )
+                    ],
+                )
 
-            assert storage._resync_pending, (
-                "the failed write should have flagged the store as owed the whole graph"
+            assert not storage._resync_pending, (
+                "a failed write to this store is resolved, not left owed"
             )
-            assert storage._store_traversal_is_current() is False, (
-                "the Future is done and the store is still behind; only the "
-                "resync flag can tell these apart"
-            )
+            assert storage._store_traversal_is_current() is True
             result = storage.get_related_nodes("a", depth=1)
-            assert {n.id for n in result["nodes"]} == {"a", "b"}, (
-                "the walk still holds the write the store never got; got "
+            assert {n.id for n in result["nodes"]} == {"a"}, (
+                "memory kept a write the store never got; got "
                 f"{sorted(n.id for n in result['nodes'])}"
             )
         finally:

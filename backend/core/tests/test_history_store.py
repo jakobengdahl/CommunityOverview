@@ -663,7 +663,7 @@ def test_create_and_delete_keep_their_whole_snapshot(storage):
     assert delete_entry["before"]["metadata"] == {"note": BULK}
 
 
-def test_edge_update_keeps_full_snapshots_so_its_diff_still_works(storage):
+def test_edge_update_carries_a_patch_and_is_trimmed_like_a_node(storage):
     _seed_two_nodes(storage)
     edge = Edge(
         id="e1",
@@ -671,8 +671,8 @@ def test_edge_update_keeps_full_snapshots_so_its_diff_still_works(storage):
         target="actor-2",
         type=RelationshipType.RELATES_TO,
         label="first",
-        # Bulk the trim would drop if edges were ever projected. Without it the
-        # fixture has nothing outside the display key and would pass either way.
+        # Bulk the trim drops. Without it the fixture has nothing outside the
+        # display key and would pass whether edges were projected or not.
         metadata={"note": BULK},
     )
     storage.add_nodes([], [edge])
@@ -680,11 +680,12 @@ def test_edge_update_keeps_full_snapshots_so_its_diff_still_works(storage):
 
     update = storage.get_edge_history("e1")[0]
 
-    # Edge updates carry no patch, so a reader diffs the snapshots instead --
-    # which needs both sides whole, bulk included.
-    assert not update["patch"]
-    assert update["before"]["metadata"] == {"note": BULK}
-    assert update["after"]["metadata"] == {"note": BULK}
+    # Edge updates carry a patch, as node updates do (SESSION_OVERLAY_CONTRACT
+    # §4.5), so the diff renders from it and the record is trimmed like a
+    # node's: the bulk the update left alone is not kept.
+    assert update["patch"] == {"label": "second"}
+    assert "metadata" not in update["before"]
+    assert "metadata" not in update["after"]
     assert _rendered_diff(update) == [("label", "first", "second")]
 
 
@@ -1222,3 +1223,16 @@ def test_the_rewrite_syncs_its_temp_file_before_renaming_it(monkeypatch):
     )
     assert "fsync" in order, "the temp file was landed without being synced"
     assert order.index("fsync") < order.index(landed[0])
+
+
+def test_an_update_record_never_shows_the_revision_as_a_change(storage):
+    """`revision` moves on every write, so it is in every update's event
+    patch; in history it would be a change on every row, telling a reader
+    nothing. Left out of the update's patch, kept in a create's snapshot."""
+    storage.add_nodes([_node_with_bulk()], [])
+    storage.update_node("actor-1", {"description": "new desc"})
+
+    update, create = storage.get_node_history("actor-1")[:2]
+    assert "revision" not in update["patch"]
+    assert "revision" not in update["before"]
+    assert create["after"]["revision"] == storage.get_node("actor-1").revision - 1

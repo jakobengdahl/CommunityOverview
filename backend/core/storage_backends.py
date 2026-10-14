@@ -28,7 +28,7 @@ import sys
 import tempfile
 import threading
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import (
@@ -93,12 +93,20 @@ class BackendCapabilities:
         so the application does not need the topology in memory to do it. It
         implements `traverse`. A backend that cannot say this is traversed
         the way it always was, in process.
+    revision_enforcement: the store assigns every entity's `revision` from a
+        counter of its own and checks a write's expectation in the statement
+        that applies it (docs/SESSION_OVERLAY_CONTRACT.md §4.4). `apply_batch`
+        then returns the revisions it stored, raises EntityRevisionConflict
+        for an expectation that does not hold, and the backend implements
+        `read_write_evidence`. A shared store needs it for revisions to mean
+        anything: without it, two instances would each count on their own.
     """
 
     incremental_writes: bool = False
     transactions: bool = False
     change_notification: bool = False
     store_traversal: bool = False
+    revision_enforcement: bool = False
 
 
 SNAPSHOT_ONLY = BackendCapabilities()
@@ -107,6 +115,8 @@ EntityKindName = Literal["node", "edge"]
 EntityActionName = Literal["upsert", "delete"]
 
 _TRAVERSAL_METHODS = ("traverse",)
+
+_REVISION_METHODS = ("read_write_evidence",)
 
 _NOTIFICATION_METHODS = (
     "start_change_notification",
@@ -130,12 +140,20 @@ class EntityOperation:
     `payload` is the serialized entity for an upsert - the same dict the
     entity occupies in a snapshot's `nodes` or `edges` list - and None for a
     delete. An upsert replaces the stored entity whole; it is not a patch.
+
+    `expected_revision` and `expect_absent` are the write's expectation
+    (docs/SESSION_OVERLAY_CONTRACT.md §4.3). Only a backend declaring
+    `revision_enforcement` reads them; the instance has already checked them
+    against its own model before the operation is issued. They are never
+    journaled: they are a condition of applying the write, not part of it.
     """
 
     kind: EntityKindName
     action: EntityActionName
     entity_id: str
     payload: Optional[Dict[str, Any]] = None
+    expected_revision: Optional[int] = None
+    expect_absent: bool = False
 
     @classmethod
     def upsert_node(cls, payload: Dict[str, Any]) -> "EntityOperation":
@@ -322,6 +340,82 @@ class IncrementalGraphPersistenceBackend(GraphPersistenceBackend, Protocol):
         """
 
 
+class RevisionEnforcingBackend(Protocol):
+    """The revision contract, for a backend declaring `revision_enforcement`.
+
+    docs/SESSION_OVERLAY_CONTRACT.md §4.4. The store assigns each upsert the
+    next value of its own revision counter, checks every operation's
+    expectation in the statement that applies it, and stores `write_token`
+    with every entity it writes. The token is the write's own evidence: it
+    lets the instance tell, after a failure, whether that write committed.
+    It is server-internal and never part of an entity a read returns.
+    """
+
+    def apply_batch(
+        self,
+        operations: Sequence[EntityOperation],
+        write_token: Optional[str] = None,
+    ) -> List[Optional[int]]:
+        """Apply atomically; return each upsert's stored revision (None for
+        a delete). Raise EntityRevisionConflict, applying nothing, when an
+        expectation does not hold."""
+
+    def read_write_evidence(
+        self, keys: Sequence[Tuple[str, str]]
+    ) -> Dict[Tuple[str, str], Optional[Tuple[int, Optional[str]]]]:
+        """For each (kind, id): (revision, write token) as stored, or None
+        when the entity is absent. Raises when the store cannot be read."""
+
+
+class EntityRevisionConflict(RuntimeError):
+    """A write's expectation about an entity did not hold.
+
+    Raised by GraphStorage when its own model refutes the expectation, and by
+    a backend declaring `revision_enforcement` when the store does - in which
+    case nothing in the batch was applied. `current_revision` is None when
+    the entity does not exist (an update or delete of something absent) and
+    the entity's revision when a create expected it absent.
+    """
+
+    code = "entity_revision_conflict"
+
+    def __init__(
+        self,
+        kind: str,
+        entity_id: str,
+        expected: Optional[int],
+        current: Optional[int],
+    ):
+        self.kind = kind
+        self.entity_id = entity_id
+        self.expected_revision = expected
+        self.current_revision = current
+        wanted = "absent" if expected is None else f"revision {expected}"
+        found = "absent" if current is None else f"revision {current}"
+        super().__init__(f"{kind} {entity_id!r}: expected {wanted}, found {found}")
+
+
+class GraphWriteFailed(RuntimeError):
+    """A shared-store write that did not land (§4.4: `write_failed`).
+
+    The instance has confirmed, on two reads of the store, that nothing the
+    write touched changed. Memory is back where it was and no event fired.
+    """
+
+    code = "write_failed"
+
+
+class GraphWriteOutcomeUnknown(RuntimeError):
+    """A shared-store write whose landing could neither be confirmed nor
+    ruled out (§4.4: `write_outcome_unknown`).
+
+    No event fired, and the instance has re-read the graph from the store.
+    The caller re-reads before retrying.
+    """
+
+    code = "write_outcome_unknown"
+
+
 class ExternalChangeRefused(RuntimeError):
     """Raised back at a backend that reported a change on a writing thread.
 
@@ -497,6 +591,22 @@ def capabilities_of(backend: Any) -> BackendCapabilities:
                 f"{type(backend).__name__} declares store_traversal but does "
                 f"not implement: {', '.join(missing)}"
             )
+    if caps.revision_enforcement:
+        # The store can only answer for revisions on the entity path; a
+        # snapshot-only backend has nowhere to return them from.
+        if not (caps.incremental_writes and caps.transactions):
+            raise TypeError(
+                f"{type(backend).__name__} declares revision_enforcement "
+                f"without incremental_writes and transactions"
+            )
+        missing = [
+            m for m in _REVISION_METHODS if not callable(getattr(backend, m, None))
+        ]
+        if missing:
+            raise TypeError(
+                f"{type(backend).__name__} declares revision_enforcement but "
+                f"does not implement: {', '.join(missing)}"
+            )
     return caps
 
 
@@ -626,6 +736,30 @@ class FileGraphPersistenceBackend:
         with self._lock:
             if self._journaled:
                 self._checkpoint_locked()
+
+    def reserve_revisions(self, ceiling: int) -> None:
+        """Durably record that revisions below `ceiling` may have been used.
+
+        The single-writer half of docs/SESSION_OVERLAY_CONTRACT.md §4.2: the
+        reservation lives in graph.json's metadata and is written by a
+        checkpoint of its own, before the instance hands out any value at or
+        above the previous one. A checkpoint rather than a journal record
+        because the journal holds entity operations only, and an older build
+        replaying an unknown record would refuse the whole file.
+        """
+        with self._lock:
+            if not self._mirrored:
+                self._load_locked()
+            previous = self._metadata.get("revision_reservation")
+            self._metadata["revision_reservation"] = ceiling
+            try:
+                self._checkpoint_locked()
+            except Exception:
+                if previous is None:
+                    self._metadata.pop("revision_reservation", None)
+                else:
+                    self._metadata["revision_reservation"] = previous
+                raise
 
     # -- internals -----------------------------------------------------------
 
@@ -787,8 +921,22 @@ class FileGraphPersistenceBackend:
     def _journal(self, operations: List[EntityOperation]) -> None:
         # Serialised before anything is written or applied, so a payload that
         # cannot be represented fails here and touches neither disk nor mirror.
+        # The four fields every build reads. An expectation is not part of
+        # the write, and a key an older build does not know would make it
+        # refuse the whole journal at load.
         ops = json.loads(
-            json.dumps([asdict(op) for op in operations], ensure_ascii=False)
+            json.dumps(
+                [
+                    {
+                        "kind": op.kind,
+                        "action": op.action,
+                        "entity_id": op.entity_id,
+                        "payload": op.payload,
+                    }
+                    for op in operations
+                ],
+                ensure_ascii=False,
+            )
         )
         # The mirror keeps its own copy, parsed back from the line, so a caller
         # that later mutates the dict it passed cannot change what was stored.
