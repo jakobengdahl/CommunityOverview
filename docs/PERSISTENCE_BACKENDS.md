@@ -524,7 +524,7 @@ with `write_failed`, reading nothing back: a backend says so by raising
 is in class 22, 23, 42 or 54 - a value the store cannot hold, a constraint, a
 statement or privilege it rejects, a program limit. The PostgreSQL backend
 raises `WriteRefusedByStore` for a value its driver refuses before sending
-(a NUL in an id). A refusal raised any other way is
+(a NUL or a lone surrogate in an id). A refusal raised any other way is
 indistinguishable from a lost commit and pays for the evidence reads below,
 holding the storage lock throughout. Any other failure is decided on the
 write's evidence, read twice with

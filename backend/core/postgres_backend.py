@@ -1485,10 +1485,15 @@ class PostgresGraphPersistenceBackend:
             except psycopg.errors.DeadlockDetected:
                 if attempt == self.DEADLOCK_RETRIES:
                     raise
-            except (psycopg.DataError, psycopg.ProgrammingError) as exc:
+            except (
+                psycopg.DataError,
+                psycopg.ProgrammingError,
+                UnicodeEncodeError,
+            ) as exc:
                 # No SQLSTATE means the driver refused a value before the
                 # statement left - a NUL in an id, which a text parameter
-                # cannot carry. Nothing was sent, so nothing landed; said so,
+                # cannot carry, or a lone surrogate, which UTF-8 cannot
+                # encode. Nothing was sent, so nothing landed; said so,
                 # or the caller would read the store back for a write that
                 # never reached it.
                 if getattr(exc, "sqlstate", None) is None:

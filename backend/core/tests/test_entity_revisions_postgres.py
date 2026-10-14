@@ -425,6 +425,7 @@ def test_a_cross_scope_create_is_refused_at_once_without_reading_back(schema):
     "bad_id",
     [
         pytest.param("a\u0000b", id="nul-the-driver-refuses"),
+        pytest.param("a\ud800b", id="lone-surrogate-utf8-cannot-encode"),
         pytest.param(
             "".join(chr(0x4E00 + i) for i in range(4000)), id="too-big-to-index"
         ),
