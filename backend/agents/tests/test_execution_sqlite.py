@@ -222,6 +222,8 @@ def _v1_file(db):
     from backend.agents.execution.sqlite_store import _CREATE_SCHEMA
 
     conn = sqlite3.connect(db)
+    # A v1 file written by this store is already in (persistent) WAL mode.
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(_CREATE_SCHEMA)
     conn.execute("PRAGMA user_version=1")
     conn.commit()
@@ -252,7 +254,7 @@ def test_concurrent_opens_of_a_v1_file_migrate_once(tmp_path):
 
     db = tmp_path / "execution.db"
     _v1_file(db)
-    barrier = threading.Barrier(4)
+    barrier = threading.Barrier(8)
     errors, stores = [], []
 
     def open_store():
@@ -262,7 +264,7 @@ def test_concurrent_opens_of_a_v1_file_migrate_once(tmp_path):
         except Exception as exc:  # pragma: no cover - the failure being tested
             errors.append(exc)
 
-    threads = [threading.Thread(target=open_store) for _ in range(4)]
+    threads = [threading.Thread(target=open_store) for _ in range(8)]
     for t in threads:
         t.start()
     for t in threads:
@@ -270,7 +272,7 @@ def test_concurrent_opens_of_a_v1_file_migrate_once(tmp_path):
     for s in stores:
         s.close()
     assert errors == []
-    assert len(stores) == 4
+    assert len(stores) == 8
 
 
 @pytest.mark.parametrize("operation", ["redact", "purge"])
@@ -283,6 +285,7 @@ def test_removed_content_leaves_no_trace_in_db_or_wal(tmp_path, operation):
     store = SqliteExecutionStore(db)
     try:
         assert store._conn.execute("PRAGMA secure_delete").fetchone()[0] == 1
+        assert store._conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         job = store.enqueue(
             _job(idempotency_key="m", payload={"event": {"summary": marker * 50}})
         )

@@ -157,6 +157,11 @@ class TestRetentionPolicy:
         with pytest.raises(ValueError, match=name):
             RetentionPolicy.from_env({name: value})
 
+    def test_sweep_interval_ceiling_is_ten_years(self):
+        assert RetentionPolicy.from_values(sweep_interval_hours=87_600)
+        with pytest.raises(ValueError):
+            RetentionPolicy.from_values(sweep_interval_hours=87_601)
+
     def test_largest_accepted_retention_keeps_read_api_working(self):
         policy = RetentionPolicy.from_env(
             {"AGENTS_RUN_HISTORY_RETENTION_DAYS": "36500"}
@@ -307,6 +312,14 @@ class TestRedactJob:
         job = self._job({}, {"handled": True, "turns": 3, "message": SECRET})
         redact_job(job, T0)
         assert job.result == {"handled": True, "turns": 3, "message": None}
+
+    def test_numeric_result_values_are_kept_but_summary_never(self):
+        from backend.agents.execution.models import redact_job
+
+        job = self._job({"foo": SECRET}, {"summary": 5, "cost": 1.5, "turns": 2})
+        redact_job(job, T0)
+        assert job.result == {"summary": None, "cost": 1.5, "turns": 2}
+        assert job.payload == {}
 
     @pytest.mark.parametrize("result", ["free text " + SECRET, [SECRET]])
     def test_non_dict_result_is_dropped(self, result):
