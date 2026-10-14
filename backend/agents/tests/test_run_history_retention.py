@@ -352,6 +352,14 @@ class TestAbandonOrphanedRuns:
         assert (report.abandoned, report.redacted, report.purged) == (0, 0, 0)
         assert store.get(inside.id).to_dict() == before
 
+    def test_dry_run_never_counts_running_younger_than_retention(self, store):
+        policy = RetentionPolicy.from_values(retention_days=30, redact_after_days=7)
+        mid = _run(store, "mid", finished_days_ago=10, state=ExecutionState.RUNNING)
+        before = store.get(mid.id).to_dict()
+        report = sweep(store, policy, now=T0, dry_run=True)
+        assert (report.abandoned, report.redacted, report.purged) == (0, 0, 0)
+        assert store.get(mid.id).to_dict() == before
+
     def test_abandon_cutoff_is_exactly_retention_days(self, store):
         policy = RetentionPolicy.from_values(retention_days=30)
         edge = store.enqueue(

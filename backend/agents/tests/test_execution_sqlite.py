@@ -14,6 +14,7 @@ import pytest
 
 from backend.agents.execution.contract import ExecutionStoreContractTests, T0, _job
 from backend.agents.execution.models import (
+    ABANDONED_REASON,
     ExecutionKind,
     ExecutionState,
     RetryPolicy,
@@ -302,3 +303,27 @@ def test_removed_content_leaves_no_trace_in_db_or_wal(tmp_path, operation):
                 assert marker.encode() not in open(path, "rb").read()
     finally:
         store.close()
+
+
+def test_abandon_survives_restart(tmp_path):
+    """An abandoned run is committed: a fresh store over the file sees it."""
+    db = tmp_path / "execution.db"
+    store = SqliteExecutionStore(db)
+    job = store.enqueue(
+        _job(
+            idempotency_key="orphan",
+            run_at=T0 - timedelta(days=40),
+            state=ExecutionState.RUNNING,
+            updated_at=T0 - timedelta(days=40),
+        )
+    )
+    assert store.abandon([job.id], cutoff=T0 - timedelta(days=30), now=T0) == 1
+    store.close()
+
+    reopened = SqliteExecutionStore(db)
+    try:
+        out = reopened.get(job.id)
+        assert out.state == ExecutionState.DEAD_LETTER
+        assert out.dead_letter_reason == ABANDONED_REASON
+    finally:
+        reopened.close()
