@@ -26,8 +26,9 @@ outside the core. No graph resolver is built.
 The owner chose the option and did not answer the five sub-questions in
 [What this ADR does not decide](#what-this-adr-does-not-decide) one by one.
 Their state on acceptance is below. A *recommended default* is this ADR's own
-recommendation, kept because it is consistent with Option A; it holds until a
-later decision changes it, and should be revisited if one does. Where this ADR
+recommendation, kept because it is consistent with Option A. It is a default,
+not an owner decision: revisit it if a later decision bears on it, or if
+Option A is superseded. Where this ADR
 made no recommendation, the question stays open.
 
 | # | Sub-question | State on acceptance |
@@ -309,8 +310,8 @@ unchanged.
   - It reads against the hosted sentence in
     `CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md`, so that document has to be
     amended or the hosted layer has to accept a core runtime per graph.
-    *(On acceptance: both — that document was amended, and the hosted layer
-    runs a core runtime per graph.)*
+    *(On acceptance: both — that document was amended, and a hosted layer
+    accepts a core runtime per graph.)*
   - The hosted layer pays per-graph process overhead (~50–61 MB floor each)
     and per-graph operational surface. For many small graphs that is the
     expensive shape. (Connections are not a differentiator: at

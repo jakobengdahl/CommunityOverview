@@ -131,7 +131,7 @@ Target outcomes:
 - clean boundaries between application roles and infrastructure access
 - ability to layer in stronger operator or admin models later
 - graph-scoped authorization decisions so a core instance can restrict which graphs (its own and federated peers), nodes, and edges a user can access
-- workspace-aware graph selection that can work with personal workspaces and team workspaces managed by an external service layer
+- workspace-aware request scope: workspace and graph context declared by an external service layer that manages personal and team workspaces, feeding authorization and audit (choosing which graph serves a request stays outside the core, as above)
 
 Likely core changes:
 - request identity abstraction
