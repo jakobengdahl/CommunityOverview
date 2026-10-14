@@ -74,6 +74,7 @@ def agent_run_to_dict(job: ExecutionJob) -> Dict[str, Any]:
         "created_at": _iso(job.created_at),
         "started_at": _iso(job.started_at),
         "finished_at": _iso(job.finished_at),
+        "redacted_at": _iso(job.redacted_at),
     }
 
 
@@ -173,16 +174,27 @@ class AgentRunRecorder:
         kind: Optional[ExecutionKind] = None,
         states: Optional[Sequence[ExecutionState]] = None,
         limit: Optional[int] = None,
+        created_after: Optional[datetime] = None,
     ) -> List[Dict[str, Any]]:
         if self._store is None:
             return []
         jobs = self._store.list_jobs(
-            states=states, agent_id=agent_id, kind=kind, limit=limit
+            states=states,
+            agent_id=agent_id,
+            kind=kind,
+            limit=limit,
+            created_after=created_after,
         )
         return [agent_run_to_dict(job) for job in jobs]
 
-    def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
+    def get_run(
+        self, run_id: str, *, created_after: Optional[datetime] = None
+    ) -> Optional[Dict[str, Any]]:
         if self._store is None:
             return None
         job = self._store.get(run_id)
-        return agent_run_to_dict(job) if job is not None else None
+        if job is None or (
+            created_after is not None and job.created_at <= created_after
+        ):
+            return None
+        return agent_run_to_dict(job)

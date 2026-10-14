@@ -118,10 +118,52 @@ def test_migration_is_idempotent_across_reopens(tmp_path):
     second = SqliteExecutionStore(db)
     try:
         version = second._conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 1
+        assert version == 2
         assert len(second.list_jobs()) == 1
     finally:
         second.close()
+
+
+def test_v1_database_migrates_forward_keeping_rows(tmp_path):
+    """A schema-v1 file gains redacted_at (unset) and keeps every job."""
+    import sqlite3
+
+    from backend.agents.execution.sqlite_store import _CREATE_SCHEMA
+
+    db = tmp_path / "execution.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(_CREATE_SCHEMA)
+    conn.execute(
+        "INSERT INTO execution_jobs (id, agent_id, kind, idempotency_key, state,"
+        " run_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+        ("job-v1", "a1", "event", "k1", "succeeded", 1.0, 1.0, 1.0),
+    )
+    conn.execute("PRAGMA user_version=1")
+    conn.commit()
+    conn.close()
+
+    store = SqliteExecutionStore(db)
+    try:
+        assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        job = store.get("job-v1")
+        assert job is not None and job.redacted_at is None
+        assert store.redact(["job-v1"], now=T0) == 1
+        assert store.get("job-v1").redacted_at == T0
+    finally:
+        store.close()
+
+
+def test_purge_matches_quote_bearing_id_literally(tmp_path):
+    store = SqliteExecutionStore(tmp_path / "execution.db")
+    try:
+        target = store.enqueue(_job(idempotency_key="t"))
+        store.complete(target.id, now=T0)
+        hostile = f"{target.id}' OR '1'='1"
+        assert store.purge([hostile]) == 0
+        assert store.get(target.id) is not None
+        assert store.purge([target.id]) == 1
+    finally:
+        store.close()
 
 
 def test_list_jobs_binds_every_filter_value(tmp_path):
@@ -170,5 +212,93 @@ def test_recover_stale_binds_every_job_id(tmp_path):
         assert str(int(now_ts)) not in sql
         for j in jobs:
             assert j.id not in sql
+    finally:
+        store.close()
+
+
+def _v1_file(db):
+    import sqlite3
+
+    from backend.agents.execution.sqlite_store import _CREATE_SCHEMA
+
+    conn = sqlite3.connect(db)
+    # A v1 file written by this store is already in (persistent) WAL mode.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.executescript(_CREATE_SCHEMA)
+    conn.execute("PRAGMA user_version=1")
+    conn.commit()
+    conn.close()
+
+
+def test_migration_survives_crash_between_alter_and_version_bump(tmp_path):
+    """A v1 file that already has redacted_at (crash mid-migration) still opens."""
+    import sqlite3
+
+    db = tmp_path / "execution.db"
+    _v1_file(db)
+    conn = sqlite3.connect(db)
+    conn.execute("ALTER TABLE execution_jobs ADD COLUMN redacted_at REAL")
+    conn.commit()
+    conn.close()
+
+    store = SqliteExecutionStore(db)
+    try:
+        assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    finally:
+        store.close()
+
+
+def test_concurrent_opens_of_a_v1_file_migrate_once(tmp_path):
+    """Several stores opening one v1 file at once all succeed."""
+    import threading
+
+    db = tmp_path / "execution.db"
+    _v1_file(db)
+    barrier = threading.Barrier(8)
+    errors, stores = [], []
+
+    def open_store():
+        barrier.wait()
+        try:
+            stores.append(SqliteExecutionStore(db))
+        except Exception as exc:  # pragma: no cover - the failure being tested
+            errors.append(exc)
+
+    threads = [threading.Thread(target=open_store) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    for s in stores:
+        s.close()
+    assert errors == []
+    assert len(stores) == 8
+
+
+@pytest.mark.parametrize("operation", ["redact", "purge"])
+def test_removed_content_leaves_no_trace_in_db_or_wal(tmp_path, operation):
+    """secure_delete + WAL checkpoint: the marker is gone from every file."""
+    import os
+
+    marker = "MARKER-7f3a9c-unique-content"
+    db = tmp_path / "execution.db"
+    store = SqliteExecutionStore(db)
+    try:
+        assert store._conn.execute("PRAGMA secure_delete").fetchone()[0] == 1
+        assert store._conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        job = store.enqueue(
+            _job(idempotency_key="m", payload={"event": {"summary": marker * 50}})
+        )
+        store.complete(job.id, result={"summary": marker}, now=T0)
+        store._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        if operation == "redact":
+            assert store.redact([job.id], now=T0) == 1
+        else:
+            assert store.purge([job.id]) == 1
+        wal = str(db) + "-wal"
+        assert not os.path.exists(wal) or os.path.getsize(wal) == 0
+        for path in (db, wal):
+            if os.path.exists(path):
+                assert marker.encode() not in open(path, "rb").read()
     finally:
         store.close()
