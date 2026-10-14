@@ -163,6 +163,8 @@ def _run_worker(
     exchange = _exchange_posix if os.name == "posix" else _exchange_threads
     try:
         reply, outcome = exchange(proc, payload, limits)
+    except OSError:  # e.g. no descriptor left for the selector
+        return ExtractionResult(STATUS_FAILED, detail="worker_io")
     finally:
         _kill_group(proc)
         proc.wait()
@@ -196,21 +198,32 @@ def _exchange_posix(proc: subprocess.Popen, payload: bytes, limits: ExtractionLi
     written = 0
     pipes = {proc.stdin.fileno(): proc.stdin, proc.stdout.fileno(): proc.stdout}
     in_fd, out_fd = proc.stdin.fileno(), proc.stdout.fileno()
-    selector = selectors.DefaultSelector()
-    for fd, event in ((in_fd, selectors.EVENT_WRITE), (out_fd, selectors.EVENT_READ)):
-        os.set_blocking(fd, False)
-        selector.register(fd, event)
+    selector = None
+    registered: set[int] = set()
 
     def close(fd: int) -> None:
-        if fd in pipes:
+        if fd in registered:
             selector.unregister(fd)
+            registered.discard(fd)
+        if fd in pipes:
             pipes.pop(fd).close()
 
     try:
+        selector = selectors.DefaultSelector()
+        for fd, event in (
+            (in_fd, selectors.EVENT_WRITE),
+            (out_fd, selectors.EVENT_READ),
+        ):
+            os.set_blocking(fd, False)
+            selector.register(fd, event)
+            registered.add(fd)
         while out_fd in pipes:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return reply, "timeout"
+            # Sampled before the select: a child seen exited here has already
+            # written all it will, so an empty select after it means no tail.
+            exited = proc.poll() is not None
             events = selector.select(min(remaining, 0.05))
             for key, _ in events:
                 if key.fd == out_fd:
@@ -230,7 +243,7 @@ def _exchange_posix(proc: subprocess.Popen, payload: bytes, limits: ExtractionLi
                         written = len(view)
                     if written >= len(view):
                         close(in_fd)
-            if not events and proc.poll() is not None:
+            if not events and exited:
                 # The child has exited and nothing is readable: whatever still
                 # holds the pipe open is not the child, so its reply is complete.
                 break
@@ -243,7 +256,8 @@ def _exchange_posix(proc: subprocess.Popen, payload: bytes, limits: ExtractionLi
     finally:
         for fd in list(pipes):
             close(fd)
-        selector.close()
+        if selector is not None:
+            selector.close()
 
 
 def _exchange_threads(proc: subprocess.Popen, payload: bytes, limits: ExtractionLimits):

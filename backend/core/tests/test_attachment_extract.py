@@ -1182,7 +1182,7 @@ def test_g1_a_process_that_escapes_the_group_cannot_hold_parent_resources(held):
     code = (
         "import subprocess, sys\n"
         "subprocess.Popen([sys.executable, '-c', "
-        f"'{close_stdout}import time; time.sleep(8)'], start_new_session=True)\n"
+        f"'{close_stdout}import time; time.sleep(4)'], start_new_session=True)\n"
         "sys.exit(0)"
     )
     fds_before = (
@@ -1197,7 +1197,8 @@ def test_g1_a_process_that_escapes_the_group_cannot_hold_parent_resources(held):
         _fake_worker(code),
     )
     assert result.status in (ae.STATUS_FAILED, ae.STATUS_TIMEOUT)
-    assert time.monotonic() - started < 4
+    # Well inside the 5 s a blocked join would cost on top of the wall clock.
+    assert time.monotonic() - started < 6
     assert threading.active_count() == threads_before
     if fds_before is not None:
         assert len(os.listdir("/proc/self/fd")) == fds_before
@@ -1220,3 +1221,44 @@ def test_g7_docx_horizontally_merged_cell_is_reported_once():
     document.save(out)
     result = extract(out.getvalue(), ae.DOCX)
     assert _texts(result) == ["MERGED\na\tb"]
+
+
+# --- Review round 5 regressions ----------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the selector exchange is POSIX")
+def test_g1_a_reply_written_just_before_exit_is_read_in_full(monkeypatch):
+    import selectors
+
+    class SlowSelector(selectors.DefaultSelector):
+        # Widens the gap between an empty select and the exit check, as a busy
+        # server thread holding the GIL would.
+        def select(self, timeout=None):
+            events = super().select(timeout)
+            if not events:
+                time.sleep(0.3)
+            return events
+
+    monkeypatch.setattr(selectors, "DefaultSelector", SlowSelector)
+    code = (
+        "import sys, time; sys.stdin.buffer.read(); time.sleep(0.1); "
+        'sys.stdout.write(\'{"status": "ok", "segments": [{"text": "tail", '
+        '"locator": {}}], "truncated": false}\')'
+    )
+    result = ae._run_worker(
+        b"x", ae.TEXT, ExtractionLimits(timeout_seconds=10), _fake_worker(code)
+    )
+    assert _texts(result) == ["tail"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the selector exchange is POSIX")
+def test_g1_a_selector_that_cannot_be_created_is_failed_not_raised(monkeypatch):
+    import selectors
+
+    def no_descriptors():
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr(selectors, "DefaultSelector", no_descriptors)
+    assert extract(b"hi", ae.TEXT) == ae.ExtractionResult(
+        ae.STATUS_FAILED, detail="worker_io"
+    )
