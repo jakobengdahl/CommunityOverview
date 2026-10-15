@@ -4185,25 +4185,22 @@ class GraphStorage:
         Get all edges connected to any of the given nodes (incoming or outgoing).
         More efficient than iterating through all edges.
         """
+        # OPTIMIZATION: Filter valid nodes first and pass them as a batch to NetworkX
+        # out_edges/in_edges rather than querying nodes individually in a Python loop.
+        valid_nodes = [n for n in node_ids if n in self.nodes and n in self.graph]
+        if not valid_nodes:
+            return []
+
         collected_edges = {}
 
-        for node_id in node_ids:
-            if node_id not in self.nodes:
-                continue
+        # Outgoing edges
+        for _, _, _, edge_data in self.graph.out_edges(valid_nodes, keys=True, data=True):
+            edge = edge_data["data"]
+            collected_edges[edge.id] = edge
 
-            if node_id in self.graph:
-                # Outgoing edges
-                for _, _, _, edge_data in self.graph.out_edges(
-                    node_id, keys=True, data=True
-                ):
-                    edge = edge_data["data"]
-                    collected_edges[edge.id] = edge
-
-                # Incoming edges
-                for _, _, _, edge_data in self.graph.in_edges(
-                    node_id, keys=True, data=True
-                ):
-                    edge = edge_data["data"]
-                    collected_edges[edge.id] = edge
+        # Incoming edges
+        for _, _, _, edge_data in self.graph.in_edges(valid_nodes, keys=True, data=True):
+            edge = edge_data["data"]
+            collected_edges[edge.id] = edge
 
         return list(collected_edges.values())
