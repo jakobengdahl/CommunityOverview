@@ -144,6 +144,11 @@ class TestAuthorization:
         hook = _Hook(read=(False, False))
         assert _client(storage, hook).post(URL, json=_body()).status_code == 403
 
+    def test_a_caller_whose_writes_are_narrowed_is_refused(self, storage):
+        hook = _Hook(narrowed=True, read=(True, False))
+        response = _client(storage, hook).post(URL, json=_body())
+        assert response.status_code == 409
+
     def test_a_caller_whose_reads_are_narrowed_is_refused(self, storage):
         hook = _Hook(read=(True, True))
         response = _client(storage, hook).post(URL, json=_body())

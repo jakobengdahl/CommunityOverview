@@ -491,6 +491,30 @@ class TestEdges:
         )
         assert plan.report["skips"]["items"][0]["live_edge_id"] == "e5"
 
+    def test_settling_keeps_each_relationship_type_apart(self, storage):
+        # Both live types between a1 and i1 are retyped by the plan, and each
+        # has a second live edge a document duplicate must fall back to.
+        storage.add_edge(Edge(id="f5", source="a1", target="i1", type="BELONGS_TO"))
+        storage.add_edge(Edge(id="r1", source="a1", target="i1", type="RELATES_TO"))
+        storage.add_edge(Edge(id="r5", source="a1", target="i1", type="RELATES_TO"))
+        plan = _plan(
+            storage,
+            [],
+            [
+                {"id": "e1", "source": "a1", "target": "i1", "type": "RELATES_TO"},
+                {"id": "r1", "source": "a1", "target": "i1", "type": "BELONGS_TO"},
+                {"id": "dB", "source": "a1", "target": "i1", "type": "BELONGS_TO"},
+                {"id": "dR", "source": "a1", "target": "i1", "type": "RELATES_TO"},
+            ],
+            policy=MergePolicy(default="overwrite"),
+        )
+        duplicates = {
+            s["id"]: s["live_edge_id"]
+            for s in plan.report["skips"]["items"]
+            if s["reason"] == "duplicate_edge"
+        }
+        assert duplicates == {"dB": "f5", "dR": "r5"}
+
     def test_the_same_triple_with_another_type_is_not_a_duplicate(self, storage):
         plan = _plan(
             storage,
@@ -1214,6 +1238,29 @@ class TestGenerationRecheck:
         steady = compute_merge_plan(document, params, StorageGraphView(storage))
         assert plan.report["adds"]["edges"]["ids"] == ["d2"]
         assert plan.digest == steady.digest
+
+    def test_an_incident_edge_updated_in_place_during_the_rejudge_restarts(
+        self, storage
+    ):
+        class _View(StorageGraphView):
+            written = False
+            walks = 0
+
+            def incident_edges(self, node_id):
+                self.walks += 1
+                return super().incident_edges(node_id)
+
+            def get_edge(self, edge_id):
+                if edge_id == "e1" and not self.written:
+                    self.written = True
+                    storage.update_edge("e1", {"label": "moved"})
+                return super().get_edge(edge_id)
+
+        view = _View(storage)
+        compute_merge_plan(self.SUBTYPE_CHANGE, self.OVERWRITE, view)
+        assert view.written
+        # The walk's copy of e1 predates the write, so the attempt restarts.
+        assert view.walks == 2
 
     def test_an_incident_edge_deleted_during_the_rejudge_restarts_the_plan(
         self, storage
