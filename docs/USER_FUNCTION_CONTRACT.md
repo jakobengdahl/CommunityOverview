@@ -334,10 +334,24 @@ listed in §11.
 | `graph.add` | `graph:write` | `add_nodes` (nodes and edges) |
 | `graph.update_node` | `graph:write` | `update_node` |
 
-Arguments and results follow the mapped MCP tool. The broker never forwards an
-argument that would change scope (a graph id, a session id, an event origin or
-a correlation id): those come from the run (§3, §9) and a caller-supplied value
-is rejected. Deletion is not available in version 1 (§13).
+Arguments and results follow the mapped MCP tool, with these restrictions; a
+call that breaks one is refused with `invalid_arguments`:
+
+- Each tool accepts only its documented arguments. Arguments that would change
+  scope are rejected: a graph or session id, an event origin or correlation id
+  (those come from the run, §3, §9), federation depth, and visualization
+  actions.
+- A function cannot set, change or clear a node's or edge's graph scope or
+  provenance. The federation and provenance keys (`origin_graph_id`,
+  `origin_node_id`, `federation_distance`, `is_federated`, `read_only`,
+  `adopted_from` and the related keys) are refused at the top level of a node
+  or edge and inside its `metadata`; node ids in the reserved `federated::`
+  namespace are refused; and `graph.update_node` changes `metadata` only with
+  `metadata_merge: true`, so keys the function does not name are kept.
+- Work per call is bounded: `limit` is an integer from 0 to 500 and `depth`
+  from 0 to 3.
+
+Deletion is not available in version 1 (§13).
 
 ### 6.4 Tool errors
 

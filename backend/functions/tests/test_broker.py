@@ -10,6 +10,7 @@ from backend.functions.broker import (
     BROKER_ERROR_CODE,
     MAX_MESSAGE_BYTES,
     MAX_TOOL_CALLS,
+    wire_size,
     GRANT_GRAPH_READ,
     GRANT_GRAPH_WRITE,
     BrokerContext,
@@ -473,12 +474,28 @@ def test_the_response_limit_is_measured_in_bytes_and_is_inclusive(storage, hook)
 
     service = Fixed(storage, authorization_hook=hook)
     Fixed.payload = {"t": "a" * 100}
-    exact = len(json.dumps(Fixed.payload).encode("utf-8"))
+    exact = wire_size({"jsonrpc": "2.0", "id": 1, "result": Fixed.payload})
     assert "result" in call(
         make_broker(service, max_message_bytes=exact), "graph.search", {"query": "q"}
     )
-    Fixed.payload = {"t": "é" * 60}  # 60 characters, 120 bytes of UTF-8
-    over = make_broker(service, max_message_bytes=100)
+    assert error_code(
+        call(
+            make_broker(service, max_message_bytes=exact - 1),
+            "graph.search",
+            {"query": "q"},
+        )
+    ) == ("tool_failed")
+    # The id counts too: the whole line written to the function is measured.
+    assert error_code(
+        call(
+            make_broker(service, max_message_bytes=exact),
+            "graph.search",
+            {"query": "q"},
+            request_id="long-id",
+        )
+    ) == ("tool_failed")
+    Fixed.payload = {"t": "é" * 60}  # 60 characters, far more bytes on the wire
+    over = make_broker(service, max_message_bytes=150)
     assert error_code(call(over, "graph.search", {"query": "q"})) == "tool_failed"
 
 
@@ -510,3 +527,189 @@ def test_a_refused_request_is_recorded(service):
         "graph.search",
         "concurrent_call",
     )
+
+
+def test_replacing_metadata_wholesale_is_refused_so_scope_keys_survive(
+    service, storage
+):
+    storage.add_nodes(
+        [
+            Node(
+                id="scoped",
+                name="Scoped",
+                type=NodeType.ACTOR,
+                metadata={"origin_graph_id": "g1", "k": 1},
+            )
+        ],
+        [],
+    )
+    broker = make_broker(service)
+    replaced = call(
+        broker,
+        "graph.update_node",
+        {"node_id": "scoped", "updates": {"metadata": {"k": 2}}},
+    )
+    assert error_code(replaced) == "invalid_arguments"
+    merged = call(
+        broker,
+        "graph.update_node",
+        {
+            "node_id": "scoped",
+            "updates": {"metadata": {"k": 2}},
+            "metadata_merge": True,
+        },
+    )
+    assert "result" in merged, merged
+    assert storage.get_node("scoped").metadata == {"origin_graph_id": "g1", "k": 2}
+    cleared = call(
+        broker,
+        "graph.update_node",
+        {
+            "node_id": "scoped",
+            "updates": {"metadata": {"origin_graph_id": None}},
+            "metadata_merge": True,
+        },
+    )
+    assert error_code(cleared) == "invalid_arguments"
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "origin_graph_id",
+        "origin_node_id",
+        "federation_distance",
+        "is_federated",
+        "is_federated_reference",
+        "read_only",
+        "adopted_from",
+    ],
+)
+def test_scope_and_provenance_keys_are_refused_on_nodes_edges_and_updates(service, key):
+    broker = make_broker(service)
+    node = {"name": "N", "type": "Actor"}
+    edge = {"source": "a", "target": "b", "type": "RELATES_TO"}
+    attempts = [
+        ("graph.add", {"nodes": [{**node, key: "x"}]}),
+        ("graph.add", {"nodes": [{**node, "metadata": {key: "x"}}]}),
+        ("graph.add", {"nodes": [], "edges": [{**edge, "metadata": {key: "x"}}]}),
+        ("graph.add", {"nodes": [], "edges": [{**edge, key: "x"}]}),
+        (
+            "graph.update_node",
+            {
+                "node_id": "n",
+                "updates": {"metadata": {key: "x"}},
+                "metadata_merge": True,
+            },
+        ),
+    ]
+    for tool, arguments in attempts:
+        assert error_code(call(broker, tool, arguments)) == "invalid_arguments", (
+            tool,
+            arguments,
+        )
+    assert service.calls == []
+
+
+def test_reserved_federated_node_ids_and_malformed_edges_are_refused(service):
+    broker = make_broker(service)
+    spoof = {"nodes": [{"id": "federated::g9::real", "name": "S", "type": "Actor"}]}
+    assert error_code(call(broker, "graph.add", spoof)) == "invalid_arguments"
+    assert error_code(call(broker, "graph.add", {"nodes": [], "edges": {"a": 1}})) == (
+        "invalid_arguments"
+    )
+    assert service.calls == []
+
+
+def test_a_failing_hook_still_produces_an_answer(storage):
+    class BrokenHook(RecordingHook):
+        def evaluate(self, context):
+            raise TimeoutError("authorization service unreachable at 10.0.0.5")
+
+    broker = make_broker(SpyService(storage, authorization_hook=BrokenHook()))
+    response = call(broker, "graph.search", {"query": "x"})
+    assert error_code(response) == "tool_failed"
+    assert "10.0.0.5" not in response["error"]["message"]
+    assert broker.tool_calls[-1].outcome == "tool_failed"
+
+
+def test_a_failing_enablement_check_still_produces_an_answer(service):
+    def broken(grant):
+        raise RuntimeError("config store down")
+
+    broker = make_broker(service, grant_enabled=broken)
+    assert error_code(call(broker, "graph.search", {"query": "x"})) == "tool_failed"
+
+
+@pytest.mark.parametrize(
+    "tool, arguments",
+    [
+        ("graph.search", {"query": "x", "limit": 0}),
+        ("graph.search", {"query": "x", "limit": 500}),
+        ("graph.get_related", {"node_id": "n", "depth": 3}),
+    ],
+)
+def test_work_bounds_accept_their_inclusive_limits(service, tool, arguments):
+    response = call(make_broker(service), tool, arguments)
+    # The node may not exist; what matters is that the bound itself is accepted.
+    assert "result" in response or error_code(response) == "tool_failed"
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [{"query": "x", "limit": None}, {"query": "x", "limit": "10"}],
+)
+def test_work_bounds_reject_non_integers(service, arguments):
+    assert error_code(call(make_broker(service), "graph.search", arguments)) == (
+        "invalid_arguments"
+    )
+
+
+def test_every_node_in_a_batch_is_scope_checked(service):
+    nodes = [
+        {"name": "Fine", "type": "Actor"},
+        {"name": "Sneaky", "type": "Actor", "metadata": {"origin_graph_id": "g"}},
+    ]
+    assert error_code(call(make_broker(service), "graph.add", {"nodes": nodes})) == (
+        "invalid_arguments"
+    )
+    assert service.calls == []
+
+
+def test_grant_enablement_has_no_default():
+    with pytest.raises(TypeError):
+        BrokerContext(
+            run_id="r",
+            function_id="f",
+            function_version="1",
+            declared_grants=frozenset(),
+            correlation_id="c",
+            authorization_inputs={},
+        )
+
+
+def test_similarity_search_hides_local_nodes_when_the_local_graph_is_excluded(
+    storage,
+):
+    narrowing = GraphAccessNarrowing(
+        enabled=True, allow_local_graph=False, include_graph_ids=("g1",)
+    )
+    service = SpyService(storage, authorization_hook=RecordingHook(narrowing=narrowing))
+    storage.add_nodes([Node(name="Local Similar", type=NodeType.ACTOR)], [])
+    response = call(
+        make_broker(service), "graph.find_similar", {"name": "Local", "threshold": 0.1}
+    )
+    assert response["result"]["similar_nodes"] == []
+
+
+def test_only_an_explicit_false_success_is_a_failure(storage, hook):
+    class Odd(GraphService):
+        def search_graph(self, query, **kwargs):
+            return {"success": None, "nodes": []}
+
+    response = call(
+        make_broker(Odd(storage, authorization_hook=hook)),
+        "graph.search",
+        {"query": "q"},
+    )
+    assert "result" in response

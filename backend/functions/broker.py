@@ -35,6 +35,8 @@ from backend.runtime.authorization import (
     use_request_authorization,
 )
 from backend.service import access
+from backend.service.attachments import FEDERATED_NODE_PREFIX
+from backend.service.mutations import _FEDERATION_BOOKKEEPING_METADATA_KEYS
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +202,11 @@ def error_response(request_id: Any, code: str, message: str) -> Dict[str, Any]:
     }
 
 
+def wire_size(message: Any) -> int:
+    """Bytes the message takes on the wire, as protocol.py writes it."""
+    return len(json.dumps(message, separators=(",", ":")).encode("utf-8")) + 1
+
+
 def _sanitize(message: Any) -> str:
     text = str(message or "").strip() or "The operation failed."
     return text[:_MAX_ERROR_MESSAGE_CHARS]
@@ -230,11 +237,24 @@ class FunctionBroker:
         self._calls_made += 1
         try:
             result = self._dispatch(params)
+            response = {"jsonrpc": "2.0", "id": request_id, "result": result}
+            if wire_size(response) > self._context.max_message_bytes:
+                raise BrokerError(
+                    ERR_TOOL_FAILED, "The response exceeds the message size limit."
+                )
         except BrokerError as exc:
             self._record(name, exc.code, started)
             return error_response(request_id, exc.code, exc.message)
+        except Exception:
+            # A failing hook or enablement check must still end in an answer,
+            # never in an exception out of the session.
+            logger.exception(
+                "Function run %s: tool call failed in the broker", self._context.run_id
+            )
+            self._record(name, ERR_TOOL_FAILED, started)
+            return error_response(request_id, ERR_TOOL_FAILED, "The operation failed.")
         self._record(name, "ok", started)
-        return {"jsonrpc": "2.0", "id": request_id, "result": result}
+        return response
 
     def refuse(
         self, message: Mapping[str, Any], code: str, text: str
@@ -330,12 +350,9 @@ class FunctionBroker:
                     _sanitize(result.get("error") or result.get("message")),
                 )
 
-        encoded = json.dumps(result, default=str)
-        if len(encoded.encode("utf-8")) > ctx.max_message_bytes:
-            raise BrokerError(
-                ERR_TOOL_FAILED, "The response exceeds the message size limit."
-            )
-        return json.loads(encoded)
+        # Round-trip so the function receives plain JSON (dates become strings);
+        # handle_request then measures the whole response envelope.
+        return json.loads(json.dumps(result, default=str))
 
     @staticmethod
     def _validate_arguments(spec: ToolSpec, arguments: Mapping[str, Any]) -> None:
@@ -356,8 +373,33 @@ class FunctionBroker:
                 raise BrokerError(ERR_INVALID_ARGUMENTS, "nodes must be a list.")
             for node in nodes:
                 _refuse_graph_scope(node)
+                node_id = node.get("id") if isinstance(node, Mapping) else None
+                if isinstance(node_id, str) and node_id.startswith(
+                    FEDERATED_NODE_PREFIX
+                ):
+                    raise BrokerError(
+                        ERR_INVALID_ARGUMENTS,
+                        f"Node ids starting with {FEDERATED_NODE_PREFIX} are reserved.",
+                    )
+            edges = arguments.get("edges", [])
+            if not isinstance(edges, list):
+                raise BrokerError(ERR_INVALID_ARGUMENTS, "edges must be a list.")
+            for edge in edges:
+                _refuse_graph_scope(edge)
         if spec.method == "update_node":
-            _refuse_graph_scope(arguments.get("updates"))
+            updates = arguments.get("updates")
+            _refuse_graph_scope(updates)
+            if (
+                isinstance(updates, Mapping)
+                and "metadata" in updates
+                and arguments.get("metadata_merge") is not True
+            ):
+                # Replacing metadata wholesale would drop the host-set scope
+                # keys this guard exists to protect.
+                raise BrokerError(
+                    ERR_INVALID_ARGUMENTS,
+                    "Updating metadata requires metadata_merge: true.",
+                )
 
     @staticmethod
     def _validate_keys(spec: ToolSpec, arguments: Mapping[str, Any]) -> None:
@@ -386,20 +428,27 @@ class FunctionBroker:
 # interrupted while a service call runs).
 _ARGUMENT_CAPS = {"limit": 500, "depth": 3}
 
-# A node's graph scope lives in this metadata key; a function may not set it.
-_GRAPH_SCOPE_KEY = "origin_graph_id"
+# Keys through which the storage and federation layers record a node's or
+# edge's graph scope and provenance. A function may neither set nor clear them,
+# at the top level (folded into metadata on add) or inside metadata.
+_SCOPE_KEYS = frozenset(_FEDERATION_BOOKKEEPING_METADATA_KEYS) | {
+    "is_federated_reference",
+    "read_only",
+    "adopted_from",
+}
 
 
 def _refuse_graph_scope(payload: Any) -> None:
     if not isinstance(payload, Mapping):
         return
     metadata = payload.get("metadata")
-    if _GRAPH_SCOPE_KEY in payload or (
-        isinstance(metadata, Mapping) and _GRAPH_SCOPE_KEY in metadata
-    ):
+    found = set(payload) & _SCOPE_KEYS
+    if isinstance(metadata, Mapping):
+        found |= set(metadata) & _SCOPE_KEYS
+    if found:
         raise BrokerError(
             ERR_INVALID_ARGUMENTS,
-            f"Scope is fixed by the host; not allowed: {_GRAPH_SCOPE_KEY}",
+            "Scope is fixed by the host; not allowed: " + ", ".join(sorted(found)),
         )
 
 

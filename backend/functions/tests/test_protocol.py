@@ -493,3 +493,197 @@ send({"jsonrpc": "2.0", "method": "result",
     outcome = run_script(make_broker(storage), script)
     assert outcome.succeeded, outcome
     assert "result" in outcome.output["third"]
+
+
+@pytest.mark.parametrize("number", ["1e999", "-1e999"])
+def test_non_finite_numbers_are_protocol_errors(storage, number):
+    script = PRELUDE + (
+        'sys.stdout.write(\'{"jsonrpc": "2.0", "method": "result", '
+        f'"params": {{"status": "ok", "output": {{"v": {number}}}}}}}\' '
+        "+ '\\n'); sys.stdout.flush()\n"
+    )
+    assert run_script(make_broker(storage), script).code == "protocol_error"
+
+
+def test_a_request_read_after_the_deadline_is_not_dispatched(storage, monkeypatch):
+    import backend.functions.protocol as protocol
+
+    broker = make_broker(storage)
+    calls = []
+    original = broker.handle_request
+    broker.handle_request = lambda message: calls.append(message) or original(message)
+
+    read_fd, write_fd = os.pipe()
+    to_fn_read, to_fn_write = os.pipe()
+    request = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tool",
+        "params": {"name": "graph.search", "arguments": {"query": "x"}},
+    }
+    os.write(write_fd, (json.dumps(request) + "\n").encode())
+
+    start = time.monotonic()
+    # The first reading (waiting for input) is in time; by the next one, after
+    # the request has been read, the deadline has passed.
+    clock = iter([start])
+
+    def fake_monotonic():
+        return next(clock, start + 100)
+
+    monkeypatch.setattr(protocol.time, "monotonic", fake_monotonic)
+    try:
+        outcome = run_session(
+            broker,
+            ENVELOPE,
+            reader_fd=read_fd,
+            writer_fd=to_fn_write,
+            deadline=start + 10,
+        )
+    finally:
+        monkeypatch.undo()
+        for fd in (read_fd, write_fd, to_fn_read, to_fn_write):
+            os.close(fd)
+    assert outcome.code == "timeout"
+    assert calls == []
+
+
+def _discard(chunks, limit=64):
+    read_fd, write_fd = os.pipe()
+
+    def writer():
+        for chunk in chunks:
+            os.write(write_fd, chunk)
+            time.sleep(0.01)
+        os.close(write_fd)
+
+    thread = threading.Thread(target=writer)
+    thread.start()
+    reader = LineReader(read_fd, limit)
+    line = reader.read_line(time.monotonic() + 5)
+    thread.join()
+    os.close(read_fd)
+    return line
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        [b'{"x": "' + b"a" * 200, b'", "method":"result"}\n'],  # last fragment
+        [b"a" * 100 + b'"method":"res', b'ult"' + b"a" * 100 + b"\n"],  # split
+        [b'{"method": "result", "x": "' + b"a" * 200 + b'"}\n'],  # spaced form
+        [b"a" * 100 + b'"method":"result"' + b"a" * 100, b"\n"],  # first buffer
+    ],
+)
+def test_an_oversized_result_is_recognised_wherever_its_marker_falls(chunks):
+    line = _discard(chunks)
+    assert isinstance(line, _Oversized) and line.looks_like_result
+
+
+def test_an_oversized_request_is_not_mistaken_for_a_result():
+    line = _discard([b'{"method":"tool", "x": "' + b"a" * 200, b'"}\n'])
+    assert isinstance(line, _Oversized) and not line.looks_like_result
+
+
+def test_a_line_of_exactly_the_limit_split_across_writes_is_accepted():
+    assert _discard([b"a" * 64, b"\n"]) == b"a" * 64
+
+
+@pytest.mark.parametrize(
+    "request_id, accepted",
+    [
+        (2**31, True),
+        (2**63 - 1, True),
+        (2**63, False),
+        ("i" * 128, True),
+        ("i" * 129, False),
+    ],
+)
+def test_request_id_bounds(storage, request_id, accepted):
+    script = (
+        PRELUDE
+        + f"""
+send({{"jsonrpc": "2.0", "id": {request_id!r}, "method": "tool",
+      "params": {{"name": "graph.search", "arguments": {{"query": "a"}}}}}})
+answer = recv()
+send({{"jsonrpc": "2.0", "method": "result",
+      "params": {{"status": "ok", "output": {{"id": answer["id"]}}}}}})
+"""
+    )
+    outcome = run_script(make_broker(storage), script)
+    assert outcome.succeeded is accepted, outcome
+
+
+def test_one_byte_over_the_output_limit_is_output_too_large(storage):
+    exact = len(json.dumps({"t": "a" * 100}, separators=(",", ":")).encode())
+    over = run_script(
+        make_broker(storage),
+        _result_script('{"status": "ok", "output": {"t": "a" * 100}}'),
+        max_output_bytes=exact - 1,
+    )
+    assert over.code == "output_too_large"
+
+
+def test_a_slow_reader_still_receives_a_large_message_before_the_deadline(storage):
+    envelope = {"invocation": {"input": {"blob": "x" * (512 * 1024)}}}
+    script = """
+import json, sys, time
+time.sleep(0.3)
+invoke = json.loads(sys.stdin.readline())
+size = len(invoke["params"]["invocation"]["input"]["blob"])
+sys.stdout.write(json.dumps({"jsonrpc": "2.0", "method": "result",
+                             "params": {"status": "ok", "output": {"size": size}}}) + "\\n")
+sys.stdout.flush()
+"""
+    outcome = run_script(make_broker(storage), script, envelope=envelope, timeout=10)
+    assert outcome.succeeded, outcome
+    assert outcome.output == {"size": 512 * 1024}
+
+
+def test_a_request_arriving_after_blank_lines_is_sequential_not_concurrent(storage):
+    script = (
+        PRELUDE
+        + """
+import time
+req = lambda i: {"jsonrpc": "2.0", "id": i, "method": "tool",
+                 "params": {"name": "graph.search", "arguments": {"query": "z"}}}
+send(req(1))
+first = recv()
+sys.stdout.write("\\n\\n"); sys.stdout.flush()
+time.sleep(0.2)
+send(req(2))
+second = recv()
+send({"jsonrpc": "2.0", "method": "result",
+      "params": {"status": "ok", "output": {"second": second}}})
+"""
+    )
+    outcome = run_script(make_broker(storage), script)
+    assert outcome.succeeded, outcome
+    assert "result" in outcome.output["second"]
+
+
+def test_a_request_written_while_the_previous_one_is_served_is_concurrent(storage):
+    class SlowSearch(GraphService):
+        def search_graph(self, query, **kwargs):
+            time.sleep(0.3)
+            return super().search_graph(query, **kwargs)
+
+    context = make_broker(storage).context
+    broker = FunctionBroker(SlowSearch(storage), context)
+    script = (
+        PRELUDE
+        + """
+import time
+req = lambda i: {"jsonrpc": "2.0", "id": i, "method": "tool",
+                 "params": {"name": "graph.search", "arguments": {"query": "z"}}}
+sys.stdout.write(json.dumps(req(1)) + "\\n\\n\\n"); sys.stdout.flush()
+time.sleep(0.1)
+send(req(2))
+first, second = recv(), recv()
+send({"jsonrpc": "2.0", "method": "result",
+      "params": {"status": "ok", "output": {"second": second}}})
+"""
+    )
+    outcome = run_script(broker, script)
+    assert outcome.succeeded, outcome
+    assert outcome.output["second"]["error"]["data"]["code"] == "concurrent_call"

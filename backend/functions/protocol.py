@@ -14,6 +14,7 @@ module only reports what happened.
 from __future__ import annotations
 
 import json
+import math
 import os
 import select
 import time
@@ -258,7 +259,9 @@ def run_session(
             continue
 
         try:
-            message = json.loads(line, parse_constant=_reject_constant)
+            message = json.loads(
+                line, parse_constant=_reject_constant, parse_float=_finite_float
+            )
         except Exception:  # ValueError, UnicodeDecodeError, RecursionError
             return outcome(
                 CODE_PROTOCOL_ERROR, error_message="Output was not valid JSON."
@@ -313,6 +316,13 @@ def _valid_id(value: Any) -> bool:
 
 def _reject_constant(name: str) -> Any:
     raise ValueError(f"{name} is not valid JSON")
+
+
+def _finite_float(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError("non-finite number")
+    return value
 
 
 def _finish(params: Any, max_output_bytes: int, outcome: Any) -> SessionOutcome:
