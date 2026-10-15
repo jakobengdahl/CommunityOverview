@@ -215,7 +215,8 @@ A manifest is **rejected**, and the function cannot run, when:
 - the manifest holds text that is not valid Unicode, such as a lone surrogate
   escape (`"\ud800"`), which no record or response could carry, or a number
   JSON cannot represent (`NaN`, or one too large to be finite);
-- a file or folder in the package has a name that is not valid UTF-8.
+- a file or folder in the package has a name that is not valid UTF-8;
+- `function.json` nests deeper than the limit in §8.
 
 A schema may refer only to locations inside itself (`$ref` values starting
 with `#`); the host never resolves a reference over the network. It checks
@@ -226,7 +227,7 @@ or `invalid_output`), and so does an output holding text that is not valid
 Unicode. A reference, read percent-decoded, may not point into data such as
 `const`, `enum` or `default`. A check that cannot finish within its limits, or a schema
 that refers to itself without end or is too deeply nested to check even a
-shallow value, counts as the schema not applying: the
+shallow value (one at most 16 levels deep), counts as the schema not applying: the
 invocation is `rejected` with `invalid_manifest`, or the run `failed` with
 `invalid_output`.
 
@@ -431,6 +432,7 @@ system that started it.
 | Size of one tool call or response | 1 MiB | The call is refused with `invalid_arguments`, or the response is replaced by a `tool_failed` error. |
 | Size of `result.output` | 256 KiB | The run ends `failed` with `output_too_large`. |
 | Nesting depth of `result.output` | 64 levels | The run ends `failed` with `invalid_output`. |
+| Nesting depth of `function.json` | 64 levels | The manifest is rejected (§4.3). |
 | Captured log | 256 KiB | Further log output is dropped and the truncation is recorded. |
 | Concurrent runs per function | 1 | A further invocation is `rejected` with `busy`. |
 

@@ -1020,3 +1020,22 @@ def test_output_that_is_not_unicode_fails_even_with_an_output_schema(harness):
     service = harness.service
     run = finished(service, invoke(service, "odd"))
     assert (run["status"], run["error"]["code"]) == ("failed", "invalid_output")
+
+
+# --- review round 9 --------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("keyword", ["default", "examples", "x-annotation"])
+def test_a_deeply_nested_manifest_value_leaves_the_list_readable(harness, keyword):
+    deep = 0
+    for _ in range(300):
+        deep = [deep]
+    harness.add("count", "return {}")
+    harness.add("deep", "return {}", input_schema={"type": "object", keyword: deep})
+    client = _client(harness.service)
+    response = client.get("/functions")
+    assert response.status_code == 200
+    listed = {f["id"]: f for f in response.json()}
+    assert listed["count"]["valid"] and not listed["deep"]["valid"]
+    assert "nests deeper than" in listed["deep"]["errors"][0]
+    assert client.get("/functions/deep").status_code == 200

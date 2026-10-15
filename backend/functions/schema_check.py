@@ -35,8 +35,10 @@ _ENDLESS = "\x00endless"
 # problem's message, or nothing. It limits itself before reading anything.
 # When the check recurses too deeply, the schema is at fault if the value is
 # shallow, or if a trivial value recurses too; otherwise the value is too deep.
-# A finite schema reaches Python's recursion limit only for values hundreds of
-# levels deep, so a value this shallow cannot be the cause.
+# A plain recursive schema reaches Python's recursion limit only for values
+# about 250 levels deep (one with long $ref chains per level, sooner), so
+# recursing on a value this shallow means the schema, not the value, is too
+# deep to check: either it never ends or it costs dozens of frames per level.
 SHALLOW_LEVELS = 16
 _CHILD = f"""
 import json, resource, sys

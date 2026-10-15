@@ -31,6 +31,7 @@ from backend.functions.runner import (
 )
 from backend.functions.broker import MAX_TOOL_CALLS
 from backend.functions.protocol import _finite_float, _reject_constant
+from backend.functions.schema_check import depth_below
 
 MANIFEST_FILE = "function.json"
 SUPPORTED_CONTRACT_VERSIONS = ("1",)
@@ -50,6 +51,9 @@ MAX_FILES = 200
 MAX_ENTRIES = 2 * MAX_FILES
 MAX_PACKAGE_BYTES = 5 * 1024 * 1024
 MAX_MANIFEST_BYTES = 256 * 1024
+# Manifests are served on request threads; a deeper value (in a schema's
+# default, say) would make every list of functions fail to serialize.
+MAX_MANIFEST_DEPTH = 64
 
 _ID_PATTERN = re.compile(r"[a-z0-9-]{3,64}")
 # Path segments the /functions API uses for itself.
@@ -136,6 +140,11 @@ def validate_package(loaded: LoadedFunction) -> LoadedFunction:
         )
     except (ValueError, UnicodeDecodeError, RecursionError) as exc:
         loaded.errors.append(f"{MANIFEST_FILE} is not valid JSON: {exc}")
+        return loaded
+    if not depth_below(document, MAX_MANIFEST_DEPTH):
+        loaded.errors.append(
+            f"{MANIFEST_FILE} nests deeper than {MAX_MANIFEST_DEPTH} levels"
+        )
         return loaded
     try:
         json.dumps(document, ensure_ascii=False).encode("utf-8")

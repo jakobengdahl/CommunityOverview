@@ -382,3 +382,22 @@ def test_reading_a_package_reports_why_it_is_missing_and_leaks_no_descriptor(
     os.symlink("/etc/passwd", directory / "d" / "y")
     assert read_package(str(tmp_path), "count-nodes").errors
     assert _open_descriptors() == before
+
+
+def test_a_manifest_may_nest_exactly_to_the_limit(tmp_path):
+    from backend.functions.manifest import MAX_MANIFEST_DEPTH
+
+    def package(levels):
+        # The manifest and input_schema are two levels; default holds the
+        # rest as lists around an empty one.
+        value = []
+        for _ in range(levels - 3):
+            value = [value]
+        document = dict(VALID, input_schema={"type": "object", "default": value})
+        return {"function.json": json.dumps(document).encode(), "main.py": b""}
+
+    _write(tmp_path / "a", "count-nodes", package(MAX_MANIFEST_DEPTH))
+    assert load_function(str(tmp_path / "a"), "count-nodes").valid
+    _write(tmp_path / "b", "count-nodes", package(MAX_MANIFEST_DEPTH + 1))
+    loaded = load_function(str(tmp_path / "b"), "count-nodes")
+    assert "nests deeper than" in loaded.errors[0]
