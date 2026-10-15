@@ -419,6 +419,7 @@ def confine(spec):
 
 def _child(spec, setup_w):
     try:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
         # Without the isolation control the function can kill the supervisor;
         # it then dies with it instead of running on unsupervised.
         libc().prctl(PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0)
@@ -513,6 +514,10 @@ def supervise(spec, status_fd):
 
     spec = dict(spec, supervisor_pid=os.getpid())
     setup_r, setup_w = os.pipe2(os.O_CLOEXEC)
+    # A stop request is held back until the start's outcome is reported: a
+    # function that fails to start exits at once, the host then asks to stop,
+    # and the setup error must still reach it.
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
     child = os.fork()
     if child == 0:
         os.close(setup_r)
@@ -531,6 +536,7 @@ def supervise(spec, status_fd):
             _report(status_fd, {"setup_error": setup_error.decode(errors="replace")})
             return
         _report(status_fd, {"started": child})
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
         while True:
             pid, status = os.waitpid(-1, 0)
             if pid == child:
