@@ -253,13 +253,7 @@ class StorageGraphView:
         return self._storage.get_edges_from_to(source, target)
 
     def incident_edges(self, node_id: str) -> List[Edge]:
-        import networkx
-
-        try:
-            return self._storage.get_edges_for_node(node_id)
-        except networkx.NetworkXError as exc:
-            # The node was deleted between the membership test and the walk.
-            raise LiveGraphMoved(str(exc)) from exc
+        return self._storage.get_edges_for_node(node_id)
 
     def attachments_configured(self) -> bool:
         return self._attachments is not None
@@ -712,8 +706,21 @@ class _Planner:
         )
         if not matches:
             return None
-        self._read_edge(matches[0])
+        listed = next(
+            live
+            for live in self.view.edges_from_to(source.node_id, target.node_id)
+            if live.id == matches[0]
+        )
+        self._confirm_listed_edge(listed)
         return matches[0]
+
+    def _confirm_listed_edge(self, listed: Edge) -> None:
+        # A listing and a by-id read are two reads; an edge deleted or
+        # rewritten between them must restart the plan, not be recorded as
+        # absent while a decision relied on it.
+        by_id = self._read_edge(listed.id)
+        if by_id is None or by_id.revision != listed.revision:
+            raise LiveGraphMoved(f"edge '{listed.id}' changed during planning")
 
     def _settle_duplicates(self) -> None:
         """A live edge this plan retypes is no longer the triple it was, so it
@@ -749,12 +756,18 @@ class _Planner:
         for decision in sorted(self.nodes.values(), key=lambda d: d.node.id):
             if decision.outcome != "overwrite" or "subtypes" not in decision.changes:
                 continue
-            for live_edge in sorted(
-                self.view.incident_edges(decision.node.id), key=lambda e: e.id
-            ):
+            node_id = decision.node.id
+            incident = self.view.incident_edges(node_id)
+            # The walk must have seen this node as the plan read it: a node
+            # deleted or changed around the walk, or edges not incident to it,
+            # mean the graph moved under the read.
+            if any(node_id not in (e.source, e.target) for e in incident):
+                raise LiveGraphMoved(f"node '{node_id}' changed during planning")
+            self._read_node(node_id)
+            for live_edge in sorted(incident, key=lambda e: e.id):
                 if live_edge.id in overwritten_edge_ids:
                     continue
-                self._read_edge(live_edge.id)
+                self._confirm_listed_edge(live_edge)
                 ends = [
                     self._resulting_state(live_edge.source),
                     self._resulting_state(live_edge.target),

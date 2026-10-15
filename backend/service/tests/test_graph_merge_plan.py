@@ -662,6 +662,21 @@ class TestAttachmentFlags:
         flagged = plan.report["attachments"]["created_over_orphan_attachments"]
         assert flagged["ids"] == ["x"]
 
+    def test_a_store_error_is_flagged_not_fatal(self, storage):
+        from backend.core.attachment_store import AttachmentIndexCorrupt
+
+        class _Corrupt:
+            def list(self, namespace, node_id):
+                raise AttachmentIndexCorrupt("bad index")
+
+        plan = _plan(
+            storage,
+            [{"id": "x", "type": "Actor", "name": "X"}],
+            attachments=AttachmentSettings(store=_Corrupt(), namespace="ns"),
+        )
+        flagged = plan.report["attachments"]["created_over_orphan_attachments"]
+        assert flagged["ids"] == ["x"]
+
     def test_a_pathologically_nested_index_is_flagged_not_fatal(self, storage):
         import json as _json
 
@@ -901,11 +916,12 @@ class _RacingView(StorageGraphView):
 
 
 class _MovingNodeView(StorageGraphView):
-    """Bumps one node's revision between its first and second read, once."""
+    """Changes (or hides) one node on its second read only."""
 
-    def __init__(self, storage, node_id):
+    def __init__(self, storage, node_id, vanish=False):
         super().__init__(storage)
         self.node_id = node_id
+        self.vanish = vanish
         self.reads = 0
 
     def get_node(self, node_id):
@@ -913,6 +929,8 @@ class _MovingNodeView(StorageGraphView):
         if node_id == self.node_id:
             self.reads += 1
             if self.reads == 2:
+                if self.vanish:
+                    return None
                 return node.model_copy(update={"revision": node.revision + 1})
         return node
 
@@ -957,26 +975,51 @@ class TestGenerationRecheck:
         with pytest.raises(RuntimeError, match="something else"):
             compute_merge_plan(self.SUBTYPE_CHANGE, self.OVERWRITE, _View(storage))
 
-    def test_a_node_deleted_while_its_edges_are_walked_restarts_the_plan(
-        self, storage, monkeypatch
+    def test_a_node_deleted_before_its_edges_are_walked_restarts_the_plan(
+        self, storage
     ):
-        import networkx
-
-        calls = []
-        original = storage.get_edges_for_node
-
-        def _walk(node_id):
-            calls.append(node_id)
-            if len(calls) == 1:
-                raise networkx.NetworkXError("The node a1 is not in the graph.")
-            return original(node_id)
-
-        monkeypatch.setattr(storage, "get_edges_for_node", _walk)
-        plan = compute_merge_plan(
-            self.SUBTYPE_CHANGE, self.OVERWRITE, StorageGraphView(storage)
-        )
+        view = _MovingNodeView(storage, "a1", vanish=True)
+        plan = compute_merge_plan(self.SUBTYPE_CHANGE, self.OVERWRITE, view)
         assert plan.report["overwrites"]["nodes"]["count"] == 1
-        assert len(calls) == 2
+        assert view.reads > 2
+
+    def test_a_walk_that_returns_foreign_edges_restarts_the_plan(self, storage):
+        class _View(StorageGraphView):
+            walks = 0
+
+            def incident_edges(self, node_id):
+                self.walks += 1
+                if self.walks == 1:
+                    return [Edge(id="x", source="p", target="q")]
+                return super().incident_edges(node_id)
+
+        view = _View(storage)
+        compute_merge_plan(self.SUBTYPE_CHANGE, self.OVERWRITE, view)
+        assert view.walks == 2
+
+    def test_a_listed_edge_deleted_before_its_read_restarts_the_plan(self, storage):
+        class _View(StorageGraphView):
+            hidden = True
+
+            def get_edge(self, edge_id):
+                if edge_id == "e1" and self.hidden:
+                    self.hidden = False
+                    return None
+                return super().get_edge(edge_id)
+
+        document = {
+            "nodes": [],
+            "edges": [
+                {"id": "d1", "source": "a1", "target": "i1", "type": "BELONGS_TO"}
+            ],
+        }
+        params = MergeParameters()
+        view = _View(storage)
+        plan = compute_merge_plan(document, params, view)
+        assert not view.hidden  # the hiding read happened, in a discarded attempt
+        assert plan.report["skips"]["items"][0]["live_edge_id"] == "e1"
+        steady = compute_merge_plan(document, params, StorageGraphView(storage))
+        assert plan.digest == steady.digest
 
     def test_an_entity_that_changes_between_two_reads_restarts_the_plan(self, storage):
         # Two edges attach to i1, so it is read twice in one attempt.

@@ -71,8 +71,9 @@ Choices it made inside the decisions above:
   document and `generation`.
 - A live edge the same plan retypes under `overwrite` is not what a document
   edge duplicates. The planner reads without the storage lock; a live write
-  that changes an adjacency map mid-read, deletes a node being walked, or
-  changes an entity the plan already read restarts the plan like a replace.
+  that changes an adjacency map mid-read, or changes or deletes an entity the
+  plan read twice — by id, or once in a listing and once by id — restarts the
+  plan like a replace.
 - One preview runs at a time per process; another is refused with 503
   `import_preview_busy` and can be retried, since a preview changes nothing.
 
