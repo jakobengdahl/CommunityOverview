@@ -213,7 +213,9 @@ A manifest is **rejected**, and the function cannot run, when:
   grant, a limit above the contract maximum in §8, or any reserved field;
 - `entry_point` does not resolve to a file inside the function directory;
 - the manifest holds text that is not valid Unicode, such as a lone surrogate
-  escape (`"\ud800"`), which no record or response could carry.
+  escape (`"\ud800"`), which no record or response could carry, or a number
+  JSON cannot represent (`NaN`, or one too large to be finite);
+- a file or folder in the package has a name that is not valid UTF-8.
 
 A schema may refer only to locations inside itself (`$ref` values starting
 with `#`); the host never resolves a reference over the network. It checks
@@ -221,9 +223,10 @@ with `#`); the host never resolves a reference over the network. It checks
 a time and memory limit, since a schema can cost far more than its size
 suggests. A value nested too deeply to check fails its schema (`invalid_input`
 or `invalid_output`), and so does an output holding text that is not valid
-Unicode. A reference is followed as the validator follows it, percent-decoded,
-and may not point into data such as `const`, `enum` or `default`. A check that cannot finish within its limits, or a schema
-that refers to itself without end, counts as the schema not applying: the
+Unicode. A reference, read percent-decoded, may not point into data such as
+`const`, `enum` or `default`. A check that cannot finish within its limits, or a schema
+that refers to itself without end or is too deeply nested to check even a
+shallow value, counts as the schema not applying: the
 invocation is `rejected` with `invalid_manifest`, or the run `failed` with
 `invalid_output`.
 

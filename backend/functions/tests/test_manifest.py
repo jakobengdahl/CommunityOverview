@@ -347,3 +347,13 @@ def test_a_package_may_hold_exactly_the_most_entries_and_no_more(tmp_path):
     loaded = load_function(str(tmp_path), "count-nodes")
     assert not loaded.valid
     assert "files and folders" in loaded.errors[0]
+
+
+@pytest.mark.parametrize("number", ["NaN", "Infinity", "1e400"])
+def test_a_manifest_with_a_number_json_cannot_represent_is_invalid(tmp_path, number):
+    text = json.dumps(dict(VALID, input_schema={"maximum": 0}))
+    text = text.replace('"maximum": 0', f'"maximum": {number}')
+    _write(tmp_path, "count-nodes", {"function.json": text.encode(), "main.py": b""})
+    loaded = load_function(str(tmp_path), "count-nodes")
+    assert not loaded.valid
+    assert "not valid JSON" in loaded.errors[0]

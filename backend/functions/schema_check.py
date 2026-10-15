@@ -33,9 +33,11 @@ _ENDLESS = "\x00endless"
 
 # The child reads {"schema", "instance"} on standard input and writes the first
 # problem's message, or nothing. It limits itself before reading anything.
-# When the check recurses too deeply, trivial values tell an instance that is
-# too deep apart from a schema that recurses without end whatever the value
-# (one may stop at a keyword before the recursion, so several are tried).
+# When the check recurses too deeply, the schema is at fault if the value is
+# shallow, or if a trivial value recurses too; otherwise the value is too deep.
+# A finite schema reaches Python's recursion limit only for values hundreds of
+# levels deep, so a value this shallow cannot be the cause.
+SHALLOW_LEVELS = 16
 _CHILD = f"""
 import json, resource, sys
 memory = {CHECK_MEMORY_MIB} * 1024 * 1024
@@ -43,6 +45,20 @@ resource.setrlimit(resource.RLIMIT_AS, (memory, memory))
 resource.setrlimit(resource.RLIMIT_CPU, ({int(CHECK_TIMEOUT_SECONDS)}, {int(CHECK_TIMEOUT_SECONDS) + 1}))
 from jsonschema import Draft202012Validator
 from referencing import Registry
+
+def shallow(value):
+    level = [value]
+    for _ in range({SHALLOW_LEVELS}):
+        children = []
+        for item in level:
+            if isinstance(item, dict):
+                children.extend(item.values())
+            elif isinstance(item, list):
+                children.extend(item)
+        if not children:
+            return True
+        level = children
+    return False
 
 def first_problem(validator, instance):
     error = next(iter(validator.iter_errors(instance)), None)
@@ -57,12 +73,15 @@ try:
     message = first_problem(validator, request["instance"])
 except RecursionError:
     message = {_TOO_DEEP!r}
-    for probe in (None, {{}}, [], "", 0) if validator is not None else ():
-        try:
-            first_problem(validator, probe)
-        except RecursionError:
-            message = {_ENDLESS!r}
-            break
+    if validator is not None and shallow(request["instance"]):
+        message = {_ENDLESS!r}
+    elif validator is not None:
+        for probe in (None, {{}}, [], "", 0):
+            try:
+                first_problem(validator, probe)
+            except RecursionError:
+                message = {_ENDLESS!r}
+                break
 sys.stdout.buffer.write(message[:{MAX_PROBLEM_CHARS}].encode("utf-8", "replace"))
 """
 
@@ -93,7 +112,9 @@ def schema_problem(
     finally:
         slots.release()
     if problem == _ENDLESS:
-        raise SchemaCheckFailed("the schema refers to itself without end")
+        raise SchemaCheckFailed(
+            "the schema refers to itself without end or nests too deeply"
+        )
     if problem == _TOO_DEEP:
         return "the value is nested too deeply to check"
     return problem

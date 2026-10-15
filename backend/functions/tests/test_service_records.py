@@ -945,3 +945,45 @@ def test_too_deep_input_against_a_finite_schema_names_the_nesting(harness):
     run = invoke(harness.service, "tree", value)
     _rejected(run, "invalid_input")
     assert "nested too deeply" in run["error"]["message"]
+
+
+# --- review round 8 --------------------------------------------------------------------
+
+
+def test_a_package_file_named_outside_utf8_is_invalid_and_everything_lists(harness):
+    import os
+
+    harness.add("count", "return {}")
+    harness.add("odd", "return {}")
+    with open(os.fsencode(harness.root / "odd") + b"/y\xff.txt", "wb") as handle:
+        handle.write(b"")
+    os.mkdir(os.fsencode(harness.root) + b"/ab\xff")
+    service = harness.service
+    client = _client(service)
+    response = client.get("/functions")
+    assert response.status_code == 200
+    listed = {f["id"]: f for f in response.json()}
+    assert set(listed) == {"count", "odd"}
+    assert not listed["odd"]["valid"]
+    assert "valid UTF-8" in listed["odd"]["errors"][0]
+    assert client.get("/functions/odd").status_code == 200
+    _rejected(invoke(service, "odd"), "invalid_manifest")
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {
+            "properties": {"a": {"$ref": "#/$defs/b"}},
+            "$defs": {"b": {"if": {"type": "boolean"}, "then": {"$ref": "#/$defs/b"}}},
+        },
+        {
+            "properties": {
+                "a": {"if": {"type": "boolean"}, "then": {"$ref": "#/properties/a"}}
+            }
+        },
+    ],
+)
+def test_a_schema_endless_only_below_the_root_is_the_manifests_fault(harness, schema):
+    harness.add("loop", "return {}", input_schema=schema)
+    _rejected(invoke(harness.service, "loop", {"a": True}), "invalid_manifest")

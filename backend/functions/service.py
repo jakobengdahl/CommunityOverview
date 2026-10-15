@@ -250,7 +250,7 @@ class FunctionService:
         return {
             "id": function_id,
             "valid": loaded.valid,
-            "errors": list(loaded.errors),
+            "errors": [_scrub(error) for error in loaded.errors],
             "enabled": self._settings.is_enabled(function_id),
             "grants": declared,
             "missing_grants": [

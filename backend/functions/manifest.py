@@ -30,6 +30,7 @@ from backend.functions.runner import (
     safe_relative_path,
 )
 from backend.functions.broker import MAX_TOOL_CALLS
+from backend.functions.protocol import _finite_float, _reject_constant
 
 MANIFEST_FILE = "function.json"
 SUPPORTED_CONTRACT_VERSIONS = ("1",)
@@ -111,7 +112,8 @@ def package_digest(files: Mapping[str, bytes]) -> str:
     digest = hashlib.sha256()
     for path in sorted(files):
         content = files[path]
-        digest.update(f"{len(path)}:{path}:{len(content)}:".encode("utf-8"))
+        name = path.encode("utf-8", "surrogateescape")
+        digest.update(f"{len(name)}:".encode() + name + f":{len(content)}:".encode())
         digest.update(content)
     return digest.hexdigest()
 
@@ -128,7 +130,10 @@ def validate_package(loaded: LoadedFunction) -> LoadedFunction:
         )
         return loaded
     try:
-        document = json.loads(raw)
+        # A non-finite number would be listed as null, not as what is enforced.
+        document = json.loads(
+            raw, parse_constant=_reject_constant, parse_float=_finite_float
+        )
     except (ValueError, UnicodeDecodeError, RecursionError) as exc:
         loaded.errors.append(f"{MANIFEST_FILE} is not valid JSON: {exc}")
         return loaded
@@ -166,6 +171,7 @@ def list_function_directories(root: str) -> List[str]:
         name
         for name in entries
         if not name.startswith(".")
+        and _is_text(name)
         and os.path.isdir(os.path.join(root, name))
         and not os.path.islink(os.path.join(root, name))
     ]
@@ -209,6 +215,11 @@ def _read_package(directory: str) -> Dict[str, bytes]:
                 relative = (
                     f"{relative_dir}/{entry.name}" if relative_dir else entry.name
                 )
+                if not _is_text(entry.name):
+                    # A name the file system decoded as surrogates could not be
+                    # listed or recorded.
+                    shown = relative.encode("utf-8", "backslashreplace").decode()
+                    raise ValueError(f"names must be valid UTF-8: {shown}")
                 if entry.is_symlink():
                     raise ValueError(f"symbolic links are not allowed: {relative}")
                 if entry.is_dir(follow_symlinks=False):
@@ -230,6 +241,14 @@ def _read_package(directory: str) -> Dict[str, bytes]:
         finally:
             os.close(fd)
     return files
+
+
+def _is_text(name: str) -> bool:
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _open_folder(path: str) -> int:
