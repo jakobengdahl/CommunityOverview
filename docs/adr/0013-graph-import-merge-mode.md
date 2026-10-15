@@ -221,14 +221,18 @@ and an overwrite is destructive.
 
 **Plan report** (returned by the preview, and again by the commit):
 
-- `adds` — nodes and edges to create (counts, plus ids up to a cap);
+- `adds` — nodes and edges to create (counts, plus ids up to a cap; the
+  digest covers their full content, so a document edited after the preview
+  does not match);
 - `overwrites` — per entity, the fields that change (`main` = live value,
   `incoming` = document value; `main` as in the session diff, which also has
   a `base` this feature has no equivalent for);
 - `renames` — the old ids that will be renamed, and the edges rewritten with
   each. New ids are **not** in the plan: they are minted at commit and
   returned only in the commit response, so recomputing a plan stays
-  deterministic (see the digest below);
+  deterministic (see the digest below). The same holds for the values a
+  provenance stamp would write (§7 (c): import id, time) — minted at commit,
+  never part of the plan;
 - `skips` — collisions kept as live, and duplicate edges skipped;
 - `conflicts` — entries that block the commit under the chosen policy (type
   mismatch, endpoint mismatch, `fail` collisions, applicability failures after
@@ -295,8 +299,8 @@ not by itself close it. It is closed the way `SESSION_OVERLAY_CONTRACT.md`
   with a delete but not with an ordinary update, so a concurrent subtype
   change could commit between the check and the merge. The store must
   verify these checks inside the unit, holding each checked row against
-  updates too (`FOR SHARE`, or the revision compared in the statement that
-  writes). The existence checks are the machinery the session contract
+  updates too: a locking read (`FOR SHARE`) inside the unit that compares
+  the revision. The existence checks are the machinery the session contract
   assigns to slice S2; the revision checks on entities the merge does not
   write go **beyond** S2 and are new work for this feature. (The alternative
   is to accept the subtype race on attach targets as today's direct-write
@@ -357,11 +361,16 @@ shape is a new, narrow `GraphStorage` method (working name
    `_resolve_failed_write`, `SESSION_OVERLAY_CONTRACT.md` §4.4): landed,
    `write_failed` (undo), or `write_outcome_unknown` (reload). The merge writes
    only upserts, so every touched entity carries the write token as evidence.
+   On the file backend a write that fails after hand-over is not undone
+   either: the existing landing path keeps memory as it is and re-saves the
+   whole graph (`_await_landing`), and the merge inherits that.
 
-The pre-merge backup (below) is written **before** this locked unit, as v1
-writes its backup before `replace_all_nodes_and_edges`; the overwrite
-expectations guarantee that the backup's copy of every overwritten entity is
-still the version the merge replaces.
+**Order.** Recompute the plan and check the digest, then write the pre-merge
+backup (below), then run the locked unit — the backup outside the lock, as v1
+writes its backup before `replace_all_nodes_and_edges`. Because the plan, and
+so the expectations, are taken before the backup, an overwritten entity that
+changes after the backup was written fails its expectation; the backup's copy
+of every overwritten entity is therefore the version the merge replaces.
 
 It does **not** bump `generation`. `generation` means "the whole graph was
 replaced"; bumping it on a merge would make an in-flight replace job report
@@ -439,6 +448,22 @@ have the job record each node's revision when it reads the text, and have the
 commit skip any node whose revision has moved since. Recommendation: **(b)** —
 revisions make it a per-node comparison under the lock the commit already
 takes.
+
+A second gap concerns a shared PostgreSQL store. The worker commits through
+`commit_generation_embeddings`, which persists with `save()`, and under
+PostgreSQL `save()` is `save_graph_data`: it rewrites every row from this
+instance's memory in one transaction (vectors travel inline in node rows,
+ADR 0009). For a replace that is harmless — the graph was just replaced
+wholesale. For a merge it is not: §4 is designed around other instances
+continuing to write, and a whole-graph save from one instance's memory would
+overwrite concurrent writes it has not yet received, and make every other
+instance reload. Options: (a) in a shared store, persist only the embedded
+nodes as entity upserts through `apply_batch`, each carrying the revision
+recorded under (b) as its expectation; (b) declare merge out of scope for
+multi-instance PostgreSQL until (a) exists. Recommendation: **(a)**, in the
+third slice, with slice 2 refusing a shared-store merge until then. (The same
+whole-graph save already follows a replace's embedding job in a
+shared store; that is a property of today's replace path, outside this ADR.)
 
 Merge via `POST /import/archive` (restoring vectors from `embeddings.bin` for
 created nodes) is out of scope for the first slices; plain `graph.json` only.
@@ -523,7 +548,12 @@ slices benchmark against them:
   entities, not the live graph (the whole-graph backup of §4 (a) runs before
   the lock and is measured separately);
 - request latency and delivery-queue depth for the §7 (b) event fan-out at
-  10,000 entities.
+  10,000 entities, and, with several PostgreSQL instances, the cost on the
+  others: each re-emits a change it receives as an `external-change` event
+  (so the plan's `events` count is per instance, and an agent's own
+  `ignore_origins` entry does not stop that echo), and a batch too large to
+  announce reaches them as an unknown change, which makes each reload
+  (`docs/EVENT_SUBSCRIPTIONS.md`, "Limitations").
 
 ### 9. Decision point — API surface
 
@@ -611,9 +641,13 @@ controls proposed for it:
   Under narrowed callers (option (b) above) it must not reveal entities
   outside the caller's scope.
 - **System types, when included.** `include_system_types: true` requires a
-  digest (§3), and creating or overwriting a system node goes through the same
-  validation its ordinary create path applies (for example to webhook
-  delivery settings), not only generic schema validation.
+  digest (§3). Today system nodes get only generic schema validation on every
+  create path; webhook safety is enforced when an event is delivered (the
+  delivery-time address checks in `backend/core/events/delivery.py`), not
+  when an `EventSubscription` is written. Delivery-time checks still apply to
+  merged subscriptions, but a merge can repoint many at once, so whether to
+  add create-time validation for system types is part of this decision point
+  — new work, not reuse.
 - **Server-owned fields.** A document cannot supply `revision` (§1) or event
   attribution: the event origin comes from the request's `x-event-origin`
   header, as `POST /import` already reads it, or the server default (§7).
@@ -643,7 +677,11 @@ After acceptance, in dependency order:
    file backend vectors persist through the embedding sidecar, separately
    from the journal batch, so the drop is atomic in memory and the slice must
    say how it is made durable. Contract tests in the in-memory, file and PostgreSQL backends.
-3. **Embedding race guard.** The per-node revision guard in the worker (§6).
+   Until slice 3 lands, slice 2 refuses a merge on a shared PostgreSQL store
+   (§6, second gap).
+3. **Embedding commit for merges.** The per-node revision guard in the worker,
+   and the entity-upsert embedding commit for a shared store (§6); lifts
+   slice 2's PostgreSQL refusal.
 4. **Optional, later:** per-id resolutions after preview (§1 (c)), merge for
    narrowed callers (§10 (b)), merge from an archive (§6), opt-in provenance
    stamping (§7 (c)) if not already folded into slice 2.
