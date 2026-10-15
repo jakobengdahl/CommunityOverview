@@ -89,6 +89,8 @@ class TestRequestParsing:
             {"document": {}, "policy": {"by_type": {"Actor": "replace"}}},
             {"document": {}, "policy": {"default": "skip", "extra": 1}},
             {"document": {}, "include_system_types": "yes"},
+            {"document": {}, "policy": {"by_type": []}},
+            {"document": {}, "policy": {"by_type": False}},
             {"policy": {}},
             [],
         ],
@@ -197,7 +199,7 @@ class TestNodeCollisions:
             policy=MergePolicy(default="rename"),
         )
         assert plan.report["renames"]["nodes"]["items"] == [
-            {"id": "a1", "edges_rewritten": ["e9"]}
+            {"id": "a1", "edges_rewritten": {"count": 1, "ids": ["e9"]}}
         ]
         # The rewritten edge is created against the renamed node, so the
         # live a1 -> i1 edges are not duplicates of it.
@@ -314,6 +316,82 @@ class TestEdges:
             }
         ]
         assert plan.report["adds"]["edges"]["count"] == 0
+
+    LIVE_TWIN = {"id": "e1", "source": "a1", "target": "i1", "type": "BELONGS_TO"}
+
+    def test_an_edge_id_collision_follows_the_edge_policy(self, storage):
+        assert _conflicts(_plan(storage, [], [self.LIVE_TWIN])) == {
+            ("edge", "e1"): "id_collision"
+        }
+        skipped = _plan(storage, [], [self.LIVE_TWIN], policy=MergePolicy("skip"))
+        assert _skip_reasons(skipped) == {("edge", "e1"): "collision_kept_live"}
+        same = _plan(storage, [], [self.LIVE_TWIN], policy=MergePolicy("overwrite"))
+        assert _skip_reasons(same) == {("edge", "e1"): "unchanged"}
+        by_rel = _plan(
+            storage,
+            [],
+            [self.LIVE_TWIN],
+            policy=MergePolicy("fail", by_type=(("BELONGS_TO", "skip"),)),
+        )
+        assert _skip_reasons(by_rel) == {("edge", "e1"): "collision_kept_live"}
+
+    def test_an_edge_whose_endpoint_is_in_conflict_is_a_conflict(self, storage):
+        plan = _plan(
+            storage,
+            [{"id": "a1", "type": "Actor", "name": "Clash"}],
+            [{"id": "e9", "source": "a1", "target": "i1", "type": "RELATES_TO"}],
+        )
+        assert _conflicts(plan)[("edge", "e9")] == "endpoint_in_conflict"
+
+    def test_a_live_edge_in_the_reverse_direction_is_not_a_duplicate(self, storage):
+        plan = _plan(
+            storage,
+            [],
+            [{"id": "e9", "source": "i1", "target": "a1", "type": "BELONGS_TO"}],
+        )
+        assert plan.report["adds"]["edges"]["ids"] == ["e9"]
+        assert [e.id for e in storage.get_edges_from_to("a1", "i1")] == ["e1"]
+        assert storage.get_edges_from_to("i1", "a1") == []
+
+    def test_renaming_an_edge_that_equals_its_live_namesake_is_a_duplicate(
+        self, storage
+    ):
+        plan = _plan(
+            storage,
+            [],
+            [{"id": "e1", "source": "a1", "target": "i1", "type": "BELONGS_TO"}],
+            policy=MergePolicy(default="rename"),
+        )
+        assert plan.report["renames"]["edges"]["count"] == 0
+        assert _skip_reasons(plan) == {("edge", "e1"): "duplicate_edge"}
+
+    def test_edges_attached_to_a_skipped_node_are_identified(self, storage):
+        plan = _plan(
+            storage,
+            [{"id": "a1", "type": "Actor", "name": "Other"}],
+            [{"id": "e9", "source": "a1", "target": "i1", "type": "RELATES_TO"}],
+            policy=MergePolicy(default="skip"),
+        )
+        assert plan.report["edges_to_skipped_nodes"]["ids"] == ["e9"]
+
+    def test_an_archived_live_node_stays_archived_under_overwrite_and_is_reported(
+        self, storage
+    ):
+        plan = _plan(
+            storage,
+            [{"id": "g1", "type": "Goal", "name": "Goal v2"}],
+            [{"id": "e9", "source": "a1", "target": "g1", "type": "AIMS_FOR"}],
+            policy=MergePolicy(default="overwrite"),
+        )
+        assert plan.report["edges_to_archived_nodes"]["ids"] == ["e9"]
+
+    def test_a_created_archived_node_is_not_an_archived_live_node(self, storage):
+        plan = _plan(
+            storage,
+            [{"id": "new", "type": "Goal", "name": "N", "archived": True}],
+            [{"id": "e9", "source": "a1", "target": "new", "type": "AIMS_FOR"}],
+        )
+        assert plan.report["edges_to_archived_nodes"]["count"] == 0
 
     def test_the_same_triple_with_another_type_is_not_a_duplicate(self, storage):
         plan = _plan(
@@ -483,6 +561,29 @@ class TestAttachmentFlags:
         assert flags["overwritten_with_attachments"]["ids"] == ["a1"]
         assert flags["created_over_orphan_attachments"]["ids"] == ["orphan"]
 
+    def test_without_a_store_the_check_is_not_run_even_with_nothing_to_flag(
+        self, storage
+    ):
+        plan = _plan(
+            storage,
+            [{"id": "a1", "type": "Actor", "name": "Alice"}],
+            policy=MergePolicy(default="skip"),
+        )
+        assert plan.report["attachments"]["checked"] is False
+
+    def test_an_unreadable_index_is_flagged_not_fatal(self, storage):
+        class _Broken:
+            def list(self, namespace, node_id):
+                raise PermissionError("denied")
+
+        plan = _plan(
+            storage,
+            [{"id": "x", "type": "Actor", "name": "X"}],
+            attachments=AttachmentSettings(store=_Broken(), namespace="ns"),
+        )
+        flagged = plan.report["attachments"]["created_over_orphan_attachments"]
+        assert flagged["ids"] == ["x"]
+
     def test_without_an_attachment_store_the_check_is_reported_as_not_run(
         self, storage
     ):
@@ -531,6 +632,18 @@ class TestDigest:
         assert first == again == reordered
         assert first.startswith("sha256:")
 
+    def test_a_blocked_plan_is_order_independent_too(self, storage):
+        nodes = [
+            {"id": "a1", "type": "Actor", "name": "Clash"},
+            {"id": "bad", "type": "NoSuchType", "name": "Bad"},
+            {"id": "ok", "type": "Actor", "name": "Fine"},
+        ]
+        fail = MergePolicy(default="fail")
+        first = _plan(storage, nodes, policy=fail)
+        reordered = _plan(storage, list(reversed(nodes)), policy=fail)
+        assert not first.committable
+        assert first.digest == reordered.digest
+
     def test_changes_with_the_policy(self, storage):
         assert self._digest(storage) != self._digest(
             storage, policy=MergePolicy(default="overwrite")
@@ -570,6 +683,33 @@ class TestDigest:
         )
         assert self._digest(storage) != before
 
+    def test_changes_with_the_content_of_a_created_edge(self, storage):
+        edited = [dict(self.DOC_EDGES[0], label="edited")]
+        assert self._digest(storage) != self._digest(storage, edges=edited)
+
+    def test_changes_when_a_duplicate_live_edge_is_written(self, storage):
+        edges = [{"id": "e9", "source": "a1", "target": "i1", "type": "BELONGS_TO"}]
+        before = self._digest(storage, nodes=[], edges=edges)
+        storage.update_edge("e1", {"label": "touched"})
+        assert self._digest(storage, nodes=[], edges=edges) != before
+
+    def test_changes_with_the_generation_alone(self, storage):
+        params = MergeParameters(policy=MergePolicy(default="skip"))
+        document = {"nodes": self.DOC_NODES, "edges": self.DOC_EDGES}
+
+        class _Generation(StorageGraphView):
+            def __init__(self, storage, value):
+                super().__init__(storage)
+                self.value = value
+
+            @property
+            def generation(self):
+                return self.value
+
+        first = compute_merge_plan(document, params, _Generation(storage, 1))
+        second = compute_merge_plan(document, params, _Generation(storage, 2))
+        assert first.digest != second.digest
+
     def test_ignores_the_embedding_backlog(self, storage):
         view = StorageGraphView(storage)
         params = MergeParameters(policy=MergePolicy(default="skip"))
@@ -583,6 +723,38 @@ class TestDigest:
         second = compute_merge_plan(document, params, _MoreBacklog(storage))
         assert second.report["embeddings"] != first.report["embeddings"]
         assert second.digest == first.digest
+
+
+class TestSavedViewMetadata:
+    def test_overwrite_values_pass_through_the_saved_view_sanitizer(
+        self, storage, monkeypatch
+    ):
+        storage.add_nodes(
+            [Node(id="v1", type="SavedView", name="View", metadata={"k": "live"})], []
+        )
+        seen = []
+
+        def _sanitize(metadata):
+            seen.append(metadata)
+            return {"sanitized": True}
+
+        monkeypatch.setattr(graph_merge_plan, "sanitize_saved_view_metadata", _sanitize)
+        plan = _plan(
+            storage,
+            [
+                {
+                    "id": "v1",
+                    "type": "SavedView",
+                    "name": "View",
+                    "metadata": {"k": "doc"},
+                }
+            ],
+            policy=MergePolicy(default="overwrite"),
+            include_system_types=True,
+        )
+        change = plan.report["overwrites"]["nodes"]["items"][0]["changes"]["metadata"]
+        assert change == {"main": {"sanitized": True}, "incoming": {"sanitized": True}}
+        assert seen == [{"k": "live"}, {"k": "doc"}]
 
 
 class _ShiftingGenerationView(StorageGraphView):
@@ -628,3 +800,20 @@ class TestListCaps:
         )
         assert plan.report["adds"]["nodes"]["count"] == 5
         assert len(plan.report["adds"]["nodes"]["ids"]) == 2
+
+    def test_the_edges_rewritten_by_one_rename_are_capped_too(
+        self, storage, monkeypatch
+    ):
+        monkeypatch.setattr(graph_merge_plan, "PLAN_LIST_CAP", 2)
+        plan = _plan(
+            storage,
+            [{"id": "a1", "type": "Actor", "name": "Twin"}],
+            [
+                {"id": f"r{i}", "source": "a1", "target": "i1", "type": "RELATES_TO"}
+                for i in range(5)
+            ],
+            policy=MergePolicy(default="rename"),
+        )
+        rewritten = plan.report["renames"]["nodes"]["items"][0]["edges_rewritten"]
+        assert rewritten["count"] == 5
+        assert len(rewritten["ids"]) == 2

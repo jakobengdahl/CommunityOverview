@@ -149,6 +149,16 @@ class TestAuthorization:
         assert detail["error_code"] == "import_requires_full_graph_access"
         assert "plan" not in detail
 
+    def test_request_authorization_reaches_the_worker_thread(self, storage):
+        hook = _Hook()
+        response = _client(storage, hook).post(
+            URL,
+            json=_body(),
+            headers={"x-communityoverview-actor-id": "actor-7"},
+        )
+        assert response.status_code == 200
+        assert hook.contexts[0].actor.get("actor_id") == "actor-7"
+
     def test_authorization_runs_before_parameter_validation(self, storage):
         response = _client(storage, _Hook(allowed=False)).post(
             URL, json={"bogus": True}
@@ -209,6 +219,15 @@ class TestReplaceRoutesAreUnchanged:
 
 
 class TestMcpPreviewTool:
+    def test_plans_only_small_documents(self, storage, monkeypatch):
+        from backend.service import graph_merge_plan
+
+        monkeypatch.setattr(graph_merge_plan, "MCP_PREVIEW_MAX_NODES", 1)
+        tools = self._tools(storage)
+        result = tools["preview_graph_merge"](document=_body()["document"])
+        assert result["error_code"] == "validation_failed"
+        assert result["errors"][0]["location"] == "nodes"
+
     def _tools(self, storage, hook=None):
         return register_mcp_tools(
             Mock(), GraphService(storage, authorization_hook=hook)

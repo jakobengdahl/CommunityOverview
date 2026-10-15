@@ -31,12 +31,15 @@ from backend.core.models import (
     is_valid_relationship_type,
 )
 
+from backend.core.session_annotations import sanitize_saved_view_metadata
+
 from .graph_import import (
     ImportIssue,
     build_document_nodes,
     check_document_edge_shape,
     read_document_lists,
 )
+from .serializers import _SAVED_VIEW_NODE_TYPES
 
 if TYPE_CHECKING:
     from backend.core import GraphStorage
@@ -64,6 +67,11 @@ EMBEDDING_FIELDS = ("name", "description", "summary", "tags", "aliases")
 
 # Ids listed per plan category; counts are always exact (ADR §3).
 PLAN_LIST_CAP = 1_000
+# The MCP tool runs on the server's event loop, so it plans only the small
+# documents an assistant assembles (ADR §9); REST plans run in a worker thread
+# and take the v1 caps.
+MCP_PREVIEW_MAX_NODES = 10_000
+MCP_PREVIEW_MAX_EDGES = 20_000
 # A replace landing mid-plan restarts it; this bounds the restarts.
 MAX_PLAN_ATTEMPTS = 3
 DIGEST_VERSION = 1
@@ -173,7 +181,9 @@ def _parse_policy(raw: Any) -> MergePolicy:
     default = raw.get("default", DEFAULT_POLICY)
     if default not in POLICIES:
         raise _invalid(f'policy "default" must be one of {", ".join(POLICIES)}')
-    by_type_raw = raw.get("by_type") or {}
+    by_type_raw = raw.get("by_type")
+    if by_type_raw is None:
+        by_type_raw = {}
     if not isinstance(by_type_raw, dict):
         raise _invalid('policy "by_type" must be an object')
     by_type: List[Tuple[str, str]] = []
@@ -205,7 +215,9 @@ class LiveGraphView(Protocol):
 
     def incident_edges(self, node_id: str) -> List[Edge]: ...
 
-    def has_attachments(self, node_id: str) -> Optional[bool]: ...
+    def attachments_configured(self) -> bool: ...
+
+    def has_attachments(self, node_id: str) -> bool: ...
 
     def nodes_without_vector(self) -> int: ...
 
@@ -237,17 +249,21 @@ class StorageGraphView:
     def incident_edges(self, node_id: str) -> List[Edge]:
         return self._storage.get_edges_for_node(node_id)
 
-    def has_attachments(self, node_id: str) -> Optional[bool]:
+    def attachments_configured(self) -> bool:
+        return self._attachments is not None
+
+    def has_attachments(self, node_id: str) -> bool:
         if self._attachments is None:
-            return None
+            return False
         from backend.core.attachment_store import AttachmentStoreError
 
         try:
             return bool(
                 self._attachments.store.list(self._attachments.namespace, node_id)
             )
-        except AttachmentStoreError:
-            # An unreadable index still means files sit under that id.
+        except (AttachmentStoreError, OSError):
+            # An index that cannot be read still means files may sit under
+            # that id; flag it rather than fail the whole preview.
             return True
 
     def nodes_without_vector(self) -> int:
@@ -305,7 +321,12 @@ _WRITTEN = ("create", "overwrite", "rename")
 
 
 def compute_merge_plan(
-    document: Any, parameters: MergeParameters, view: LiveGraphView
+    document: Any,
+    parameters: MergeParameters,
+    view: LiveGraphView,
+    *,
+    max_nodes: Optional[int] = None,
+    max_edges: Optional[int] = None,
 ) -> MergePlan:
     """Plan merging ``document`` into the live graph ``view`` reads; write nothing.
 
@@ -313,7 +334,9 @@ def compute_merge_plan(
     shape or size cannot be judged entity by entity, and ``MergePlanUnstable``
     when a whole-graph replace moved ``generation`` during every attempt.
     """
-    raw_nodes, raw_edges, shape_errors = read_document_lists(document)
+    raw_nodes, raw_edges, shape_errors = read_document_lists(
+        document, max_nodes=max_nodes, max_edges=max_edges
+    )
     if shape_errors:
         raise MergeRequestError(
             "validation_failed",
@@ -351,6 +374,8 @@ class _Planner:
         self.nodes: Dict[str, _NodeDecision] = {}
         self.edges: List[_EdgeDecision] = []
         self.archived_attach_edges: List[str] = []
+        # Edges attached to the live node a skip collision kept (ADR §2 (a)).
+        self.skipped_attach_edges: List[str] = []
 
     # -- live reads, each recorded for the digest ---------------------------
 
@@ -436,6 +461,12 @@ class _Planner:
                 self.nodes[node.id] = _NodeDecision(index, node, "rename", live=live)
             else:
                 changes = _field_changes(live, node, NODE_OVERWRITE_FIELDS)
+                if "metadata" in changes and node.type_str in _SAVED_VIEW_NODE_TYPES:
+                    # Every read path strips unsafe view annotations; so does this.
+                    for side in ("main", "incoming"):
+                        changes["metadata"][side] = sanitize_saved_view_metadata(
+                            changes["metadata"][side]
+                        )
                 outcome = "overwrite" if changes else "unchanged"
                 self.nodes[node.id] = _NodeDecision(
                     index,
@@ -614,10 +645,14 @@ class _Planner:
                 decision.outcome = "rejected"
             return decision
 
-        for end in (source, target):
-            if end.kind == "live" and end.archived:
-                self.archived_attach_edges.append(edge.id)
-                break
+        # An overwrite never takes ``archived`` from the document, so any
+        # endpoint with a live node behind it keeps the live flag.
+        if any(end.archived and end.has_live_edges for end in (source, target)):
+            self.archived_attach_edges.append(edge.id)
+        if any(
+            end.kind == "live" and end.node_id in self.nodes for end in (source, target)
+        ):
+            self.skipped_attach_edges.append(edge.id)
         return decision
 
     def _live_duplicate(
@@ -625,10 +660,12 @@ class _Planner:
     ) -> Optional[str]:
         if not (source.has_live_edges and target.has_live_edges):
             return None
+        # The live edge with the document edge's own id counts too: renamed,
+        # the document edge would sit beside it as a second identical triple.
         matches = sorted(
             live.id
             for live in self.view.edges_from_to(source.node_id, target.node_id)
-            if live.type_str == edge.type_str and live.id != edge.id
+            if live.type_str == edge.type_str
         )
         if not matches:
             return None
@@ -735,13 +772,9 @@ class _Planner:
 
         overwritten_with_attachments: List[str] = []
         created_over_orphans: List[str] = []
-        attachments_checked = True
-        for d in node_overwrites + node_creates:
-            flag = self.view.has_attachments(d.node.id)
-            if flag is None:
-                attachments_checked = False
-                break
-            if flag:
+        attachments_checked = self.view.attachments_configured()
+        for d in node_overwrites + node_creates if attachments_checked else []:
+            if self.view.has_attachments(d.node.id):
                 (
                     overwritten_with_attachments
                     if d.outcome == "overwrite"
@@ -787,7 +820,7 @@ class _Planner:
                     [
                         {
                             "id": d.node.id,
-                            "edges_rewritten": rewrites.get(d.node.id, []),
+                            "edges_rewritten": _capped_ids(rewrites.get(d.node.id, [])),
                         }
                         for d in node_renames
                     ]
@@ -802,13 +835,12 @@ class _Planner:
             "attachments": {
                 "checked": attachments_checked,
                 "overwritten_with_attachments": _capped_ids(
-                    overwritten_with_attachments if attachments_checked else []
+                    overwritten_with_attachments
                 ),
-                "created_over_orphan_attachments": _capped_ids(
-                    created_over_orphans if attachments_checked else []
-                ),
+                "created_over_orphan_attachments": _capped_ids(created_over_orphans),
             },
             "edges_to_archived_nodes": _capped_ids(sorted(self.archived_attach_edges)),
+            "edges_to_skipped_nodes": _capped_ids(sorted(self.skipped_attach_edges)),
             "embeddings": {
                 "nodes_to_embed": to_embed,
                 "live_nodes_without_vector": live_without_vector,
@@ -847,12 +879,13 @@ class _Planner:
                 }
                 for d in sorted(self.edges, key=lambda d: d.edge.id)
             ],
+            # By entity, not by document position, so reordering a blocked
+            # document leaves its digest alone too. Rejected entries carry only
+            # positions; their count is enough, as any one blocks the commit.
             "conflicts": sorted(
-                [c["kind"], c["id"], c["reason"], c["location"]] for c in self.conflicts
+                [c["kind"], c["id"], c["reason"]] for c in self.conflicts
             ),
-            "rejected": sorted(
-                [issue.location, issue.message] for issue in self.rejected
-            ),
+            "rejected": len(self.rejected),
             "reads": sorted(
                 [kind, entity_id, revision]
                 for (kind, entity_id), revision in self.reads.items()

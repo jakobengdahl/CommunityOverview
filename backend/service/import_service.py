@@ -557,6 +557,8 @@ def preview_merge_import(
     body: Any,
     *,
     attachment_settings: Optional["AttachmentSettings"] = None,
+    max_nodes: Optional[int] = None,
+    max_edges: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Plan a MERGE import without writing anything (ADR 0013, slice 1).
 
@@ -588,6 +590,8 @@ def preview_merge_import(
             document,
             parameters,
             graph_merge_plan.StorageGraphView(storage, attachment_settings),
+            max_nodes=max_nodes,
+            max_edges=max_edges,
         )
     except graph_merge_plan.MergeRequestError as exc:
         result: Dict[str, Any] = {

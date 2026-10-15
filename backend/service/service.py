@@ -725,7 +725,12 @@ class GraphService:
             event_correlation_id=event_correlation_id,
         )
 
-    def preview_merge_import(self, body: Any) -> Dict[str, Any]:
+    def preview_merge_import(
+        self,
+        body: Any,
+        max_nodes: Optional[int] = None,
+        max_edges: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """
         Read-only MERGE import plan and digest. See
         ``backend.service.import_service.preview_merge_import`` and
@@ -736,6 +741,8 @@ class GraphService:
             self._authorization_hook,
             body,
             attachment_settings=self._attachment_settings,
+            max_nodes=max_nodes,
+            max_edges=max_edges,
         )
 
     def get_import_job(

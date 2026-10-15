@@ -35,6 +35,7 @@ from fastapi import (
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import Response, StreamingResponse
 from starlette.background import BackgroundTask
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, field_validator
 from pydantic import ValidationError as PydanticValidationError
 
@@ -1691,8 +1692,10 @@ def _register_import_endpoints(
         ``plan_digest`` a later merge commit will be bound to. Requires the
         same access as the commit: graph mutation, with full graph access.
         """
+        # Planning is CPU-bound and linear in the document (up to the v1
+        # caps), so it runs in a worker thread rather than on the event loop.
         with use_request_authorization(headers=request.headers):
-            result = service.preview_merge_import(body)
+            result = await run_in_threadpool(service.preview_merge_import, body)
         _raise_for_access_denied(result)
         if not result.get("success", True):
             status_code = _IMPORT_ERROR_STATUS.get(result.get("error_code"), 400)

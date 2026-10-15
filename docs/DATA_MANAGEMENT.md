@@ -321,7 +321,9 @@ POST /api/import/merge/preview
 The `plan` lists `adds`, `overwrites` (each changed field's `main` = live and
 `incoming` = document value), `renames`, `skips`, `conflicts`, `rejected`,
 attachment flags (overwritten nodes that have attachments, and new nodes whose
-id has leftover attachment files), `edges_to_archived_nodes`, how many nodes
+id has leftover attachment files), `edges_to_archived_nodes`,
+`edges_to_skipped_nodes` (document edges attached to a live node a `skip`
+kept), how many nodes
 would be (re)embedded and how many graph events a commit would emit. Each list
 holds at most 1,000 entries; its `count` is always exact. `committable` is
 `false` while anything is rejected or in conflict. `plan_digest` changes when
@@ -332,7 +334,8 @@ The preview reveals which ids exist and live field values, so it needs the
 same access as a commit: graph mutation rights with unnarrowed graph access.
 `stamp_provenance: true` is refused until provenance stamping ships. The
 `preview_graph_merge` MCP tool does the same for small documents an assistant
-assembles; there is no MCP tool that commits a merge.
+assembles — at most 10,000 nodes and 20,000 edges, since it plans on the
+server's event loop; there is no MCP tool that commits a merge.
 
 ## Importing a vector-aware archive
 

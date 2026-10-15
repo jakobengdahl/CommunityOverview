@@ -82,7 +82,7 @@ from backend.core.session_annotations import (
 )
 from backend.config.config_loader import build_session_url
 from backend.runtime.authorization import GRAPH_ACTION_MUTATE, GRAPH_ACTION_READ
-from . import access
+from . import access, graph_merge_plan
 from .service import GraphService
 
 # Server-owned session state records node x/y but not rendered node dimensions
@@ -890,7 +890,8 @@ def register_mcp_tools(
         stamp_provenance: bool = False,
     ) -> Dict[str, Any]:
         """
-        Preview merging a small graph document into the live graph. Writes
+        Preview merging a small graph document (at most 10,000 nodes and
+        20,000 edges) into the live graph. Writes
         NOTHING: returns the plan a merge import would apply and its
         plan_digest. There is no MCP tool that commits a merge.
 
@@ -917,7 +918,11 @@ def register_mcp_tools(
         }
         if policy is not None:
             body["policy"] = policy
-        return service.preview_merge_import(body)
+        return service.preview_merge_import(
+            body,
+            max_nodes=graph_merge_plan.MCP_PREVIEW_MAX_NODES,
+            max_edges=graph_merge_plan.MCP_PREVIEW_MAX_EDGES,
+        )
 
     @register_tool
     def list_node_types() -> Dict[str, Any]:

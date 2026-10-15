@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import statistics
 import sys
@@ -102,6 +103,11 @@ def measure(graph_size: int, document_size: int, repeats: int) -> Dict[str, Any]
             result = service.preview_merge_import(body)
             samples.append((time.perf_counter() - started) * 1000)
         assert result.get("success"), result
+        # A blocked plan (e.g. the schema not found, so every node rejected)
+        # is cheap and would make any threshold look met.
+        plan = result["plan"]
+        assert plan["committable"], plan["rejected"]
+        assert plan["adds"]["nodes"]["count"] and plan["overwrites"]["nodes"]["count"]
 
         tracemalloc.start()
         service.preview_merge_import(body)
@@ -124,6 +130,8 @@ def measure(graph_size: int, document_size: int, repeats: int) -> Dict[str, Any]
 
 
 def main() -> int:
+    # The schema config is resolved from the working directory.
+    os.chdir(REPO_ROOT)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--graph", type=int, default=100_000)
     parser.add_argument("--document", type=int, default=10_000)

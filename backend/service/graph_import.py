@@ -18,7 +18,7 @@ graph, and a validation failure can never have written anything.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import ValidationError as PydanticValidationError
 
@@ -77,12 +77,18 @@ def _fail(errors: List[ImportIssue]) -> ImportValidationResult:
 
 def read_document_lists(
     document: Any,
+    *,
+    max_nodes: Optional[int] = None,
+    max_edges: Optional[int] = None,
 ) -> Tuple[List[Any], List[Any], List[ImportIssue]]:
     """Top-level shape and size checks shared by every import mode.
 
     Returns ``(raw_nodes, raw_edges, errors)``; when ``errors`` is non-empty
     the lists are empty and the document cannot be judged entity by entity.
+    The caps default to ``MAX_IMPORT_NODES`` / ``MAX_IMPORT_EDGES``.
     """
+    max_nodes = MAX_IMPORT_NODES if max_nodes is None else max_nodes
+    max_edges = MAX_IMPORT_EDGES if max_edges is None else max_edges
     if not isinstance(document, dict):
         return [], [], [ImportIssue("$", "the import document must be a JSON object")]
 
@@ -98,25 +104,25 @@ def read_document_lists(
     if not isinstance(raw_edges, list):
         return [], [], [ImportIssue("edges", '"edges" must be a list')]
 
-    if len(raw_nodes) > MAX_IMPORT_NODES:
+    if len(raw_nodes) > max_nodes:
         return (
             [],
             [],
             [
                 ImportIssue(
                     "nodes",
-                    f"{len(raw_nodes)} nodes exceeds the {MAX_IMPORT_NODES} import limit",
+                    f"{len(raw_nodes)} nodes exceeds the {max_nodes} import limit",
                 )
             ],
         )
-    if len(raw_edges) > MAX_IMPORT_EDGES:
+    if len(raw_edges) > max_edges:
         return (
             [],
             [],
             [
                 ImportIssue(
                     "edges",
-                    f"{len(raw_edges)} edges exceeds the {MAX_IMPORT_EDGES} import limit",
+                    f"{len(raw_edges)} edges exceeds the {max_edges} import limit",
                 )
             ],
         )

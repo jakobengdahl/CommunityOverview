@@ -51,10 +51,22 @@ Choices it made inside the decisions above:
 - An edge whose endpoint resolves to a live system-type node is excluded with
   the system nodes, not only an edge whose endpoint is a document system node.
 - `attachments.checked` is `false` when no attachment store is configured,
-  rather than reporting no flags as if the check had run.
+  rather than reporting no flags as if the check had run; an attachment index
+  that cannot be read flags its node rather than failing the preview.
+- Edges attached to a node a `skip` collision kept are listed in
+  `edges_to_skipped_nodes` as well as in `adds` (§2 (a): "every such edge
+  listed"). A `rename` whose live edge already has the same source, target
+  and type is a duplicate-triple skip, since the renamed copy would repeat it.
+- The REST route plans in a worker thread, as planning at the document caps
+  takes tens of seconds. The MCP tool plans on the server's event loop, so it
+  takes documents of at most 10,000 nodes and 20,000 edges (§9: "for small
+  documents an assistant assembles").
+- A `SavedView` overwrite's metadata values pass through the same sanitizer
+  every other read applies before they are returned.
 - The digest covers the canonical content of every document entity, not only
   the ones the commit writes, so editing a skipped entity also makes a preview
-  stale.
+  stale. Conflicts enter it by entity and rejected entries by count, so it
+  does not depend on document order even for a blocked plan.
 
 ### Slice 1 measurements and thresholds (§8)
 
