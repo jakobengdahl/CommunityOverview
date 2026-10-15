@@ -1582,6 +1582,7 @@ _IMPORT_ERROR_STATUS = {
     "invalid_parameters": 422,
     "provenance_not_supported": 422,
     "import_plan_unstable": 503,
+    "import_preview_busy": 503,
 }
 
 # A generous cap on the whole multipart upload for POST /import/archive: a

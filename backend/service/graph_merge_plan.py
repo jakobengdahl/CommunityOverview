@@ -261,7 +261,7 @@ class StorageGraphView:
             return bool(
                 self._attachments.store.list(self._attachments.namespace, node_id)
             )
-        except (AttachmentStoreError, OSError):
+        except (AttachmentStoreError, OSError, ValueError):
             # An index that cannot be read still means files may sit under
             # that id; flag it rather than fail the whole preview.
             return True
@@ -345,12 +345,17 @@ def compute_merge_plan(
         )
     for _attempt in range(MAX_PLAN_ATTEMPTS):
         generation = view.generation
-        plan = _Planner(raw_nodes, raw_edges, parameters, view, generation).run()
+        try:
+            plan = _Planner(raw_nodes, raw_edges, parameters, view, generation).run()
+        except RuntimeError as exc:
+            # The planner reads without the storage lock; a live write that
+            # resizes an adjacency map mid-iteration is retried like a replace.
+            if "changed size during iteration" not in str(exc):
+                raise
+            continue
         if view.generation == generation:
             return plan
-    raise MergePlanUnstable(
-        "the graph was replaced while the merge plan was being computed"
-    )
+    raise MergePlanUnstable("the graph changed while the merge plan was being computed")
 
 
 class _Planner:
@@ -376,6 +381,8 @@ class _Planner:
         self.archived_attach_edges: List[str] = []
         # Edges attached to the live node a skip collision kept (ADR §2 (a)).
         self.skipped_attach_edges: List[str] = []
+        # (decision, location, outcome it had before the duplicate check)
+        self.pending_duplicates: List[Tuple[_EdgeDecision, str, str]] = []
 
     # -- live reads, each recorded for the digest ---------------------------
 
@@ -621,10 +628,18 @@ class _Planner:
         if decision.outcome in ("create", "rename"):
             duplicate = self._live_duplicate(edge, source, target)
             if duplicate is not None:
+                # Provisional: a later document edge may retype that live edge
+                # (see _settle_duplicates).
+                self.pending_duplicates.append((decision, location, decision.outcome))
                 decision.outcome, decision.reason = "skip", "duplicate_edge"
                 decision.duplicate_of = duplicate
                 return decision
 
+        return self._finish_edge(decision, location)
+
+    def _finish_edge(self, decision: _EdgeDecision, location: str) -> _EdgeDecision:
+        edge, source, target = decision.edge, decision.source, decision.target
+        assert source is not None and target is not None
         verdict = config_loader.relationship_type_allows_node_types(
             edge.type_str,
             source.type_name,
@@ -656,7 +671,11 @@ class _Planner:
         return decision
 
     def _live_duplicate(
-        self, edge: Edge, source: _Endpoint, target: _Endpoint
+        self,
+        edge: Edge,
+        source: _Endpoint,
+        target: _Endpoint,
+        exclude: Tuple[str, ...] = (),
     ) -> Optional[str]:
         if not (source.has_live_edges and target.has_live_edges):
             return None
@@ -665,12 +684,37 @@ class _Planner:
         matches = sorted(
             live.id
             for live in self.view.edges_from_to(source.node_id, target.node_id)
-            if live.type_str == edge.type_str
+            if live.type_str == edge.type_str and live.id not in exclude
         )
         if not matches:
             return None
         self._read_edge(matches[0])
         return matches[0]
+
+    def _settle_duplicates(self) -> None:
+        """A live edge this plan retypes is no longer the triple it was, so it
+        cannot be what a document edge duplicates."""
+        retyped = tuple(
+            sorted(
+                d.edge.id
+                for d in self.edges
+                if d.outcome == "overwrite" and "type" in d.changes
+            )
+        )
+        if not retyped:
+            return
+        for decision, location, outcome in self.pending_duplicates:
+            if decision.duplicate_of not in retyped:
+                continue
+            assert decision.source is not None and decision.target is not None
+            other = self._live_duplicate(
+                decision.edge, decision.source, decision.target, exclude=retyped
+            )
+            if other is not None:
+                decision.duplicate_of = other
+                continue
+            decision.outcome, decision.reason, decision.duplicate_of = outcome, "", None
+            self._finish_edge(decision, location)
 
     # -- §1: live incident edges of a node whose subtypes change -----------
 
@@ -726,6 +770,7 @@ class _Planner:
     def run(self) -> MergePlan:
         self._plan_nodes()
         self._plan_edges()
+        self._settle_duplicates()
         self._rejudge_incident_edges()
         live_without_vector = self.view.nodes_without_vector()
         report = self._report(live_without_vector)
@@ -737,6 +782,8 @@ class _Planner:
     def _renamed_edge_rewrites(self) -> Dict[str, List[str]]:
         rewrites: Dict[str, List[str]] = {}
         for d in self.edges:
+            if d.outcome not in _WRITTEN:
+                continue
             for end in (d.source, d.target):
                 if end is not None and end.kind == "renamed":
                     rewrites.setdefault(end.node_id, []).append(d.edge.id)
@@ -854,43 +901,56 @@ class _Planner:
                 return None
             return [end.kind, end.node_id]
 
-        canonical = {
+        canonical: Dict[str, Any] = {
             "digest_version": DIGEST_VERSION,
+            # Every entry as sent, valid or not, as a sorted multiset: the
+            # digest follows any document edit and never its order.
+            "document": {
+                "nodes": sorted(_canonical_entry(raw) for raw in self.raw_nodes),
+                "edges": sorted(_canonical_entry(raw) for raw in self.raw_edges),
+            },
             "parameters": self.params.canonical(),
             "generation": self.generation,
-            "nodes": [
-                {
-                    "id": d.node.id,
-                    "outcome": d.outcome,
-                    "reason": d.reason,
-                    "content": _content(self.raw_nodes[d.index]),
-                }
-                for d in sorted(self.nodes.values(), key=lambda d: d.node.id)
-            ],
-            "edges": [
-                {
-                    "id": d.edge.id,
-                    "outcome": d.outcome,
-                    "reason": d.reason,
-                    "source": endpoint(d.source),
-                    "target": endpoint(d.target),
-                    "duplicate_of": d.duplicate_of,
-                    "content": _content(self.raw_edges[d.index]),
-                }
-                for d in sorted(self.edges, key=lambda d: d.edge.id)
-            ],
-            # By entity, not by document position, so reordering a blocked
-            # document leaves its digest alone too. Rejected entries carry only
-            # positions; their count is enough, as any one blocks the commit.
-            "conflicts": sorted(
-                [c["kind"], c["id"], c["reason"]] for c in self.conflicts
-            ),
-            "rejected": len(self.rejected),
-            "reads": sorted(
-                [kind, entity_id, revision]
-                for (kind, entity_id), revision in self.reads.items()
-            ),
         }
+        if self.rejected:
+            # A rejected entry blocks any commit. Which occurrence of a repeated
+            # id was planned depends on document order, so a blocked plan's
+            # digest stops at what it was asked and when.
+            canonical["blocked"] = True
+        else:
+            canonical.update(
+                {
+                    "nodes": [
+                        {
+                            "id": d.node.id,
+                            "outcome": d.outcome,
+                            "reason": d.reason,
+                            "content": _content(self.raw_nodes[d.index]),
+                        }
+                        for d in sorted(self.nodes.values(), key=lambda d: d.node.id)
+                    ],
+                    "edges": [
+                        {
+                            "id": d.edge.id,
+                            "outcome": d.outcome,
+                            "reason": d.reason,
+                            "source": endpoint(d.source),
+                            "target": endpoint(d.target),
+                            "duplicate_of": d.duplicate_of,
+                            "content": _content(self.raw_edges[d.index]),
+                        }
+                        for d in sorted(self.edges, key=lambda d: d.edge.id)
+                    ],
+                    # By entity, not by document position.
+                    "conflicts": sorted(
+                        [c["kind"], c["id"], c["reason"]] for c in self.conflicts
+                    ),
+                    "reads": sorted(
+                        [kind, entity_id, revision]
+                        for (kind, entity_id), revision in self.reads.items()
+                    ),
+                }
+            )
         encoded = json.dumps(
             canonical,
             sort_keys=True,
@@ -899,6 +959,13 @@ class _Planner:
             default=str,
         ).encode("utf-8")
         return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _canonical_entry(raw: Any) -> str:
+    content = _content(raw) if isinstance(raw, dict) else raw
+    return json.dumps(
+        content, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str
+    )
 
 
 def _content(raw: Dict[str, Any]) -> Dict[str, Any]:

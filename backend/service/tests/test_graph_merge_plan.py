@@ -353,6 +353,47 @@ class TestEdges:
         assert [e.id for e in storage.get_edges_from_to("a1", "i1")] == ["e1"]
         assert storage.get_edges_from_to("i1", "a1") == []
 
+    def test_a_live_edge_this_plan_retypes_is_not_a_duplicate_target(self, storage):
+        plan = _plan(
+            storage,
+            [],
+            [
+                {"id": "e2", "source": "a1", "target": "i1", "type": "BELONGS_TO"},
+                {"id": "e1", "source": "a1", "target": "i1", "type": "RELATES_TO"},
+            ],
+            policy=MergePolicy(default="overwrite"),
+        )
+        assert plan.report["overwrites"]["edges"]["items"][0]["id"] == "e1"
+        assert plan.report["adds"]["edges"]["ids"] == ["e2"]
+        assert plan.committable
+
+    def test_edges_between_plain_live_nodes_are_not_skip_attachments(self, storage):
+        plan = _plan(
+            storage,
+            [{"id": "new", "type": "Actor", "name": "N"}],
+            [
+                {"id": "e8", "source": "i1", "target": "a1", "type": "RELATES_TO"},
+                {"id": "e9", "source": "new", "target": "a1", "type": "RELATES_TO"},
+            ],
+        )
+        assert plan.report["edges_to_skipped_nodes"]["count"] == 0
+
+    def test_a_renamed_node_lists_only_edges_the_commit_writes(self, storage):
+        plan = _plan(
+            storage,
+            [
+                {"id": "a1", "type": "Actor", "name": "Twin"},
+                {"id": "ag", "type": "Agent", "name": "Agent"},
+            ],
+            [
+                {"id": "ex", "source": "a1", "target": "ag", "type": "RELATES_TO"},
+                {"id": "ok", "source": "a1", "target": "i1", "type": "RELATES_TO"},
+            ],
+            policy=MergePolicy(default="rename"),
+        )
+        rewritten = plan.report["renames"]["nodes"]["items"][0]["edges_rewritten"]
+        assert rewritten == {"count": 1, "ids": ["ok"]}
+
     def test_renaming_an_edge_that_equals_its_live_namesake_is_a_duplicate(
         self, storage
     ):
@@ -567,9 +608,11 @@ class TestAttachmentFlags:
         plan = _plan(
             storage,
             [{"id": "a1", "type": "Actor", "name": "Alice"}],
-            policy=MergePolicy(default="skip"),
+            policy=MergePolicy(default="overwrite"),
         )
-        assert plan.report["attachments"]["checked"] is False
+        attachments = plan.report["attachments"]
+        assert attachments["checked"] is False
+        assert attachments["overwritten_with_attachments"]["count"] == 0
 
     def test_an_unreadable_index_is_flagged_not_fatal(self, storage):
         class _Broken:
@@ -580,6 +623,21 @@ class TestAttachmentFlags:
             storage,
             [{"id": "x", "type": "Actor", "name": "X"}],
             attachments=AttachmentSettings(store=_Broken(), namespace="ns"),
+        )
+        flagged = plan.report["attachments"]["created_over_orphan_attachments"]
+        assert flagged["ids"] == ["x"]
+
+    def test_a_non_utf8_index_is_flagged_not_fatal(self, storage, temp_dir):
+        from backend.core.attachment_store import FileAttachmentStore
+
+        store = FileAttachmentStore(os.path.join(temp_dir, "attachments"))
+        index = store._index_path("ns", "x")
+        index.parent.mkdir(parents=True)
+        index.write_bytes(b"\xff\xfe{")
+        plan = _plan(
+            storage,
+            [{"id": "x", "type": "Actor", "name": "X"}],
+            attachments=AttachmentSettings(store=store, namespace="ns"),
         )
         flagged = plan.report["attachments"]["created_over_orphan_attachments"]
         assert flagged["ids"] == ["x"]
@@ -643,6 +701,26 @@ class TestDigest:
         reordered = _plan(storage, list(reversed(nodes)), policy=fail)
         assert not first.committable
         assert first.digest == reordered.digest
+
+    def test_repeated_ids_do_not_make_the_digest_order_dependent(self, storage):
+        nodes = [
+            {"id": "n1", "type": "Actor", "name": "First"},
+            {"id": "n1", "type": "Actor", "name": "Second"},
+        ]
+        edges = [
+            {"id": "x", "source": "a1", "target": "i1", "type": "RELATES_TO"},
+            {"id": "x", "source": "a1", "target": "i1", "label": "other"},
+        ]
+        first = self._digest(storage, nodes=nodes, edges=edges)
+        reordered = self._digest(
+            storage, nodes=list(reversed(nodes)), edges=list(reversed(edges))
+        )
+        assert first == reordered
+
+    def test_changes_with_the_content_of_an_invalid_entity(self, storage):
+        bad = [{"id": "r", "type": "Actor", "name": "a" * 201}]
+        worse = [{"id": "r", "type": "Actor", "name": "b" * 201}]
+        assert self._digest(storage, nodes=bad) != self._digest(storage, nodes=worse)
 
     def test_changes_with_the_policy(self, storage):
         assert self._digest(storage) != self._digest(
@@ -773,7 +851,38 @@ class _ShiftingGenerationView(StorageGraphView):
         return self.reads
 
 
+class _RacingView(StorageGraphView):
+    """Raises the error a dict resized mid-iteration raises, ``fail`` times."""
+
+    def __init__(self, storage, fail):
+        super().__init__(storage)
+        self.fail = fail
+
+    def incident_edges(self, node_id):
+        if self.fail:
+            self.fail -= 1
+            raise RuntimeError("dictionary changed size during iteration")
+        return super().incident_edges(node_id)
+
+
 class TestGenerationRecheck:
+    SUBTYPE_CHANGE = {
+        "nodes": [{"id": "a1", "type": "Actor", "name": "Alice", "subtypes": []}]
+    }
+    OVERWRITE = MergeParameters(policy=MergePolicy(default="overwrite"))
+
+    def test_a_concurrent_resize_mid_plan_is_retried(self, storage):
+        plan = compute_merge_plan(
+            self.SUBTYPE_CHANGE, self.OVERWRITE, _RacingView(storage, fail=1)
+        )
+        assert plan.report["overwrites"]["nodes"]["count"] == 1
+
+    def test_a_graph_that_keeps_resizing_is_refused(self, storage):
+        with pytest.raises(MergePlanUnstable):
+            compute_merge_plan(
+                self.SUBTYPE_CHANGE, self.OVERWRITE, _RacingView(storage, fail=99)
+            )
+
     def test_a_replace_mid_plan_restarts_the_plan(self, storage):
         view = _ShiftingGenerationView(storage, stable_after=2)
         plan = compute_merge_plan(

@@ -327,15 +327,19 @@ kept), how many nodes
 would be (re)embedded and how many graph events a commit would emit. Each list
 holds at most 1,000 entries; its `count` is always exact. `committable` is
 `false` while anything is rejected or in conflict. `plan_digest` changes when
-the request, the document or any live entity the plan relied on changes, so a
-future commit can refuse a plan that is no longer the one previewed.
+the request or the document changes (not when it is merely reordered), or the
+graph is replaced, and — unless something is rejected, which blocks any
+commit — when a live entity the plan relied on changes, so a future commit can
+refuse a plan that is no longer the one previewed.
 
 The preview reveals which ids exist and live field values, so it needs the
 same access as a commit: graph mutation rights with unnarrowed graph access.
 `stamp_provenance: true` is refused until provenance stamping ships. The
 `preview_graph_merge` MCP tool does the same for small documents an assistant
 assembles — at most 10,000 nodes and 20,000 edges, since it plans on the
-server's event loop; there is no MCP tool that commits a merge.
+server's event loop; there is no MCP tool that commits a merge. One preview
+runs at a time; a second is refused with 503 `import_preview_busy` and can
+simply be retried.
 
 ## Importing a vector-aware archive
 

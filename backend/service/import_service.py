@@ -59,6 +59,8 @@ logger = logging.getLogger(__name__)
 
 BACKUP_SUBDIR = "import-backups"
 
+_PREVIEW_SLOT = threading.BoundedSemaphore(1)
+
 
 def _iso(dt: Optional[datetime]) -> Optional[str]:
     return dt.isoformat().replace("+00:00", "Z") if dt is not None else None
@@ -584,6 +586,28 @@ def preview_merge_import(
             ),
         }
 
+    # Planning holds the document and a plan in memory for up to tens of
+    # seconds at the caps; one at a time per process keeps a caller from
+    # stacking them. A refused preview is retryable and changed nothing.
+    if not _PREVIEW_SLOT.acquire(blocking=False):
+        return {
+            "success": False,
+            "error_code": "import_preview_busy",
+            "message": "Another merge preview is running; retry shortly.",
+        }
+    try:
+        return _plan_preview(storage, body, attachment_settings, max_nodes, max_edges)
+    finally:
+        _PREVIEW_SLOT.release()
+
+
+def _plan_preview(
+    storage: "GraphStorage",
+    body: Any,
+    attachment_settings: Optional["AttachmentSettings"],
+    max_nodes: Optional[int],
+    max_edges: Optional[int],
+) -> Dict[str, Any]:
     try:
         document, parameters = graph_merge_plan.parse_merge_request(body)
         plan = graph_merge_plan.compute_merge_plan(

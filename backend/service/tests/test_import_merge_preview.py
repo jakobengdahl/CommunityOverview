@@ -159,6 +159,47 @@ class TestAuthorization:
         assert response.status_code == 200
         assert hook.contexts[0].actor.get("actor_id") == "actor-7"
 
+    def test_plans_off_the_event_loop_thread(self, storage, monkeypatch):
+        import threading
+
+        service = GraphService(storage)
+        threads = []
+        original = service.preview_merge_import
+
+        def _record(body, **kwargs):
+            threads.append(threading.get_ident())
+            return original(body, **kwargs)
+
+        monkeypatch.setattr(service, "preview_merge_import", _record)
+        app = FastAPI()
+        app.include_router(
+            create_rest_router(service, import_job_store=InMemoryExecutionStore()),
+            prefix="/api/graph",
+        )
+        loop_threads = []
+
+        @app.get("/loop-thread")
+        async def _loop_thread():
+            loop_threads.append(threading.get_ident())
+            return {}
+
+        with TestClient(app) as client:
+            client.get("/loop-thread")
+            assert client.post(URL, json=_body()).status_code == 200
+        assert threads and threads[0] != loop_threads[0]
+
+    def test_a_second_concurrent_preview_is_refused_as_busy(self, storage):
+        from backend.service import import_service
+
+        assert import_service._PREVIEW_SLOT.acquire(blocking=False)
+        try:
+            response = _client(storage).post(URL, json=_body())
+        finally:
+            import_service._PREVIEW_SLOT.release()
+        assert response.status_code == 503
+        assert response.json()["detail"]["error_code"] == "import_preview_busy"
+        assert _client(storage).post(URL, json=_body()).status_code == 200
+
     def test_authorization_runs_before_parameter_validation(self, storage):
         response = _client(storage, _Hook(allowed=False)).post(
             URL, json={"bogus": True}
@@ -232,6 +273,20 @@ class TestMcpPreviewTool:
         return register_mcp_tools(
             Mock(), GraphService(storage, authorization_hook=hook)
         )
+
+    def test_the_caps_are_ten_thousand_nodes_and_twenty_thousand_edges(self):
+        from backend.service import graph_merge_plan
+
+        assert graph_merge_plan.MCP_PREVIEW_MAX_NODES == 10_000
+        assert graph_merge_plan.MCP_PREVIEW_MAX_EDGES == 20_000
+
+    def test_plans_only_documents_within_the_edge_cap(self, storage, monkeypatch):
+        from backend.service import graph_merge_plan
+
+        monkeypatch.setattr(graph_merge_plan, "MCP_PREVIEW_MAX_EDGES", 0)
+        tools = self._tools(storage)
+        result = tools["preview_graph_merge"](document=_body()["document"])
+        assert result["errors"][0]["location"] == "edges"
 
     def test_returns_the_same_plan_and_digest_as_rest(self, storage):
         tools = self._tools(storage)

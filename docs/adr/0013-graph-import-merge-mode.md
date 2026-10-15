@@ -63,10 +63,17 @@ Choices it made inside the decisions above:
   documents an assistant assembles").
 - A `SavedView` overwrite's metadata values pass through the same sanitizer
   every other read applies before they are returned.
-- The digest covers the canonical content of every document entity, not only
-  the ones the commit writes, so editing a skipped entity also makes a preview
-  stale. Conflicts enter it by entity and rejected entries by count, so it
-  does not depend on document order even for a blocked plan.
+- The digest covers every document entry as sent, valid or not, as a sorted
+  multiset, so any edit to the document — a skipped entity included — makes a
+  preview stale, and reordering it does not. Per-entity outcomes, conflicts
+  (by entity) and live reads enter it as §3 (c) describes; a plan with any
+  rejected entry, which no commit can apply, digests only the request, the
+  document and `generation`.
+- A live edge the same plan retypes under `overwrite` is not what a document
+  edge duplicates. The planner reads without the storage lock; a live write
+  that resizes an adjacency map mid-read restarts the plan like a replace.
+- One preview runs at a time per process; another is refused with 503
+  `import_preview_busy` and can be retried, since a preview changes nothing.
 
 ### Slice 1 measurements and thresholds (§8)
 
