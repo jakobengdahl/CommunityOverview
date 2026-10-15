@@ -1049,6 +1049,7 @@ interface.
 | `update_node` | Update node properties |
 | `delete_nodes` | Delete nodes by ID |
 | `get_graph_stats` | Get summary statistics about the graph |
+| `preview_graph_merge` | Preview what merging a small graph document into the graph would add, overwrite, skip or reject — writes nothing (see [DATA_MANAGEMENT.md](DATA_MANAGEMENT.md#previewing-a-merge-import)) |
 | `save_view` | Save a named canvas view |
 | `get_capabilities` | Discover what the server supports |
 | `connect_to_visualization_session` | Check that a session ID resolves, and whether a client is connected to it |

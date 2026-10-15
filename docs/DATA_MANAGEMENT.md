@@ -213,8 +213,8 @@ the full design) replaces the ENTIRE active graph with a posted document in
 the same shape `GET /api/export` returns — a `nodes` list and an `edges` list.
 This is a **REPLACE, not a merge**: every id in the document becomes the live
 graph's content exactly, and any node or edge from the previous graph that
-does not also appear in the document is gone. There is no per-id
-merge/collision policy in this version (tracked as a follow-up).
+does not also appear in the document is gone. To see what a document would
+do to the live graph *without* replacing it, use the merge preview below.
 
 What happens, in order:
 
@@ -279,6 +279,60 @@ job is still running.
 
 To undo an import, re-run `POST /api/import` with the content of the backup
 file it wrote.
+
+## Previewing a merge import
+
+`POST /api/import/merge/preview` (see
+[ADR 0013](adr/0013-graph-import-merge-mode.md)) plans merging a document
+*into* the live graph instead of replacing it, and **writes nothing**: no
+graph change, no backup, no job, no events. Committing a merge is a later
+slice; today the preview is a dry run you can act on by editing the document
+or by importing with `POST /api/import`.
+
+```http
+POST /api/import/merge/preview
+{ "document": { "nodes": [...], "edges": [...] },
+  "policy": { "default": "fail", "by_type": { "Actor": "overwrite" } },
+  "include_system_types": false }
+→ 200 { "success": true, "plan": {...}, "plan_digest": "sha256:…" }
+```
+
+- **Collisions.** A document node or edge whose id already exists live follows
+  its policy: `fail` (the default — a conflict that blocks the merge), `skip`
+  (keep the live entity), `overwrite` (take the document's name, description,
+  summary, tags, subtypes, aliases and metadata; for an edge its type, label
+  and metadata), or `rename` (create it under a new id minted at commit, with
+  the document's own edges rewritten to it). `by_type` overrides the default
+  per node type or relationship type. A node whose type differs from the live
+  node's, or an edge whose endpoints differ, is a conflict unless its policy
+  is `rename`.
+- **Edges** may attach to live nodes; an endpoint that is neither in the
+  document nor live is rejected as dangling, never created as a placeholder.
+  A document edge repeating a live edge's source, target and type under
+  another id is skipped as a duplicate. An overwrite that changes a node's
+  subtypes re-checks its live edges, and one that would become inapplicable
+  is a conflict.
+- **System types** (`Agent`, `EventSubscription`, `SavedView`, `Skill`, …) and
+  every edge touching one are skipped unless `include_system_types` is `true`.
+- **Validation** is v1's: an unknown node or relationship type, a duplicate id
+  within the document or a malformed entity is listed under `rejected` and
+  blocks the merge. The v1 size caps apply.
+
+The `plan` lists `adds`, `overwrites` (each changed field's `main` = live and
+`incoming` = document value), `renames`, `skips`, `conflicts`, `rejected`,
+attachment flags (overwritten nodes that have attachments, and new nodes whose
+id has leftover attachment files), `edges_to_archived_nodes`, how many nodes
+would be (re)embedded and how many graph events a commit would emit. Each list
+holds at most 1,000 entries; its `count` is always exact. `committable` is
+`false` while anything is rejected or in conflict. `plan_digest` changes when
+the request, the document or any live entity the plan relied on changes, so a
+future commit can refuse a plan that is no longer the one previewed.
+
+The preview reveals which ids exist and live field values, so it needs the
+same access as a commit: graph mutation rights with unnarrowed graph access.
+`stamp_provenance: true` is refused until provenance stamping ships. The
+`preview_graph_merge` MCP tool does the same for small documents an assistant
+assembles; there is no MCP tool that commits a merge.
 
 ## Importing a vector-aware archive
 
