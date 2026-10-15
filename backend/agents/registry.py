@@ -10,6 +10,7 @@ The registry:
 
 import logging
 import threading
+from datetime import datetime
 from typing import Dict, Any, Optional, List, Callable, TYPE_CHECKING
 
 from .config import AgentConfig, AgentsSettings
@@ -543,6 +544,15 @@ class AgentRegistry:
             limit=limit,
             created_after=self._retention.read_cutoff(),
         )
+
+    @property
+    def run_history_store(self) -> Optional[ExecutionStore]:
+        """The run-history store, shared with user-function runs (§11)."""
+        return self._run_recorder.store
+
+    def run_history_read_cutoff(self) -> Optional[datetime]:
+        """Runs created at or before this instant are outside the read window."""
+        return self._retention.read_cutoff()
 
     def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
         """Return a single AgentRun by id, or None (also outside the read window)."""

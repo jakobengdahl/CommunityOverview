@@ -48,6 +48,10 @@ _STATUS = {
     ExecutionState.CANCELLED: "cancelled",
 }
 
+# The run-history store also holds user-function runs (kind ``function``),
+# which have their own view; the AgentRun API only ever shows these kinds.
+AGENT_RUN_KINDS = (ExecutionKind.SCHEDULED, ExecutionKind.EVENT)
+
 # Reverse map for filtering the read API by AgentRun status.
 STATUS_TO_STATE = {status: state for state, status in _STATUS.items()}
 
@@ -178,15 +182,20 @@ class AgentRunRecorder:
         limit: Optional[int] = None,
         created_after: Optional[datetime] = None,
     ) -> List[Dict[str, Any]]:
-        if self._store is None:
+        if self._store is None or (kind is not None and kind not in AGENT_RUN_KINDS):
             return []
-        jobs = self._store.list_jobs(
-            states=states,
-            agent_id=agent_id,
-            kind=kind,
-            limit=limit,
-            created_after=created_after,
-        )
+        jobs: List[ExecutionJob] = []
+        for agent_kind in (kind,) if kind is not None else AGENT_RUN_KINDS:
+            jobs += self._store.list_jobs(
+                states=states,
+                agent_id=agent_id,
+                kind=agent_kind,
+                limit=limit,
+                created_after=created_after,
+            )
+        jobs.sort(key=lambda job: job.created_at, reverse=True)
+        if limit is not None:
+            jobs = jobs[:limit]
         return [agent_run_to_dict(job) for job in jobs]
 
     def get_run(
@@ -195,8 +204,10 @@ class AgentRunRecorder:
         if self._store is None:
             return None
         job = self._store.get(run_id)
-        if job is None or (
-            created_after is not None and job.created_at <= created_after
+        if (
+            job is None
+            or job.kind not in AGENT_RUN_KINDS
+            or (created_after is not None and job.created_at <= created_after)
         ):
             return None
         return agent_run_to_dict(job)
