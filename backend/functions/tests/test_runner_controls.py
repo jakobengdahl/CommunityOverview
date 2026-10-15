@@ -101,6 +101,24 @@ def test_a_control_that_cannot_be_applied_aborts_the_start(
     assert "must never run" not in result.log
 
 
+def test_a_stop_request_never_hides_a_failed_start(runner, monkeypatch):
+    # A function that fails to start exits at once and the host then asks the
+    # supervisor to stop; whenever that request lands, the run must not read
+    # as an ordinary kill. Sweeping the delay crosses the supervisor's start.
+    runner.probe()
+    limits = runner._limits(5, 64)
+    monkeypatch.setattr(
+        runner, "_limits", lambda *_: dict(limits, file_size_mib="not a number")
+    )
+    outcomes = set()
+    for step in range(150):
+        handle = runner.start(spec("pass\n"))
+        time.sleep(step * 0.0006)
+        handle.kill()
+        outcomes.add(handle.wait().outcome)
+    assert outcomes <= {"failed_to_start", "runner_lost"}
+
+
 class _FakeLibc:
     def __init__(self, prctl=0, syscall=3):
         self._prctl = prctl
