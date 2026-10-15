@@ -687,3 +687,11 @@ send({"jsonrpc": "2.0", "method": "result",
     outcome = run_script(broker, script)
     assert outcome.succeeded, outcome
     assert outcome.output["second"]["error"]["data"]["code"] == "concurrent_call"
+
+
+@pytest.mark.parametrize("marker", [b'"method":"result"', b'"method": "result"'])
+def test_a_result_marker_split_at_any_offset_across_reads_is_recognised(marker):
+    for offset in range(1, len(marker)):
+        chunks = [b"a" * 100 + marker[:offset], marker[offset:] + b"a" * 100 + b"\n"]
+        line = _discard(chunks)
+        assert isinstance(line, _Oversized) and line.looks_like_result, offset

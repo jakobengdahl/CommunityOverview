@@ -474,7 +474,12 @@ def test_the_response_limit_is_measured_in_bytes_and_is_inclusive(storage, hook)
 
     service = Fixed(storage, authorization_hook=hook)
     Fixed.payload = {"t": "a" * 100}
-    exact = wire_size({"jsonrpc": "2.0", "id": 1, "result": Fixed.payload})
+    # Measured independently of wire_size: the exact line protocol.py writes.
+    line = json.dumps(
+        {"jsonrpc": "2.0", "id": 1, "result": Fixed.payload}, separators=(",", ":")
+    )
+    exact = len((line + "\n").encode("utf-8"))
+    assert wire_size({"jsonrpc": "2.0", "id": 1, "result": Fixed.payload}) == exact
     assert "result" in call(
         make_broker(service, max_message_bytes=exact), "graph.search", {"query": "q"}
     )
@@ -494,8 +499,10 @@ def test_the_response_limit_is_measured_in_bytes_and_is_inclusive(storage, hook)
             request_id="long-id",
         )
     ) == ("tool_failed")
-    Fixed.payload = {"t": "é" * 60}  # 60 characters, far more bytes on the wire
-    over = make_broker(service, max_message_bytes=150)
+    # 60 characters, 120 bytes of UTF-8, 360 bytes once escaped on the wire:
+    # a limit between the raw and the escaped size must refuse it.
+    Fixed.payload = {"t": "é" * 60}
+    over = make_broker(service, max_message_bytes=250)
     assert error_code(call(over, "graph.search", {"query": "q"})) == "tool_failed"
 
 
