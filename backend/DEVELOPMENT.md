@@ -225,6 +225,12 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | `AGENTS_RUN_HISTORY_REDACT_AFTER_DAYS` | - (never) | Strip the content of terminal AgentRuns older than this many days (at most the retention) |
 | `AGENTS_RUN_HISTORY_EXPORT_MAX_DAYS` | retention | How far back `GET /agents/runs` reads (at most the retention) |
 | `AGENTS_RUN_HISTORY_SWEEP_INTERVAL_HOURS` | `24` | Hours between retention sweeps |
+| `FUNCTIONS_ROOT` | `config/functions` | Directory holding one sub-directory per user function (`docs/USER_FUNCTION_CONTRACT.md` §4.1) |
+| `FUNCTIONS_ENABLED` | *(unset: none)* | JSON object enabling functions and their grants, e.g. `{"recompute-derived-values": ["graph:read", "graph:write"]}`. A function, or a grant it declares, that is not listed is rejected with `not_enabled`. Read at start-up: changing it takes a restart, which also ends runs in progress. A malformed value is logged and enables nothing |
+| `FUNCTIONS_ISOLATION_MINIMUM` | `degraded` | `full` rejects runs while the runner cannot enforce all four isolation controls (§3.1); at `degraded` the host logs the missing controls at start-up |
+| `FUNCTIONS_TIMEOUT_SECONDS` | `120` | Instance wall-clock limit per run; may only lower the contract maximum (a higher value is clamped and logged) |
+| `FUNCTIONS_MEMORY_MIB` | `256` | Instance memory limit per run; may only lower the contract maximum |
+| `FUNCTIONS_MAX_TOOL_CALLS` | `200` | Instance tool-call budget per run; may only lower the contract maximum |
 | `AGENTS_WORKSPACE_DIR` | `~/.communityoverview/agent-workspace` | Root the agent's filesystem tools are confined to. Use an absolute path (or one starting with `~`): a relative path resolves against the process's working directory, which can differ between the places that read the setting. Must be a directory the service user owns and others cannot write to, or the FS tools refuse it — so prefer a private path over a shared one. A uid with no home (a container run as an arbitrary uid) falls back to a per-uid directory under the system temp dir |
 
 ## Building Frontend
@@ -505,6 +511,13 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | POST | `/agents/proposals/{proposal_id}/approve` | Approve a proposal (applies the action for act_after_approval agents) |
 | POST | `/agents/proposals/{proposal_id}/reject` | Reject a proposal |
 | POST | `/agents/{id}/trigger` | Fire a scheduled agent immediately (used by GCP Cloud Scheduler) |
+| GET | `/functions` | List user functions with their validation state, enablement and missing grants (read access) |
+| GET | `/functions/runner` | The function runner's isolation level, missing controls and runtimes |
+| GET | `/functions/runs` | List function runs (filter by `function_id`, `status`, `limit`), newest-first, inside the run-history read window |
+| GET | `/functions/runs/{run_id}` | Get one function run record (`docs/USER_FUNCTION_CONTRACT.md` §11) |
+| POST | `/functions/runs/{run_id}/cancel` | Terminate a run in progress (mutate access); `409` when it is not running |
+| GET | `/functions/{id}` | Get one function's manifest summary and state |
+| POST | `/functions/{id}/invoke` | Invoke a function as the calling actor. Body: `input`, optional `idempotency_key` and `correlation_id` (or the `x-correlation-id` header). `202` with the run record when it starts; `200` with the earlier run for a repeated key or with a `rejected` record; `403` without read access (no record) |
 
 ### Node attachments
 

@@ -17,6 +17,7 @@ shared knowledge graphs. This guide covers all user-facing features.
    - [Saved views](#26-saved-views)
    - [Agents](#27-agents)
    - [Recent nodes (navigation trail)](#28-recent-nodes-navigation-trail)
+   - [User functions](#29-user-functions)
 3. [Search](#3-search)
 4. [AI Chat](#4-ai-chat)
    - [Asking questions](#41-asking-questions)
@@ -602,6 +603,26 @@ This trail is per-session and lives only in your browser. It is separate from
 **Recent activity** ([5.2](#52-recent-activity-audit-log)), whose Graph tab is a
 persisted audit log of who changed what in the graph data (its Session tab is a
 different, session-scoped record: this session's own annotation/canvas activity).
+
+### 2.9 User functions
+
+A **user function** is a small program the operator of an instance adds to
+recompute or tidy graph content, such as values that derive from other nodes.
+Unlike an agent it runs no AI model: it is plain code that is started on
+request, reads and changes the graph through a narrow set of tools, and stops
+within two minutes at most.
+
+Functions have no screen in the app yet. An operator places them under the
+configured functions directory, enables each one together with the
+permissions it asks for (read, or read and write), and starts them through
+the API (`POST /functions/{id}/invoke`). A function always acts as the person
+who started it: it can never see or change more than they can, and every
+change it makes is marked with the function's name in the graph's history.
+
+Each run is kept in the same run history as agent runs, with its result, its
+log and the tools it called. The technical reference for function authors is
+[`docs/USER_FUNCTION_CONTRACT.md`](USER_FUNCTION_CONTRACT.md); the operator
+settings are listed in [`backend/DEVELOPMENT.md`](../backend/DEVELOPMENT.md).
 
 ---
 

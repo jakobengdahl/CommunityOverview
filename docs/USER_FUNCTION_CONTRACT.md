@@ -5,9 +5,10 @@
 [ADR 0011](adr/0011-sandboxed-user-functions.md). It is normative for the first
 implementation slices. Implemented so far, in `backend/functions/`: the broker
 and its protocol session (§6, §7, §9 attribution, the per-message and tool-call
-limits of §8), and the default hardened-subprocess runner of ADR 0012 with the
-Python helper library (§3.1, the time, memory and log limits of §8, §10). Not
-yet implemented: manifests, invocation and run records.
+limits of §8), the default hardened-subprocess runner of ADR 0012 with the
+Python helper library (§3.1, the time, memory and log limits of §8, §10), and
+manifests, enablement, manual invocation and run records (§4, §5, §11) with
+the `/functions` API. Not yet implemented: the Node.js runtime.
 **Scope:** Open-source core. This version covers manually invoked functions that
 read and write the graph through a broker. Every other trigger, tool and binding
 is out of scope (see [§13](#13-reserved-for-later-versions)); the fields they
@@ -527,6 +528,11 @@ Status meanings:
 - `cancelled`: an operator cancelled the run. Cancelling a running run
   terminates its process as in §8; writes already made stay.
 
+An invocation from a caller without read access is refused before any record is
+created, so that a caller who may not read the graph cannot fill its run
+history; a caller who may read but lacks the access a function needs gets a
+`rejected` record with `access_denied`.
+
 Records never contain secret values, credentials or tokens. Tool arguments and
 results are not recorded, because they may hold graph content the run record's
 readers should not see.
@@ -551,13 +557,15 @@ Run-level error codes are a closed set:
 | `failed` | `invalid_output` | `result.output` failed `output_schema`. |
 | `timed_out` | `timeout` | The wall-clock limit was reached (§8). |
 
-The store's states and methods do not change. In the run-history store:
+The store's states do not change, and its `fail` method takes an optional
+`result` so that a failed run keeps the same fields as any other. In the
+run-history store:
 
 - `succeeded` is `SUCCEEDED`, recorded with `complete`;
 - `failed` and `timed_out` are `DEAD_LETTER`, recorded with `fail`, whose
-  `error` (stored as `last_error`) starts with the code (`timeout: …`). The
-  run-history view reads the code from that prefix to tell `timed_out` from
-  `failed`;
+  `error` (stored as `last_error`) starts with the code (`timeout: …`) and
+  whose `result` keeps the run's other fields. The run-history view reads the
+  code from that prefix to tell `timed_out` from `failed`;
 - `rejected` and `cancelled` are `CANCELLED`, recorded with `cancel`, whose
   `result` keeps the outcome and code.
 
