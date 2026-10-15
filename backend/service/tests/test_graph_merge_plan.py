@@ -267,6 +267,13 @@ class TestEdges:
         monkeypatch.setattr(
             graph_merge_plan.config_loader, "relationship_type_allows_node_types", _rule
         )
+        # The planner only carries subtypes some rule names; this rule is
+        # patched in rather than configured, so name its subtypes too.
+        monkeypatch.setattr(
+            graph_merge_plan,
+            "_applicability_names",
+            lambda: frozenset({"Agency", "Person"}),
+        )
         plan = _plan(
             storage,
             [{"id": "new", "type": "Actor", "name": "N"}],
@@ -569,6 +576,13 @@ class TestSubtypeChangeRejudgesLiveIncidentEdges:
 
         monkeypatch.setattr(
             graph_merge_plan.config_loader, "relationship_type_allows_node_types", _rule
+        )
+        # The planner only carries subtypes some rule names; this rule is
+        # patched in rather than configured, so name its subtypes too.
+        monkeypatch.setattr(
+            graph_merge_plan,
+            "_applicability_names",
+            lambda: frozenset({"Agency", "Person"}),
         )
         plan = _plan(
             storage,
@@ -1040,6 +1054,27 @@ class TestSettleCost:
         assert elapsed < 3.0
 
 
+class TestSubtypeLength:
+    def test_a_long_subtypes_list_is_not_copied_per_edge(self, storage):
+        import tracemalloc
+
+        subtypes = [f"s{i}" for i in range(20_000)]
+        nodes = [{"id": "hub", "type": "Actor", "name": "Hub", "subtypes": subtypes}]
+        edges = [
+            {"id": f"x{i}", "source": "hub", "target": "i1", "type": "RELATES_TO"}
+            for i in range(2_000)
+        ]
+        tracemalloc.start()
+        try:
+            plan = _plan(storage, nodes, edges)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert plan.report["adds"]["edges"]["count"] == 2_000
+        # One copy per edge would be 2,000 x 20,000 references (~320 MB).
+        assert peak < 40 * 1024 * 1024
+
+
 class TestDigestMemory:
     def test_digest_work_does_not_multiply_the_document_text(self, storage):
         import json as _json
@@ -1348,17 +1383,11 @@ class TestGenerationRecheck:
         assert plan.digest == steady.digest
 
     def test_an_entity_that_changes_between_two_reads_restarts_the_plan(self, storage):
-        # Two edges attach to i1, so it is read twice in one attempt.
-        document = {
-            "nodes": [{"id": "x", "type": "Actor", "name": "X"}],
-            "edges": [
-                {"id": "ea", "source": "x", "target": "i1", "type": "RELATES_TO"},
-                {"id": "eb", "source": "x", "target": "i1", "type": "RELATES_TO"},
-            ],
-        }
-        view = _MovingNodeView(storage, "i1")
-        plan = compute_merge_plan(document, MergeParameters(), view)
-        assert plan.committable
+        # a1 is read when its overwrite is planned and again after its
+        # incident-edge walk; a write between the two must restart.
+        view = _MovingNodeView(storage, "a1")
+        plan = compute_merge_plan(self.SUBTYPE_CHANGE, self.OVERWRITE, view)
+        assert plan.report["overwrites"]["nodes"]["count"] == 1
         assert view.reads > 2
 
     def test_a_graph_that_keeps_resizing_is_refused(self, storage):

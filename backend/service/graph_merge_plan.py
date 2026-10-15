@@ -309,6 +309,15 @@ class _Listed:
     target: str
 
 
+def _applicability_names() -> frozenset:
+    """Every node type or subtype name some relationship rule mentions."""
+    names = set()
+    for rule in config_loader.get_schema()["relationship_types"].values():
+        names.update(rule.get("source_types") or ())
+        names.update(rule.get("target_types") or ())
+    return frozenset(names)
+
+
 def _snapshot(edges: List[Edge]) -> List[_Listed]:
     return [_Listed(e.id, e.revision, e.type_str, e.source, e.target) for e in edges]
 
@@ -414,6 +423,9 @@ class _Planner:
         # Edges attached to the live node a skip collision kept (ADR §2 (a)).
         self.skipped_attach_edges: List[str] = []
         self.pair_listings: Dict[Tuple[str, str], Dict[str, List[_Listed]]] = {}
+        self.endpoints: Dict[str, _Endpoint] = {}
+        self.resulting_states: Dict[str, Optional[Tuple[str, Tuple[str, ...]]]] = {}
+        self.rule_names = _applicability_names()
         # (source, target, type) -> first live edge outside the retyped set
         self.first_unexcluded: Dict[Tuple[str, str, str], Optional[_Listed]] = {}
         # (decision, location, outcome it had before the duplicate check)
@@ -540,6 +552,20 @@ class _Planner:
     # -- edges ----------------------------------------------------------------
 
     def _resolve(self, node_id: str) -> _Endpoint:
+        # One endpoint per node per attempt, shared by every edge that
+        # names it: an endpoint's cost must not repeat per edge.
+        endpoint = self.endpoints.get(node_id)
+        if endpoint is None:
+            endpoint = self.endpoints[node_id] = self._resolve_once(node_id)
+        return endpoint
+
+    def _relevant(self, subtypes: List[str]) -> Tuple[str, ...]:
+        """The subtypes applicability can depend on: those a relationship
+        rule names. ``subtypes`` has no size limit, so an endpoint keeps
+        only these, keeping per-edge work independent of its length."""
+        return tuple(sorted(name for name in set(subtypes) if name in self.rule_names))
+
+    def _resolve_once(self, node_id: str) -> _Endpoint:
         decision = self.nodes.get(node_id)
         if decision is not None:
             node = decision.node
@@ -549,7 +575,7 @@ class _Planner:
                 return _Endpoint(node_id, "conflict")
             if decision.outcome == "rename":
                 return _Endpoint(
-                    node_id, "renamed", node.type_str, tuple(node.subtypes)
+                    node_id, "renamed", node.type_str, self._relevant(node.subtypes)
                 )
             if decision.outcome == "skip":
                 live = decision.live
@@ -558,7 +584,7 @@ class _Planner:
                     node_id,
                     "live",
                     live.type_str,
-                    tuple(live.subtypes),
+                    self._relevant(live.subtypes),
                     live.archived,
                     True,
                 )
@@ -566,7 +592,7 @@ class _Planner:
                 node_id,
                 "document",
                 node.type_str,
-                tuple(node.subtypes),
+                self._relevant(node.subtypes),
                 node.archived if decision.live is None else decision.live.archived,
                 decision.live is not None,
             )
@@ -576,7 +602,12 @@ class _Planner:
         if self._is_excluded_type(live.type_str):
             return _Endpoint(node_id, "excluded")
         return _Endpoint(
-            node_id, "live", live.type_str, tuple(live.subtypes), live.archived, True
+            node_id,
+            "live",
+            live.type_str,
+            self._relevant(live.subtypes),
+            live.archived,
+            True,
         )
 
     def _plan_edges(self) -> None:
@@ -851,13 +882,20 @@ class _Planner:
                     )
 
     def _resulting_state(self, node_id: str) -> Optional[Tuple[str, Tuple[str, ...]]]:
+        if node_id not in self.resulting_states:
+            self.resulting_states[node_id] = self._resulting_state_once(node_id)
+        return self.resulting_states[node_id]
+
+    def _resulting_state_once(
+        self, node_id: str
+    ) -> Optional[Tuple[str, Tuple[str, ...]]]:
         decision = self.nodes.get(node_id)
         if decision is not None and decision.outcome in ("overwrite", "unchanged"):
-            return decision.node.type_str, tuple(decision.node.subtypes)
+            return decision.node.type_str, self._relevant(decision.node.subtypes)
         live = self._read_node(node_id)
         if live is None:
             return None
-        return live.type_str, tuple(live.subtypes)
+        return live.type_str, self._relevant(live.subtypes)
 
     # -- assembly -------------------------------------------------------------
 

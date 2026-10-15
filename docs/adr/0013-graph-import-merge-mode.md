@@ -86,8 +86,12 @@ Choices it made inside the decisions above:
   subtype re-judge, or a duplicate-triple lookup that matched nothing. A write
   to a *different* entity between two reads is an ordinary concurrent write,
   not a restart. Live nodes are updated in place, so one read can also see a
-  concurrent update's fields under the revision it had before. The commit's
-  checks (§3) must cover all three.
+  concurrent update's fields under the revision it had before, or the fields
+  of an update that is then undone. The commit's checks (§3) must cover all
+  of these.
+- Each node an edge names is resolved once per plan attempt and keeps only
+  the subtypes some relationship rule names: `subtypes` has no size limit, so
+  per-edge work must not grow with its length.
 
 ### Slice 1 measurements and thresholds (§8)
 
@@ -101,7 +105,7 @@ a tuned benchmark machine; three runs.
 | Figure | Measured | Pass/fail threshold |
 |---|---|---|
 | Preview latency, median of 3 after one warm-up | 1.73–1.85 s, of which ~0.8 s is one full garbage collection over the resident graph that the preview's allocations trigger (1.1–1.2 s without it) | ≤ 2.5 s |
-| Peak memory beyond the resident graph (`tracemalloc` peak during one preview) | 76.1 MB | ≤ 160 MB |
+| Peak memory beyond the resident graph (`tracemalloc` peak during one preview) | 74.9 MB | ≤ 160 MB |
 
 Whether a full collection lands inside a preview depends on how many objects
 the process allocated before it, so the latency threshold leaves room for one.
