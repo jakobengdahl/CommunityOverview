@@ -176,6 +176,24 @@ class ExecutionStoreContractTests:
         assert final.attempts == self.retry_policy.max_attempts
         assert final.dead_letter_reason
 
+    def test_a_terminal_failure_keeps_the_result_it_is_given(self, store):
+        j = store.enqueue(_job())
+        now = T0
+        for _ in range(self.retry_policy.max_attempts):
+            store.claim_next("w1", now=now)
+            failed = store.fail(j.id, error="boom", result={"log": "trace"}, now=now)
+            now = failed.run_at or now
+        assert failed.state == ExecutionState.DEAD_LETTER
+        assert store.get(j.id).result == {"log": "trace"}
+
+    def test_a_failure_without_a_result_leaves_the_result_empty(self, store):
+        j = store.enqueue(_job())
+        now = T0
+        for _ in range(self.retry_policy.max_attempts):
+            store.claim_next("w1", now=now)
+            now = store.fail(j.id, error="boom", now=now).run_at or now
+        assert store.get(j.id).result is None
+
     # -- cancellation -------------------------------------------------------
 
     def test_cancel_non_terminal(self, store):

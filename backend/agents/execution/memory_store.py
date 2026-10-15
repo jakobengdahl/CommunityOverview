@@ -125,7 +125,7 @@ class InMemoryExecutionStore:
             job.updated_at = now
             return job.copy()
 
-    def fail(self, job_id: str, *, error: str, now=None) -> ExecutionJob:
+    def fail(self, job_id: str, *, error: str, result=None, now=None) -> ExecutionJob:
         now = now or utcnow()
         with self._lock:
             job = self._require(job_id)
@@ -141,6 +141,8 @@ class InMemoryExecutionStore:
                 job.state = ExecutionState.DEAD_LETTER
                 job.dead_letter_reason = f"failed after {job.attempts} attempt(s)"
                 job.finished_at = now
+                if result is not None:
+                    job.result = dict(result)
             else:
                 job.state = ExecutionState.PENDING
                 job.run_at = now + timedelta(

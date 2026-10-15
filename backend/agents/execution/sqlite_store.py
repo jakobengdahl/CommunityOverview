@@ -342,6 +342,7 @@ class SqliteExecutionStore:
         job_id: str,
         *,
         error: str,
+        result: Optional[dict] = None,
         now: Optional[datetime] = None,
     ) -> ExecutionJob:
         now = now or utcnow()
@@ -358,6 +359,7 @@ class SqliteExecutionStore:
                     """
                     UPDATE execution_jobs SET
                         state = ?, last_error = ?, dead_letter_reason = ?,
+                        result = COALESCE(?, result),
                         lease_owner = NULL, lease_expiry = NULL,
                         finished_at = ?, updated_at = ?
                     WHERE id = ?
@@ -366,6 +368,7 @@ class SqliteExecutionStore:
                         ExecutionState.DEAD_LETTER.value,
                         error,
                         f"failed after {job.attempts} attempt(s)",
+                        json.dumps(result) if result is not None else None,
                         now_ts,
                         now_ts,
                         job_id,

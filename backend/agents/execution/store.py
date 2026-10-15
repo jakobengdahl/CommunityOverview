@@ -105,12 +105,14 @@ class ExecutionStore(Protocol):
         job_id: str,
         *,
         error: str,
+        result: Optional[dict] = None,
         now: Optional[datetime] = None,
     ) -> ExecutionJob:
         """
         Record a failed attempt. If the retry budget remains, reschedule the job
-        as PENDING with a backoff delay; otherwise dead-letter it. No-op if the
-        job is already terminal. Raises ``JobNotFoundError`` if unknown.
+        as PENDING with a backoff delay; otherwise dead-letter it, keeping
+        ``result`` (diagnostics of the failed attempt) when one is given. No-op
+        if the job is already terminal. Raises ``JobNotFoundError`` if unknown.
         """
         ...
 

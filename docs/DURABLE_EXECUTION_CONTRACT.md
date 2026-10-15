@@ -175,7 +175,7 @@ is required.
 | `claim_next(worker_id, now, lease_seconds)` | Claim oldest runnable job → `RUNNING`; reclaim expired leases; dead-letter a claim past budget; else `None`. |
 | `renew_lease(job_id, worker_id, now, lease_seconds)` | Extend a lease held by `worker_id`; `False` otherwise. |
 | `complete(job_id, result, now)` | → `SUCCEEDED`; no-op if already terminal. |
-| `fail(job_id, error, now)` | Retry with backoff or dead-letter; no-op if already terminal. |
+| `fail(job_id, error, result=None, now)` | Retry with backoff or dead-letter; a dead-lettered job keeps `result` when one is given (diagnostics of the failed attempt). No-op if already terminal. |
 | `cancel(job_id, result, now)` | → `CANCELLED` if non-terminal; `True`/`False`. `result` is stored like `complete`'s, for a caller that can explain the cancellation. |
 | `recover_stale(now)` | Reset expired-lease `RUNNING` jobs to `PENDING`; return them. |
 | `get(job_id)` | Fetch by id, or `None`. |
