@@ -454,6 +454,43 @@ class TestEdges:
         )
         assert _skip_reasons(plan)[("edge", "e2")] == "duplicate_edge"
 
+    def test_each_node_pair_has_its_own_duplicate_listing(self, storage):
+        storage.add_nodes([Node(id="c1", type="Initiative", name="C")], [])
+        storage.add_edge(Edge(id="ec", source="a1", target="c1", type="RELATES_TO"))
+        plan = _plan(
+            storage,
+            [],
+            [
+                {"id": "d1", "source": "a1", "target": "i1", "type": "RELATES_TO"},
+                {"id": "d2", "source": "a1", "target": "c1", "type": "RELATES_TO"},
+            ],
+        )
+        assert plan.report["adds"]["edges"]["ids"] == ["d1"]
+        assert _skip_reasons(plan) == {("edge", "d2"): "duplicate_edge"}
+
+    def test_the_duplicate_target_is_the_lowest_live_id(self, storage):
+        storage.add_edge(Edge(id="z9", source="a1", target="i1", type="RELATES_TO"))
+        storage.add_edge(Edge(id="b2", source="a1", target="i1", type="RELATES_TO"))
+        plan = _plan(
+            storage,
+            [],
+            [{"id": "d1", "source": "a1", "target": "i1", "type": "RELATES_TO"}],
+        )
+        assert plan.report["skips"]["items"][0]["live_edge_id"] == "b2"
+
+    def test_a_retyped_duplicate_target_falls_back_to_the_next_live_edge(self, storage):
+        storage.add_edge(Edge(id="e5", source="a1", target="i1", type="BELONGS_TO"))
+        plan = _plan(
+            storage,
+            [],
+            [
+                {"id": "d1", "source": "a1", "target": "i1", "type": "BELONGS_TO"},
+                {"id": "e1", "source": "a1", "target": "i1", "type": "RELATES_TO"},
+            ],
+            policy=MergePolicy(default="overwrite"),
+        )
+        assert plan.report["skips"]["items"][0]["live_edge_id"] == "e5"
+
     def test_the_same_triple_with_another_type_is_not_a_duplicate(self, storage):
         plan = _plan(
             storage,
