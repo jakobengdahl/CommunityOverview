@@ -918,6 +918,15 @@ class TestSavedViewAnnotationsTheWritePathRefuses:
         assert plan.report["rejected"]["items"][0]["location"] == "nodes[0]"
         assert not plan.committable
 
+    def test_only_saved_view_types_are_checked(self, storage):
+        actor = dict(self._view([self.REMOTE_IMAGE]), id="a9", type="Actor")
+        plan = _plan(storage, [actor], include_system_types=True)
+        assert plan.committable
+
+    def test_an_excluded_view_does_not_block_the_plan(self, storage):
+        plan = _plan(storage, [self._view([self.REMOTE_IMAGE])])
+        assert plan.committable
+
     def test_a_view_without_them_is_fine(self, storage):
         plan = _plan(storage, [self._view([])], include_system_types=True)
         assert plan.committable
@@ -1056,6 +1065,66 @@ class TestGenerationRecheck:
         view = _View(storage)
         compute_merge_plan(self.SUBTYPE_CHANGE, self.OVERWRITE, view)
         assert view.walks == 2
+
+    def test_a_subtype_change_on_an_edge_target_plans_normally(self, storage):
+        plan = compute_merge_plan(
+            {
+                "nodes": [
+                    {
+                        "id": "i1",
+                        "type": "Initiative",
+                        "name": "Project X",
+                        "subtypes": ["Programme"],
+                    }
+                ]
+            },
+            self.OVERWRITE,
+            StorageGraphView(storage),
+        )
+        assert plan.report["overwrites"]["nodes"]["count"] == 1
+        assert plan.committable
+
+    def test_a_listed_edge_rewritten_before_its_read_restarts_the_plan(self, storage):
+        class _View(StorageGraphView):
+            bumped = False
+
+            def get_edge(self, edge_id):
+                edge = super().get_edge(edge_id)
+                if edge_id == "e1" and not self.bumped:
+                    self.bumped = True
+                    return edge.model_copy(update={"revision": edge.revision + 1})
+                return edge
+
+        document = {
+            "nodes": [],
+            "edges": [
+                {"id": "d1", "source": "a1", "target": "i1", "type": "BELONGS_TO"}
+            ],
+        }
+        params = MergeParameters()
+        plan = compute_merge_plan(document, params, _View(storage))
+        steady = compute_merge_plan(document, params, StorageGraphView(storage))
+        assert plan.digest == steady.digest
+
+    def test_an_incident_edge_deleted_during_the_rejudge_restarts_the_plan(
+        self, storage
+    ):
+        class _View(StorageGraphView):
+            hidden = True
+
+            def get_edge(self, edge_id):
+                if edge_id == "e1" and self.hidden:
+                    self.hidden = False
+                    return None
+                return super().get_edge(edge_id)
+
+        view = _View(storage)
+        plan = compute_merge_plan(self.SUBTYPE_CHANGE, self.OVERWRITE, view)
+        steady = compute_merge_plan(
+            self.SUBTYPE_CHANGE, self.OVERWRITE, StorageGraphView(storage)
+        )
+        assert not view.hidden
+        assert plan.digest == steady.digest
 
     def test_a_listed_edge_deleted_before_its_read_restarts_the_plan(self, storage):
         class _View(StorageGraphView):
