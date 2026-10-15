@@ -10,6 +10,8 @@ is out of scope (see [§13](#13-reserved-for-later-versions)); the fields they
 will need are reserved here so that adding them is not a breaking change.
 
 **Related:**
+[ADR 0012](adr/0012-user-function-isolation.md) (the default runner and the
+isolation levels in §3.1),
 [`DURABLE_EXECUTION_CONTRACT.md`](DURABLE_EXECUTION_CONTRACT.md) (run state,
 idempotency and run history this contract reuses),
 [`EVENT_SUBSCRIPTIONS.md`](EVENT_SUBSCRIPTIONS.md) (the event envelope and the
@@ -58,8 +60,14 @@ User functions are deliberately narrow:
 
 ## 3. Invariants
 
-These hold for every run and every runner. An implementation slice is tested
-against them.
+These hold for every run and every runner, with one qualification: invariant 2,
+invariants 4, 6 and 7 insofar as they rest on it, and the part of invariant 5
+that covers processes a run starts, hold in full only at isolation level
+`full`. Below it, a function may reach files and process information directly
+instead of through the broker, and, without the `processes` and `isolation`
+controls, a process it starts may escape termination; a runner reports which
+controls it could not enforce (§3.1). An implementation slice is tested against
+them.
 
 1. **No in-process code.** Function code never runs inside the application
    process and never receives a reference to an application object, module,
@@ -75,11 +83,53 @@ against them.
    acts as are set when the run starts. The function cannot name another graph,
    another actor or another session.
 5. **The time limit is absolute.** A run that has not returned by its deadline is
-   terminated (§8). No configuration raises the platform maximum.
+   terminated (§8), together with every process it started: nothing a run
+   starts outlives it. No configuration raises the platform maximum.
 6. **Writes are attributed.** Every write a run makes carries the function's
    origin and the run's correlation id (§9).
 7. **No secret material in v1.** No secret value is reachable from a function in
    this contract version; see §13 for how a later version adds them.
+
+### 3.1 Isolation levels
+
+How much of invariant 2 a runner can enforce depends on the host: the kernel
+features available, and whether the application itself runs unprivileged
+inside a container. A runner therefore probes the host when it starts and
+reports the controls it enforces:
+
+| Control | Enforced means |
+|---|---|
+| `filesystem` | The process can read only the runtime, the helper library and the function's directory, and write only its working directory. |
+| `network` | The process can create no socket other than a connected pair (`socketpair`), so it can reach neither the network nor any socket outside the run. |
+| `processes` | The process can start no other process and cannot leave its session, so termination reaches everything it runs. |
+| `isolation` | The process cannot signal, trace or read the memory or `/proc` entries of any process outside the run, the application included. |
+
+The **isolation level** of a runner is `full` when it enforces all four
+controls, and `degraded` otherwise. Independent of the level, every runner:
+
+- runs the function in a separate process with an empty environment and no
+  inherited file descriptors besides its standard streams;
+- enforces the wall-clock limit and terminates everything the run started
+  (invariant 5); where it cannot prevent new processes (`processes` missing), a
+  per-run supervisor process that adopts orphaned descendants terminates every
+  descendant it can see before the run is recorded as finished. Without the
+  `isolation` control the function can kill that supervisor, so this
+  termination is best-effort, and a runner that loses its supervisor records
+  the run as `failed` with `runner_lost`;
+- applies the memory limit (§8) and reads the process's output with the size
+  limits of §8, terminating the run when they are exceeded rather than
+  buffering further.
+
+An instance setting, `isolation_minimum`, is `degraded` (the default) or
+`full`. A run is `rejected` with `isolation_below_minimum` when the runner's
+level is below it. When a runner starts at level `degraded`, the host logs a
+warning naming the missing controls, and every run record carries the level and
+the missing controls (§11).
+
+At level `degraded` the function may be able to read files and process
+information that the application's own user can read, which can include
+configuration and credentials. Operators who run functions from authors they do
+not fully trust set `isolation_minimum: full`.
 
 ## 4. Package and manifest
 
@@ -333,7 +383,7 @@ system that started it.
 | Limit | Platform maximum | Behaviour when reached |
 |---|---|---|
 | Wall-clock time | **120 seconds** | The runner terminates the process. The run ends `timed_out`. |
-| Memory | 256 MiB | The runner terminates the process. The run ends `failed` with `memory_exceeded`. |
+| Memory | 256 MiB | Allocation beyond the limit fails, or the runner terminates the process. The run ends `failed` with `memory_exceeded`. |
 | Tool calls per run | 200 | Further calls return `limit_exceeded`. |
 | Size of one tool call or response | 1 MiB | The call is refused with `invalid_arguments`, or the response is replaced by a `tool_failed` error. |
 | Size of `result.output` | 256 KiB | The run ends `failed` with `output_too_large`. |
@@ -347,6 +397,13 @@ system that started it.
   `memory_mib`, `max_tool_calls`). A value above the contract maximum rejects
   the manifest (§4.3). The limit a run gets is the smaller of the manifest
   value and the instance value.
+- The memory limit may be enforced as a limit on the process's address space,
+  or, for a runtime that reserves address space it does not use, as the
+  runtime's own heap limit under a larger address-space ceiling.
+  The helper library (§10) reports an allocation failure as a `result` with
+  `status: error` and code `memory_exceeded`, which the host records as
+  `failed` with `memory_exceeded`. A process that exits without a result after
+  reaching the limit is recorded the same way wherever the runner can tell.
 - Termination is forced. The runner does not wait for the function to clean up,
   and writes the function made before it was terminated stay in the graph.
   Functions that make several writes should make them idempotent, so that a
@@ -431,6 +488,7 @@ The run record exposes:
 | `correlation_id`, `origin`, `actor` | Who started it and the id its writes carry. |
 | `tool_calls` | The count, and per call the tool name, outcome and duration, without arguments or results. |
 | `usage` | Wall-clock time and peak memory, where the runner can measure it. |
+| `isolation` | The runner's isolation level and, at `degraded`, the missing controls (§3.1). |
 | `log` | The captured standard error, truncated per §8. |
 | `created_at`, `started_at`, `finished_at` | Timestamps. |
 
@@ -438,8 +496,9 @@ Status meanings:
 
 - `rejected`: the run never started, because the manifest failed validation, the
   function or one of its declared grants is not enabled, the invoking actor
-  lacks the required access, the input failed `input_schema`, or the
-  chain-depth limit was reached.
+  lacks the required access, the input failed `input_schema`, another run of
+  the function is in progress, the runner's isolation level is below the
+  instance minimum, or the chain-depth limit was reached.
 - `failed`: the function returned `status: error`, exited without a result,
   broke the protocol, exceeded memory or produced output that is too large or
   fails `output_schema`.
@@ -461,7 +520,9 @@ Run-level error codes are a closed set:
 | `rejected` | `invalid_input` | `input` failed `input_schema`. |
 | `rejected` | `chain_depth_exceeded` | The chain-depth limit was reached (§9). |
 | `rejected` | `busy` | Another run of the same function is in progress (§8). |
-| `failed` | `function_error` | The function returned `status: error`; its code and message are kept, sanitized. |
+| `rejected` | `isolation_below_minimum` | The runner's isolation level is below the instance's `isolation_minimum` (§3.1). |
+| `failed` | `function_error` | The function returned `status: error`; its code and message are kept, sanitized. A result with code `memory_exceeded` is recorded as `memory_exceeded` instead (§8); the code is reported by the function's own process. |
+| `failed` | `runner_lost` | The runner lost control of the run, for example because its supervisor process died (§3.1). |
 | `failed` | `no_result` | The process exited without sending `result`. |
 | `failed` | `protocol_error` | The function broke the protocol (§6.2). |
 | `failed` | `memory_exceeded` | The memory limit was reached (§8). |
@@ -484,8 +545,10 @@ The store's states and methods do not change. In the run-history store:
 - `contract_version` is a single integer string. A host lists the versions it
   supports and rejects others. The text of a contract version does not change
   once a host implements it, so two hosts that support the same version accept
-  and run the same manifests the same way.
-- Any change to what a manifest may contain or what a run may do, including
+  and run the same manifests the same way. Until a host implements a version,
+  its text may be amended in place.
+- Once a version is implemented, any change to what a manifest may contain or
+  what a run may do, including
   enabling a capability reserved in §13, is a new contract version.
 - A new version is **additive** when every manifest valid under the previous
   version is valid under it and behaves the same: adding a tool, a grant, a
@@ -516,4 +579,5 @@ already reserved for it, so that adding it is an additive contract version
 | Hosted management | — | Workspace-scoped storage, quotas and administration belong to a hosted layer, outside this repository. |
 
 The isolation runtime itself (hardened subprocess, container, microVM or
-WebAssembly) is not chosen by this contract. Every runner must satisfy §3 and §8.
+WebAssembly) is not chosen by this contract; ADR 0012 picks the default runner.
+Every runner must satisfy §3, report its level per §3.1, and enforce §8.
