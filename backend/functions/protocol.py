@@ -128,16 +128,34 @@ class LineReader:
             self._buffer += chunk
 
 
-def _write_message(fd: int, message: Dict[str, Any]) -> bool:
+_WRITTEN = "written"
+_CLOSED = "closed"
+_TIMED_OUT = "timed_out"
+
+
+def _write_message(fd: int, message: Dict[str, Any], deadline: float) -> str:
+    """Write one message without blocking past the deadline.
+
+    ``fd`` must be non-blocking: a function that stops reading its input must
+    not stall the host once the pipe buffer is full.
+    """
     data = (json.dumps(message, separators=(",", ":")) + "\n").encode("utf-8")
-    try:
-        view = memoryview(data)
-        while view:
+    view = memoryview(data)
+    while view:
+        try:
             written = os.write(fd, view)
-            view = view[written:]
-    except (BrokenPipeError, OSError):
-        return False
-    return True
+        except BlockingIOError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return _TIMED_OUT
+            _, ready, _ = select.select([], [fd], [], remaining)
+            if not ready:
+                return _TIMED_OUT
+            continue
+        except OSError:
+            return _CLOSED
+        view = view[written:]
+    return _WRITTEN
 
 
 def run_session(
@@ -151,14 +169,26 @@ def run_session(
 ) -> SessionOutcome:
     """Drive one run's protocol session; ``deadline`` is a time.monotonic() value."""
     reader = LineReader(reader_fd, broker.context.max_message_bytes)
+    os.set_blocking(writer_fd, False)
 
     def outcome(code: Optional[str], **kwargs: Any) -> SessionOutcome:
         return SessionOutcome(code=code, tool_calls=list(broker.tool_calls), **kwargs)
 
-    if not _write_message(
-        writer_fd, {"jsonrpc": "2.0", "method": "invoke", "params": envelope}
-    ):
-        return outcome(CODE_NO_RESULT, error_message="The process closed its input.")
+    def write_failed(message: Dict[str, Any]) -> Optional[SessionOutcome]:
+        status = _write_message(writer_fd, message, deadline)
+        if status == _TIMED_OUT:
+            return outcome(
+                CODE_TIMEOUT, error_message="The wall-clock limit was reached."
+            )
+        if status == _CLOSED:
+            return outcome(
+                CODE_NO_RESULT, error_message="The process closed its input."
+            )
+        return None
+
+    failed = write_failed({"jsonrpc": "2.0", "method": "invoke", "params": envelope})
+    if failed:
+        return failed
 
     concurrent_pending = False
     while True:
@@ -175,12 +205,13 @@ def run_session(
             )
         if line is OVERSIZED:
             # The request id cannot be recovered from a discarded line.
-            _write_message(
-                writer_fd,
+            failed = write_failed(
                 error_response(
                     None, ERR_INVALID_ARGUMENTS, "The message exceeds the size limit."
-                ),
+                )
             )
+            if failed:
+                return failed
             continue
         if not line.strip():
             continue
@@ -219,10 +250,9 @@ def run_session(
         # this request was unanswered (§6.2). Detection is best-effort: the
         # broker answers strictly in order either way.
         concurrent_pending = reader.has_pending()
-        if not _write_message(writer_fd, response):
-            return outcome(
-                CODE_NO_RESULT, error_message="The process closed its input."
-            )
+        failed = write_failed(response)
+        if failed:
+            return failed
 
 
 def _valid_id(value: Any) -> bool:

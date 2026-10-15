@@ -35,7 +35,7 @@ def make_broker(storage, **overrides):
     return FunctionBroker(GraphService(storage), context)
 
 
-def run_script(broker, script, *, timeout=10.0, **session_kwargs):
+def run_script(broker, script, *, timeout=10.0, envelope=ENVELOPE, **session_kwargs):
     """Run ``script`` as a real function process and drive its session."""
     process = subprocess.Popen(
         [sys.executable, "-I", "-c", textwrap.dedent(script)],
@@ -47,7 +47,7 @@ def run_script(broker, script, *, timeout=10.0, **session_kwargs):
     try:
         return run_session(
             broker,
-            ENVELOPE,
+            envelope,
             reader_fd=process.stdout.fileno(),
             writer_fd=process.stdin.fileno(),
             deadline=time.monotonic() + timeout,
@@ -242,3 +242,18 @@ send({{"jsonrpc": "2.0", "id": {bad_id!r}, "method": "tool",
 """
     )
     assert run_script(make_broker(storage), script).code == "protocol_error"
+
+
+def test_a_function_that_stops_reading_cannot_hold_the_host_past_the_deadline(storage):
+    # The envelope is larger than a pipe buffer and the function never reads it,
+    # so the host's write would block forever without the deadline.
+    envelope = {"invocation": {"input": {"blob": "x" * (1024 * 1024)}}}
+    started = time.monotonic()
+    outcome = run_script(
+        make_broker(storage),
+        "import time; time.sleep(30)\n",
+        timeout=0.5,
+        envelope=envelope,
+    )
+    assert outcome.code == "timeout"
+    assert time.monotonic() - started < 5
