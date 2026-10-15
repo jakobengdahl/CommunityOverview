@@ -564,10 +564,11 @@ def preview_merge_import(
 ) -> Dict[str, Any]:
     """Plan a MERGE import without writing anything (ADR 0013, slice 1).
 
-    Authorized exactly as the merge commit will be: ``GRAPH_ACTION_MUTATE``,
-    and refused for a caller whose graph access is narrowed — the plan
-    reveals which ids exist and the live value of every field an overwrite
-    would change (ADR 0013 §10). No backup, no job, no graph write.
+    Authorized as the merge commit will be (``GRAPH_ACTION_MUTATE``) and,
+    since the plan reveals which ids exist and the live value of every field
+    an overwrite would change, as a whole-graph read (``GRAPH_ACTION_READ``);
+    refused when either is denied or narrowed (ADR 0013 §10). No backup, no
+    job, no graph write.
     """
     decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_MUTATE, target="import_graph_merge"

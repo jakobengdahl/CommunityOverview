@@ -1690,8 +1690,8 @@ def _register_import_endpoints(
         """
         Plan merging ``body.document`` into the live graph without writing
         anything (ADR 0013, slice 1). Returns the per-entity plan and a
-        ``plan_digest`` a later merge commit will be bound to. Requires the
-        same access as the commit: graph mutation, with full graph access.
+        ``plan_digest`` a later merge commit will be bound to. Requires graph
+        mutation and read access, both with full graph scope.
         """
         # Planning is CPU-bound and linear in the document (up to the v1
         # caps), so it runs in a worker thread rather than on the event loop.
