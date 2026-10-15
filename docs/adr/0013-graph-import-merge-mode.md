@@ -76,6 +76,13 @@ Choices it made inside the decisions above:
   plan like a replace.
 - One preview runs at a time per process; another is refused with 503
   `import_preview_busy` and can be retried, since a preview changes nothing.
+- A `SavedView`/`VisualizationView` document node whose annotations the write
+  path refuses (`saved_view_annotation_error`) is listed under `rejected`.
+- For slice 2: the digest records every live entity the plan read and its
+  revision, not absences a listing found — the incident edges walked for a
+  subtype re-judge, or a duplicate-triple lookup that matched nothing. A write
+  to a *different* entity between two reads is an ordinary concurrent write,
+  not a restart. The commit's checks (§3) must cover both.
 
 ### Slice 1 measurements and thresholds (§8)
 
@@ -88,9 +95,11 @@ a tuned benchmark machine; three runs.
 
 | Figure | Measured | Pass/fail threshold |
 |---|---|---|
-| Preview latency, median of 3 after one warm-up | 0.97–1.08 s | ≤ 2.5 s |
-| Peak memory beyond the resident graph (`tracemalloc` peak during one preview) | 79.1 MB | ≤ 160 MB |
+| Preview latency, median of 3 after one warm-up | 1.73–1.83 s, of which ~0.8 s is one full garbage collection over the resident graph that the preview's allocations trigger (1.1–1.2 s without it) | ≤ 2.5 s |
+| Peak memory beyond the resident graph (`tracemalloc` peak during one preview) | 75.7 MB | ≤ 160 MB |
 
+Whether a full collection lands inside a preview depends on how many objects
+the process allocated before it, so the latency threshold leaves room for one.
 Later slices re-run the script and fail a threshold they exceed. The two other
 figures §8 names, how long the commit holds `_lock` and the event fan-out at
 10,000 entities, need the commit to exist; slice 2 sets their thresholds from

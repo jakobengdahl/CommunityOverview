@@ -885,6 +885,66 @@ class TestSavedViewMetadata:
         assert seen == [{"k": "live"}, {"k": "doc"}]
 
 
+class TestSavedViewAnnotationsTheWritePathRefuses:
+    REMOTE_IMAGE = {
+        "id": "img-1",
+        "type": "image",
+        "kind": "image",
+        "position": {"x": 0, "y": 0},
+        "geometry": {"x": 0, "y": 0, "w": 10, "h": 10, "rotation": 0},
+        "image": {"url": "https://attacker.example/t.png", "width": 10, "height": 10},
+        "alt": "",
+    }
+
+    def _view(self, annotations):
+        return {
+            "id": "v9",
+            "type": "SavedView",
+            "name": "View",
+            "metadata": {
+                "annotation_schema_version": 1,
+                "annotation_document": {
+                    "schema_version": 1,
+                    "annotations": annotations,
+                },
+                "annotations": annotations,
+            },
+        }
+
+    def test_are_rejected_like_add_nodes_rejects_them(self, storage):
+        plan = _plan(
+            storage, [self._view([self.REMOTE_IMAGE])], include_system_types=True
+        )
+        assert plan.report["rejected"]["items"][0]["location"] == "nodes[0]"
+        assert not plan.committable
+
+    def test_a_view_without_them_is_fine(self, storage):
+        plan = _plan(storage, [self._view([])], include_system_types=True)
+        assert plan.committable
+
+
+class TestDigestMemory:
+    def test_digest_work_does_not_multiply_the_document_text(self, storage):
+        import json as _json
+        import tracemalloc
+
+        # Quotes and backslashes double on every JSON escaping, and one
+        # character outside the BMP widens a whole Python string to 4 bytes.
+        description = '"\\' * 900 + "\U0001f600"
+        nodes = [
+            {"id": f"n{i}", "type": "Actor", "name": "N", "description": description}
+            for i in range(100)
+        ]
+        size = sum(len(_json.dumps(node)) for node in nodes)
+        tracemalloc.start()
+        try:
+            _plan(storage, nodes)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert peak < 2 * size
+
+
 class _ShiftingGenerationView(StorageGraphView):
     """Reports a new generation on every read: a replace landing mid-plan."""
 

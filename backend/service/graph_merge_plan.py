@@ -31,7 +31,10 @@ from backend.core.models import (
     is_valid_relationship_type,
 )
 
-from backend.core.session_annotations import sanitize_saved_view_metadata
+from backend.core.session_annotations import (
+    sanitize_saved_view_metadata,
+    saved_view_annotation_error,
+)
 
 from .graph_import import (
     ImportIssue,
@@ -291,7 +294,7 @@ class MergePlan:
 # --- planning ---------------------------------------------------------------
 
 
-@dataclass
+@dataclass(slots=True)
 class _NodeDecision:
     index: int
     node: Node
@@ -301,7 +304,7 @@ class _NodeDecision:
     changes: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
-@dataclass
+@dataclass(slots=True)
 class _Endpoint:
     node_id: str
     kind: str  # document | renamed | live | excluded | conflict | dangling
@@ -311,7 +314,7 @@ class _Endpoint:
     has_live_edges: bool = False  # the id exists live, so live edges may join it
 
 
-@dataclass
+@dataclass(slots=True)
 class _EdgeDecision:
     index: int
     edge: Edge
@@ -438,6 +441,13 @@ class _Planner:
     def _plan_nodes(self) -> None:
         for index, node in build_document_nodes(self.raw_nodes, self.rejected):
             location = f"nodes[{index}]"
+            if not self._is_excluded_type(node.type_str) and (
+                node.type_str in _SAVED_VIEW_NODE_TYPES
+            ):
+                # The write path refuses these annotations; so must a plan.
+                annotation_error = saved_view_annotation_error(node.metadata)
+                if annotation_error:
+                    self.rejected.append(ImportIssue(location, annotation_error))
             if self._is_excluded_type(node.type_str):
                 self.nodes[node.id] = _NodeDecision(
                     index, node, "excluded", "system_type_excluded"
@@ -938,13 +948,18 @@ class _Planner:
                 return None
             return [end.kind, end.node_id]
 
+        # Each entry is hashed on its own, so the canonical form below holds
+        # 64-character hashes rather than the document's text: its size does
+        # not grow with field content, however that content escapes.
+        node_hashes = [_entry_hash(raw) for raw in self.raw_nodes]
+        edge_hashes = [_entry_hash(raw) for raw in self.raw_edges]
         canonical: Dict[str, Any] = {
             "digest_version": DIGEST_VERSION,
             # Every entry as sent, valid or not, as a sorted multiset: the
             # digest follows any document edit and never its order.
             "document": {
-                "nodes": sorted(_canonical_entry(raw) for raw in self.raw_nodes),
-                "edges": sorted(_canonical_entry(raw) for raw in self.raw_edges),
+                "nodes": sorted(node_hashes),
+                "edges": sorted(edge_hashes),
             },
             "parameters": self.params.canonical(),
             "generation": self.generation,
@@ -962,7 +977,7 @@ class _Planner:
                             "id": d.node.id,
                             "outcome": d.outcome,
                             "reason": d.reason,
-                            "content": _content(self.raw_nodes[d.index]),
+                            "content": node_hashes[d.index],
                         }
                         for d in sorted(self.nodes.values(), key=lambda d: d.node.id)
                     ],
@@ -974,7 +989,7 @@ class _Planner:
                             "source": endpoint(d.source),
                             "target": endpoint(d.target),
                             "duplicate_of": d.duplicate_of,
-                            "content": _content(self.raw_edges[d.index]),
+                            "content": edge_hashes[d.index],
                         }
                         for d in sorted(self.edges, key=lambda d: d.edge.id)
                     ],
@@ -998,11 +1013,12 @@ class _Planner:
         return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
-def _canonical_entry(raw: Any) -> str:
-    content = _content(raw) if isinstance(raw, dict) else raw
-    return json.dumps(
-        content, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str
-    )
+def _entry_hash(raw: Any) -> str:
+    content = _content(raw) if isinstance(raw, dict) and "revision" in raw else raw
+    encoded = json.dumps(
+        content, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str
+    ).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _content(raw: Dict[str, Any]) -> Dict[str, Any]:
