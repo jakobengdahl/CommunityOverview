@@ -987,3 +987,36 @@ def test_a_package_file_named_outside_utf8_is_invalid_and_everything_lists(harne
 def test_a_schema_endless_only_below_the_root_is_the_manifests_fault(harness, schema):
     harness.add("loop", "return {}", input_schema=schema)
     _rejected(invoke(harness.service, "loop", {"a": True}), "invalid_manifest")
+
+
+def test_every_text_a_run_reports_is_stored_as_unicode(harness):
+    from backend.functions.broker import ToolCallRecord
+    from backend.functions.runner import FunctionRunResult
+
+    harness.add("count", "return {}")
+    service = harness.service
+    job = harness.store.enqueue(_job(key="u", payload={"function_id": "count"}))
+    result = FunctionRunResult(
+        status="failed",
+        code="function_error",
+        message="m\ud800",
+        function_error_code="c\ud800",
+        tool_calls=[ToolCallRecord(tool="t\ud800", outcome="o\ud800", duration_ms=1)],
+        log="l\ud800",
+    )
+    service._record_outcome(job.id, service._load("count").manifest, result, False)
+    response = _client(service).get(f"/functions/runs/{job.id}")
+    assert response.status_code == 200
+    run = response.json()
+    assert run["error"]["message"] == "m?"
+    assert run["function_error_code"] == "c?"
+    assert run["tool_calls"]["calls"][0]["tool"] == "t?"
+    assert run["tool_calls"]["calls"][0]["outcome"] == "o?"
+    assert run["log"] == "l?"
+
+
+def test_output_that_is_not_unicode_fails_even_with_an_output_schema(harness):
+    harness.add("odd", 'return {"a": "\\ud800"}', output_schema={"type": "object"})
+    service = harness.service
+    run = finished(service, invoke(service, "odd"))
+    assert (run["status"], run["error"]["code"]) == ("failed", "invalid_output")

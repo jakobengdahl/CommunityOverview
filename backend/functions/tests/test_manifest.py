@@ -357,3 +357,28 @@ def test_a_manifest_with_a_number_json_cannot_represent_is_invalid(tmp_path, num
     loaded = load_function(str(tmp_path), "count-nodes")
     assert not loaded.valid
     assert "not valid JSON" in loaded.errors[0]
+
+
+def _open_descriptors():
+    return len(os.listdir("/proc/self/fd"))
+
+
+def test_reading_a_package_reports_why_it_is_missing_and_leaks_no_descriptor(
+    tmp_path,
+):
+    from backend.functions.manifest import read_package
+
+    (tmp_path / "plain-file").write_bytes(b"")
+    real = _write(tmp_path / "elsewhere", "count-nodes", {"main.py": b""})
+    os.symlink(real, tmp_path / "linked")
+    before = _open_descriptors()
+    for name in ("missing", "plain-file", "linked"):
+        loaded = read_package(str(tmp_path), name)
+        assert loaded.errors == ["the function directory does not exist"], name
+    directory = _write(
+        tmp_path, "count-nodes", {"function.json": b"{}", "main.py": b"", "d/x": b""}
+    )
+    assert read_package(str(tmp_path), "count-nodes").errors == []
+    os.symlink("/etc/passwd", directory / "d" / "y")
+    assert read_package(str(tmp_path), "count-nodes").errors
+    assert _open_descriptors() == before
