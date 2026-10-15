@@ -445,6 +445,9 @@ class _Stop(Exception):
 
 
 def _on_sigterm(signum, frame):
+    # A second stop request must not raise again outside the handling of the
+    # first, which would lose the final report.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
     raise _Stop()
 
 
