@@ -307,6 +307,8 @@ class FunctionBroker:
             )
 
         self._validate_arguments(spec, arguments)
+        if spec.method == "add_nodes":
+            self._refuse_reference_endpoints(arguments)
         call_args = dict(arguments)
         if spec.action == GRAPH_ACTION_MUTATE:
             call_args["event_origin"] = function_origin(
@@ -353,6 +355,42 @@ class FunctionBroker:
         # Round-trip so the function receives plain JSON (dates become strings);
         # handle_request then measures the whole response envelope.
         return json.loads(json.dumps(result, default=str))
+
+    def _refuse_reference_endpoints(self, arguments: Mapping[str, Any]) -> None:
+        """Refuse edge endpoints that name a federated reference node.
+
+        Storage resolves an endpoint that is not a node id by name, across all
+        nodes, so a name can land on a host-managed reference node. Names of
+        nodes created in the same call are fine: storage resolves those to the
+        new nodes. Any other name shared with a reference node is refused,
+        whichever node the name would resolve to.
+        """
+        edges = arguments.get("edges") or []
+        names = {
+            edge.get(end)
+            for edge in edges
+            if isinstance(edge, Mapping)
+            for end in ("source", "target")
+            if isinstance(edge.get(end), str)
+        }
+        if not names:
+            return
+        nodes = self._service.storage.nodes
+        new_names = {
+            node.get("name")
+            for node in arguments.get("nodes") or []
+            if isinstance(node, Mapping)
+        }
+        candidates = {n for n in names if n not in nodes and n not in new_names}
+        if not candidates:
+            return
+        for node_id, node in list(nodes.items()):
+            if node_id.startswith(FEDERATED_NODE_PREFIX) and node.name in candidates:
+                raise BrokerError(
+                    ERR_INVALID_ARGUMENTS,
+                    "An edge endpoint names a federated reference node; "
+                    "use the id of a local node.",
+                )
 
     @staticmethod
     def _validate_arguments(spec: ToolSpec, arguments: Mapping[str, Any]) -> None:

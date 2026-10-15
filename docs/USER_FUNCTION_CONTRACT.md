@@ -347,7 +347,8 @@ call that breaks one is refused with `invalid_arguments`:
   `adopted_from` and the related keys) are refused at the top level of a node
   or edge and inside its `metadata`, and `metadata` must be an object; node ids
   in the reserved `federated::` namespace are refused, whether created, updated
-  or named as an edge endpoint; and `graph.update_node` changes `metadata` only
+  or used as an edge endpoint, and so is an edge endpoint given by a name that a
+  federated reference node carries; and `graph.update_node` changes `metadata` only
   with `metadata_merge: true`, so keys the function does not name are kept.
 - Work per call is bounded: `limit` is an integer from 0 to 500 and `depth`
   from 0 to 3.

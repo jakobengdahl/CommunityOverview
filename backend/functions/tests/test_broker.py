@@ -790,3 +790,48 @@ def test_top_level_scope_keys_in_updates_are_refused(service, key):
     )
     assert error_code(response) == "invalid_arguments"
     assert "fixed by the host" in response["error"]["message"]
+
+
+def test_an_edge_endpoint_naming_a_federated_reference_node_is_refused(
+    service, storage
+):
+    storage.add_nodes(
+        [
+            Node(name="Local", type=NodeType.ACTOR),
+            Node(
+                id="federated::g2::n1",
+                name="Remote Ref",
+                type=NodeType.ACTOR,
+                metadata={"is_federated_reference": True, "read_only": True},
+            ),
+        ],
+        [],
+    )
+    broker = make_broker(service)
+    edge = {"source": "Local", "target": "Remote Ref", "type": "RELATES_TO"}
+    response = call(broker, "graph.add", {"nodes": [], "edges": [edge]})
+    assert error_code(response) == "invalid_arguments"
+    assert service.calls == []
+    assert not any(e.target.startswith("federated::") for e in storage.edges.values())
+
+
+def test_an_edge_endpoint_naming_a_node_created_in_the_same_call_is_allowed(
+    service, storage
+):
+    storage.add_nodes(
+        [Node(id="federated::g2::n1", name="Shared", type=NodeType.ACTOR)], []
+    )
+    broker = make_broker(service)
+    response = call(
+        broker,
+        "graph.add",
+        {
+            "nodes": [
+                {"name": "Shared", "type": "Actor"},
+                {"name": "Other", "type": "Actor"},
+            ],
+            "edges": [{"source": "Other", "target": "Shared", "type": "RELATES_TO"}],
+        },
+    )
+    assert "result" in response, response
+    assert not any(e.target.startswith("federated::") for e in storage.edges.values())
