@@ -82,7 +82,9 @@ Choices it made inside the decisions above:
   revision, not absences a listing found — the incident edges walked for a
   subtype re-judge, or a duplicate-triple lookup that matched nothing. A write
   to a *different* entity between two reads is an ordinary concurrent write,
-  not a restart. The commit's checks (§3) must cover both.
+  not a restart. Live nodes are updated in place, so one read can also see a
+  concurrent update's fields under the revision it had before. The commit's
+  checks (§3) must cover all three.
 
 ### Slice 1 measurements and thresholds (§8)
 

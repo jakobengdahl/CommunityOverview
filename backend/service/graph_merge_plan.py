@@ -398,6 +398,7 @@ class _Planner:
         self.archived_attach_edges: List[str] = []
         # Edges attached to the live node a skip collision kept (ADR §2 (a)).
         self.skipped_attach_edges: List[str] = []
+        self.pair_listings: Dict[Tuple[str, str], Dict[str, List[Edge]]] = {}
         # (decision, location, outcome it had before the duplicate check)
         self.pending_duplicates: List[Tuple[_EdgeDecision, str, str]] = []
 
@@ -710,25 +711,35 @@ class _Planner:
         edge: Edge,
         source: _Endpoint,
         target: _Endpoint,
-        exclude: Tuple[str, ...] = (),
+        exclude: frozenset = frozenset(),
     ) -> Optional[str]:
         if not (source.has_live_edges and target.has_live_edges):
             return None
         # The live edge with the document edge's own id counts too: renamed,
         # the document edge would sit beside it as a second identical triple.
-        listing = self.view.edges_from_to(source.node_id, target.node_id)
-        matches = sorted(
-            (
-                live
-                for live in listing
-                if live.type_str == edge.type_str and live.id not in exclude
-            ),
-            key=lambda live: live.id,
+        same_type = self._pair_index(source.node_id, target.node_id).get(
+            edge.type_str, ()
         )
-        if not matches:
+        match = next((live for live in same_type if live.id not in exclude), None)
+        if match is None:
             return None
-        self._confirm_listed_edge(matches[0])
-        return matches[0].id
+        self._confirm_listed_edge(match)
+        return match.id
+
+    def _pair_index(self, source: str, target: str) -> Dict[str, List[Edge]]:
+        """The live edges from ``source`` to ``target`` by type, sorted by id:
+        listed once per attempt, so many document edges between one heavily
+        connected pair cost one scan of its live edges, not one each."""
+        key = (source, target)
+        index = self.pair_listings.get(key)
+        if index is None:
+            index = {}
+            for live in sorted(
+                self.view.edges_from_to(source, target), key=lambda e: e.id
+            ):
+                index.setdefault(live.type_str, []).append(live)
+            self.pair_listings[key] = index
+        return index
 
     def _confirm_listed_edge(self, listed: Edge) -> None:
         # A listing and a by-id read are two reads; an edge deleted or
@@ -741,12 +752,10 @@ class _Planner:
     def _settle_duplicates(self) -> None:
         """A live edge this plan retypes is no longer the triple it was, so it
         cannot be what a document edge duplicates."""
-        retyped = tuple(
-            sorted(
-                d.edge.id
-                for d in self.edges
-                if d.outcome == "overwrite" and "type" in d.changes
-            )
+        retyped = frozenset(
+            d.edge.id
+            for d in self.edges
+            if d.outcome == "overwrite" and "type" in d.changes
         )
         if not retyped:
             return

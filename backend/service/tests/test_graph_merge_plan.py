@@ -1151,12 +1151,15 @@ class TestGenerationRecheck:
             {
                 "nodes": [],
                 "edges": [
-                    {"id": "d1", "source": "a1", "target": "i1", "type": "BELONGS_TO"}
+                    {"id": f"d{i}", "source": "a1", "target": "i1", "type": rel}
+                    for i, rel in enumerate(["BELONGS_TO", "BELONGS_TO", "RELATES_TO"])
                 ],
             },
             MergeParameters(),
             view,
         )
+        # One scan of the pair's live edges, however many document edges
+        # share it, so a heavily connected pair costs its edges once.
         assert view.listings == 1
 
     def test_a_node_removed_mid_walk_restarts_the_plan(self, storage, monkeypatch):
