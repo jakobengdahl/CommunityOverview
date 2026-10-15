@@ -28,7 +28,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from backend.functions import sandbox
 from backend.functions.broker import FunctionBroker, ToolCallRecord
@@ -623,12 +623,19 @@ def run_function(
     envelope: Dict[str, Any],
     *,
     max_output_bytes: int = MAX_OUTPUT_BYTES,
+    on_start: Optional[Callable[[RunHandle], None]] = None,
 ) -> FunctionRunResult:
-    """Execute one run: start it, serve its tool calls, terminate it."""
+    """Execute one run: start it, serve its tool calls, terminate it.
+
+    ``on_start`` receives the handle once the process runs, so that an
+    operator can cancel the run (``handle.kill()``) while it is in progress.
+    """
     deadline = time.monotonic() + spec.timeout_seconds
     handle = runner.start(spec)
     outcome: Optional[SessionOutcome] = None
     try:
+        if on_start is not None:
+            on_start(handle)
         outcome = run_session(
             broker,
             envelope,

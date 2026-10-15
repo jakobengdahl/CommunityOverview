@@ -51,6 +51,8 @@ from backend.ui import ChatService, DocumentService, create_ui_router
 from backend.agents import AgentRegistry, AgentsSettings
 from backend.agents.execution import SqliteExecutionStore
 from backend.agents.execution.import_worker import recover_import_jobs
+from backend.functions.service import FunctionService
+from backend.functions.settings import FunctionsSettings, FunctionsSettingsError
 from backend.federation import (
     FederationManager,
     load_federation_config,
@@ -68,6 +70,7 @@ from .session_stream import register_session_stream
 from .tool_routes import register_tool_routes
 from .system_routes import register_system_routes
 from .agent_routes import register_agent_routes
+from .function_routes import register_function_routes
 
 logger = logging.getLogger(__name__)
 
@@ -367,6 +370,29 @@ def create_app(
 
     # Federation + agent-system status endpoints
     register_agent_routes(app, agent_registry, graph_storage, federation_manager)
+
+    # User functions (docs/USER_FUNCTION_CONTRACT.md): runs are recorded in the
+    # run-history store agent runs use, with the same retention.
+    try:
+        function_settings = FunctionsSettings.from_env()
+    except FunctionsSettingsError:
+        # A malformed setting must not take the application down; with it
+        # unread, no function is enabled.
+        logger.exception("User-function settings are invalid; no function is enabled")
+        function_settings = FunctionsSettings()
+    function_service = FunctionService(
+        graph_service,
+        agent_registry.run_history_store,
+        settings=function_settings,
+        read_cutoff=agent_registry.run_history_read_cutoff,
+    )
+    app.state.function_service = function_service
+    threading.Thread(
+        target=function_service.log_runner_level,
+        name="function-runner-probe",
+        daemon=True,
+    ).start()
+    register_function_routes(app, function_service, graph_service)
 
     # Shutdown handler for graceful cleanup
     @app.on_event("shutdown")
