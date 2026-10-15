@@ -29,3 +29,4 @@ ADRs carry only the technical decision.
 | [0010](0010-attachment-content-access-for-agents-and-assistant.md) | Agent and assistant access to node attachment content | Proposed |
 | [0011](0011-sandboxed-user-functions.md) | Sandboxed user-defined functions: first contract | Proposed |
 | [0012](0012-user-function-isolation.md) | User-function isolation: a hardened-subprocess default runner | Proposed |
+| [0013](0013-graph-import-merge-mode.md) | Graph import: MERGE mode beside REPLACE | Proposed |
