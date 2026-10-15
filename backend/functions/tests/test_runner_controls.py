@@ -78,6 +78,13 @@ def _run_dirs(prefix):
     return set(glob.glob(os.path.join(tempfile.gettempdir(), prefix + "*")))
 
 
+@pytest.fixture
+def private_tmp(monkeypatch, tmp_path):
+    """Run directories go to a directory no concurrent run shares."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    return tmp_path
+
+
 # --- a start that cannot be confined is not a run ---------------------------------
 
 
@@ -86,7 +93,9 @@ def test_a_control_that_cannot_be_applied_aborts_the_start(
 ):
     runner.probe()
     limits = runner._limits(5, 64)
-    monkeypatch.setattr(runner, "_limits", lambda *_: dict(limits, memory_mib=-1))
+    monkeypatch.setattr(
+        runner, "_limits", lambda *_: dict(limits, file_size_mib="not a number")
+    )
     result = execute(runner, storage, "raise SystemExit('must never run')\n")
     assert (result.status, result.code) == ("failed", "runner_lost")
     assert "must never run" not in result.log
@@ -206,10 +215,9 @@ def test_without_landlock_the_seccomp_controls_still_hold():
     assert probe.missing == ("filesystem", "isolation")
 
 
-def test_the_probe_leaves_no_directory_behind():
-    before = _run_dirs("fnprobe-")
+def test_the_probe_leaves_no_directory_behind(private_tmp):
     HardenedSubprocessRunner().probe()
-    assert _run_dirs("fnprobe-") <= before
+    assert _run_dirs("fnprobe-") == set()
 
 
 def test_third_party_packages_beside_the_standard_library_are_not_readable(
@@ -521,18 +529,20 @@ def test_the_run_ends_when_its_host_dies(tmp_path):
 # --- cleanup and inputs -----------------------------------------------------------
 
 
-def test_a_run_leaves_no_descriptor_or_directory_behind(runner, storage):
+def test_a_run_leaves_no_descriptor_or_directory_behind(runner, storage, private_tmp):
     execute(runner, storage, handler("out['warm'] = True"))
-    fds, dirs = _open_fds(), _run_dirs("fnrun-")
+    fds = _open_fds()
     execute(runner, storage, handler("out['again'] = True"))
     time.sleep(0.2)
     assert _open_fds() == fds
-    assert _run_dirs("fnrun-") == dirs
+    assert _run_dirs("fnrun-") == set()
 
 
-def test_a_failed_spawn_leaves_no_descriptor_or_directory_behind(runner, monkeypatch):
+def test_a_failed_spawn_leaves_no_descriptor_or_directory_behind(
+    runner, monkeypatch, private_tmp
+):
     runner.probe()
-    fds, dirs = _open_fds(), _run_dirs("fnrun-")
+    fds = _open_fds()
 
     def refuse(*args, **kwargs):
         raise OSError("spawn refused")
@@ -541,7 +551,7 @@ def test_a_failed_spawn_leaves_no_descriptor_or_directory_behind(runner, monkeyp
     with pytest.raises(OSError):
         runner.start(spec("pass\n"))
     assert _open_fds() == fds
-    assert _run_dirs("fnrun-") == dirs
+    assert _run_dirs("fnrun-") == set()
 
 
 @pytest.mark.parametrize(

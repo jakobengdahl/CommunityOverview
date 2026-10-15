@@ -442,9 +442,13 @@ def test_no_process_can_be_started_but_threads_work(runner, storage):
                 "/usr/bin/true", ["true"], {}))
             attempt("setsid", lambda: os.setsid())
             attempt("setpgid", lambda: os.setpgid(0, 0))
-            attempt("unshare", lambda: os.unshare(os.CLONE_NEWUSER))
-            attempt("mknod", lambda: os.mknod("node", 0o600 | 0o010000))
             libc = ctypes.CDLL(None, use_errno=True)
+            def unshare_user_namespace():
+                # os.unshare exists only from Python 3.12.
+                if libc.unshare(0x10000000) != 0:
+                    raise PermissionError(ctypes.get_errno(), "unshare")
+            attempt("unshare", unshare_user_namespace)
+            attempt("mknod", lambda: os.mknod("node", 0o600 | 0o010000))
             # A thread with a namespace of its own; the filter refuses it
             # before the kernel would start it on a bogus stack.
             def namespaced_thread():
