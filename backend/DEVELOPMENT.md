@@ -513,11 +513,11 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | POST | `/agents/{id}/trigger` | Fire a scheduled agent immediately (used by GCP Cloud Scheduler) |
 | GET | `/functions` | List user functions with their validation state, enablement and missing grants (read access) |
 | GET | `/functions/runner` | The function runner's isolation level, missing controls and runtimes (read access) |
-| GET | `/functions/runs` | List function runs (filter by `function_id`, `status`, `limit` up to 100), newest-first, inside the run-history read window. Items leave out `output` and `log` (read them from the run itself). A reader with narrowed graph visibility sees only the status, error code, timing and tool names of runs they did not start (`content_hidden` marks them) |
+| GET | `/functions/runs` | List function runs (filter by `function_id`, `status`, `limit` up to 100), newest-first, inside the run-history read window. Items leave out `output` and `log` (read them from the run itself). `failed` and `timed_out`, and `cancelled` and `rejected`, share a store state: a filter on one of them looks at the newest `4 × limit` records of that state. A reader with narrowed graph visibility sees only the status, error code, timing and tool names of runs they did not start (`content_hidden` marks them) |
 | GET | `/functions/runs/{run_id}` | Get one function run record (`docs/USER_FUNCTION_CONTRACT.md` §11) |
 | POST | `/functions/runs/{run_id}/cancel` | Terminate a run in progress (mutate access); `409` when it is not running |
 | GET | `/functions/{id}` | Get one function's manifest summary and state |
-| POST | `/functions/{id}/invoke` | Invoke a function as the calling actor. Body: `input`, optional `idempotency_key` and `correlation_id` (or the `x-correlation-id` header). `202` with the run record when it starts; `200` with the earlier run for a repeated key or with a `rejected` record; `403` without read access (no record) |
+| POST | `/functions/{id}/invoke` | Invoke a function as the calling actor. Body: `input`, optional `idempotency_key` and `correlation_id` (or the `x-correlation-id` header). `202` with the run record when it starts; `200` with the earlier run for a repeated key or with a `rejected` record; `403` without read access (no record); `503` with `Retry-After` while every input-check slot is taken (no record) |
 
 ### Node attachments
 

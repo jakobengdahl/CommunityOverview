@@ -213,7 +213,29 @@ def _check_schema(name, value, errors) -> Optional[Dict[str, Any]]:
     except SchemaError as exc:
         errors.append(f"{name} is not a valid JSON Schema: {exc.message}")
         return None
+    if _refers_outside(value):
+        errors.append(f"{name} may refer only within itself ($ref starting with '#')")
+        return None
     return value
+
+
+_REFERENCE_KEYWORDS = ("$ref", "$dynamicRef", "$recursiveRef")
+
+
+def _refers_outside(schema: Any) -> bool:
+    """Whether a schema names anything but a location inside itself."""
+    if isinstance(schema, list):
+        return any(_refers_outside(item) for item in schema)
+    if not isinstance(schema, dict):
+        return False
+    for keyword, value in schema.items():
+        if keyword in _REFERENCE_KEYWORDS and not (
+            isinstance(value, str) and value.startswith("#")
+        ):
+            return True
+        if _refers_outside(value):
+            return True
+    return False
 
 
 def validate_manifest(

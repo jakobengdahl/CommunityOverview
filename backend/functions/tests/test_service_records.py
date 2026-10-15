@@ -305,3 +305,126 @@ def test_a_job_read_by_its_key_is_a_copy():
     store.enqueue(_job(key="copy"))
     store.get_by_key("copy").payload["changed"] = True
     assert "changed" not in store.get_by_key("copy").payload
+
+
+# --- review round 4 --------------------------------------------------------------------
+
+
+def test_a_schema_check_never_fetches_a_remote_reference():
+    import http.server
+
+    from backend.functions.schema_check import SchemaCheckFailed, schema_problem
+
+    hits = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            hits.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"enum": ["secret"]}')
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}/leak"
+        with pytest.raises(SchemaCheckFailed):
+            schema_problem({"$ref": url}, "x")
+    finally:
+        server.shutdown()
+    assert hits == []
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"$ref": "http://example.invalid/s.json"},
+        {"properties": {"a": {"$ref": "other.json"}}},
+        {"$dynamicRef": "https://example.invalid/x"},
+        {"$ref": 5},
+    ],
+)
+def test_a_manifest_schema_may_refer_only_within_itself(schema):
+    from backend.functions.manifest import validate_manifest
+    from backend.functions.tests.test_service import manifest
+
+    _, errors = validate_manifest(
+        dict(manifest("count-nodes"), input_schema=schema),
+        "count-nodes",
+        {"main.py": b"", "function.json": b"{}"},
+    )
+    assert errors
+
+
+def test_a_local_reference_is_allowed():
+    from backend.functions.manifest import validate_manifest
+    from backend.functions.tests.test_service import manifest
+
+    schema = {
+        "$defs": {"n": {"type": "integer"}},
+        "properties": {"n": {"$ref": "#/$defs/n"}},
+    }
+    _, errors = validate_manifest(
+        dict(manifest("count-nodes"), input_schema=schema),
+        "count-nodes",
+        {"main.py": b"", "function.json": b"{}"},
+    )
+    assert errors == []
+
+
+def test_a_busy_function_rejects_before_checking_input(harness, monkeypatch):
+    import backend.functions.service as service_module
+
+    harness.add("sleeper", "time.sleep(60)", input_schema={"type": "object"})
+    service = harness.service
+    first = invoke(service, "sleeper")
+    checks = []
+    monkeypatch.setattr(
+        service_module, "schema_problem", lambda *a, **k: checks.append(1)
+    )
+    _rejected(invoke(service, "sleeper"), "busy")
+    assert checks == []
+    service.cancel_run(first["id"])
+    finished(service, first)
+
+
+def test_invocations_beyond_the_check_slots_are_turned_away(harness):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    import backend.functions.schema_check as schema_check
+    from backend.api_host.function_routes import register_function_routes
+
+    harness.add("typed", "return {}", input_schema={"type": "object"})
+    service = harness.service
+    app = FastAPI()
+    register_function_routes(app, service, service._graph_service)
+    client = TestClient(app)
+    taken = 0
+    while schema_check._slots.acquire(blocking=False):
+        taken += 1
+    try:
+        response = client.post("/functions/typed/invoke", json={"input": {}})
+        assert response.status_code == 503
+        assert response.headers["retry-after"] == "1"
+    finally:
+        for _ in range(taken):
+            schema_check._slots.release()
+    assert harness.store.list_jobs() == []
+
+
+def test_deeply_nested_input_is_invalid_input(harness):
+    harness.add(
+        "typed",
+        "return {}",
+        input_schema={"type": "object", "properties": {"a": {"uniqueItems": True}}},
+    )
+    deep = []
+    for _ in range(600):
+        deep = [deep]
+    _rejected(invoke(harness.service, "typed", {"a": [deep, deep]}), "invalid_input")

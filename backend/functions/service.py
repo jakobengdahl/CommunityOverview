@@ -50,7 +50,11 @@ from backend.functions.runner import (
     RunSpec,
     run_function,
 )
-from backend.functions.schema_check import SchemaCheckFailed, schema_problem
+from backend.functions.schema_check import (
+    SchemaCheckBusy,
+    SchemaCheckFailed,
+    schema_problem,
+)
 from backend.functions.settings import FunctionsSettings
 from backend.runtime.authorization import (
     GRAPH_ACTION_MUTATE,
@@ -387,6 +391,10 @@ class FunctionService:
             )
         if GRANT_GRAPH_WRITE in manifest.grants:
             self._require_access(hook, GRAPH_ACTION_MUTATE)
+        # Checked again under the admission lock; this early look only spares
+        # the input check for a run that could not start anyway.
+        if manifest.id in self._busy:
+            raise _Rejected(CODE_BUSY, "Another run of this function is in progress.")
         _validate_input(manifest, input_value)
         if self._settings.isolation_minimum == LEVEL_FULL and probe.level != LEVEL_FULL:
             raise _Rejected(
@@ -768,7 +776,9 @@ def _validate_input(manifest: Manifest, input_value: Any) -> None:
             )
         return
     try:
-        problem = schema_problem(manifest.input_schema, input_value)
+        problem = schema_problem(manifest.input_schema, input_value, wait=False)
+    except SchemaCheckBusy:
+        raise
     except SchemaCheckFailed as exc:
         raise _Rejected(
             CODE_INVALID_MANIFEST, f"input_schema could not be applied ({exc})."

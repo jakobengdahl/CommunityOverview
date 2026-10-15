@@ -7,6 +7,7 @@ from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from backend.functions.runner import RunnerUnavailable
+from backend.functions.schema_check import SchemaCheckBusy
 from backend.functions.service import (
     RUN_STATUSES,
     STATUS_RUNNING,
@@ -141,6 +142,12 @@ def register_function_routes(
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             except RunnerUnavailable as exc:
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
+            except SchemaCheckBusy as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Too many invocations are being checked; retry shortly.",
+                    headers={"Retry-After": "1"},
+                ) from exc
         # A repeated key returns the earlier run, which may be someone else's.
         return JSONResponse(
             view_run(run, viewer),

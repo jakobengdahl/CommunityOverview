@@ -213,11 +213,14 @@ A manifest is **rejected**, and the function cannot run, when:
   grant, a limit above the contract maximum in §8, or any reserved field;
 - `entry_point` does not resolve to a file inside the function directory.
 
-The host checks `input` and `result.output` against their schemas in a
-separate process with a time and memory limit, since a schema can cost far
-more than its size suggests. A check that cannot finish within that limit
-counts as the schema not applying: the invocation is `rejected` with
-`invalid_manifest`, or the run `failed` with `invalid_output`.
+A schema may refer only to locations inside itself (`$ref` values starting
+with `#`); the host never resolves a reference over the network. It checks
+`input` and `result.output` against their schemas in a separate process with
+a time and memory limit, since a schema can cost far more than its size
+suggests. A value nested too deeply to check fails its schema (`invalid_input`
+or `invalid_output`); a check that cannot finish within its limits counts as
+the schema not applying: the invocation is `rejected` with `invalid_manifest`,
+or the run `failed` with `invalid_output`.
 
 Top-level fields this contract does not name are ignored, so that tooling may
 add its own annotations. A field §4.2 lists as reserved is not unknown: it is
@@ -297,7 +300,8 @@ A run is a durable job in the `ExecutionStore`
 idempotency key is `fn:<function_id>:<key>`, where `<key>` is the invocation's
 `idempotency_key`, or a fresh id when none is given. An invocation that repeats
 a key returns the existing run instead of starting a new one, in any state,
-until retention purges that run. Callers that retry a manual invocation after a
+until retention purges that run, also when the run is older than the
+run-history read window. Callers that retry a manual invocation after a
 network failure therefore pass the same key. A `rejected` run also holds its
 key: after fixing the cause (for example, enabling the function), invoke with a
 new key.
