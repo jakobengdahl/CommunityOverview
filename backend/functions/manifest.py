@@ -46,7 +46,7 @@ MAX_FILES = 200
 MAX_PACKAGE_BYTES = 5 * 1024 * 1024
 MAX_MANIFEST_BYTES = 256 * 1024
 
-_ID_PATTERN = re.compile(r"^[a-z0-9-]{3,64}$")
+_ID_PATTERN = re.compile(r"[a-z0-9-]{3,64}")
 # Path segments the /functions API uses for itself.
 RESERVED_IDS = frozenset({"runs", "runner"})
 _ENTRY_SUFFIXES = {"python": (".py",), "node": (".js", ".mjs")}
@@ -226,7 +226,7 @@ def validate_manifest(
 
     function_id = _expect(document, "id", str, errors)
     if function_id is not None:
-        if not _ID_PATTERN.match(function_id):
+        if not _ID_PATTERN.fullmatch(function_id):
             errors.append("id must be 3-64 lowercase letters, digits or '-'")
         elif function_id in RESERVED_IDS:
             errors.append(f"id {function_id!r} is reserved")
