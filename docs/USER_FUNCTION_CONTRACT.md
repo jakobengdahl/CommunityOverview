@@ -345,9 +345,10 @@ call that breaks one is refused with `invalid_arguments`:
   provenance. The federation and provenance keys (`origin_graph_id`,
   `origin_node_id`, `federation_distance`, `is_federated`, `read_only`,
   `adopted_from` and the related keys) are refused at the top level of a node
-  or edge and inside its `metadata`; node ids in the reserved `federated::`
-  namespace are refused; and `graph.update_node` changes `metadata` only with
-  `metadata_merge: true`, so keys the function does not name are kept.
+  or edge and inside its `metadata`, and `metadata` must be an object; node ids
+  in the reserved `federated::` namespace are refused, whether created, updated
+  or named as an edge endpoint; and `graph.update_node` changes `metadata` only
+  with `metadata_merge: true`, so keys the function does not name are kept.
 - Work per call is bounded: `limit` is an integer from 0 to 500 and `depth`
   from 0 to 3.
 

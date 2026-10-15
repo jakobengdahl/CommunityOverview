@@ -275,7 +275,7 @@ class FunctionBroker:
         self.tool_calls.append(
             ToolCallRecord(
                 # Only names the contract defines: the function chose this text.
-                tool=name if name in TOOLS else "",
+                tool=name if isinstance(name, str) and name in TOOLS else "",
                 outcome=outcome,
                 duration_ms=int((time.monotonic() - started) * 1000),
             )
@@ -373,20 +373,18 @@ class FunctionBroker:
                 raise BrokerError(ERR_INVALID_ARGUMENTS, "nodes must be a list.")
             for node in nodes:
                 _refuse_graph_scope(node)
-                node_id = node.get("id") if isinstance(node, Mapping) else None
-                if isinstance(node_id, str) and node_id.startswith(
-                    FEDERATED_NODE_PREFIX
-                ):
-                    raise BrokerError(
-                        ERR_INVALID_ARGUMENTS,
-                        f"Node ids starting with {FEDERATED_NODE_PREFIX} are reserved.",
-                    )
+                if isinstance(node, Mapping):
+                    _refuse_reserved_id(node.get("id"))
             edges = arguments.get("edges", [])
             if not isinstance(edges, list):
                 raise BrokerError(ERR_INVALID_ARGUMENTS, "edges must be a list.")
             for edge in edges:
                 _refuse_graph_scope(edge)
+                if isinstance(edge, Mapping):
+                    for end in ("source", "target"):
+                        _refuse_reserved_id(edge.get(end))
         if spec.method == "update_node":
+            _refuse_reserved_id(arguments.get("node_id"))
             updates = arguments.get("updates")
             _refuse_graph_scope(updates)
             if (
@@ -435,13 +433,27 @@ _SCOPE_KEYS = frozenset(_FEDERATION_BOOKKEEPING_METADATA_KEYS) | {
     "is_federated_reference",
     "read_only",
     "adopted_from",
+    "is_federated_lineage",
 }
+
+
+def _refuse_reserved_id(node_id: Any) -> None:
+    """Federated reference nodes are host-managed mirrors of remote nodes."""
+    if isinstance(node_id, str) and node_id.startswith(FEDERATED_NODE_PREFIX):
+        raise BrokerError(
+            ERR_INVALID_ARGUMENTS,
+            f"Node ids starting with {FEDERATED_NODE_PREFIX} are reserved.",
+        )
 
 
 def _refuse_graph_scope(payload: Any) -> None:
     if not isinstance(payload, Mapping):
         return
     metadata = payload.get("metadata")
+    if metadata is not None and not isinstance(metadata, Mapping):
+        # The service coerces some non-mapping shapes (a list of pairs) into a
+        # dict after this check would have run; accept only a mapping.
+        raise BrokerError(ERR_INVALID_ARGUMENTS, "metadata must be an object.")
     found = set(payload) & _SCOPE_KEYS
     if isinstance(metadata, Mapping):
         found |= set(metadata) & _SCOPE_KEYS

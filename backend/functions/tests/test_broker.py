@@ -713,3 +713,73 @@ def test_only_an_explicit_false_success_is_a_failure(storage, hook):
         {"query": "q"},
     )
     assert "result" in response
+
+
+def test_metadata_must_be_an_object_so_coerced_shapes_cannot_carry_scope(
+    service, storage
+):
+    broker = make_broker(service)
+    pairs = [["origin_graph_id", "other-graph"], ["is_federated", True]]
+    attempts = [
+        (
+            "graph.add",
+            {"nodes": [{"type": "Actor", "name": "X", "foo": 1, "metadata": pairs}]},
+        ),
+        (
+            "graph.add",
+            {"nodes": [], "edges": [{"source": "a", "target": "b", "metadata": pairs}]},
+        ),
+        (
+            "graph.update_node",
+            {"node_id": "n", "updates": {"metadata": pairs}, "metadata_merge": True},
+        ),
+    ]
+    for tool, arguments in attempts:
+        assert error_code(call(broker, tool, arguments)) == "invalid_arguments", tool
+    assert service.calls == []
+    assert storage.search_nodes("X") == []
+
+
+@pytest.mark.parametrize("name", [["graph.search"], {"a": 1}, 7])
+def test_a_non_string_tool_name_is_answered_never_raised(service, name):
+    broker = make_broker(service)
+    response = broker.handle_request(
+        {"jsonrpc": "2.0", "id": 1, "method": "tool", "params": {"name": name}}
+    )
+    assert error_code(response) == "invalid_arguments"
+    refused = broker.refuse(
+        {"id": 2, "params": {"name": name}}, "concurrent_call", "busy"
+    )
+    assert error_code(refused) == "concurrent_call"
+    assert all(record.tool == "" for record in broker.tool_calls)
+
+
+def test_federated_reference_nodes_are_not_writable(service):
+    broker = make_broker(service)
+    update = call(
+        broker,
+        "graph.update_node",
+        {"node_id": "federated::g2::n1", "updates": {"name": "hijacked"}},
+    )
+    assert error_code(update) == "invalid_arguments"
+    for end in ("source", "target"):
+        edge = {
+            "source": "a",
+            "target": "b",
+            "type": "RELATES_TO",
+            end: "federated::g2::n1",
+        }
+        response = call(broker, "graph.add", {"nodes": [], "edges": [edge]})
+        assert error_code(response) == "invalid_arguments", end
+    assert service.calls == []
+
+
+@pytest.mark.parametrize("key", ["origin_graph_id", "is_federated_lineage"])
+def test_top_level_scope_keys_in_updates_are_refused(service, key):
+    response = call(
+        make_broker(service),
+        "graph.update_node",
+        {"node_id": "n", "updates": {key: "x"}},
+    )
+    assert error_code(response) == "invalid_arguments"
+    assert "fixed by the host" in response["error"]["message"]
