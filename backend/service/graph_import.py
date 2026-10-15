@@ -73,24 +73,15 @@ class ImportValidationResult:
 
 # A validation error lists every bad item, so one entity with a million bad
 # list entries would otherwise produce a message hundreds of times the size
-# of the request. A few located details are enough to fix a document.
-_MAX_ERROR_DETAILS = 5
+# of the request. Its first lines are enough to fix a document.
 _MAX_ERROR_CHARS = 500
 
 
 def describe_invalid(exc: Exception) -> str:
-    """A bounded, located description of why an entity failed to construct."""
-    if isinstance(exc, PydanticValidationError):
-        details = [
-            f"{'.'.join(str(part) for part in error.get('loc', ()))}: {error.get('msg')}"
-            for error in exc.errors(include_url=False)[:_MAX_ERROR_DETAILS]
-        ]
-        count = exc.error_count()
-        text = f"{count} validation error(s): " + "; ".join(details)
-        if count > _MAX_ERROR_DETAILS:
-            text += f"; and {count - _MAX_ERROR_DETAILS} more"
-    else:
-        text = str(exc)
+    """A bounded description of why an entity failed to construct: the
+    validator's own text, cut. Its first lines name the count and the
+    first located failures."""
+    text = str(exc)
     if len(text) > _MAX_ERROR_CHARS:
         text = text[:_MAX_ERROR_CHARS] + "…"
     return text

@@ -402,6 +402,11 @@ def compute_merge_plan(
             plan = _Planner(raw_nodes, raw_edges, parameters, view, generation).run()
         except LiveGraphMoved:
             continue
+        except RecursionError as exc:
+            raise MergeRequestError(
+                "validation_failed",
+                "the import document is nested too deeply to plan",
+            ) from exc
         except RuntimeError as exc:
             # The planner reads without the storage lock; a live write that
             # changes an adjacency map mid-iteration ("dictionary changed size
@@ -896,9 +901,8 @@ class _Planner:
                         live_edge.id,
                         f"nodes[{decision.index}]",
                         "incident_edge_inapplicable",
-                        f"overwriting the subtypes of '{decision.node.id}' would "
-                        f"leave live edge '{live_edge.id}' inapplicable: "
-                        + (verdict.get("message") or ""),
+                        "overwriting this node's subtypes would leave the live "
+                        "edge inapplicable: " + (verdict.get("message") or ""),
                     )
 
     def _resulting_state(self, node_id: str) -> Optional[Tuple[str, Tuple[str, ...]]]:
@@ -966,7 +970,7 @@ class _Planner:
                         "reason": d.reason,
                     }
                     if kind == "edge" and d.duplicate_of:
-                        entry["live_edge_id"] = d.duplicate_of
+                        entry["live_edge_id"] = _shown(d.duplicate_of)
                     skips.append(entry)
 
         overwritten_with_attachments: List[str] = []
@@ -1121,19 +1125,26 @@ class _Planner:
         return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
-_ENTRY_ENCODER = json.JSONEncoder(
-    sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str
-)
-
-
 def _entry_hash(raw: Any) -> str:
     content = _content(raw) if isinstance(raw, dict) and "revision" in raw else raw
-    # Streamed into the hash chunk by chunk, so no escaped copy of the whole
-    # entry is built; surrogatepass keeps lone surrogates hashable.
-    digest = hashlib.sha256()
-    for chunk in _ENTRY_ENCODER.iterencode(content):
-        digest.update(chunk.encode("utf-8", "surrogatepass"))
-    return digest.hexdigest()
+    # One-shot (C) encoding without escaping, so an entry costs about its own
+    # text twice over (the string, then its bytes) and nesting is not walked
+    # by Python recursion; surrogatepass keeps lone surrogates hashable.
+    encoded = json.dumps(
+        content, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str
+    ).encode("utf-8", "surrogatepass")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+# A live id can be any length and one can be named by every document edge,
+# so the report shows a bounded prefix of it rather than repeating it whole.
+_SHOWN_ID_CHARS = 256
+
+
+def _shown(value: str) -> str:
+    if len(value) <= _SHOWN_ID_CHARS:
+        return value
+    return value[:_SHOWN_ID_CHARS] + "…"
 
 
 def _content(raw: Dict[str, Any]) -> Dict[str, Any]:

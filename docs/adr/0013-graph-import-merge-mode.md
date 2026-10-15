@@ -104,7 +104,7 @@ a tuned benchmark machine; three runs.
 
 | Figure | Measured | Pass/fail threshold |
 |---|---|---|
-| Preview latency, median of 3 after one warm-up | 1.73–1.85 s, of which ~0.8 s is one full garbage collection over the resident graph that the preview's allocations trigger (1.1–1.2 s without it) | ≤ 2.5 s |
+| Preview latency, median of 3 after one warm-up | 1.90–1.98 s, of which ~0.8 s is one full garbage collection over the resident graph that the preview's allocations trigger (1.1–1.3 s without it) | ≤ 2.5 s |
 | Peak memory beyond the resident graph (`tracemalloc` peak during one preview) | 74.9 MB | ≤ 160 MB |
 
 Whether a full collection lands inside a preview depends on how many objects

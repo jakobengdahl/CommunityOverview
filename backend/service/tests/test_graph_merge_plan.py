@@ -1205,7 +1205,8 @@ class TestRejectedCost:
             storage, [{"id": "x", "type": "Actor", "name": "X", "tags": [1] * 50_000}]
         )
         message = plan.report["rejected"]["items"][0]["message"]
-        assert "50000 validation error(s)" in message
+        assert "50000 validation errors" in message
+        assert "tags.0" in message
         assert len(message) <= 600
 
     def test_rejected_issues_are_counted_but_only_the_first_are_kept(
@@ -1222,16 +1223,15 @@ class TestRejectedCost:
 
 
 class TestDescribeInvalid:
-    def test_the_description_is_located_counted_and_bounded(self):
+    def test_the_description_keeps_the_count_and_first_location(self):
         from backend.service.graph_import import describe_invalid
 
         try:
             Node(type="Actor", name="X", tags=[1] * 50)
         except Exception as exc:  # pydantic ValidationError
             text = describe_invalid(exc)
-        assert text.startswith("50 validation error(s): tags.0:")
-        assert text.count("tags.") == 5
-        assert "and 45 more" in text
+        assert text.startswith("50 validation errors")
+        assert "tags.0" in text
         assert len(text) <= 501
 
     def test_long_text_is_cut_at_the_cap(self):
@@ -1253,6 +1253,46 @@ class TestDescribeInvalid:
         good = {"id": "ok", "source": "a1", "target": "i1", "type": "RELATES_TO"}
         plan = _plan(storage, [], bad + [good])
         assert plan.report["adds"]["edges"]["ids"] == ["ok"]
+
+
+class TestDeepNesting:
+    def test_metadata_nested_past_the_recursion_limit_is_planned(self, storage):
+        import sys
+
+        nested: dict = {}
+        cursor = nested
+        for _ in range(sys.getrecursionlimit() + 100):
+            cursor["k"] = {}
+            cursor = cursor["k"]
+        plan = _plan(
+            storage, [{"id": "n", "type": "Actor", "name": "N", "metadata": nested}]
+        )
+        assert plan.report["adds"]["nodes"]["ids"] == ["n"]
+
+    def test_a_recursion_error_while_planning_is_a_refusal(self, storage, monkeypatch):
+        def _too_deep(raw):
+            raise RecursionError("maximum recursion depth exceeded")
+
+        monkeypatch.setattr(graph_merge_plan, "_entry_hash", _too_deep)
+        with pytest.raises(MergeRequestError) as exc:
+            _plan(storage, [{"id": "n", "type": "Actor", "name": "N"}])
+        assert exc.value.error_code == "validation_failed"
+
+
+class TestLiveIdsInTheReport:
+    def test_a_long_live_duplicate_id_is_shown_capped(self, storage):
+        long_id = "z" * 10_000
+        storage.add_edge(Edge(id=long_id, source="a1", target="i1", type="RELATES_TO"))
+        plan = _plan(
+            storage,
+            [],
+            [
+                {"id": f"d{i}", "source": "a1", "target": "i1", "type": "RELATES_TO"}
+                for i in range(20)
+            ],
+        )
+        shown = {s["live_edge_id"] for s in plan.report["skips"]["items"]}
+        assert shown == {long_id[:256] + "…"}
 
 
 class TestEntryHash:
