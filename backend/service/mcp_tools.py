@@ -883,6 +883,43 @@ def register_mcp_tools(
         return service.get_graph_stats()
 
     @register_tool
+    def preview_graph_merge(
+        document: Dict[str, Any],
+        policy: Optional[Dict[str, Any]] = None,
+        include_system_types: bool = False,
+        stamp_provenance: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Preview merging a small graph document into the live graph. Writes
+        NOTHING: returns the plan a merge import would apply and its
+        plan_digest. There is no MCP tool that commits a merge.
+
+        Args:
+            document: {"nodes": [...], "edges": [...]} in the export shape
+            policy: what to do when a document id already exists live —
+                {"default": "fail"|"skip"|"overwrite"|"rename",
+                 "by_type": {"<node or relationship type>": "<policy>"}};
+                default is fail
+            include_system_types: also merge system nodes (Agent,
+                EventSubscription, ...); excluded by default
+            stamp_provenance: not supported yet; must be false
+
+        Returns:
+            Dict with plan (adds, overwrites, renames, skips, conflicts,
+            rejected, attachments, embeddings, events, committable) and
+            plan_digest, or an error. Requires graph mutation access with
+            full graph scope, as the commit will.
+        """
+        body: Dict[str, Any] = {
+            "document": document,
+            "include_system_types": include_system_types,
+            "stamp_provenance": stamp_provenance,
+        }
+        if policy is not None:
+            body["policy"] = policy
+        return service.preview_merge_import(body)
+
+    @register_tool
     def list_node_types() -> Dict[str, Any]:
         """
         List all allowed node types according to the metamodel

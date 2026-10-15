@@ -1578,6 +1578,9 @@ _IMPORT_ERROR_STATUS = {
     "backup_failed": 503,
     "replace_failed": 502,
     "archive_integrity_failed": 422,
+    "invalid_parameters": 422,
+    "provenance_not_supported": 422,
+    "import_plan_unstable": 503,
 }
 
 # A generous cap on the whole multipart upload for POST /import/archive: a
@@ -1672,6 +1675,24 @@ def _register_import_endpoints(
                 event_origin=request.headers.get("x-event-origin"),
                 event_correlation_id=request.headers.get("x-correlation-id"),
             )
+        _raise_for_access_denied(result)
+        if not result.get("success", True):
+            status_code = _IMPORT_ERROR_STATUS.get(result.get("error_code"), 400)
+            raise HTTPException(status_code=status_code, detail=result)
+        return result
+
+    @router.post("/import/merge/preview")
+    async def preview_merge_import(
+        request: Request, body: Dict[str, Any] = Body(...)
+    ) -> Dict[str, Any]:
+        """
+        Plan merging ``body.document`` into the live graph without writing
+        anything (ADR 0013, slice 1). Returns the per-entity plan and a
+        ``plan_digest`` a later merge commit will be bound to. Requires the
+        same access as the commit: graph mutation, with full graph access.
+        """
+        with use_request_authorization(headers=request.headers):
+            result = service.preview_merge_import(body)
         _raise_for_access_denied(result)
         if not result.get("success", True):
             status_code = _IMPORT_ERROR_STATUS.get(result.get("error_code"), 400)

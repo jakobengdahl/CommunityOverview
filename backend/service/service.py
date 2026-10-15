@@ -725,6 +725,19 @@ class GraphService:
             event_correlation_id=event_correlation_id,
         )
 
+    def preview_merge_import(self, body: Any) -> Dict[str, Any]:
+        """
+        Read-only MERGE import plan and digest. See
+        ``backend.service.import_service.preview_merge_import`` and
+        docs/adr/0013-graph-import-merge-mode.md.
+        """
+        return import_service.preview_merge_import(
+            self._storage,
+            self._authorization_hook,
+            body,
+            attachment_settings=self._attachment_settings,
+        )
+
     def get_import_job(
         self, execution_store: "ExecutionStore", job_id: str
     ) -> Optional[Dict[str, Any]]:
