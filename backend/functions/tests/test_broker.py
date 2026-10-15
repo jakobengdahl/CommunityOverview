@@ -861,3 +861,61 @@ def test_a_non_string_node_name_does_not_break_the_endpoint_check(service, caplo
     )
     assert "error" in response
     assert "raised" not in caplog.text and "failed in the broker" not in caplog.text
+
+
+def _seed_reference(storage, *local_names):
+    storage.add_nodes(
+        [Node(name=name, type=NodeType.ACTOR) for name in local_names]
+        + [Node(id="federated::g2::n1", name="Remote Ref", type=NodeType.ACTOR)],
+        [],
+    )
+
+
+@pytest.mark.parametrize("end", ["source", "target"])
+def test_a_reference_node_name_is_refused_on_either_end_without_naming_it_back(
+    service, storage, end
+):
+    _seed_reference(storage, "Mine")
+    other = "source" if end == "target" else "target"
+    edge = {end: "Remote Ref", other: "Mine", "type": "RELATES_TO"}
+    response = call(make_broker(service), "graph.add", {"nodes": [], "edges": [edge]})
+    assert error_code(response) == "invalid_arguments"
+    assert "Remote Ref" not in response["error"]["message"]
+    assert service.calls == []
+
+
+def test_local_nodes_may_be_named_as_edge_endpoints(service, storage):
+    _seed_reference(storage, "Alpha", "Beta")
+    edge = {"source": "Alpha", "target": "Beta", "type": "RELATES_TO"}
+    response = call(make_broker(service), "graph.add", {"nodes": [], "edges": [edge]})
+    assert "result" in response, response
+
+
+def test_a_node_id_equal_to_a_reference_node_name_resolves_by_id(service, storage):
+    storage.add_nodes(
+        [
+            Node(id="Remote Ref", name="Local by id", type=NodeType.ACTOR),
+            Node(name="Other", type=NodeType.ACTOR),
+            Node(id="federated::g2::n1", name="Remote Ref", type=NodeType.ACTOR),
+        ],
+        [],
+    )
+    edge = {"source": "Other", "target": "Remote Ref", "type": "RELATES_TO"}
+    response = call(make_broker(service), "graph.add", {"nodes": [], "edges": [edge]})
+    assert "result" in response, response
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"nodes": ["not an object"]},
+        {"nodes": [], "edges": ["not an object"]},
+        {"nodes": [], "edges": [{"source": 1, "target": "b"}]},
+        {"nodes": [], "edges": [{"source": "a"}]},
+        {"nodes": [{"name": "N", "type": "Actor", "metadata": []}]},
+    ],
+)
+def test_malformed_nodes_and_edges_are_refused(service, arguments):
+    response = call(make_broker(service), "graph.add", arguments)
+    assert error_code(response) == "invalid_arguments"
+    assert service.calls == []

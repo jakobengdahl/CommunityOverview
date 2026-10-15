@@ -412,17 +412,26 @@ class FunctionBroker:
             if not isinstance(nodes, list):
                 raise BrokerError(ERR_INVALID_ARGUMENTS, "nodes must be a list.")
             for node in nodes:
+                if not isinstance(node, Mapping):
+                    raise BrokerError(
+                        ERR_INVALID_ARGUMENTS, "Each node must be an object."
+                    )
                 _refuse_graph_scope(node)
-                if isinstance(node, Mapping):
-                    _refuse_reserved_id(node.get("id"))
+                _refuse_reserved_id(node.get("id"))
             edges = arguments.get("edges", [])
             if not isinstance(edges, list):
                 raise BrokerError(ERR_INVALID_ARGUMENTS, "edges must be a list.")
             for edge in edges:
+                if not isinstance(edge, Mapping) or not all(
+                    isinstance(edge.get(end), str) for end in ("source", "target")
+                ):
+                    raise BrokerError(
+                        ERR_INVALID_ARGUMENTS,
+                        "Each edge must be an object with string source and target.",
+                    )
                 _refuse_graph_scope(edge)
-                if isinstance(edge, Mapping):
-                    for end in ("source", "target"):
-                        _refuse_reserved_id(edge.get(end))
+                for end in ("source", "target"):
+                    _refuse_reserved_id(edge[end])
         if spec.method == "update_node":
             _refuse_reserved_id(arguments.get("node_id"))
             updates = arguments.get("updates")
