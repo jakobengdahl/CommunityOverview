@@ -38,6 +38,7 @@ from backend.core.session_annotations import (
 
 from .graph_import import (
     ImportIssue,
+    describe_invalid,
     build_document_nodes,
     check_document_edge_shape,
     read_document_lists,
@@ -309,6 +310,21 @@ class _Listed:
     target: str
 
 
+class _IssueList(list):
+    """Rejected issues: every one counted, only the first ``PLAN_LIST_CAP``
+    kept. Any one blocks the commit and the response lists no more, so a
+    document of millions of invalid entries holds no more than that."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.total = 0
+
+    def append(self, issue: ImportIssue) -> None:  # type: ignore[override]
+        self.total += 1
+        if len(self) < PLAN_LIST_CAP:
+            super().append(issue)
+
+
 def _applicability_names() -> frozenset:
     """Every node type or subtype name some relationship rule mentions."""
     names = set()
@@ -413,7 +429,7 @@ class _Planner:
         self.params = parameters
         self.view = view
         self.generation = generation
-        self.rejected: List[ImportIssue] = []
+        self.rejected = _IssueList()
         self.conflicts: List[Dict[str, str]] = []
         # (kind, id) -> live revision, or None when the plan relied on absence.
         self.reads: Dict[Tuple[str, str], Optional[int]] = {}
@@ -614,7 +630,7 @@ class _Planner:
         seen_edge_ids: Dict[str, int] = {}
         for index, raw_edge in enumerate(self.raw_edges):
             location = f"edges[{index}]"
-            errors_before = len(self.rejected)
+            errors_before = self.rejected.total
             if not check_document_edge_shape(
                 raw_edge, location, index, seen_edge_ids, self.rejected
             ):
@@ -622,9 +638,11 @@ class _Planner:
             try:
                 edge = Edge.from_dict(dict(raw_edge))
             except (PydanticValidationError, ValueError, TypeError) as exc:
-                self.rejected.append(ImportIssue(location, f"invalid edge: {exc}"))
+                self.rejected.append(
+                    ImportIssue(location, f"invalid edge: {describe_invalid(exc)}")
+                )
                 continue
-            if len(self.rejected) != errors_before:
+            if self.rejected.total != errors_before:
                 continue
             self.edges.append(self._plan_edge(index, location, edge))
 
@@ -841,6 +859,7 @@ class _Planner:
         overwritten_edge_ids = {
             d.edge.id for d in self.edges if d.outcome == "overwrite"
         }
+        judged: set = set()  # an edge between two overwritten nodes, once
         for decision in sorted(self.nodes.values(), key=lambda d: d.node.id):
             if decision.outcome != "overwrite" or "subtypes" not in decision.changes:
                 continue
@@ -853,8 +872,9 @@ class _Planner:
                 raise LiveGraphMoved(f"node '{node_id}' changed during planning")
             self._read_node(node_id)
             for live_edge in sorted(incident, key=lambda e: e.id):
-                if live_edge.id in overwritten_edge_ids:
+                if live_edge.id in overwritten_edge_ids or live_edge.id in judged:
                     continue
+                judged.add(live_edge.id)
                 self._confirm_listed_edge(live_edge)
                 ends = [
                     self._resulting_state(live_edge.source),
@@ -907,7 +927,7 @@ class _Planner:
         live_without_vector = self.view.nodes_without_vector()
         report = self._report(live_without_vector)
         digest = self._digest()
-        committable = not self.rejected and not self.conflicts
+        committable = not self.rejected.total and not self.conflicts
         report["committable"] = committable
         return MergePlan(report=report, digest=digest, committable=committable)
 
@@ -1010,7 +1030,10 @@ class _Planner:
             "conflicts": _capped_items(
                 sorted(self.conflicts, key=lambda c: (c["kind"], c["id"], c["reason"]))
             ),
-            "rejected": _capped_items([issue.to_dict() for issue in self.rejected]),
+            "rejected": {
+                "count": self.rejected.total,
+                "items": [issue.to_dict() for issue in self.rejected],
+            },
             "attachments": {
                 "checked": attachments_checked,
                 "overwritten_with_attachments": _capped_ids(
@@ -1049,7 +1072,7 @@ class _Planner:
             "parameters": self.params.canonical(),
             "generation": self.generation,
         }
-        if self.rejected:
+        if self.rejected.total:
             # A rejected entry blocks any commit. Which occurrence of a repeated
             # id was planned depends on document order, so a blocked plan's
             # digest stops at what it was asked and when.
@@ -1098,12 +1121,19 @@ class _Planner:
         return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+_ENTRY_ENCODER = json.JSONEncoder(
+    sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str
+)
+
+
 def _entry_hash(raw: Any) -> str:
     content = _content(raw) if isinstance(raw, dict) and "revision" in raw else raw
-    encoded = json.dumps(
-        content, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str
-    ).encode("ascii")
-    return hashlib.sha256(encoded).hexdigest()
+    # Streamed into the hash chunk by chunk, so no escaped copy of the whole
+    # entry is built; surrogatepass keeps lone surrogates hashable.
+    digest = hashlib.sha256()
+    for chunk in _ENTRY_ENCODER.iterencode(content):
+        digest.update(chunk.encode("utf-8", "surrogatepass"))
+    return digest.hexdigest()
 
 
 def _content(raw: Dict[str, Any]) -> Dict[str, Any]:

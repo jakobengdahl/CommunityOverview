@@ -71,6 +71,31 @@ class ImportValidationResult:
         }
 
 
+# A validation error lists every bad item, so one entity with a million bad
+# list entries would otherwise produce a message hundreds of times the size
+# of the request. A few located details are enough to fix a document.
+_MAX_ERROR_DETAILS = 5
+_MAX_ERROR_CHARS = 500
+
+
+def describe_invalid(exc: Exception) -> str:
+    """A bounded, located description of why an entity failed to construct."""
+    if isinstance(exc, PydanticValidationError):
+        details = [
+            f"{'.'.join(str(part) for part in error.get('loc', ()))}: {error.get('msg')}"
+            for error in exc.errors(include_url=False)[:_MAX_ERROR_DETAILS]
+        ]
+        count = exc.error_count()
+        text = f"{count} validation error(s): " + "; ".join(details)
+        if count > _MAX_ERROR_DETAILS:
+            text += f"; and {count - _MAX_ERROR_DETAILS} more"
+    else:
+        text = str(exc)
+    if len(text) > _MAX_ERROR_CHARS:
+        text = text[:_MAX_ERROR_CHARS] + "…"
+    return text
+
+
 def _fail(errors: List[ImportIssue]) -> ImportValidationResult:
     return ImportValidationResult(errors=errors, nodes=[], edges=[])
 
@@ -174,7 +199,9 @@ def build_document_nodes(
         try:
             node = Node.from_dict(dict(raw_node))
         except (PydanticValidationError, ValueError, TypeError) as exc:
-            errors.append(ImportIssue(location, f"invalid node: {exc}"))
+            errors.append(
+                ImportIssue(location, f"invalid node: {describe_invalid(exc)}")
+            )
             continue
 
         if node_id is not None and seen_node_ids.get(node_id) == index:
@@ -303,7 +330,9 @@ def validate_import_document(document: Any) -> ImportValidationResult:
         try:
             edge = Edge.from_dict(dict(raw_edge))
         except (PydanticValidationError, ValueError, TypeError) as exc:
-            errors.append(ImportIssue(location, f"invalid edge: {exc}"))
+            errors.append(
+                ImportIssue(location, f"invalid edge: {describe_invalid(exc)}")
+            )
             continue
 
         if (

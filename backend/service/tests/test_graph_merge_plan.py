@@ -593,6 +593,34 @@ class TestSubtypeChangeRejudgesLiveIncidentEdges:
         assert not plan.committable
 
 
+class TestRejudgeOncePerEdge:
+    def test_an_edge_between_two_overwritten_nodes_is_reported_once(
+        self, storage, monkeypatch
+    ):
+        monkeypatch.setattr(
+            graph_merge_plan.config_loader,
+            "relationship_type_allows_node_types",
+            lambda rel, s, t, ss=None, ts=None: {
+                "allowed": not (ss or ts),
+                "message": "no subtypes",
+            },
+        )
+        monkeypatch.setattr(
+            graph_merge_plan, "_applicability_names", lambda: frozenset({"P"})
+        )
+        storage.update_node("a1", {"subtypes": []})
+        plan = _plan(
+            storage,
+            [
+                {"id": "a1", "type": "Actor", "name": "Alice", "subtypes": ["P"]},
+                {"id": "i1", "type": "Initiative", "name": "X", "subtypes": ["P"]},
+            ],
+            policy=MergePolicy(default="overwrite"),
+        )
+        reasons = [c["reason"] for c in plan.report["conflicts"]["items"]]
+        assert reasons == ["incident_edge_inapplicable"]
+
+
 class TestValidation:
     def test_an_unknown_node_type_blocks_the_whole_import(self, storage):
         plan = _plan(
@@ -1169,6 +1197,43 @@ class TestSubtypeReduction:
             view,
         )
         assert view.reads == 1
+
+
+class TestRejectedCost:
+    def test_one_entity_with_many_bad_items_gets_a_bounded_message(self, storage):
+        plan = _plan(
+            storage, [{"id": "x", "type": "Actor", "name": "X", "tags": [1] * 50_000}]
+        )
+        message = plan.report["rejected"]["items"][0]["message"]
+        assert "50000 validation error(s)" in message
+        assert len(message) <= 600
+
+    def test_rejected_issues_are_counted_but_only_the_first_are_kept(
+        self, storage, monkeypatch
+    ):
+        monkeypatch.setattr(graph_merge_plan, "PLAN_LIST_CAP", 3)
+        plan = _plan(storage, [{} for _ in range(10)], [{} for _ in range(10)])
+        rejected = plan.report["rejected"]
+        assert rejected["count"] > 10
+        assert len(rejected["items"]) == 3
+        assert not plan.committable
+        # Shape errors on every edge still stop it being planned past the cap.
+        assert plan.report["adds"]["edges"]["count"] == 0
+
+
+class TestDigestOfOneLargeEntry:
+    def test_hashing_a_large_entry_does_not_copy_it_escaped(self, storage):
+        import tracemalloc
+
+        text = "\U0001f600" * 500_000  # 2 MB as UCS-4, 12 MB if \u-escaped
+        nodes = [{"id": "big", "type": "Actor", "name": "B", "metadata": {"t": text}}]
+        tracemalloc.start()
+        try:
+            graph_merge_plan._entry_hash(nodes[0])
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert peak < 3 * len(text) * 4
 
 
 class TestDigestMemory:
