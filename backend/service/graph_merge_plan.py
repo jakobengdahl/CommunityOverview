@@ -256,7 +256,11 @@ class StorageGraphView:
         return self._storage.get_edges_from_to(source, target)
 
     def incident_edges(self, node_id: str) -> List[Edge]:
-        return self._storage.get_edges_for_node(node_id)
+        try:
+            return self._storage.get_edges_for_node(node_id)
+        except KeyError as exc:
+            # The node was removed between the walk's lookup and its iteration.
+            raise LiveGraphMoved(f"node '{node_id}' removed during planning") from exc
 
     def attachments_configured(self) -> bool:
         return self._attachments is not None
@@ -445,7 +449,10 @@ class _Planner:
                 node.type_str in _SAVED_VIEW_NODE_TYPES
             ):
                 # The write path refuses these annotations; so must a plan.
-                annotation_error = saved_view_annotation_error(node.metadata)
+                try:
+                    annotation_error = saved_view_annotation_error(node.metadata)
+                except (TypeError, AttributeError, ValueError):
+                    annotation_error = "saved-view annotations are malformed"
                 if annotation_error:
                     self.rejected.append(ImportIssue(location, annotation_error))
             if self._is_excluded_type(node.type_str):
@@ -709,20 +716,19 @@ class _Planner:
             return None
         # The live edge with the document edge's own id counts too: renamed,
         # the document edge would sit beside it as a second identical triple.
+        listing = self.view.edges_from_to(source.node_id, target.node_id)
         matches = sorted(
-            live.id
-            for live in self.view.edges_from_to(source.node_id, target.node_id)
-            if live.type_str == edge.type_str and live.id not in exclude
+            (
+                live
+                for live in listing
+                if live.type_str == edge.type_str and live.id not in exclude
+            ),
+            key=lambda live: live.id,
         )
         if not matches:
             return None
-        listed = next(
-            live
-            for live in self.view.edges_from_to(source.node_id, target.node_id)
-            if live.id == matches[0]
-        )
-        self._confirm_listed_edge(listed)
-        return matches[0]
+        self._confirm_listed_edge(matches[0])
+        return matches[0].id
 
     def _confirm_listed_edge(self, listed: Edge) -> None:
         # A listing and a by-id read are two reads; an edge deleted or

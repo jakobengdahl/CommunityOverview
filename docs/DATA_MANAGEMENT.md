@@ -327,7 +327,8 @@ kept), how many nodes
 would be (re)embedded and how many graph events a commit would emit. Each list
 holds at most 1,000 entries; its `count` is always exact. `committable` is
 `false` while anything is rejected or in conflict. `plan_digest` changes when
-the request or the document changes (not when it is merely reordered), or the
+the request or the document changes (not when it is merely reordered, and not
+for an entry's `revision` field, which a write ignores), or the
 graph is replaced, and — unless something is rejected, which blocks any
 commit — when a live entity the plan relied on changes, so a future commit can
 refuse a plan that is no longer the one previewed.

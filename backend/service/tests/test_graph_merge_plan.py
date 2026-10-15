@@ -927,6 +927,18 @@ class TestSavedViewAnnotationsTheWritePathRefuses:
         plan = _plan(storage, [self._view([self.REMOTE_IMAGE])])
         assert plan.committable
 
+    @pytest.mark.parametrize("annotations", [5, True])
+    def test_malformed_annotations_are_rejected_not_fatal(self, storage, annotations):
+        view = {
+            "id": "v1",
+            "type": "SavedView",
+            "name": "V",
+            "metadata": {"annotation_document": {"annotations": annotations}},
+        }
+        plan = _plan(storage, [view], include_system_types=True)
+        assert plan.report["rejected"]["items"][0]["location"] == "nodes[0]"
+        assert not plan.committable
+
     def test_a_view_without_them_is_fine(self, storage):
         plan = _plan(storage, [self._view([])], include_system_types=True)
         assert plan.committable
@@ -1125,6 +1137,44 @@ class TestGenerationRecheck:
         )
         assert not view.hidden
         assert plan.digest == steady.digest
+
+    def test_the_duplicate_lookup_lists_the_live_edges_once(self, storage):
+        class _View(StorageGraphView):
+            listings = 0
+
+            def edges_from_to(self, source, target):
+                self.listings += 1
+                return super().edges_from_to(source, target)
+
+        view = _View(storage)
+        compute_merge_plan(
+            {
+                "nodes": [],
+                "edges": [
+                    {"id": "d1", "source": "a1", "target": "i1", "type": "BELONGS_TO"}
+                ],
+            },
+            MergeParameters(),
+            view,
+        )
+        assert view.listings == 1
+
+    def test_a_node_removed_mid_walk_restarts_the_plan(self, storage, monkeypatch):
+        calls = []
+        original = storage.get_edges_for_node
+
+        def _walk(node_id):
+            calls.append(node_id)
+            if len(calls) == 1:
+                raise KeyError(node_id)
+            return original(node_id)
+
+        monkeypatch.setattr(storage, "get_edges_for_node", _walk)
+        plan = compute_merge_plan(
+            self.SUBTYPE_CHANGE, self.OVERWRITE, StorageGraphView(storage)
+        )
+        assert plan.report["overwrites"]["nodes"]["count"] == 1
+        assert len(calls) == 2
 
     def test_a_listed_edge_deleted_before_its_read_restarts_the_plan(self, storage):
         class _View(StorageGraphView):
