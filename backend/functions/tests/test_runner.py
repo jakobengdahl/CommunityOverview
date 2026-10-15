@@ -522,7 +522,7 @@ def test_an_x32_system_call_kills_the_function(runner, storage):
         ctypes.CDLL(None).syscall(0x40000000 | 39)  # x32 getpid
         # Reached only if the call returned instead of killing the process.
         sys.stdout.write(json.dumps({"jsonrpc": "2.0", "method": "result",
-                                     "params": {"status": "ok", "output": {}}}) + "\n")
+                                     "params": {"status": "ok", "output": {}}}) + "\\n")
         """,
     )
     assert (result.status, result.code) == ("failed", "no_result")

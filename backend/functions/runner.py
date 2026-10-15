@@ -197,6 +197,28 @@ class _LogReader(threading.Thread):
         return b"".join(self._chunks).decode("utf-8", "replace"), self.truncated
 
 
+def exit_from_report(
+    final: Mapping[str, Any], *, cpu_limit_seconds: int, wall_ms: int
+) -> RunExit:
+    """The run's exit from the supervisor's final report."""
+    stopped = bool(final.get("stopped"))
+    exit_signal = final.get("signal")
+    cpu_seconds = final.get("cpu_seconds") or 0
+    return RunExit(
+        "killed" if stopped else "exited",
+        exit_code=final.get("exit_code"),
+        signal=exit_signal,
+        peak_memory_kib=final.get("peak_memory_kib"),
+        wall_ms=wall_ms,
+        # Threads that release the interpreter lock can use CPU time faster
+        # than wall-clock time; the kernel's backstop then ends the run before
+        # the host's timer does.
+        cpu_limit_reached=not stopped
+        and exit_signal in (signal.SIGXCPU, signal.SIGKILL)
+        and cpu_seconds >= cpu_limit_seconds,
+    )
+
+
 class RunHandle:
     """One started run: the function's standard streams and its supervisor."""
 
@@ -272,21 +294,8 @@ class RunHandle:
                 detail=lost_detail or "The supervisor ended without a report.",
             )
         else:
-            stopped = bool(final.get("stopped"))
-            exit_signal = final.get("signal")
-            cpu_seconds = final.get("cpu_seconds") or 0
-            result = RunExit(
-                "killed" if stopped else "exited",
-                exit_code=final.get("exit_code"),
-                signal=exit_signal,
-                peak_memory_kib=final.get("peak_memory_kib"),
-                wall_ms=wall_ms,
-                # Threads that release the interpreter lock can use CPU time
-                # faster than wall-clock time; the kernel's backstop then ends
-                # the run before the host's timer does.
-                cpu_limit_reached=not stopped
-                and exit_signal in (signal.SIGXCPU, signal.SIGKILL)
-                and cpu_seconds >= self._cpu_limit_seconds,
+            result = exit_from_report(
+                final, cpu_limit_seconds=self._cpu_limit_seconds, wall_ms=wall_ms
             )
         self.close_input()
         os.close(self.stdout_fd)
