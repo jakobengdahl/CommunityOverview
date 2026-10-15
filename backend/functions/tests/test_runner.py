@@ -19,12 +19,15 @@ from backend.functions.broker import (
     BrokerContext,
     FunctionBroker,
 )
+from backend.functions.protocol import SessionOutcome
 from backend.functions.runner import (
     CONTROLS,
     LEVEL_DEGRADED,
     LEVEL_FULL,
     HardenedSubprocessRunner,
+    RunExit,
     RunSpec,
+    _result_for,
     run_function,
     safe_relative_path,
 )
@@ -301,6 +304,28 @@ def test_a_runtime_the_runner_lacks_is_refused(runner):
         )
 
 
+@pytest.mark.parametrize(
+    "limit",
+    [
+        {"timeout_seconds": 121},
+        {"timeout_seconds": 0},
+        {"memory_mib": 257},
+        {"memory_mib": -1},
+        {"max_log_bytes": 256 * 1024 + 1},
+        {"timeout_seconds": True},
+    ],
+)
+def test_a_spec_cannot_raise_or_zero_a_platform_limit(limit):
+    with pytest.raises(ValueError):
+        RunSpec(
+            run_id="r",
+            runtime="python",
+            entry_point="main.py",
+            files={"main.py": b""},
+            **limit,
+        )
+
+
 def test_safe_relative_path_normalizes_a_leading_dot():
     assert safe_relative_path("./lib/x.py") == "lib/x.py"
 
@@ -339,6 +364,37 @@ def test_only_the_runtime_and_the_function_are_readable_and_only_work_is_writabl
         "write function dir": "PermissionError",
         "read own file": "allowed",
         "write work dir": "allowed",
+    }
+
+
+def test_the_work_directory_takes_no_device_nodes_fifos_or_links(storage):
+    # Landlock alone: the seccomp filter also denies mknod, as a second layer.
+    runner = HardenedSubprocessRunner(use_seccomp=False)
+    needs(runner, "filesystem")
+    result = execute(
+        runner,
+        storage,
+        handler(
+            ATTEMPT,
+            """
+            import stat
+            attempt("block device", lambda: os.mknod(
+                "blk", 0o600 | stat.S_IFBLK, os.makedev(7, 0)))
+            attempt("character device", lambda: os.mknod(
+                "chr", 0o600 | stat.S_IFCHR, os.makedev(1, 3)))
+            attempt("fifo", lambda: os.mkfifo("fifo"))
+            attempt("symlink", lambda: os.symlink("/etc/passwd", "link"))
+            attempt("directory", lambda: os.mkdir("sub"))
+            """,
+        ),
+    )
+    assert result.status == "succeeded", result
+    assert result.output == {
+        "block device": "PermissionError",
+        "character device": "PermissionError",
+        "fifo": "PermissionError",
+        "symlink": "PermissionError",
+        "directory": "allowed",
     }
 
 
@@ -384,6 +440,16 @@ def test_no_process_can_be_started_but_threads_work(runner, storage):
             attempt("setsid", lambda: os.setsid())
             attempt("setpgid", lambda: os.setpgid(0, 0))
             attempt("unshare", lambda: os.unshare(os.CLONE_NEWUSER))
+            attempt("mknod", lambda: os.mknod("node", 0o600 | 0o010000))
+            libc = ctypes.CDLL(None, use_errno=True)
+            # A thread with a namespace of its own; the filter refuses it
+            # before the kernel would start it on a bogus stack.
+            def namespaced_thread():
+                flags = 0x100 | 0x800 | 0x10000 | 0x04000000
+                if libc.syscall(libc_clone, flags, ctypes.c_void_p(1), 0, 0, 0) < 0:
+                    raise PermissionError(ctypes.get_errno(), "clone")
+            libc_clone = {"x86_64": 56, "aarch64": 220}[os.uname().machine]
+            attempt("namespaced thread", namespaced_thread)
             results = []
             worker = threading.Thread(target=lambda: results.append(21 * 2))
             worker.start()
@@ -402,6 +468,8 @@ def test_no_process_can_be_started_but_threads_work(runner, storage):
         "setsid": "PermissionError",
         "setpgid": "PermissionError",
         "unshare": "PermissionError",
+        "mknod": "PermissionError",
+        "namespaced thread": "PermissionError",
     }
 
 
@@ -557,7 +625,7 @@ def test_the_function_dies_with_a_supervisor_it_killed(degraded_runner, storage)
 def test_every_architecture_denies_the_same_calls_except_those_it_lacks():
     x86 = set(sandbox._SYSCALLS["x86_64"]["deny"])
     arm = set(sandbox._SYSCALLS["aarch64"]["deny"])
-    assert x86 - arm == {"fork", "vfork", "iopl", "ioperm"}
+    assert x86 - arm == {"fork", "vfork", "iopl", "ioperm", "mknod"}
     assert arm <= x86
 
 
@@ -580,3 +648,27 @@ def test_the_ruleset_names_only_rights_the_kernels_abi_knows():
     assert sandbox._FS_BY_ABI.get(5, sandbox._FS_ALL) & sandbox.FS_IOCTL_DEV
     for abi in (1, 2, 3, 4):
         assert not sandbox._FS_BY_ABI[abi] & sandbox.FS_IOCTL_DEV
+
+
+def _exit(**fields):
+    return RunExit("exited", **fields)
+
+
+def test_a_cpu_backstop_kill_without_a_result_is_a_timeout(storage):
+    broker = make_broker(storage)
+    silent = SessionOutcome(code="no_result")
+    cpu_kill = _exit(signal=9, cpu_limit_reached=True)
+    assert _result_for(silent, cpu_kill, broker).code == "timeout"
+    assert _result_for(silent, _exit(signal=9), broker).code == "no_result"
+
+
+def test_losing_the_runner_outranks_whatever_the_function_reported(storage):
+    broker = make_broker(storage)
+    succeeded = SessionOutcome(code=None, output={"ok": True})
+    for outcome in ("runner_lost", "failed_to_start"):
+        result = _result_for(succeeded, RunExit(outcome), broker)
+        assert (result.status, result.code, result.output) == (
+            "failed",
+            "runner_lost",
+            None,
+        )

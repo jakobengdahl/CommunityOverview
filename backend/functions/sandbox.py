@@ -69,6 +69,10 @@ FS_EXECUTE = 1 << 0
 FS_WRITE_FILE = 1 << 1
 FS_READ_FILE = 1 << 2
 FS_READ_DIR = 1 << 3
+FS_REMOVE_DIR = 1 << 4
+FS_REMOVE_FILE = 1 << 5
+FS_MAKE_DIR = 1 << 7
+FS_MAKE_REG = 1 << 8
 FS_REFER = 1 << 13  # ABI 2
 FS_TRUNCATE = 1 << 14  # ABI 3
 FS_IOCTL_DEV = 1 << 15  # ABI 5
@@ -84,6 +88,19 @@ _FS_BY_ABI = {1: (1 << 13) - 1, 2: (1 << 14) - 1, 3: (1 << 15) - 1, 4: (1 << 15)
 _FS_ALL = (1 << 16) - 1
 _FILE_RIGHTS = FS_EXECUTE | FS_READ_FILE | FS_WRITE_FILE | FS_TRUNCATE | FS_IOCTL_DEV
 READ_RIGHTS = FS_EXECUTE | FS_READ_FILE | FS_READ_DIR
+# The work directory holds ordinary files and directories only: no device
+# nodes, sockets, FIFOs or symbolic links, and nothing to execute.
+WORK_RIGHTS = (
+    FS_READ_FILE
+    | FS_WRITE_FILE
+    | FS_READ_DIR
+    | FS_REMOVE_DIR
+    | FS_REMOVE_FILE
+    | FS_MAKE_DIR
+    | FS_MAKE_REG
+    | FS_REFER
+    | FS_TRUNCATE
+)
 
 # Landlock ABI each control needs (ADR 0012 §2).
 FILESYSTEM_MIN_ABI = 3
@@ -131,7 +148,7 @@ def apply_landlock(abi, read_paths, write_path, list_paths=()):
         rules = [(path, READ_RIGHTS) for path in read_paths]
         # Listing a directory reads names only, never file contents.
         rules += [(path, FS_READ_DIR) for path in list_paths]
-        rules.append((write_path, handled_fs))
+        rules.append((write_path, WORK_RIGHTS))
         for path, rights in rules:
             try:
                 fd = os.open(path, os.O_PATH | os.O_CLOEXEC)
@@ -167,6 +184,18 @@ AUDIT_ARCH_X86_64 = 0xC000003E
 AUDIT_ARCH_AARCH64 = 0xC00000B7
 X32_SYSCALL_BIT = 0x40000000
 CLONE_THREAD = 0x00010000
+# CLONE_NEWNS, NEWCGROUP, NEWUTS, NEWIPC, NEWUSER, NEWPID, NEWNET, NEWTIME
+# (linux/sched.h): a thread must not get namespaces of its own either.
+CLONE_NAMESPACE_FLAGS = (
+    0x00020000
+    | 0x02000000
+    | 0x04000000
+    | 0x08000000
+    | 0x10000000
+    | 0x20000000
+    | 0x40000000
+    | 0x00000080
+)
 EPERM = 1
 ENOSYS = 38
 
@@ -222,6 +251,8 @@ _SYSCALLS = {
             "acct": 163,
             "iopl": 172,
             "ioperm": 173,
+            "mknod": 133,
+            "mknodat": 259,
         },
     },
     "aarch64": {
@@ -269,6 +300,7 @@ _SYSCALLS = {
             "swapon": 224,
             "swapoff": 225,
             "acct": 89,
+            "mknodat": 33,
         },
     },
 }
@@ -318,9 +350,10 @@ def seccomp_program(table):
         # Creating a socket of any family is denied; socketpair stays.
         _jump(_BPF_JEQ_K, table["socket"], 0, 1),
         _stmt(_BPF_RET_K, _RET_ERRNO | EPERM),
-        # clone only for threads.
-        _jump(_BPF_JEQ_K, table["clone"], 0, 4),
+        # clone only for threads, and never with a namespace flag.
+        _jump(_BPF_JEQ_K, table["clone"], 0, 5),
         _stmt(_BPF_LD_W_ABS, _OFFSET_ARG0_LOW),
+        _jump(_BPF_JSET_K, CLONE_NAMESPACE_FLAGS, 2, 0),
         _jump(_BPF_JSET_K, CLONE_THREAD, 0, 1),
         _stmt(_BPF_RET_K, _RET_ALLOW),
         _stmt(_BPF_RET_K, _RET_ERRNO | EPERM),
@@ -519,6 +552,7 @@ def supervise(spec, status_fd):
             "signal": exit_signal,
             "stopped": stopped,
             "peak_memory_kib": int(usage.ru_maxrss),
+            "cpu_seconds": round(usage.ru_utime + usage.ru_stime, 3),
         },
     )
 

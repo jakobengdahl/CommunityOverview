@@ -33,6 +33,8 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 from backend.functions import sandbox
 from backend.functions.broker import FunctionBroker, ToolCallRecord
 from backend.functions.protocol import (
+    CODE_NO_RESULT,
+    CODE_PROTOCOL_ERROR,
     CODE_TIMEOUT,
     MAX_OUTPUT_BYTES,
     SessionOutcome,
@@ -103,6 +105,16 @@ class RunSpec:
     memory_mib: int = MAX_MEMORY_MIB
     max_log_bytes: int = MAX_LOG_BYTES
 
+    def __post_init__(self) -> None:
+        # The platform maximums are absolute (§8): no caller can raise them.
+        for name, value, maximum in (
+            ("timeout_seconds", self.timeout_seconds, MAX_TIMEOUT_SECONDS),
+            ("memory_mib", self.memory_mib, MAX_MEMORY_MIB),
+            ("max_log_bytes", self.max_log_bytes, MAX_LOG_BYTES),
+        ):
+            if isinstance(value, bool) or not 0 < value <= maximum:
+                raise ValueError(f"{name} must be above 0 and at most {maximum}")
+
 
 @dataclass
 class RunExit:
@@ -117,6 +129,7 @@ class RunExit:
     log: str = ""
     log_truncated: bool = False
     detail: str = ""
+    cpu_limit_reached: bool = False
 
 
 def _controls_for(landlock_abi: int, seccomp: bool) -> Tuple[str, ...]:
@@ -197,6 +210,7 @@ class RunHandle:
         log_reader: _LogReader,
         run_root: str,
         started: float,
+        cpu_limit_seconds: int,
     ):
         self._process = process
         self.stdin_fd = stdin_fd
@@ -205,6 +219,7 @@ class RunHandle:
         self._log_reader = log_reader
         self._run_root = run_root
         self._started = started
+        self._cpu_limit_seconds = cpu_limit_seconds
         self._result: Optional[RunExit] = None
 
     def kill(self) -> None:
@@ -257,12 +272,21 @@ class RunHandle:
                 detail=lost_detail or "The supervisor ended without a report.",
             )
         else:
+            stopped = bool(final.get("stopped"))
+            exit_signal = final.get("signal")
+            cpu_seconds = final.get("cpu_seconds") or 0
             result = RunExit(
-                "killed" if final.get("stopped") else "exited",
+                "killed" if stopped else "exited",
                 exit_code=final.get("exit_code"),
-                signal=final.get("signal"),
+                signal=exit_signal,
                 peak_memory_kib=final.get("peak_memory_kib"),
                 wall_ms=wall_ms,
+                # Threads that release the interpreter lock can use CPU time
+                # faster than wall-clock time; the kernel's backstop then ends
+                # the run before the host's timer does.
+                cpu_limit_reached=not stopped
+                and exit_signal in (signal.SIGXCPU, signal.SIGKILL)
+                and cpu_seconds >= self._cpu_limit_seconds,
             )
         self.close_input()
         os.close(self.stdout_fd)
@@ -499,6 +523,7 @@ class HardenedSubprocessRunner:
         log_reader.start()
         return RunHandle(
             process,
+            cpu_limit_seconds=sandbox_spec["limits"]["cpu_seconds"],
             stdin_fd=stdin_w,
             stdout_fd=stdout_r,
             status_fd=status_r,
@@ -606,8 +631,8 @@ def run_function(
     finally:
         sent_result = outcome is not None and outcome.code not in (
             CODE_TIMEOUT,
-            "no_result",
-            "protocol_error",
+            CODE_NO_RESULT,
+            CODE_PROTOCOL_ERROR,
         )
         handle.close_input()
         if not (sent_result and handle.exited_within(EXIT_GRACE_SECONDS)):
@@ -640,6 +665,10 @@ def _result_for(
     if outcome.code == CODE_TIMEOUT:
         return FunctionRunResult(
             STATUS_TIMED_OUT, CODE_TIMEOUT, outcome.error_message, **common
+        )
+    if outcome.code == CODE_NO_RESULT and process_exit.cpu_limit_reached:
+        return FunctionRunResult(
+            STATUS_TIMED_OUT, CODE_TIMEOUT, "The CPU-time limit was reached.", **common
         )
     if outcome.code is None:
         return FunctionRunResult(STATUS_SUCCEEDED, output=outcome.output, **common)
