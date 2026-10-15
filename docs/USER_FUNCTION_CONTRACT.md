@@ -3,7 +3,10 @@
 **Contract version:** 1
 **Status:** Draft contract, adopted by
 [ADR 0011](adr/0011-sandboxed-user-functions.md). It is normative for the first
-implementation slices; nothing in it is implemented yet.
+implementation slices. Implemented so far: the broker and its protocol session
+(§6, §7, §9 attribution, the per-message and tool-call limits of §8) in
+`backend/functions/`. Not yet implemented: manifests, invocation, the runner
+and run records.
 **Scope:** Open-source core. This version covers manually invoked functions that
 read and write the graph through a broker. Every other trigger, tool and binding
 is out of scope (see [§13](#13-reserved-for-later-versions)); the fields they
