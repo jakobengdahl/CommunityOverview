@@ -105,10 +105,13 @@ def load_function(root: str, directory_name: str) -> LoadedFunction:
         return loaded
     try:
         document = json.loads(raw)
-    except (ValueError, UnicodeDecodeError) as exc:
+    except (ValueError, UnicodeDecodeError, RecursionError) as exc:
         loaded.errors.append(f"{MANIFEST_FILE} is not valid JSON: {exc}")
         return loaded
-    manifest, errors = validate_manifest(document, directory_name, loaded.files)
+    try:
+        manifest, errors = validate_manifest(document, directory_name, loaded.files)
+    except RecursionError:
+        manifest, errors = None, [f"{MANIFEST_FILE} is nested too deeply"]
     loaded.errors.extend(errors)
     if not errors:
         loaded.manifest = manifest
@@ -210,42 +213,7 @@ def _check_schema(name, value, errors) -> Optional[Dict[str, Any]]:
     except SchemaError as exc:
         errors.append(f"{name} is not a valid JSON Schema: {exc.message}")
         return None
-    if _uses_regular_expressions(value):
-        # The host checks schemas in its own process, where a backtracking
-        # expression could stall it beyond any run's time limit.
-        errors.append(f"{name} may not use pattern or patternProperties in version 1")
-        return None
     return value
-
-
-# Keywords whose values are maps from names to subschemas, and keywords whose
-# values are data rather than schemas.
-_NAMED_SUBSCHEMAS = frozenset(
-    {"properties", "$defs", "definitions", "dependentSchemas"}
-)
-_DATA_KEYWORDS = frozenset(
-    {"const", "enum", "default", "examples", "dependentRequired"}
-)
-
-
-def _uses_regular_expressions(schema: Any) -> bool:
-    if isinstance(schema, list):
-        return any(_uses_regular_expressions(item) for item in schema)
-    if not isinstance(schema, dict):
-        return False
-    for keyword, value in schema.items():
-        if keyword == "patternProperties" or (
-            keyword == "pattern" and isinstance(value, str)
-        ):
-            return True
-        if keyword in _DATA_KEYWORDS:
-            continue
-        if keyword in _NAMED_SUBSCHEMAS and isinstance(value, dict):
-            if any(_uses_regular_expressions(sub) for sub in value.values()):
-                return True
-        elif _uses_regular_expressions(value):
-            return True
-    return False
 
 
 def validate_manifest(

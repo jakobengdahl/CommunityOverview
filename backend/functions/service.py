@@ -23,8 +23,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from jsonschema import Draft202012Validator
-
 from backend.agents.execution import (
     ExecutionJob,
     ExecutionKind,
@@ -52,6 +50,7 @@ from backend.functions.runner import (
     RunSpec,
     run_function,
 )
+from backend.functions.schema_check import SchemaCheckFailed, schema_problem
 from backend.functions.settings import FunctionsSettings
 from backend.runtime.authorization import (
     GRAPH_ACTION_MUTATE,
@@ -250,6 +249,8 @@ class FunctionService:
         _check_text("idempotency_key", idempotency_key, allow_empty=False)
         _check_text("correlation_id", correlation_id)
         _check_text("event_origin", event_origin)
+        if not is_valid_id(function_id):
+            raise FunctionNotFound(function_id)
         key = f"fn:{function_id}:{idempotency_key or uuid.uuid4().hex}"
         if idempotency_key is not None:
             # A repeated key returns the earlier run in any state (§5.3), even
@@ -555,9 +556,9 @@ class FunctionService:
         status, code, message = result.status, result.code, result.message
         if status == STATUS_SUCCEEDED and manifest.output_schema is not None:
             try:
-                problem = _schema_problem(manifest.output_schema, result.output)
-            except Exception:  # noqa: BLE001 - e.g. a $ref that does not resolve
-                problem = "output_schema could not be applied"
+                problem = schema_problem(manifest.output_schema, result.output)
+            except SchemaCheckFailed as exc:
+                problem = f"output_schema could not be applied ({exc})"
             if problem:
                 status, code = STATUS_FAILED, CODE_INVALID_OUTPUT
                 message = f"result.output failed output_schema: {problem}"
@@ -612,17 +613,20 @@ class FunctionService:
         agent_id = f"function:{function_id}" if function_id else None
         states = [_STATUS_STATES[status]] if status else None
         exact = status is None or status in _STATUSES_WITH_OWN_STATE
+        # Two statuses share one store state; a bounded look-back keeps one
+        # request from loading the whole history.
         jobs = self._store.list_jobs(
             kind=ExecutionKind.FUNCTION,
             agent_id=agent_id,
             states=states,
-            limit=limit if exact else None,
+            limit=limit if exact else limit * _SHARED_STATE_LOOKBACK,
             created_after=self._read_cutoff(),
         )
         runs = [function_run_to_dict(job) for job in jobs]
         if status is not None:
             runs = [run for run in runs if run["status"] == status][:limit]
-        return [_for_viewer(run, viewer) for run in runs]
+        # A listing summarizes; output and log are read one run at a time.
+        return [dict(_for_viewer(run, viewer), output=None, log=None) for run in runs]
 
     def get_run(
         self, run_id: str, *, viewer: Optional["RunViewer"] = None
@@ -688,6 +692,7 @@ _STATUS_STATES = {
     STATUS_REJECTED: ExecutionState.CANCELLED,
 }
 _STATUSES_WITH_OWN_STATE = frozenset({STATUS_RUNNING, STATUS_SUCCEEDED})
+_SHARED_STATE_LOOKBACK = 4
 
 
 @dataclass(frozen=True)
@@ -699,7 +704,16 @@ class RunViewer:
     narrowed: bool = False
 
 
-_CONTENT_FIELDS = ("output", "log", "actor")
+# Everything a function or its caller controls the text of: a narrowed reader
+# of someone else's run keeps its status, error code, timing and tool names.
+_CONTENT_FIELDS = (
+    "output",
+    "log",
+    "actor",
+    "function_error_code",
+    "correlation_id",
+    "origin",
+)
 
 
 def _for_viewer(run: Dict[str, Any], viewer: Optional[RunViewer]) -> Dict[str, Any]:
@@ -711,8 +725,15 @@ def _for_viewer(run: Dict[str, Any], viewer: Optional[RunViewer]) -> Dict[str, A
     hidden = dict(run)
     for name in _CONTENT_FIELDS:
         hidden[name] = None
+    if hidden.get("error"):
+        hidden["error"] = {"code": hidden["error"].get("code"), "message": ""}
     hidden["content_hidden"] = True
     return hidden
+
+
+def view_run(run: Dict[str, Any], viewer: Optional["RunViewer"]) -> Dict[str, Any]:
+    """A run record as ``viewer`` may see it."""
+    return _for_viewer(run, viewer)
 
 
 def _check_text(name: str, value: Any, *, allow_empty: bool = True) -> None:
@@ -726,11 +747,6 @@ def _check_text(name: str, value: Any, *, allow_empty: bool = True) -> None:
         raise InvocationError(
             f"{name} must be a string of at most {MAX_KEY_CHARS} characters"
         )
-
-
-def _schema_problem(schema: Dict[str, Any], value: Any) -> Optional[str]:
-    error = next(iter(Draft202012Validator(schema).iter_errors(value)), None)
-    return error.message[:500] if error is not None else None
 
 
 def _validate_input(manifest: Manifest, input_value: Any) -> None:
@@ -752,10 +768,10 @@ def _validate_input(manifest: Manifest, input_value: Any) -> None:
             )
         return
     try:
-        problem = _schema_problem(manifest.input_schema, input_value)
-    except Exception:  # noqa: BLE001 - e.g. a $ref that does not resolve
+        problem = schema_problem(manifest.input_schema, input_value)
+    except SchemaCheckFailed as exc:
         raise _Rejected(
-            CODE_INVALID_MANIFEST, "input_schema could not be applied."
+            CODE_INVALID_MANIFEST, f"input_schema could not be applied ({exc})."
         ) from None
     if problem:
         raise _Rejected(CODE_INVALID_INPUT, f"input failed input_schema: {problem}")

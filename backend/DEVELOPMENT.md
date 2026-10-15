@@ -226,7 +226,7 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | `AGENTS_RUN_HISTORY_EXPORT_MAX_DAYS` | retention | How far back `GET /agents/runs` reads (at most the retention) |
 | `AGENTS_RUN_HISTORY_SWEEP_INTERVAL_HOURS` | `24` | Hours between retention sweeps |
 | `FUNCTIONS_ROOT` | `config/functions` | Directory holding one sub-directory per user function (`docs/USER_FUNCTION_CONTRACT.md` §4.1) |
-| `FUNCTIONS_ENABLED` | *(unset: none)* | JSON object enabling functions and their grants, e.g. `{"recompute-derived-values": ["graph:read", "graph:write"]}`. A function, or a grant it declares, that is not listed is rejected with `not_enabled`. Read at start-up: changing it takes a restart, which also ends runs in progress; the next start closes their records as `runner_lost`. A malformed value of any `FUNCTIONS_*` setting is logged and leaves every function disabled |
+| `FUNCTIONS_ENABLED` | *(unset: none)* | JSON object enabling functions and their grants, e.g. `{"recompute-derived-values": ["graph:read", "graph:write"]}`. A function, or a grant it declares, that is not listed is rejected with `not_enabled`. Read at start-up: changing it takes a restart, which also ends runs in progress; the next start closes their records as `runner_lost`. A malformed value of any `FUNCTIONS_*` setting is logged and leaves every function disabled. Runs execute inside the application process, so serve functions from a single process per run-history store: a second process sharing that store would close the first one's runs as interrupted when it starts |
 | `FUNCTIONS_ISOLATION_MINIMUM` | `degraded` | `full` rejects runs while the runner cannot enforce all four isolation controls (§3.1); at `degraded` the host logs the missing controls at start-up |
 | `FUNCTIONS_TIMEOUT_SECONDS` | `120` | Instance wall-clock limit per run; may only lower the contract maximum (a higher value is clamped and logged) |
 | `FUNCTIONS_MEMORY_MIB` | `256` | Instance memory limit per run; may only lower the contract maximum |
@@ -513,7 +513,7 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | POST | `/agents/{id}/trigger` | Fire a scheduled agent immediately (used by GCP Cloud Scheduler) |
 | GET | `/functions` | List user functions with their validation state, enablement and missing grants (read access) |
 | GET | `/functions/runner` | The function runner's isolation level, missing controls and runtimes (read access) |
-| GET | `/functions/runs` | List function runs (filter by `function_id`, `status`, `limit`), newest-first, inside the run-history read window. A reader with narrowed graph visibility gets `output`, `log` and `actor` only for runs they started (`content_hidden` marks the others) |
+| GET | `/functions/runs` | List function runs (filter by `function_id`, `status`, `limit` up to 100), newest-first, inside the run-history read window. Items leave out `output` and `log` (read them from the run itself). A reader with narrowed graph visibility sees only the status, error code, timing and tool names of runs they did not start (`content_hidden` marks them) |
 | GET | `/functions/runs/{run_id}` | Get one function run record (`docs/USER_FUNCTION_CONTRACT.md` §11) |
 | POST | `/functions/runs/{run_id}/cancel` | Terminate a run in progress (mutate access); `409` when it is not running |
 | GET | `/functions/{id}` | Get one function's manifest summary and state |

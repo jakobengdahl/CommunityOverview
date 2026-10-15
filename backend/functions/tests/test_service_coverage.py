@@ -2,6 +2,7 @@
 untested (USER_FUNCTION_CONTRACT §4.3, §5, §8, §11)."""
 
 import json
+import time
 import os
 from datetime import datetime, timezone
 
@@ -367,7 +368,7 @@ def test_an_invocation_without_a_body_sends_empty_input(harness):
     finished(service, response.json())
 
 
-@pytest.mark.parametrize("limit", [0, 501])
+@pytest.mark.parametrize("limit", [0, 101])
 def test_the_run_listing_limit_is_bounded(harness, limit):
     client, _ = _client(harness)
     assert client.get(f"/functions/runs?limit={limit}").status_code == 422
@@ -598,37 +599,63 @@ def test_a_redacted_flag_is_reported(harness):
 # --- review round 2 ------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "schema",
-    [
-        {"type": "string", "pattern": "^(a+)+$"},
-        {"properties": {"s": {"pattern": "a"}}},
-        {"patternProperties": {"^x": {}}},
-        {"items": [{"anyOf": [{"pattern": "a"}]}]},
-        {"$defs": {"d": {"pattern": "a"}}},
-    ],
-)
-def test_schemas_may_not_use_regular_expressions(schema):
-    _, errors = validate_manifest(
-        dict(manifest("count-nodes"), input_schema=schema, output_schema=schema),
-        "count-nodes",
-        {"main.py": b"", "function.json": b"{}"},
+def test_a_costly_input_schema_check_is_cut_off_and_rejects_the_run(
+    harness, monkeypatch
+):
+    import backend.functions.schema_check as schema_check
+
+    monkeypatch.setattr(schema_check, "CHECK_TIMEOUT_SECONDS", 1.0)
+    harness.add(
+        "regex",
+        "return {}",
+        input_schema={
+            "type": "object",
+            "properties": {"s": {"type": "string", "pattern": "^(a+)+$"}},
+        },
     )
-    assert any("pattern" in e for e in errors)
+    started = time.monotonic()
+    run = invoke(harness.service, "regex", {"s": "a" * 40 + "!"})
+    _rejected(run, "invalid_manifest")
+    assert time.monotonic() - started < 5
 
 
-def test_a_property_or_value_named_pattern_is_not_a_regular_expression():
-    schema = {
-        "properties": {"pattern": {"type": "string"}},
-        "enum": [{"pattern": "data"}],
-        "default": {"pattern": "data"},
-    }
-    _, errors = validate_manifest(
-        dict(manifest("count-nodes"), input_schema=schema),
-        "count-nodes",
-        {"main.py": b"", "function.json": b"{}"},
+def test_a_costly_output_schema_check_fails_the_run_in_bounded_time(
+    harness, monkeypatch
+):
+    import backend.functions.schema_check as schema_check
+
+    monkeypatch.setattr(schema_check, "CHECK_TIMEOUT_SECONDS", 1.0)
+    harness.add(
+        "many",
+        "return {'items': [{'n': i} for i in range(20000)]}",
+        output_schema={
+            "type": "object",
+            "properties": {"items": {"type": "array", "uniqueItems": True}},
+        },
     )
-    assert errors == []
+    service = harness.service
+    started = time.monotonic()
+    run = finished(service, invoke(service, "many"))
+    assert (run["status"], run["error"]["code"]) == ("failed", "invalid_output")
+    assert time.monotonic() - started < 15
+    assert invoke(service, "many")["status"] == "running"
+
+
+def test_a_deeply_nested_manifest_is_invalid_not_an_error(tmp_path):
+    deep = "[" * 100000 + "]" * 100000
+    _package(tmp_path, {"function.json": f'{{"x": {deep}}}'.encode(), "main.py": b""})
+    loaded = load_function(str(tmp_path), "count-nodes")
+    assert not loaded.valid
+
+
+def test_a_function_id_with_a_colon_cannot_reach_another_functions_key(harness):
+    from backend.functions.service import FunctionNotFound
+
+    harness.add("echo", "return {}")
+    service = harness.service
+    invoke(service, "echo", idempotency_key="x:y")
+    with pytest.raises(FunctionNotFound):
+        invoke(service, "echo:x", idempotency_key="y")
 
 
 def test_runs_a_previous_process_left_running_are_closed_at_start(harness):
@@ -714,3 +741,55 @@ def test_failed_and_timed_out_runs_are_told_apart_by_the_status_filter(harness):
     timed_out = finished(service, invoke(service, "spin"))
     assert [r["id"] for r in service.list_runs(status="failed")] == [failed["id"]]
     assert [r["id"] for r in service.list_runs(status="timed_out")] == [timed_out["id"]]
+
+
+def test_a_replayed_key_shows_a_narrowed_reader_no_one_elses_content(
+    storage, tmp_path, runner
+):
+    harness = Harness(storage, tmp_path, runner, hook=NarrowedHook())
+    harness.add("echo", "print('secret log'); return {'secret': 1}")
+    client, service = _client(harness)
+    first = client.post(
+        "/functions/echo/invoke",
+        json={"idempotency_key": "daily"},
+        headers={ACTOR_ID_HEADER: "someone"},
+    ).json()
+    finished(service, first)
+    replay = client.post(
+        "/functions/echo/invoke",
+        json={"idempotency_key": "daily"},
+        headers={ACTOR_ID_HEADER: "narrowed"},
+    ).json()
+    assert replay["id"] == first["id"]
+    assert (replay["output"], replay["log"], replay["actor"]) == (None, None, None)
+
+
+def test_a_narrowed_reader_sees_no_function_text_in_someone_elses_errors(
+    storage, tmp_path, runner
+):
+    harness = Harness(storage, tmp_path, runner, hook=NarrowedHook())
+    harness.add("leaky", "raise ToolError('code-with-data', 'Node Confidential X')")
+    client, service = _client(harness)
+    run = finished(
+        service,
+        client.post(
+            "/functions/leaky/invoke",
+            json={},
+            headers={ACTOR_ID_HEADER: "someone", "x-correlation-id": "corr-secret"},
+        ).json(),
+    )
+    seen = client.get(
+        f"/functions/runs/{run['id']}", headers={ACTOR_ID_HEADER: "narrowed"}
+    ).json()
+    assert seen["error"] == {"code": "function_error", "message": ""}
+    assert seen["function_error_code"] is None
+    assert seen["correlation_id"] is None
+
+
+def test_a_listing_leaves_output_and_log_to_the_run_itself(harness):
+    harness.add("echo", "print('log line'); return {'big': 'x'}")
+    service = harness.service
+    run = finished(service, invoke(service, "echo"))
+    (listed,) = service.list_runs()
+    assert (listed["output"], listed["log"]) == (None, None)
+    assert service.get_run(run["id"])["output"] == {"big": "x"}

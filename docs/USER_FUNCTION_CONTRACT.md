@@ -211,10 +211,13 @@ A manifest is **rejected**, and the function cannot run, when:
 - a field holds a value this contract version does not allow, such as a trigger
   kind other than `manual`, a `write_target` other than `graph`, an unknown
   grant, a limit above the contract maximum in §8, or any reserved field;
-- `input_schema` or `output_schema` uses `pattern` or `patternProperties`: the
-  host checks schemas in its own process, outside any run's limits, where a
-  backtracking regular expression could stall it;
 - `entry_point` does not resolve to a file inside the function directory.
+
+The host checks `input` and `result.output` against their schemas in a
+separate process with a time and memory limit, since a schema can cost far
+more than its size suggests. A check that cannot finish within that limit
+counts as the schema not applying: the invocation is `rejected` with
+`invalid_manifest`, or the run `failed` with `invalid_output`.
 
 Top-level fields this contract does not name are ignored, so that tooling may
 add its own annotations. A field §4.2 lists as reserved is not unknown: it is
@@ -542,8 +545,10 @@ history; a caller who may read but lacks the access a function needs gets a
 Records never contain secret values, credentials or tokens. Tool arguments and
 results are not recorded, because they may hold graph content the run record's
 readers should not see. For the same reason, a reader whose graph visibility the
-authorization hook narrows sees `output`, `log` and `actor` only for runs they
-started themselves.
+authorization hook narrows sees the content of only the runs they started
+themselves: for anyone else's run they see its status, error code, timing and
+tool names, but not its output, log, actor, correlation id, origin, error
+message or function error code.
 
 Run-level error codes are a closed set:
 

@@ -14,6 +14,7 @@ from backend.functions.service import (
     FunctionService,
     InvocationError,
     RunViewer,
+    view_run,
 )
 from backend.runtime.authorization import (
     GRAPH_ACTION_MUTATE,
@@ -69,7 +70,7 @@ def register_function_routes(
         request: Request,
         function_id: Optional[str] = Query(None),
         status: Optional[str] = Query(None, description=" | ".join(RUN_STATUSES)),
-        limit: int = Query(100, ge=1, le=500),
+        limit: int = Query(50, ge=1, le=100),
     ) -> List[Dict[str, Any]]:
         """List function runs, newest-first, inside the run-history read window."""
         viewer = require(request, GRAPH_ACTION_READ, "functions.runs")
@@ -121,7 +122,7 @@ def register_function_routes(
         naming why the run could not start (§11). A caller without read access
         is refused before any record is created.
         """
-        require(request, GRAPH_ACTION_READ, "functions.invoke")
+        viewer = require(request, GRAPH_ACTION_READ, "functions.invoke")
         with use_request_authorization(headers=request.headers):
             try:
                 run = function_service.invoke(
@@ -140,6 +141,8 @@ def register_function_routes(
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             except RunnerUnavailable as exc:
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
+        # A repeated key returns the earlier run, which may be someone else's.
         return JSONResponse(
-            run, status_code=202 if run["status"] == STATUS_RUNNING else 200
+            view_run(run, viewer),
+            status_code=202 if run["status"] == STATUS_RUNNING else 200,
         )
