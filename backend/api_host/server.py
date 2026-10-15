@@ -387,6 +387,10 @@ def create_app(
         read_cutoff=agent_registry.run_history_read_cutoff,
     )
     app.state.function_service = function_service
+    try:
+        function_service.close_interrupted_runs()
+    except Exception:  # noqa: BLE001 - never fatal at startup
+        logger.exception("Could not close interrupted user-function runs")
     threading.Thread(
         target=function_service.log_runner_level,
         name="function-runner-probe",

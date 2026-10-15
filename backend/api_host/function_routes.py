@@ -13,6 +13,7 @@ from backend.functions.service import (
     FunctionNotFound,
     FunctionService,
     InvocationError,
+    RunViewer,
 )
 from backend.runtime.authorization import (
     GRAPH_ACTION_MUTATE,
@@ -29,17 +30,23 @@ def register_function_routes(
 ) -> None:
     """Register /functions/* for listing, invoking and inspecting runs."""
 
-    def require(request: Request, action: str, target: str) -> None:
+    def require(request: Request, action: str, target: str) -> RunViewer:
+        """Deny unless allowed; returns who is reading, for run records."""
         with use_request_authorization(headers=request.headers):
             try:
                 decision = access.evaluate_graph_access(
                     graph_service.authorization_hook, action=action, target=target
                 )
+                attribution = access.build_mutation_attribution(target=target)
             except Exception:  # noqa: BLE001 - a failing hook denies
                 logger.exception("Authorization hook failed for %s", target)
                 decision = None
         if decision is None or not decision.allowed:
             raise HTTPException(status_code=403, detail="Access denied.")
+        return RunViewer(
+            actor_id=attribution.actor.actor_id if attribution is not None else "",
+            narrowed=bool(decision.graph_access.enabled),
+        )
 
     @app.get("/functions")
     def functions_list(request: Request) -> List[Dict[str, Any]]:
@@ -65,16 +72,16 @@ def register_function_routes(
         limit: int = Query(100, ge=1, le=500),
     ) -> List[Dict[str, Any]]:
         """List function runs, newest-first, inside the run-history read window."""
-        require(request, GRAPH_ACTION_READ, "functions.runs")
+        viewer = require(request, GRAPH_ACTION_READ, "functions.runs")
         return function_service.list_runs(
-            function_id=function_id, status=status, limit=limit
+            function_id=function_id, status=status, limit=limit, viewer=viewer
         )
 
     @app.get("/functions/runs/{run_id}")
     def functions_run_detail(request: Request, run_id: str) -> Dict[str, Any]:
         """Get one function run."""
-        require(request, GRAPH_ACTION_READ, "functions.runs")
-        run = function_service.get_run(run_id)
+        viewer = require(request, GRAPH_ACTION_READ, "functions.runs")
+        run = function_service.get_run(run_id, viewer=viewer)
         if run is None:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
         return run

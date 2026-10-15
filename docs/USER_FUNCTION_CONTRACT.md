@@ -211,6 +211,9 @@ A manifest is **rejected**, and the function cannot run, when:
 - a field holds a value this contract version does not allow, such as a trigger
   kind other than `manual`, a `write_target` other than `graph`, an unknown
   grant, a limit above the contract maximum in §8, or any reserved field;
+- `input_schema` or `output_schema` uses `pattern` or `patternProperties`: the
+  host checks schemas in its own process, outside any run's limits, where a
+  backtracking regular expression could stall it;
 - `entry_point` does not resolve to a file inside the function directory.
 
 Top-level fields this contract does not name are ignored, so that tooling may
@@ -495,8 +498,10 @@ it is history, not queued work: it is enqueued already `RUNNING` when the run
 starts and is never claimed, leased or reclaimed by a worker. That store's
 retry policy allows one attempt, so a run is executed at most once: there is
 no automatic retry in version 1, and a host crash never re-executes a run whose
-writes may already have landed. A record a crash leaves `RUNNING` is closed by
-the run-history retention sweep, which abandons it with a fixed reason.
+writes may already have landed. Runs execute in the host process that started
+them: when the host starts, it closes every record a previous process left
+`RUNNING` as `failed` with `runner_lost`. The run-history retention sweep
+closes any record still left behind, which then also reads `runner_lost`.
 
 The run record exposes:
 
@@ -506,7 +511,7 @@ The run record exposes:
 | `function_id`, `function_version` | What ran. |
 | `trigger` | `manual` in version 1. |
 | `status` | `running`, `succeeded`, `failed`, `timed_out`, `cancelled` or `rejected`. |
-| `error` | For `failed` and `rejected`: a code and a sanitized message. |
+| `error` | For `failed`, `timed_out` and `rejected`: a code and a sanitized message. |
 | `output` | The validated `result.output`, for `succeeded`. |
 | `correlation_id`, `origin`, `actor` | Who started it and the id its writes carry. |
 | `tool_calls` | The count, and per call the tool name, outcome and duration, without arguments or results. |
@@ -536,7 +541,9 @@ history; a caller who may read but lacks the access a function needs gets a
 
 Records never contain secret values, credentials or tokens. Tool arguments and
 results are not recorded, because they may hold graph content the run record's
-readers should not see.
+readers should not see. For the same reason, a reader whose graph visibility the
+authorization hook narrows sees `output`, `log` and `actor` only for runs they
+started themselves.
 
 Run-level error codes are a closed set:
 
@@ -567,8 +574,9 @@ run-history store:
   `error` (stored as `last_error`) starts with the code (`timeout: …`) and
   whose `result` keeps the run's other fields. The run-history view reads the
   code from that prefix to tell `timed_out` from `failed`;
-- `rejected` and `cancelled` are `CANCELLED`, recorded with `cancel`, whose
-  `result` keeps the outcome and code.
+- `cancelled` is `CANCELLED`, recorded with `cancel`, whose `result` keeps the
+  outcome; `rejected` is stored already `CANCELLED`, since the run never
+  started, with the outcome and code in its `result`.
 
 ## 12. Compatibility
 

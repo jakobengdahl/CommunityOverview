@@ -19,6 +19,7 @@ import json
 import logging
 import threading
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -37,6 +38,7 @@ from backend.functions.broker import (
 )
 from backend.functions.manifest import (
     LoadedFunction,
+    is_valid_id,
     Manifest,
     list_function_directories,
     load_function,
@@ -139,6 +141,32 @@ class FunctionService:
         self._admission_lock = threading.Lock()
         self._busy: set = set()
         self._active: Dict[str, _ActiveRun] = {}
+        # Runs live only in this process; a record from another boot that
+        # still reads "running" was cut short by a restart.
+        self._boot_id = uuid.uuid4().hex
+
+    def close_interrupted_runs(self) -> int:
+        """Close runs a previous process left running (§11 ``runner_lost``)."""
+        closed = 0
+        for job in self._store.list_jobs(
+            states=[ExecutionState.RUNNING], kind=ExecutionKind.FUNCTION
+        ):
+            if (job.payload or {}).get("boot_id") == self._boot_id:
+                continue
+            try:
+                self._store.fail(
+                    job.id,
+                    error=f"{CODE_RUNNER_LOST}: The host restarted during the run.",
+                    result={"outcome": STATUS_FAILED, "code": CODE_RUNNER_LOST},
+                )
+                closed += 1
+            except Exception:  # noqa: BLE001 - one bad record must not stop the rest
+                logger.exception("Could not close interrupted function run %s", job.id)
+        if closed:
+            logger.warning(
+                "Closed %d user-function run(s) a restart interrupted", closed
+            )
+        return closed
 
     # -- the runner ---------------------------------------------------------------
 
@@ -179,7 +207,11 @@ class FunctionService:
         return self._function_view(self._load(function_id))
 
     def _load(self, function_id: str) -> LoadedFunction:
-        if function_id not in list_function_directories(self._settings.root):
+        # Only a directory named like a valid id can be invoked: run keys are
+        # "fn:<id>:<key>" and must not collide across functions.
+        if not is_valid_id(function_id) or function_id not in list_function_directories(
+            self._settings.root
+        ):
             raise FunctionNotFound(function_id)
         return load_function(self._settings.root, function_id)
 
@@ -423,6 +455,7 @@ class FunctionService:
                 "trigger": TRIGGER_MANUAL,
                 "actor": actor,
                 "isolation": isolation,
+                "boot_id": self._boot_id,
             },
             state=state,
             attempts=1 if state == ExecutionState.RUNNING else 0,
@@ -572,22 +605,28 @@ class FunctionService:
         function_id: Optional[str] = None,
         status: Optional[str] = None,
         limit: int = 100,
+        viewer: Optional["RunViewer"] = None,
     ) -> List[Dict[str, Any]]:
         if status is not None and status not in RUN_STATUSES:
             return []
         agent_id = f"function:{function_id}" if function_id else None
+        states = [_STATUS_STATES[status]] if status else None
+        exact = status is None or status in _STATUSES_WITH_OWN_STATE
         jobs = self._store.list_jobs(
             kind=ExecutionKind.FUNCTION,
             agent_id=agent_id,
-            limit=None if status else limit,
+            states=states,
+            limit=limit if exact else None,
             created_after=self._read_cutoff(),
         )
         runs = [function_run_to_dict(job) for job in jobs]
         if status is not None:
             runs = [run for run in runs if run["status"] == status][:limit]
-        return runs
+        return [_for_viewer(run, viewer) for run in runs]
 
-    def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
+    def get_run(
+        self, run_id: str, *, viewer: Optional["RunViewer"] = None
+    ) -> Optional[Dict[str, Any]]:
         job = self._store.get(run_id)
         cutoff = self._read_cutoff()
         if (
@@ -596,7 +635,7 @@ class FunctionService:
             or (cutoff is not None and job.created_at <= cutoff)
         ):
             return None
-        return function_run_to_dict(job)
+        return _for_viewer(function_run_to_dict(job), viewer)
 
     # -- the envelope ---------------------------------------------------------------
 
@@ -637,6 +676,43 @@ class FunctionService:
                 "deadline": _iso(now + timedelta(seconds=timeout_seconds)),
             },
         }
+
+
+# The store state each run status is recorded in (§11); two pairs share one.
+_STATUS_STATES = {
+    STATUS_RUNNING: ExecutionState.RUNNING,
+    STATUS_SUCCEEDED: ExecutionState.SUCCEEDED,
+    STATUS_FAILED: ExecutionState.DEAD_LETTER,
+    STATUS_TIMED_OUT: ExecutionState.DEAD_LETTER,
+    STATUS_CANCELLED: ExecutionState.CANCELLED,
+    STATUS_REJECTED: ExecutionState.CANCELLED,
+}
+_STATUSES_WITH_OWN_STATE = frozenset({STATUS_RUNNING, STATUS_SUCCEEDED})
+
+
+@dataclass(frozen=True)
+class RunViewer:
+    """Who reads run records: a reader whose graph visibility is narrowed
+    sees the content of only the runs they started themselves."""
+
+    actor_id: str = ""
+    narrowed: bool = False
+
+
+_CONTENT_FIELDS = ("output", "log", "actor")
+
+
+def _for_viewer(run: Dict[str, Any], viewer: Optional[RunViewer]) -> Dict[str, Any]:
+    if viewer is None or not viewer.narrowed:
+        return run
+    started_by = ((run.get("actor") or {}).get("actor") or {}).get("actor_id")
+    if viewer.actor_id and started_by == viewer.actor_id:
+        return run
+    hidden = dict(run)
+    for name in _CONTENT_FIELDS:
+        hidden[name] = None
+    hidden["content_hidden"] = True
+    return hidden
 
 
 def _check_text(name: str, value: Any, *, allow_empty: bool = True) -> None:
@@ -757,4 +833,5 @@ def function_run_to_dict(job: ExecutionJob) -> Dict[str, Any]:
         "started_at": _iso(job.started_at),
         "finished_at": _iso(job.finished_at),
         "redacted": job.redacted_at is not None,
+        "content_hidden": False,
     }

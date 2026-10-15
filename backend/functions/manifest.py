@@ -115,6 +115,10 @@ def load_function(root: str, directory_name: str) -> LoadedFunction:
     return loaded
 
 
+def is_valid_id(function_id: str) -> bool:
+    return bool(_ID_PATTERN.fullmatch(function_id)) and function_id not in RESERVED_IDS
+
+
 def list_function_directories(root: str) -> List[str]:
     try:
         entries = sorted(os.listdir(root))
@@ -206,7 +210,42 @@ def _check_schema(name, value, errors) -> Optional[Dict[str, Any]]:
     except SchemaError as exc:
         errors.append(f"{name} is not a valid JSON Schema: {exc.message}")
         return None
+    if _uses_regular_expressions(value):
+        # The host checks schemas in its own process, where a backtracking
+        # expression could stall it beyond any run's time limit.
+        errors.append(f"{name} may not use pattern or patternProperties in version 1")
+        return None
     return value
+
+
+# Keywords whose values are maps from names to subschemas, and keywords whose
+# values are data rather than schemas.
+_NAMED_SUBSCHEMAS = frozenset(
+    {"properties", "$defs", "definitions", "dependentSchemas"}
+)
+_DATA_KEYWORDS = frozenset(
+    {"const", "enum", "default", "examples", "dependentRequired"}
+)
+
+
+def _uses_regular_expressions(schema: Any) -> bool:
+    if isinstance(schema, list):
+        return any(_uses_regular_expressions(item) for item in schema)
+    if not isinstance(schema, dict):
+        return False
+    for keyword, value in schema.items():
+        if keyword == "patternProperties" or (
+            keyword == "pattern" and isinstance(value, str)
+        ):
+            return True
+        if keyword in _DATA_KEYWORDS:
+            continue
+        if keyword in _NAMED_SUBSCHEMAS and isinstance(value, dict):
+            if any(_uses_regular_expressions(sub) for sub in value.values()):
+                return True
+        elif _uses_regular_expressions(value):
+            return True
+    return False
 
 
 def validate_manifest(

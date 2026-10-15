@@ -593,3 +593,124 @@ def test_a_redacted_flag_is_reported(harness):
     harness.store.complete(job.id, result={"outcome": "succeeded"})
     redact_job(harness.store._jobs[job.id], datetime.now(timezone.utc))
     assert harness.service.get_run(job.id)["redacted"] is True
+
+
+# --- review round 2 ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"type": "string", "pattern": "^(a+)+$"},
+        {"properties": {"s": {"pattern": "a"}}},
+        {"patternProperties": {"^x": {}}},
+        {"items": [{"anyOf": [{"pattern": "a"}]}]},
+        {"$defs": {"d": {"pattern": "a"}}},
+    ],
+)
+def test_schemas_may_not_use_regular_expressions(schema):
+    _, errors = validate_manifest(
+        dict(manifest("count-nodes"), input_schema=schema, output_schema=schema),
+        "count-nodes",
+        {"main.py": b"", "function.json": b"{}"},
+    )
+    assert any("pattern" in e for e in errors)
+
+
+def test_a_property_or_value_named_pattern_is_not_a_regular_expression():
+    schema = {
+        "properties": {"pattern": {"type": "string"}},
+        "enum": [{"pattern": "data"}],
+        "default": {"pattern": "data"},
+    }
+    _, errors = validate_manifest(
+        dict(manifest("count-nodes"), input_schema=schema),
+        "count-nodes",
+        {"main.py": b"", "function.json": b"{}"},
+    )
+    assert errors == []
+
+
+def test_runs_a_previous_process_left_running_are_closed_at_start(harness):
+    harness.add("sleeper", "time.sleep(60)")
+    earlier = harness.store.enqueue(
+        _function_job(
+            key="fn:count:k1", payload={"function_id": "count", "boot_id": "old"}
+        )
+    )
+    service = harness.service
+    current = invoke(service, "sleeper")
+    assert service.close_interrupted_runs() == 1
+    closed = service.get_run(earlier.id)
+    assert (closed["status"], closed["error"]["code"]) == ("failed", "runner_lost")
+    assert service.get_run(current["id"])["status"] == "running"
+    service.cancel_run(current["id"])
+    finished(service, current)
+
+
+def test_a_directory_whose_name_is_not_an_id_cannot_be_invoked(harness):
+    from backend.functions.service import FunctionNotFound
+
+    (harness.root / "Not_An_Id").mkdir()
+    with pytest.raises(FunctionNotFound):
+        invoke(harness.service, "Not_An_Id")
+    assert harness.store.list_jobs() == []
+
+
+class NarrowedHook:
+    def evaluate(self, context):
+        from backend.runtime.authorization import GraphAccessNarrowing
+
+        narrowed = context.actor.get("actor_id") == "narrowed"
+        return GraphAuthorizationDecision(
+            allowed=True,
+            mode="custom",
+            source="t",
+            graph_access=GraphAccessNarrowing(enabled=narrowed),
+        )
+
+
+def test_a_narrowed_reader_sees_run_content_only_for_their_own_runs(
+    storage, tmp_path, runner
+):
+    harness = Harness(storage, tmp_path, runner, hook=NarrowedHook())
+    harness.add("echo", "print('secret log'); return {'secret': 1}")
+    client, service = _client(harness)
+    other = finished(
+        service,
+        client.post(
+            "/functions/echo/invoke", json={}, headers={ACTOR_ID_HEADER: "someone"}
+        ).json(),
+    )
+    own = finished(
+        service,
+        client.post(
+            "/functions/echo/invoke", json={}, headers={ACTOR_ID_HEADER: "narrowed"}
+        ).json(),
+    )
+    narrowed = {ACTOR_ID_HEADER: "narrowed"}
+    hidden = client.get(f"/functions/runs/{other['id']}", headers=narrowed).json()
+    assert (hidden["output"], hidden["log"], hidden["actor"]) == (None, None, None)
+    assert hidden["content_hidden"] is True
+    assert hidden["status"] == "succeeded"
+    visible = client.get(f"/functions/runs/{own['id']}", headers=narrowed).json()
+    assert visible["output"] == {"secret": 1}
+    listed = client.get("/functions/runs", headers=narrowed).json()
+    assert {r["id"]: r["content_hidden"] for r in listed} == {
+        other["id"]: True,
+        own["id"]: False,
+    }
+    unnarrowed = client.get(
+        f"/functions/runs/{other['id']}", headers={ACTOR_ID_HEADER: "admin"}
+    ).json()
+    assert unnarrowed["output"] == {"secret": 1}
+
+
+def test_failed_and_timed_out_runs_are_told_apart_by_the_status_filter(harness):
+    harness.add("broken", "raise ValueError('x')")
+    harness.add("spin", "while True:\n    pass", limits={"timeout_seconds": 1})
+    service = harness.service
+    failed = finished(service, invoke(service, "broken"))
+    timed_out = finished(service, invoke(service, "spin"))
+    assert [r["id"] for r in service.list_runs(status="failed")] == [failed["id"]]
+    assert [r["id"] for r in service.list_runs(status="timed_out")] == [timed_out["id"]]
