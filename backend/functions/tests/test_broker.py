@@ -835,3 +835,29 @@ def test_an_edge_endpoint_naming_a_node_created_in_the_same_call_is_allowed(
     )
     assert "result" in response, response
     assert not any(e.target.startswith("federated::") for e in storage.edges.values())
+
+
+def test_reference_node_names_cannot_be_probed_without_write_access(storage):
+    storage.add_nodes(
+        [Node(id="federated::g2::n1", name="Secret Ref", type=NodeType.ACTOR)], []
+    )
+    service = SpyService(storage, authorization_hook=RecordingHook(deny_mutate=True))
+    broker = make_broker(service)
+    for target in ("Secret Ref", "Nope"):
+        edge = {"source": "a", "target": target, "type": "RELATES_TO"}
+        response = call(broker, "graph.add", {"nodes": [], "edges": [edge]})
+        assert error_code(response) == "access_denied", target
+    assert service.calls == []
+
+
+def test_a_non_string_node_name_does_not_break_the_endpoint_check(service, caplog):
+    response = call(
+        make_broker(service),
+        "graph.add",
+        {
+            "nodes": [{"name": ["x"], "type": "Actor"}],
+            "edges": [{"source": "a", "target": "b", "type": "RELATES_TO"}],
+        },
+    )
+    assert "error" in response
+    assert "raised" not in caplog.text and "failed in the broker" not in caplog.text

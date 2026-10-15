@@ -307,8 +307,6 @@ class FunctionBroker:
             )
 
         self._validate_arguments(spec, arguments)
-        if spec.method == "add_nodes":
-            self._refuse_reference_endpoints(arguments)
         call_args = dict(arguments)
         if spec.action == GRAPH_ACTION_MUTATE:
             call_args["event_origin"] = function_origin(
@@ -331,6 +329,10 @@ class FunctionBroker:
                     ERR_ACCESS_DENIED,
                     _sanitize(decision.reason or "Graph access denied."),
                 )
+            if spec.method == "add_nodes":
+                # After the decision: this check reads graph state, and an
+                # actor without access must not learn anything from it.
+                self._refuse_reference_endpoints(arguments)
             try:
                 result = getattr(self._service, spec.method)(**call_args)
             except Exception:
@@ -379,7 +381,7 @@ class FunctionBroker:
         new_names = {
             node.get("name")
             for node in arguments.get("nodes") or []
-            if isinstance(node, Mapping)
+            if isinstance(node, Mapping) and isinstance(node.get("name"), str)
         }
         candidates = {n for n in names if n not in nodes and n not in new_names}
         if not candidates:

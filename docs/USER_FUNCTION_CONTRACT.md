@@ -348,7 +348,8 @@ call that breaks one is refused with `invalid_arguments`:
   or edge and inside its `metadata`, and `metadata` must be an object; node ids
   in the reserved `federated::` namespace are refused, whether created, updated
   or used as an edge endpoint, and so is an edge endpoint given by a name that a
-  federated reference node carries; and `graph.update_node` changes `metadata` only
+  federated reference node carries, unless a node created in the same call
+  carries that name (the endpoint then resolves to the new node); and `graph.update_node` changes `metadata` only
   with `metadata_merge: true`, so keys the function does not name are kept.
 - Work per call is bounded: `limit` is an integer from 0 to 500 and `depth`
   from 0 to 3.
