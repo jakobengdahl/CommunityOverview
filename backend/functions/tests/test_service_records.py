@@ -502,3 +502,155 @@ def test_output_checks_do_not_wait_on_callers_input_checks(harness):
         for _ in range(taken):
             schema_check._input_slots.release()
     assert run["status"] == "succeeded"
+
+
+# --- review round 5 mutation residue ----------------------------------------------------
+
+
+def test_a_conforming_output_keeps_its_output(harness):
+    harness.add(
+        "typed-out",
+        "return {'n': 1}",
+        output_schema={"type": "object", "required": ["n"]},
+    )
+    service = harness.service
+    run = finished(service, invoke(service, "typed-out"))
+    assert (run["status"], run["output"]) == ("succeeded", {"n": 1})
+
+
+def test_a_failed_run_keeps_its_own_code_under_an_output_schema(harness):
+    harness.add("broken", "raise ValueError('x')", output_schema={"type": "object"})
+    service = harness.service
+    run = finished(service, invoke(service, "broken"))
+    assert run["error"]["code"] == "function_error"
+
+
+def test_an_invalid_output_says_what_failed(harness):
+    harness.add(
+        "wrong",
+        "return {'n': 'x'}",
+        output_schema={"type": "object", "properties": {"n": {"type": "integer"}}},
+    )
+    service = harness.service
+    run = finished(service, invoke(service, "wrong"))
+    assert run["error"]["message"].startswith("result.output failed output_schema")
+
+
+def test_a_schema_problem_is_cut_to_its_limit():
+    from backend.functions.schema_check import MAX_PROBLEM_CHARS, schema_problem
+
+    problem = schema_problem({"const": "x" * 10000}, "y")
+    assert problem and len(problem) <= MAX_PROBLEM_CHARS
+
+
+def test_the_number_of_concurrent_input_checks_is_bounded():
+    import backend.functions.schema_check as schema_check
+
+    taken = 0
+    while schema_check._input_slots.acquire(blocking=False):
+        taken += 1
+    try:
+        assert taken == schema_check.MAX_INPUT_CHECKS == 3
+        with pytest.raises(schema_check.SchemaCheckBusy):
+            schema_check.schema_problem({"type": "object"}, {})
+    finally:
+        for _ in range(taken):
+            schema_check._input_slots.release()
+
+
+def test_a_check_that_needs_too_much_memory_fails():
+    from backend.functions.schema_check import SchemaCheckFailed, schema_problem
+
+    # Building this list inside the check needs well over the memory limit.
+    huge = {"type": "array", "items": {"type": "integer"}, "minItems": 1}
+    with pytest.raises(SchemaCheckFailed):
+        schema_problem(huge, [0] * 80_000_000)
+
+
+def test_the_check_ignores_the_hosts_environment(monkeypatch, tmp_path):
+    from backend.functions.schema_check import schema_problem
+
+    (tmp_path / "jsonschema.py").write_text("raise SystemExit('poisoned')\n")
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    assert schema_problem({"type": "object"}, {}) is None
+
+
+@pytest.mark.parametrize("combiner", ["allOf", "anyOf", "oneOf"])
+def test_a_remote_reference_inside_a_combiner_is_refused(combiner):
+    from backend.functions.manifest import validate_manifest
+    from backend.functions.tests.test_service import manifest
+
+    schema = {combiner: [{"type": "object"}, {"$ref": "http://example.invalid/s"}]}
+    _, errors = validate_manifest(
+        dict(manifest("count-nodes"), input_schema=schema),
+        "count-nodes",
+        {"main.py": b"", "function.json": b"{}"},
+    )
+    assert errors
+
+
+def test_a_manifest_whose_schema_recurses_in_validation_is_invalid(tmp_path):
+    import json as json_module
+
+    from backend.functions.manifest import load_function
+    from backend.functions.tests.test_service import manifest
+
+    # Shallow enough for the JSON parser, deep enough for schema validation,
+    # which recurses several frames per level.
+    depth = 300
+    schema = '{"allOf": [' * depth + '{"type": "object"}' + "]}" * depth
+    document = json_module.dumps(manifest("count-nodes"))[:-1]
+    directory = tmp_path / "count-nodes"
+    directory.mkdir()
+    (directory / "main.py").write_text("")
+    (directory / "function.json").write_text(
+        document + ', "input_schema": ' + schema + "}"
+    )
+    loaded = load_function(str(tmp_path), "count-nodes")
+    assert not loaded.valid
+
+
+def test_a_shared_state_filter_looks_past_newer_runs_of_the_other_status(harness):
+    harness.add("sleeper", "time.sleep(60)")
+    harness.add("off", "return {}", enable=False)
+    service = harness.service
+    cancelled = invoke(service, "sleeper")
+    service.cancel_run(cancelled["id"])
+    finished(service, cancelled)
+    for _ in range(5):
+        invoke(service, "off")
+    assert [r["id"] for r in service.list_runs(status="cancelled", limit=2)] == [
+        cancelled["id"]
+    ]
+
+
+def test_a_closed_interrupted_run_keeps_its_code_through_redaction(harness):
+    job = harness.store.enqueue(_job(key="r", payload={"boot_id": "old"}))
+    service = harness.service
+    service.close_interrupted_runs()
+    redact_job(harness.store._jobs[job.id], NOW)
+    assert service.get_run(job.id)["error"]["code"] == "runner_lost"
+
+
+def test_redaction_drops_an_outcome_code_too_long_to_keep():
+    job = _job(
+        state=ExecutionState.DEAD_LETTER,
+        result={"outcome": "failed", "code": "c" * 500},
+    )
+    redact_job(job, NOW)
+    assert job.result["code"] is None
+
+
+def test_a_narrowed_reader_does_not_see_where_someone_elses_run_came_from():
+    run = {
+        "output": None,
+        "log": None,
+        "actor": {"actor": {"actor_id": "someone"}},
+        "error": None,
+        "origin": "private-tool",
+        "correlation_id": "c",
+        "function_error_code": None,
+    }
+    seen = view_run(run, RunViewer(actor_id="narrowed", narrowed=True))
+    assert seen["origin"] is None

@@ -158,3 +158,11 @@ def test_the_listing_and_runner_status_are_readable(setup):
     status = client.get("/functions/runner", headers=as_actor("u")).json()
     assert status["level"] in ("full", "degraded")
     assert status["runtimes"] == ["python"]
+
+
+def test_the_application_serves_functions_from_the_shared_run_history(test_app):
+    app = test_app.app
+    service = app.state.function_service
+    assert service._store is app.state.agent_registry.run_history_store
+    assert test_app.get("/functions").status_code == 200
+    assert test_app.get("/functions/runs").status_code == 200
