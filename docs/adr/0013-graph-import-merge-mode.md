@@ -179,7 +179,7 @@ replace does, and not the live graph alone):
 | one or both only in the live graph | Allowed — attaching new content to existing nodes is the point of merge. Applicability is judged against the **live** node's type and subtypes. |
 | an endpoint the document names under a node that is **skipped** | See *Edges of skipped nodes* below. |
 | an endpoint the document names under a node that is **renamed** | Rewritten to the new id (§1). |
-| an endpoint in neither the document nor the live graph | **Rejected** (`dangling`). Never created as a placeholder node. |
+| an endpoint in neither the document nor the live graph | **Rejected** (`dangling`). Never created as a placeholder node. Endpoints resolve by id only, as in replace — never by node name, the fallback `add_edge` has. |
 | an endpoint that is a live node archived (`archived: true`) | Options: allow (archive is reversible) or conflict. Recommendation: allow, reported in the plan. |
 
 **Edges of skipped nodes — options:** (a) attach the edge to the live node
@@ -259,9 +259,16 @@ response.
 - **(c) Stateless digest.** Preview returns `plan_digest`, a SHA-256 over the
   canonical request parameters that change writes (`policy`,
   `include_system_types`, `stamp_provenance`) and the full, uncapped
-  canonical plan (not the capped report) *including the live
-  revision of every entity it reads or expects absent, and the graph's
-  `generation`*. Commit sends the document,
+  canonical plan (not the capped report): every outcome that determines a
+  write, the full content of every document entity the commit writes
+  (renamed creates included), *the live revision of every entity it reads
+  or expects absent, and the graph's `generation`* — sampled before the
+  first entity is read and re-checked after the last, so a replace landing
+  mid-plan restarts the plan rather than producing a mixed one.
+  Informational counts that do not determine a write (the embeddings
+  backlog, the event count) are reported but left out of the digest, since
+  they change without anything the commit writes changing. Commit sends the
+  document,
   the policy and the digest; the server recomputes the plan, and refuses with
   `import_plan_stale` (carrying the new plan) if the digest differs.
 
@@ -344,10 +351,11 @@ shape is a new, narrow `GraphStorage` method (working name
    in-memory model;
 2. captures undo state for every entity it will touch (the existing
    `_capture`/`_undo` pair);
-3. applies creates and overwrites to the in-memory model, assigning fresh
-   revisions as any write does (§4.2 of the session contract — a merge write is
-   an ordinary write, not a whole-graph replace, so untouched entities keep
-   their revisions);
+3. applies creates and overwrites to the in-memory model; fresh revisions are
+   stamped at persist time, as `_commit` stamps every direct write's (from
+   the counter, or from the store's reply under PostgreSQL) — §4.2 of the
+   session contract: a merge write is an ordinary write, not a whole-graph
+   replace, so untouched entities keep their revisions;
 4. persists **one** batch through `apply_batch`, which both shipped backends
    declare atomic (`incremental_writes` and `transactions`; on the file
    backend it is one journal record). PostgreSQL also declares
@@ -363,7 +371,9 @@ shape is a new, narrow `GraphStorage` method (working name
    only upserts, so every touched entity carries the write token as evidence.
    On the file backend a write that fails after hand-over is not undone
    either: the existing landing path keeps memory as it is and re-saves the
-   whole graph (`_await_landing`), and the merge inherits that.
+   whole graph (`_await_landing`), and the merge inherits that; if that
+   re-save itself fails, memory keeps the merge, no events fire, and the
+   response is `write_outcome_unknown`.
 
 **Order.** Recompute the plan and check the digest, then write the pre-merge
 backup (below), then run the locked unit — the backup outside the lock, as v1
@@ -444,12 +454,19 @@ One gap must be closed in the implementation: the worker checks only
 `generation` before committing. A node overwritten by a direct write *while*
 the job is encoding would receive a vector computed from its older text.
 Options: (a) accept it (the same gap exists for any slow embedding today); (b)
-have the job record each node's revision when it reads the text, and have the
-commit skip any node whose revision has moved since. Recommendation: **(b)** —
-revisions make it a per-node comparison under the lock the commit already
-takes.
+have the job record each node's embedding text (or its revision) when it reads
+it, and at commit compare per node: if the node now has a vector, or its
+embedding text changed, drop the computed vector; otherwise commit it. A
+revision alone is not enough to skip on — `update_node` re-embeds only when
+`name`, `description`, `summary`, `tags` or `aliases` change, so a metadata-
+or subtype-only update moves the revision without producing a vector, and a
+node skipped on revision alone would be left with none (the worker makes one
+pass over nodes lacking a vector). A node whose text changed and still has no
+vector is re-encoded in the same job or left for a re-enqueued one.
+Recommendation: **(b)**, a per-node comparison under the lock the commit
+already takes.
 
-A second gap concerns a shared PostgreSQL store. The worker commits through
+A second gap concerns PostgreSQL mode. The worker commits through
 `commit_generation_embeddings`, which persists with `save()`, and under
 PostgreSQL `save()` is `save_graph_data`: it rewrites every row from this
 instance's memory in one transaction (vectors travel inline in node rows,
@@ -457,13 +474,25 @@ ADR 0009). For a replace that is harmless — the graph was just replaced
 wholesale. For a merge it is not: §4 is designed around other instances
 continuing to write, and a whole-graph save from one instance's memory would
 overwrite concurrent writes it has not yet received, and make every other
-instance reload. Options: (a) in a shared store, persist only the embedded
-nodes as entity upserts through `apply_batch`, each carrying the revision
-recorded under (b) as its expectation; (b) declare merge out of scope for
-multi-instance PostgreSQL until (a) exists. Recommendation: **(a)**, in the
-third slice, with slice 2 refusing a shared-store merge until then. (The same
-whole-graph save already follows a replace's embedding job in a
-shared store; that is a property of today's replace path, outside this ADR.)
+instance reload. The core cannot tell how many instances share a store, so
+this applies to any backend declaring `revision_enforcement` — all of
+PostgreSQL mode. Options:
+
+- **(a)** persist only the embedded nodes as entity upserts through
+  `apply_batch`, each carrying the expectation from the first gap's option
+  (b). A batch is all-or-nothing, so one node edited elsewhere would fail the
+  whole commit; the rule is to re-read on conflict, drop the moved nodes and
+  re-issue (or to commit in per-node batches). Its costs: every upsert takes
+  a new revision, so each embedded node's revision moves — making other
+  callers' expectations and outstanding merge previews stale — and every
+  other instance receives each upsert as an `external-change` `node.update`
+  event, volume the plan's `events` count does not include.
+- **(b)** refuse merge in PostgreSQL mode until (a) exists.
+
+Recommendation: **(a)**, in the third slice, with slice 2 refusing a merge in
+PostgreSQL mode until then. (The same whole-graph save already follows a
+replace's embedding job in PostgreSQL mode; that is a property of today's
+replace path, outside this ADR.)
 
 Merge via `POST /import/archive` (restoring vectors from `embeddings.bin` for
 created nodes) is out of scope for the first slices; plain `graph.json` only.
@@ -520,7 +549,9 @@ entity its own merge wrote.
 
 Merge changes part of a graph other clients are looking at, so (a) leaves
 sessions, webhooks and agents blind to it. (b) uses the existing
-event types and envelope, so no contract changes, and lets a subscription opt
+event types and envelope, so no contract changes (`edge.update` exists in
+`backend/core/events/models.py` but is missing from the event table in
+`docs/EVENT_SUBSCRIPTIONS.md`; the slice adds it there), and lets a subscription opt
 out with its existing `ignore_origins` filter; its cost is volume — a merge at
 the document caps fires hundreds of thousands of events to every matching
 subscription and into mutation history (file backend only, ADR 0009), which
@@ -548,7 +579,8 @@ slices benchmark against them:
   entities, not the live graph (the whole-graph backup of §4 (a) runs before
   the lock and is measured separately);
 - request latency and delivery-queue depth for the §7 (b) event fan-out at
-  10,000 entities, and, with several PostgreSQL instances, the cost on the
+  10,000 entities; and, in slice 3 once PostgreSQL merges are allowed, with
+  several instances, the cost on the
   others: each re-emits a change it receives as an `external-change` event
   (so the plan's `events` count is per instance, and an agent's own
   `ignore_origins` entry does not stop that echo), and a batch too large to
@@ -579,6 +611,7 @@ POST /import/merge
         "backup_path": "…", "embeddings_status": "queued" }
 → 409 { "error_code": "import_plan_stale", "plan": {...}, "plan_digest": "…" }
 → 422 { "error_code": "import_merge_blocked", "plan": {...} }
+→ 502 { "error_code": "write_failed", ... }            # §4 step 5
 → 503 { "error_code": "write_outcome_unknown", ... }   # §4 step 5
 ```
 
@@ -665,6 +698,7 @@ After acceptance, in dependency order:
    `validate_import_document` that takes the document, the policy and a read
    view of the live graph, and returns the plan and digest (§1, §2, §3, §5);
    `POST /import/merge/preview`; the MCP preview tool if §9 (b) is chosen.
+   `stamp_provenance: true` is rejected until stamping ships.
    Writes nothing, so it can ship and be used for dry runs on its own.
 2. **Atomic commit.** `GraphStorage.apply_import_merge` with expectations,
    undo and one-batch persistence on both backends (§4); the backup reuse;
@@ -677,10 +711,10 @@ After acceptance, in dependency order:
    file backend vectors persist through the embedding sidecar, separately
    from the journal batch, so the drop is atomic in memory and the slice must
    say how it is made durable. Contract tests in the in-memory, file and PostgreSQL backends.
-   Until slice 3 lands, slice 2 refuses a merge on a shared PostgreSQL store
+   Until slice 3 lands, slice 2 refuses a merge in PostgreSQL mode
    (§6, second gap).
 3. **Embedding commit for merges.** The per-node revision guard in the worker,
-   and the entity-upsert embedding commit for a shared store (§6); lifts
+   and the entity-upsert embedding commit for PostgreSQL mode (§6); lifts
    slice 2's PostgreSQL refusal.
 4. **Optional, later:** per-id resolutions after preview (§1 (c)), merge for
    narrowed callers (§10 (b)), merge from an archive (§6), opt-in provenance
