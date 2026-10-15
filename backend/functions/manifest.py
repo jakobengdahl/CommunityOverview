@@ -9,6 +9,7 @@ validation state. The host validates again before every run.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -43,6 +44,7 @@ LIMIT_MAXIMUMS = {
 
 # A function is a few source files, not a project: bound what the host reads.
 MAX_FILES = 200
+MAX_ENTRIES = 2 * MAX_FILES
 MAX_PACKAGE_BYTES = 5 * 1024 * 1024
 MAX_MANIFEST_BYTES = 256 * 1024
 
@@ -83,17 +85,37 @@ class LoadedFunction:
 
 def load_function(root: str, directory_name: str) -> LoadedFunction:
     """Read and validate ``root/directory_name`` (§4.1–§4.3)."""
+    loaded = read_package(root, directory_name)
+    if loaded.errors:
+        return loaded
+    return validate_package(loaded)
+
+
+def read_package(root: str, directory_name: str) -> LoadedFunction:
+    """A function directory's files, read without validating them."""
     loaded = LoadedFunction(directory_name=directory_name)
-    directory = os.path.join(root, directory_name)
     try:
-        loaded.files = _read_package(directory)
+        loaded.files = _read_package(os.path.join(root, directory_name))
     except ValueError as exc:
         loaded.errors.append(str(exc))
-        return loaded
     except OSError as exc:
         # The message, not the host path, is what a reader of the list sees.
         loaded.errors.append(f"the package could not be read: {exc.strerror}")
-        return loaded
+    return loaded
+
+
+def package_digest(files: Mapping[str, bytes]) -> str:
+    """A digest of a package's content: paths and bytes, nothing else."""
+    digest = hashlib.sha256()
+    for path in sorted(files):
+        content = files[path]
+        digest.update(f"{len(path)}:{path}:{len(content)}:".encode("utf-8"))
+        digest.update(content)
+    return digest.hexdigest()
+
+
+def validate_package(loaded: LoadedFunction) -> LoadedFunction:
+    """Validate the manifest of a package whose files were read."""
     raw = loaded.files.get(MANIFEST_FILE)
     if raw is None:
         loaded.errors.append(f"{MANIFEST_FILE} is missing")
@@ -109,7 +131,9 @@ def load_function(root: str, directory_name: str) -> LoadedFunction:
         loaded.errors.append(f"{MANIFEST_FILE} is not valid JSON: {exc}")
         return loaded
     try:
-        manifest, errors = validate_manifest(document, directory_name, loaded.files)
+        manifest, errors = validate_manifest(
+            document, loaded.directory_name, loaded.files
+        )
     except RecursionError:
         manifest, errors = None, [f"{MANIFEST_FILE} is nested too deeply"]
     loaded.errors.extend(errors)
@@ -140,23 +164,40 @@ def _read_package(directory: str) -> Dict[str, bytes]:
     """Every regular file under ``directory``, keyed by its relative path.
 
     Symbolic links are refused rather than followed: a package can only hold
-    what is inside its own directory.
+    what is inside its own directory. The walk is iterative and counts
+    directories as well as files, so neither depth nor width is unbounded.
     """
     if os.path.islink(directory) or not os.path.isdir(directory):
         raise ValueError("the function directory does not exist")
     files: Dict[str, bytes] = {}
     total = 0
-    for current, dirnames, filenames in os.walk(directory, followlinks=False):
-        dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
-        for dirname in dirnames:
-            if os.path.islink(os.path.join(current, dirname)):
-                raise ValueError(f"symbolic links are not allowed: {dirname}")
-        for filename in sorted(filenames):
-            path = os.path.join(current, filename)
-            relative = os.path.relpath(path, directory).replace(os.sep, "/")
+    entries = 0
+    pending = [""]
+    while pending:
+        relative_dir = pending.pop()
+        current = os.path.join(directory, relative_dir) if relative_dir else directory
+        with os.scandir(current) as listing:
+            children = []
+            for entry in listing:
+                entries += 1
+                if entries > MAX_ENTRIES:
+                    raise ValueError(
+                        f"a function may hold at most {MAX_ENTRIES} files and folders"
+                    )
+                children.append(entry)
+        for entry in sorted(children, key=lambda e: e.name):
+            relative = f"{relative_dir}/{entry.name}" if relative_dir else entry.name
+            if entry.is_symlink():
+                raise ValueError(f"symbolic links are not allowed: {relative}")
+            if entry.is_dir(follow_symlinks=False):
+                if entry.name != "__pycache__":
+                    pending.append(relative)
+                continue
             if len(files) >= MAX_FILES:
                 raise ValueError(f"a function may hold at most {MAX_FILES} files")
-            content = _read_regular_file(path, relative, MAX_PACKAGE_BYTES - total + 1)
+            content = _read_regular_file(
+                entry.path, relative, MAX_PACKAGE_BYTES - total + 1
+            )
             total += len(content)
             if total > MAX_PACKAGE_BYTES:
                 raise ValueError(
@@ -230,6 +271,21 @@ _NAMED_SUBSCHEMAS = frozenset(
 )
 
 
+def _points_into_data(reference: str) -> bool:
+    """Whether a local JSON pointer resolves into data, where a reference the
+    walk above never looked at could hide."""
+    tokens = (
+        [t for t in reference[1:].split("/") if t] if reference.startswith("#/") else []
+    )
+    index = 0
+    while index < len(tokens):
+        token = tokens[index].replace("~1", "/").replace("~0", "~")
+        if token in _DATA_KEYWORDS:
+            return True
+        index += 2 if token in _NAMED_SUBSCHEMAS else 1
+    return False
+
+
 def _refers_outside(schema: Any) -> bool:
     """Whether a schema names anything but a location inside itself."""
     if isinstance(schema, list):
@@ -240,6 +296,8 @@ def _refers_outside(schema: Any) -> bool:
         if keyword in _REFERENCE_KEYWORDS:
             if not (isinstance(value, str) and value.startswith("#")):
                 return True
+            if _points_into_data(value):
+                return True
         elif keyword in _DATA_KEYWORDS:
             continue
         elif keyword in _NAMED_SUBSCHEMAS and isinstance(value, dict):
@@ -248,32 +306,6 @@ def _refers_outside(schema: Any) -> bool:
         elif _refers_outside(value):
             return True
     return False
-
-
-def package_fingerprint(root: str, directory_name: str) -> Optional[tuple]:
-    """What a package looks like on disk, without reading it: a changed file,
-    a new file or a removed one changes the fingerprint. None if unreadable."""
-    directory = os.path.join(root, directory_name)
-    entries = []
-    try:
-        for current, dirnames, filenames in os.walk(directory, followlinks=False):
-            dirnames.sort()
-            for name in sorted(dirnames) + sorted(filenames):
-                info = os.lstat(os.path.join(current, name))
-                entries.append(
-                    (
-                        os.path.relpath(os.path.join(current, name), directory),
-                        info.st_mode,
-                        info.st_size,
-                        info.st_mtime_ns,
-                        info.st_ino,
-                    )
-                )
-            if len(entries) > MAX_FILES * 2:
-                return None
-    except OSError:
-        return None
-    return tuple(entries)
 
 
 def validate_manifest(

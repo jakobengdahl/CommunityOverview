@@ -39,8 +39,9 @@ from backend.functions.manifest import (
     is_valid_id,
     Manifest,
     list_function_directories,
-    load_function,
-    package_fingerprint,
+    package_digest,
+    read_package,
+    validate_package,
 )
 from backend.functions.runner import (
     LEVEL_FULL,
@@ -54,6 +55,7 @@ from backend.functions.runner import (
 from backend.functions.schema_check import (
     SchemaCheckBusy,
     SchemaCheckFailed,
+    depth_below,
     schema_problem,
 )
 from backend.functions.settings import FunctionsSettings
@@ -68,6 +70,7 @@ logger = logging.getLogger(__name__)
 
 TRIGGER_MANUAL = "manual"
 MAX_INPUT_BYTES = 256 * 1024
+MAX_OUTPUT_DEPTH = 64
 MAX_KEY_CHARS = 200
 
 STATUS_RUNNING = "running"
@@ -145,7 +148,7 @@ class FunctionService:
         self._admission_lock = threading.Lock()
         self._busy: set = set()
         self._active: Dict[str, _ActiveRun] = {}
-        self._packages: Dict[str, Tuple[tuple, LoadedFunction]] = {}
+        self._packages: Dict[str, Tuple[str, LoadedFunction]] = {}
         # Runs live only in this process; a record from another boot that
         # still reads "running" was cut short by a restart.
         self._boot_id = uuid.uuid4().hex
@@ -203,10 +206,11 @@ class FunctionService:
     # -- the registry -------------------------------------------------------------
 
     def list_functions(self) -> List[Dict[str, Any]]:
-        return [
-            self._function_view(self._read(name))
-            for name in list_function_directories(self._settings.root)
-        ]
+        names = list_function_directories(self._settings.root)
+        with self._lock:
+            for gone in set(self._packages) - set(names):
+                del self._packages[gone]
+        return [self._function_view(self._read(name)) for name in names]
 
     def get_function(self, function_id: str) -> Dict[str, Any]:
         return self._function_view(self._load(function_id))
@@ -221,18 +225,21 @@ class FunctionService:
         return self._read(function_id)
 
     def _read(self, directory_name: str) -> LoadedFunction:
-        """A function's package, read and validated again only when it changed
-        on disk: validating large schemas on every request would let readers
-        spend the host's CPU."""
-        fingerprint = package_fingerprint(self._settings.root, directory_name)
+        """A function's package as it is on disk now. Its files are read on
+        every request; only validating the manifest is skipped when the
+        content is unchanged, since large schemas would let readers spend the
+        host's CPU."""
+        read = read_package(self._settings.root, directory_name)
+        if read.errors:
+            return read
+        digest = package_digest(read.files)
         with self._lock:
             cached = self._packages.get(directory_name)
-        if fingerprint is not None and cached is not None and cached[0] == fingerprint:
+        if cached is not None and cached[0] == digest:
             return cached[1]
-        loaded = load_function(self._settings.root, directory_name)
-        if fingerprint is not None:
-            with self._lock:
-                self._packages[directory_name] = (fingerprint, loaded)
+        loaded = validate_package(read)
+        with self._lock:
+            self._packages[directory_name] = (digest, loaded)
         return loaded
 
     def _function_view(self, loaded: LoadedFunction) -> Dict[str, Any]:
@@ -579,7 +586,14 @@ class FunctionService:
             "log_truncated": result.log_truncated,
         }
         status, code, message = result.status, result.code, result.message
-        if status == STATUS_SUCCEEDED and manifest.output_schema is not None:
+        if status == STATUS_SUCCEEDED and not depth_below(
+            result.output, MAX_OUTPUT_DEPTH
+        ):
+            # Records are read back on request threads; a deeper value could
+            # make every listing that includes it fail.
+            status, code = STATUS_FAILED, CODE_INVALID_OUTPUT
+            message = f"result.output nests deeper than {MAX_OUTPUT_DEPTH} levels"
+        elif status == STATUS_SUCCEEDED and manifest.output_schema is not None:
             try:
                 problem = schema_problem(
                     manifest.output_schema, result.output, output=True

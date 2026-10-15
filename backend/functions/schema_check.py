@@ -28,9 +28,7 @@ MAX_OUTPUT_CHECKS = 2
 _input_slots = threading.BoundedSemaphore(MAX_INPUT_CHECKS)
 _output_slots = threading.BoundedSemaphore(MAX_OUTPUT_CHECKS)
 _TOO_DEEP = "\x00too-deep"
-# A value this shallow cannot exhaust the checker's recursion: if the check
-# still recursed without end, the schema refers to itself without end.
-_SHALLOW_DEPTH = 100
+
 
 # The child reads {"schema", "instance"} on standard input and writes the first
 # problem's message, or nothing. It limits itself before reading anything.
@@ -77,16 +75,18 @@ def schema_problem(
         raise SchemaCheckBusy("too many schema checks are running")
     try:
         problem = _check(schema, instance)
+        # Either the value is too deep to check, or the schema recurses
+        # without end whatever the value: a trivial value tells them apart.
+        if problem == _TOO_DEEP and _check(schema, None) == _TOO_DEEP:
+            raise SchemaCheckFailed("the schema refers to itself without end")
     finally:
         slots.release()
     if problem == _TOO_DEEP:
-        if _depth_below(instance, _SHALLOW_DEPTH):
-            raise SchemaCheckFailed("the schema refers to itself without end")
         return "the value is nested too deeply to check"
     return problem
 
 
-def _depth_below(value: Any, limit: int) -> bool:
+def depth_below(value: Any, limit: int) -> bool:
     """Whether ``value`` nests fewer than ``limit`` levels, without recursion."""
     level = [value]
     for _ in range(limit):

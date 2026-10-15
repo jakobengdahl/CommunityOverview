@@ -421,6 +421,7 @@ system that started it.
 | Tool calls per run | 200 | Further calls return `limit_exceeded`. |
 | Size of one tool call or response | 1 MiB | The call is refused with `invalid_arguments`, or the response is replaced by a `tool_failed` error. |
 | Size of `result.output` | 256 KiB | The run ends `failed` with `output_too_large`. |
+| Nesting depth of `result.output` | 64 levels | The run ends `failed` with `invalid_output`. |
 | Captured log | 256 KiB | Further log output is dropped and the truncation is recorded. |
 | Concurrent runs per function | 1 | A further invocation is `rejected` with `busy`. |
 

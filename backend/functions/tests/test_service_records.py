@@ -460,31 +460,157 @@ def test_data_and_names_that_look_like_references_are_not_references(schema):
     assert errors == []
 
 
-def test_a_package_is_read_again_only_when_it_changes(harness, monkeypatch):
+def test_a_package_is_validated_again_only_when_its_content_changes(
+    harness, monkeypatch
+):
     import json as json_module
 
     import backend.functions.service as service_module
 
     harness.add("count", "return {}")
     service = harness.service
-    reads = []
-    real = service_module.load_function
+    validations = []
+    real = service_module.validate_package
 
-    def counting(root, name):
-        reads.append(name)
-        return real(root, name)
+    def counting(loaded):
+        validations.append(loaded.directory_name)
+        return real(loaded)
 
-    monkeypatch.setattr(service_module, "load_function", counting)
+    monkeypatch.setattr(service_module, "validate_package", counting)
     service.list_functions()
     service.get_function("count")
     service.list_functions()
-    assert reads == ["count"]
+    assert validations == ["count"]
     path = harness.root / "count" / "function.json"
     document = json_module.loads(path.read_text())
     document["name"] = "Renamed"
     path.write_text(json_module.dumps(document))
     assert service.get_function("count")["name"] == "Renamed"
-    assert reads == ["count", "count"]
+    assert validations == ["count", "count"]
+
+
+def test_a_package_replaced_with_the_same_sizes_and_times_is_seen(harness):
+    import json as json_module
+    import os
+
+    harness.add("swap", "return {'v': 1}")
+    service = harness.service
+    assert service.get_function("swap")["grants"] == ["graph:read"]
+    directory = harness.root / "swap"
+    manifest_path = directory / "function.json"
+    stat = manifest_path.stat()
+    document = json_module.loads(manifest_path.read_text())
+    document["grants"] = ["graph:write"]
+    document["name"] = document["name"][: -(len("write") - len("read"))]
+    replacement = json_module.dumps(document)
+    original = manifest_path.read_text()
+    assert len(replacement) == len(original)
+    manifest_path.unlink()
+    manifest_path.write_text(replacement)
+    os.utime(manifest_path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert service.get_function("swap")["grants"] == ["graph:write"]
+
+
+def test_a_finite_recursive_schema_blames_deep_input_not_the_manifest(harness):
+    schema = {
+        "$ref": "#/$defs/n",
+        "$defs": {
+            "n": {
+                "allOf": [
+                    {
+                        "anyOf": [
+                            {
+                                "oneOf": [
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "child": {"allOf": [{"$ref": "#/$defs/n"}]}
+                                        },
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+    }
+    harness.add("tree", "return {}", input_schema=schema)
+    value = {}
+    for _ in range(150):
+        value = {"child": value}
+    _rejected(invoke(harness.service, "tree", value), "invalid_input")
+
+
+def test_output_nested_beyond_the_limit_fails_and_listings_still_work(harness):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from backend.api_host.function_routes import register_function_routes
+    from backend.functions.service import MAX_OUTPUT_DEPTH
+
+    harness.add(
+        "deep",
+        f"""
+        value = {{}}
+        for _ in range({MAX_OUTPUT_DEPTH + 5}):
+            value = {{"x": value}}
+        return value
+        """,
+    )
+    service = harness.service
+    run = finished(service, invoke(service, "deep"))
+    assert (run["status"], run["error"]["code"]) == ("failed", "invalid_output")
+    app = FastAPI()
+    register_function_routes(app, service, service._graph_service)
+    client = TestClient(app)
+    assert client.get("/functions/runs").status_code == 200
+    assert client.get(f"/functions/runs/{run['id']}").status_code == 200
+
+
+def test_a_package_of_deeply_nested_folders_is_invalid_and_lists(harness):
+    import os
+
+    harness.add("count", "return {}")
+    path = str(harness.root / "count" / "nest")
+    os.mkdir(path)
+    for _ in range(1500):
+        path = os.path.join(path, "a")
+        os.mkdir(path)
+    listed = {f["id"]: f for f in harness.service.list_functions()}
+    assert not listed["count"]["valid"]
+
+
+def test_a_reference_into_data_is_refused():
+    from backend.functions.manifest import validate_manifest
+    from backend.functions.tests.test_service import manifest
+
+    for schema in (
+        {"$ref": "#/default/x", "default": {"x": {"$ref": "http://x/y"}}},
+        {"$ref": "#/enum/0", "enum": [{"$ref": "http://x/y"}]},
+    ):
+        _, errors = validate_manifest(
+            dict(manifest("count-nodes"), input_schema=schema),
+            "count-nodes",
+            {"main.py": b"", "function.json": b"{}"},
+        )
+        assert errors, schema
+
+
+def test_a_reference_to_a_property_named_like_data_is_allowed():
+    from backend.functions.manifest import validate_manifest
+    from backend.functions.tests.test_service import manifest
+
+    schema = {
+        "properties": {"default": {"type": "string"}},
+        "$defs": {"d": {"$ref": "#/properties/default"}},
+    }
+    _, errors = validate_manifest(
+        dict(manifest("count-nodes"), input_schema=schema),
+        "count-nodes",
+        {"main.py": b"", "function.json": b"{}"},
+    )
+    assert errors == []
 
 
 def test_output_checks_do_not_wait_on_callers_input_checks(harness):

@@ -158,7 +158,7 @@ def test_a_symbolic_link_in_a_package_makes_it_invalid(tmp_path):
     os.symlink("/etc/passwd", directory / "secret.txt")
     loaded = load_function(str(tmp_path), "count-nodes")
     assert not loaded.valid
-    assert "regular files" in loaded.errors[0]
+    assert "symbolic links" in loaded.errors[0]
 
 
 def test_a_linked_directory_is_not_a_function(tmp_path):
