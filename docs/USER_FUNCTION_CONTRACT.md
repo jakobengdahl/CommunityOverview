@@ -211,14 +211,18 @@ A manifest is **rejected**, and the function cannot run, when:
 - a field holds a value this contract version does not allow, such as a trigger
   kind other than `manual`, a `write_target` other than `graph`, an unknown
   grant, a limit above the contract maximum in §8, or any reserved field;
-- `entry_point` does not resolve to a file inside the function directory.
+- `entry_point` does not resolve to a file inside the function directory;
+- the manifest holds text that is not valid Unicode, such as a lone surrogate
+  escape (`"\ud800"`), which no record or response could carry.
 
 A schema may refer only to locations inside itself (`$ref` values starting
 with `#`); the host never resolves a reference over the network. It checks
 `input` and `result.output` against their schemas in a separate process with
 a time and memory limit, since a schema can cost far more than its size
 suggests. A value nested too deeply to check fails its schema (`invalid_input`
-or `invalid_output`). A check that cannot finish within its limits, or a schema
+or `invalid_output`), and so does an output holding text that is not valid
+Unicode. A reference is followed as the validator follows it, percent-decoded,
+and may not point into data such as `const`, `enum` or `default`. A check that cannot finish within its limits, or a schema
 that refers to itself without end, counts as the schema not applying: the
 invocation is `rejected` with `invalid_manifest`, or the run `failed` with
 `invalid_output`.
@@ -244,6 +248,8 @@ itself or another function.
 Version 1 has one trigger: an explicit, manual invocation through the host's
 API (and any CLI built on it). The invocation names the function `id`, carries
 an `input` object and, optionally, an `idempotency_key` and a `correlation_id`.
+An invocation whose key or correlation id is not valid Unicode text is refused
+outright, and nothing is recorded.
 
 The invocation is authorized as the calling actor: the host evaluates the
 caller's graph access through the existing authorization hook before the run

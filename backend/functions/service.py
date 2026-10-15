@@ -56,6 +56,7 @@ from backend.functions.schema_check import (
     SchemaCheckBusy,
     SchemaCheckFailed,
     depth_below,
+    is_utf8,
     schema_problem,
 )
 from backend.functions.settings import FunctionsSettings
@@ -520,7 +521,7 @@ class FunctionService:
             result={
                 "outcome": STATUS_REJECTED,
                 "code": rejected.code,
-                "message": rejected.message[:1000],
+                "message": _scrub(rejected.message)[:1000],
             },
             **fields,
         )
@@ -573,19 +574,23 @@ class FunctionService:
     ) -> None:
         details = {
             "output": None,
-            "function_error_code": result.function_error_code or None,
+            "function_error_code": _scrub(result.function_error_code) or None,
             "tool_calls": [
-                {"tool": c.tool, "outcome": c.outcome, "duration_ms": c.duration_ms}
+                {
+                    "tool": _scrub(c.tool),
+                    "outcome": _scrub(c.outcome),
+                    "duration_ms": c.duration_ms,
+                }
                 for c in result.tool_calls
             ],
             "usage": {
                 "wall_ms": result.wall_ms,
                 "peak_memory_kib": result.peak_memory_kib,
             },
-            "log": result.log,
+            "log": _scrub(result.log),
             "log_truncated": result.log_truncated,
         }
-        status, code, message = result.status, result.code, result.message
+        status, code, message = result.status, result.code, _scrub(result.message)
         if status == STATUS_SUCCEEDED and not depth_below(
             result.output, MAX_OUTPUT_DEPTH
         ):
@@ -593,6 +598,10 @@ class FunctionService:
             # make every listing that includes it fail.
             status, code = STATUS_FAILED, CODE_INVALID_OUTPUT
             message = f"result.output nests deeper than {MAX_OUTPUT_DEPTH} levels"
+        elif status == STATUS_SUCCEEDED and not is_utf8(result.output):
+            # JSON can carry lone surrogates that no UTF-8 response can.
+            status, code = STATUS_FAILED, CODE_INVALID_OUTPUT
+            message = "result.output holds text that is not valid Unicode"
         elif status == STATUS_SUCCEEDED and manifest.output_schema is not None:
             try:
                 problem = schema_problem(
@@ -788,6 +797,15 @@ def _check_text(name: str, value: Any, *, allow_empty: bool = True) -> None:
         raise InvocationError(
             f"{name} must be a string of at most {MAX_KEY_CHARS} characters"
         )
+    if not is_utf8(value):
+        raise InvocationError(f"{name} must be valid Unicode text")
+
+
+def _scrub(text: Any) -> Any:
+    """Text that can be stored and served as UTF-8, lone surrogates replaced."""
+    if not isinstance(text, str):
+        return text
+    return text.encode("utf-8", "replace").decode("utf-8")
 
 
 def _validate_input(manifest: Manifest, input_value: Any) -> None:

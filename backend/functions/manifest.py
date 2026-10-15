@@ -9,6 +9,7 @@ validation state. The host validates again before every run.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -16,6 +17,7 @@ import re
 import stat
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Tuple
+from urllib.parse import unquote
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
@@ -131,6 +133,15 @@ def validate_package(loaded: LoadedFunction) -> LoadedFunction:
         loaded.errors.append(f"{MANIFEST_FILE} is not valid JSON: {exc}")
         return loaded
     try:
+        json.dumps(document, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError:
+        # A lone surrogate escape would make every list of functions fail.
+        loaded.errors.append(f"{MANIFEST_FILE} holds text that is not valid Unicode")
+        return loaded
+    except RecursionError:
+        loaded.errors.append(f"{MANIFEST_FILE} is nested too deeply")
+        return loaded
+    try:
         manifest, errors = validate_manifest(
             document, loaded.directory_name, loaded.files
         )
@@ -166,53 +177,80 @@ def _read_package(directory: str) -> Dict[str, bytes]:
     Symbolic links are refused rather than followed: a package can only hold
     what is inside its own directory. The walk is iterative and counts
     directories as well as files, so neither depth nor width is unbounded.
+    Each folder is opened without following a link and must be the very
+    folder its parent listed, so swapping a folder for a link mid-walk is
+    refused; files are opened relative to that folder.
     """
-    if os.path.islink(directory) or not os.path.isdir(directory):
-        raise ValueError("the function directory does not exist")
     files: Dict[str, bytes] = {}
     total = 0
     entries = 0
-    pending = [""]
+    pending: List[Tuple[str, Optional[Tuple[int, int]]]] = [("", None)]
     while pending:
-        relative_dir = pending.pop()
-        current = os.path.join(directory, relative_dir) if relative_dir else directory
-        with os.scandir(current) as listing:
-            children = []
-            for entry in listing:
-                entries += 1
-                if entries > MAX_ENTRIES:
-                    raise ValueError(
-                        f"a function may hold at most {MAX_ENTRIES} files and folders"
-                    )
-                children.append(entry)
-        for entry in sorted(children, key=lambda e: e.name):
-            relative = f"{relative_dir}/{entry.name}" if relative_dir else entry.name
-            if entry.is_symlink():
-                raise ValueError(f"symbolic links are not allowed: {relative}")
-            if entry.is_dir(follow_symlinks=False):
-                if entry.name != "__pycache__":
-                    pending.append(relative)
-                continue
-            if len(files) >= MAX_FILES:
-                raise ValueError(f"a function may hold at most {MAX_FILES} files")
-            content = _read_regular_file(
-                entry.path, relative, MAX_PACKAGE_BYTES - total + 1
-            )
-            total += len(content)
-            if total > MAX_PACKAGE_BYTES:
+        relative_dir, expected = pending.pop()
+        fd = _open_folder(
+            os.path.join(directory, relative_dir) if relative_dir else directory
+        )
+        try:
+            info = os.fstat(fd)
+            if expected is not None and (info.st_dev, info.st_ino) != expected:
                 raise ValueError(
-                    f"a function may hold at most {MAX_PACKAGE_BYTES} bytes"
+                    f"the package changed while it was read: {relative_dir}"
                 )
-            files[safe_relative_path(relative)] = content
+            with os.scandir(fd) as listing:
+                children = []
+                for entry in listing:
+                    entries += 1
+                    if entries > MAX_ENTRIES:
+                        raise ValueError(
+                            f"a function may hold at most {MAX_ENTRIES} files and folders"
+                        )
+                    children.append(entry)
+            for entry in sorted(children, key=lambda e: e.name):
+                relative = (
+                    f"{relative_dir}/{entry.name}" if relative_dir else entry.name
+                )
+                if entry.is_symlink():
+                    raise ValueError(f"symbolic links are not allowed: {relative}")
+                if entry.is_dir(follow_symlinks=False):
+                    if entry.name != "__pycache__":
+                        found = entry.stat(follow_symlinks=False)
+                        pending.append((relative, (found.st_dev, found.st_ino)))
+                    continue
+                if len(files) >= MAX_FILES:
+                    raise ValueError(f"a function may hold at most {MAX_FILES} files")
+                content = _read_regular_file(
+                    fd, entry.name, relative, MAX_PACKAGE_BYTES - total + 1
+                )
+                total += len(content)
+                if total > MAX_PACKAGE_BYTES:
+                    raise ValueError(
+                        f"a function may hold at most {MAX_PACKAGE_BYTES} bytes"
+                    )
+                files[safe_relative_path(relative)] = content
+        finally:
+            os.close(fd)
     return files
 
 
-def _read_regular_file(path: str, relative: str, limit: int) -> bytes:
+def _open_folder(path: str) -> int:
+    try:
+        return os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        raise ValueError("the function directory does not exist") from exc
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ValueError("the function directory does not exist") from exc
+        raise
+
+
+def _read_regular_file(folder_fd: int, name: str, relative: str, limit: int) -> bytes:
     """Read a regular file without following a link or blocking on a FIFO,
     checked on the descriptor itself so the file cannot be swapped between
     the check and the read."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder_fd
+        )
     except OSError as exc:
         raise ValueError(f"only regular files are allowed: {relative}") from exc
     try:
@@ -274,6 +312,8 @@ _NAMED_SUBSCHEMAS = frozenset(
 def _points_into_data(reference: str) -> bool:
     """Whether a local JSON pointer resolves into data, where a reference the
     walk above never looked at could hide."""
+    # The resolver percent-decodes the fragment before following it.
+    reference = unquote(reference)
     tokens = (
         [t for t in reference[1:].split("/") if t] if reference.startswith("#/") else []
     )

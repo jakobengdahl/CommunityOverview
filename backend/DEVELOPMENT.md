@@ -517,7 +517,7 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | GET | `/functions/runs/{run_id}` | Get one function run record (`docs/USER_FUNCTION_CONTRACT.md` §11) |
 | POST | `/functions/runs/{run_id}/cancel` | Terminate a run in progress (mutate access); `409` when it is not running |
 | GET | `/functions/{id}` | Get one function's manifest summary and state |
-| POST | `/functions/{id}/invoke` | Invoke a function as the calling actor. Body: `input`, optional `idempotency_key` and `correlation_id` (or the `x-correlation-id` header). `202` with the run record when it starts; `200` with the earlier run for a repeated key or with a `rejected` record; `403` without read access (no record); `503` with `Retry-After` while every input-check slot is taken (no record) |
+| POST | `/functions/{id}/invoke` | Invoke a function as the calling actor. Body: `input`, optional `idempotency_key` and `correlation_id` (or the `x-correlation-id` header). `202` with the run record when it starts; `200` with the earlier run for a repeated key or with a `rejected` record; `400` for an `idempotency_key`, `correlation_id` or origin that is not valid text (no record); `403` without read access (no record); `503` with `Retry-After` while every input-check slot is taken (no record) |
 
 ### Node attachments
 

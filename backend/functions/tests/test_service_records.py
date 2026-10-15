@@ -572,13 +572,20 @@ def test_a_package_of_deeply_nested_folders_is_invalid_and_lists(harness):
     import os
 
     harness.add("count", "return {}")
-    path = str(harness.root / "count" / "nest")
-    os.mkdir(path)
+    top = str(harness.root / "count" / "nest")
+    folders = [top]
     for _ in range(1500):
-        path = os.path.join(path, "a")
-        os.mkdir(path)
-    listed = {f["id"]: f for f in harness.service.list_functions()}
-    assert not listed["count"]["valid"]
+        folders.append(os.path.join(folders[-1], "a"))
+    for folder in folders:
+        os.mkdir(folder)
+    try:
+        listed = {f["id"]: f for f in harness.service.list_functions()}
+        assert not listed["count"]["valid"]
+    finally:
+        # pytest removes old temporary folders recursively, which a tree this
+        # deep would break for a later run.
+        for folder in reversed(folders):
+            os.rmdir(folder)
 
 
 def test_a_reference_into_data_is_refused():
@@ -780,3 +787,91 @@ def test_a_narrowed_reader_does_not_see_where_someone_elses_run_came_from():
     }
     seen = view_run(run, RunViewer(actor_id="narrowed", narrowed=True))
     assert seen["origin"] is None
+
+
+# --- review round 7 --------------------------------------------------------------------
+
+
+def _client(service):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from backend.api_host.function_routes import register_function_routes
+
+    app = FastAPI()
+    register_function_routes(app, service, service._graph_service)
+    return TestClient(app)
+
+
+@pytest.mark.parametrize("field", ["correlation_id", "idempotency_key", "event_origin"])
+def test_caller_text_that_is_not_unicode_is_refused_and_nothing_is_recorded(
+    harness, field
+):
+    from backend.functions.service import InvocationError
+
+    harness.add("count", "return {}", enable=False)
+    with pytest.raises(InvocationError):
+        harness.service.invoke("count", {}, **{field: "x\ud800"})
+    assert harness.store.list_jobs() == []
+
+
+def test_a_manifest_with_text_that_is_not_unicode_leaves_the_list_readable(harness):
+    harness.add("count", "return {}")
+    harness.add("odd", "return {}", version="1\ud800")
+    client = _client(harness.service)
+    response = client.get("/functions")
+    assert response.status_code == 200
+    listed = {f["id"]: f["valid"] for f in response.json()}
+    assert listed == {"count": True, "odd": False}
+
+
+def test_output_with_text_that_is_not_unicode_fails_and_stays_readable(harness):
+    harness.add("odd", 'return {"a": "\\ud800"}')
+    service = harness.service
+    run = finished(service, invoke(service, "odd"))
+    assert (run["status"], run["error"]["code"]) == ("failed", "invalid_output")
+    client = _client(service)
+    assert client.get(f"/functions/runs/{run['id']}").status_code == 200
+    assert client.get("/functions/runs").status_code == 200
+
+
+def test_an_error_message_that_is_not_unicode_keeps_its_code_and_stays_readable(
+    harness,
+):
+    harness.add("odd", 'raise RuntimeError("bad \\ud800")')
+    service = harness.service
+    run = finished(service, invoke(service, "odd"))
+    assert (run["status"], run["error"]["code"]) == ("failed", "function_error")
+    assert _client(service).get(f"/functions/runs/{run['id']}").status_code == 200
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"type": "object", "allOf": [{"$ref": "#"}]},
+        {"if": {"type": "null"}, "then": True, "else": {"$ref": "#"}},
+    ],
+)
+def test_a_schema_endless_for_objects_is_the_manifests_fault(harness, schema):
+    harness.add("loop", "return {}", input_schema=schema)
+    _rejected(invoke(harness.service, "loop", {}), "invalid_manifest")
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"x-foo": {"const": {"$ref": "https://x/s"}}, "$ref": "#/x-foo/%63onst"},
+        {"x-foo": {"const": {"$ref": "https://x/s"}}, "$ref": "#%2Fx-foo%2Fconst"},
+        {"enum": [{"$ref": "https://x/s"}], "allOf": [{"$ref": "#/en%75m/0"}]},
+    ],
+)
+def test_a_percent_encoded_reference_into_data_is_refused(schema):
+    from backend.functions.manifest import validate_manifest
+    from backend.functions.tests.test_service import manifest
+
+    _, errors = validate_manifest(
+        dict(manifest("count-nodes"), input_schema=schema),
+        "count-nodes",
+        {"main.py": b"", "function.json": b"{}"},
+    )
+    assert errors

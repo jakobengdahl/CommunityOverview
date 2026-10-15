@@ -252,3 +252,46 @@ def test_a_fifo_in_a_package_makes_it_invalid_without_blocking(tmp_path):
     loaded = load_function(str(tmp_path), "count-nodes")
     assert not loaded.valid
     assert "regular files" in loaded.errors[0]
+
+
+def test_a_folder_swapped_for_a_link_while_the_package_is_read_is_refused(
+    tmp_path, monkeypatch
+):
+    import backend.functions.manifest as manifest_module
+
+    directory = _write(
+        tmp_path / "root",
+        "count-nodes",
+        {"function.json": json.dumps(VALID).encode(), "main.py": b""},
+    )
+    (directory / "a" / "b").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    (outside / "b").mkdir(parents=True)
+    (outside / "b" / "secret.txt").write_bytes(b"host secret")
+    open_folder = manifest_module._open_folder
+
+    def swap_then_open(path):
+        if path.endswith(os.path.join("a", "b")):
+            os.rename(directory / "a", tmp_path / "a-moved")
+            os.symlink(outside, directory / "a")
+        return open_folder(path)
+
+    monkeypatch.setattr(manifest_module, "_open_folder", swap_then_open)
+    loaded = load_function(str(tmp_path / "root"), "count-nodes")
+    assert not loaded.valid
+    assert "changed while it was read" in loaded.errors[0]
+    assert not any(b"host secret" in content for content in loaded.files.values())
+
+
+def test_a_manifest_with_text_that_is_not_unicode_is_invalid(tmp_path):
+    _write(
+        tmp_path,
+        "count-nodes",
+        {
+            "function.json": json.dumps(dict(VALID, version="1\ud800")).encode(),
+            "main.py": b"",
+        },
+    )
+    loaded = load_function(str(tmp_path), "count-nodes")
+    assert not loaded.valid
+    assert "not valid Unicode" in loaded.errors[0]
