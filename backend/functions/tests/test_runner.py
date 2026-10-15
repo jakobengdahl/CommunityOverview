@@ -177,7 +177,10 @@ def test_the_function_gets_an_empty_environment_and_only_its_standard_streams(
     """
     result = execute(runner, storage, source)
     assert result.status == "succeeded", result
-    assert result.output == {"env": {}, "fds": []}
+    # Where it can load the C.UTF-8 locale, the interpreter itself sets
+    # LC_CTYPE (PEP 538); nothing is inherited from the host.
+    assert set(result.output["env"]) <= {"LC_CTYPE"}
+    assert result.output["fds"] == []
 
 
 def test_an_unhandled_exception_is_a_function_error_with_the_traceback_logged(
@@ -510,9 +513,12 @@ def test_an_x32_system_call_kills_the_function(runner, storage):
         runner,
         storage,
         """
-        import ctypes, sys
+        import ctypes, json, sys
         sys.stdin.readline()
         ctypes.CDLL(None).syscall(0x40000000 | 39)  # x32 getpid
+        # Reached only if the call returned instead of killing the process.
+        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "method": "result",
+                                     "params": {"status": "ok", "output": {}}}) + "\n")
         """,
     )
     assert (result.status, result.code) == ("failed", "no_result")
@@ -664,9 +670,15 @@ def test_a_cpu_backstop_kill_without_a_result_is_a_timeout(storage):
 
 def test_losing_the_runner_outranks_whatever_the_function_reported(storage):
     broker = make_broker(storage)
-    succeeded = SessionOutcome(code=None, output={"ok": True})
-    for outcome in ("runner_lost", "failed_to_start"):
-        result = _result_for(succeeded, RunExit(outcome), broker)
+    reported = [
+        SessionOutcome(code=None, output={"ok": True}),
+        SessionOutcome(code="timeout"),
+        SessionOutcome(code="no_result"),
+    ]
+    for session, outcome in [
+        (s, o) for s in reported for o in ("runner_lost", "failed_to_start")
+    ]:
+        result = _result_for(session, RunExit(outcome), broker)
         assert (result.status, result.code, result.output) == (
             "failed",
             "runner_lost",
