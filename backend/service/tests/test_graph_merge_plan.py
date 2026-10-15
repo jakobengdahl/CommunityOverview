@@ -434,6 +434,26 @@ class TestEdges:
         )
         assert plan.report["edges_to_archived_nodes"]["count"] == 0
 
+    def test_a_field_only_overwrite_keeps_its_live_edge_a_duplicate_target(
+        self, storage
+    ):
+        plan = _plan(
+            storage,
+            [],
+            [
+                {"id": "e2", "source": "a1", "target": "i1", "type": "BELONGS_TO"},
+                {
+                    "id": "e1",
+                    "source": "a1",
+                    "target": "i1",
+                    "type": "BELONGS_TO",
+                    "label": "relabelled",
+                },
+            ],
+            policy=MergePolicy(default="overwrite"),
+        )
+        assert _skip_reasons(plan)[("edge", "e2")] == "duplicate_edge"
+
     def test_the_same_triple_with_another_type_is_not_a_duplicate(self, storage):
         plan = _plan(
             storage,
@@ -638,6 +658,21 @@ class TestAttachmentFlags:
             storage,
             [{"id": "x", "type": "Actor", "name": "X"}],
             attachments=AttachmentSettings(store=store, namespace="ns"),
+        )
+        flagged = plan.report["attachments"]["created_over_orphan_attachments"]
+        assert flagged["ids"] == ["x"]
+
+    def test_a_pathologically_nested_index_is_flagged_not_fatal(self, storage):
+        import json as _json
+
+        class _Deep:
+            def list(self, namespace, node_id):
+                return _json.loads("[" * 200_000)
+
+        plan = _plan(
+            storage,
+            [{"id": "x", "type": "Actor", "name": "X"}],
+            attachments=AttachmentSettings(store=_Deep(), namespace="ns"),
         )
         flagged = plan.report["attachments"]["created_over_orphan_attachments"]
         assert flagged["ids"] == ["x"]
@@ -865,6 +900,23 @@ class _RacingView(StorageGraphView):
         return super().incident_edges(node_id)
 
 
+class _MovingNodeView(StorageGraphView):
+    """Bumps one node's revision between its first and second read, once."""
+
+    def __init__(self, storage, node_id):
+        super().__init__(storage)
+        self.node_id = node_id
+        self.reads = 0
+
+    def get_node(self, node_id):
+        node = super().get_node(node_id)
+        if node_id == self.node_id:
+            self.reads += 1
+            if self.reads == 2:
+                return node.model_copy(update={"revision": node.revision + 1})
+        return node
+
+
 class TestGenerationRecheck:
     SUBTYPE_CHANGE = {
         "nodes": [{"id": "a1", "type": "Actor", "name": "Alice", "subtypes": []}]
@@ -876,6 +928,69 @@ class TestGenerationRecheck:
             self.SUBTYPE_CHANGE, self.OVERWRITE, _RacingView(storage, fail=1)
         )
         assert plan.report["overwrites"]["nodes"]["count"] == 1
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            RuntimeError("dictionary keys changed during iteration"),
+            RuntimeError("Set changed size during iteration"),
+        ],
+    )
+    def test_other_iteration_races_are_retried_too(self, storage, error):
+        class _View(StorageGraphView):
+            raised = False
+
+            def incident_edges(self, node_id):
+                if not self.raised:
+                    self.raised = True
+                    raise error
+                return super().incident_edges(node_id)
+
+        plan = compute_merge_plan(self.SUBTYPE_CHANGE, self.OVERWRITE, _View(storage))
+        assert plan.report["overwrites"]["nodes"]["count"] == 1
+
+    def test_an_unrelated_runtime_error_propagates(self, storage):
+        class _View(StorageGraphView):
+            def incident_edges(self, node_id):
+                raise RuntimeError("something else")
+
+        with pytest.raises(RuntimeError, match="something else"):
+            compute_merge_plan(self.SUBTYPE_CHANGE, self.OVERWRITE, _View(storage))
+
+    def test_a_node_deleted_while_its_edges_are_walked_restarts_the_plan(
+        self, storage, monkeypatch
+    ):
+        import networkx
+
+        calls = []
+        original = storage.get_edges_for_node
+
+        def _walk(node_id):
+            calls.append(node_id)
+            if len(calls) == 1:
+                raise networkx.NetworkXError("The node a1 is not in the graph.")
+            return original(node_id)
+
+        monkeypatch.setattr(storage, "get_edges_for_node", _walk)
+        plan = compute_merge_plan(
+            self.SUBTYPE_CHANGE, self.OVERWRITE, StorageGraphView(storage)
+        )
+        assert plan.report["overwrites"]["nodes"]["count"] == 1
+        assert len(calls) == 2
+
+    def test_an_entity_that_changes_between_two_reads_restarts_the_plan(self, storage):
+        # Two edges attach to i1, so it is read twice in one attempt.
+        document = {
+            "nodes": [{"id": "x", "type": "Actor", "name": "X"}],
+            "edges": [
+                {"id": "ea", "source": "x", "target": "i1", "type": "RELATES_TO"},
+                {"id": "eb", "source": "x", "target": "i1", "type": "RELATES_TO"},
+            ],
+        }
+        view = _MovingNodeView(storage, "i1")
+        plan = compute_merge_plan(document, MergeParameters(), view)
+        assert plan.committable
+        assert view.reads > 2
 
     def test_a_graph_that_keeps_resizing_is_refused(self, storage):
         with pytest.raises(MergePlanUnstable):

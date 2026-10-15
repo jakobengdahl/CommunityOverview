@@ -75,6 +75,8 @@ MCP_PREVIEW_MAX_EDGES = 20_000
 # A replace landing mid-plan restarts it; this bounds the restarts.
 MAX_PLAN_ATTEMPTS = 3
 DIGEST_VERSION = 1
+# CPython's messages for a dict or set changed under an iterator.
+_ITERATION_RACES = ("changed size during iteration", "changed during iteration")
 
 _ALLOWED_PARAMETER_KEYS = {
     "document",
@@ -100,7 +102,11 @@ class MergeRequestError(Exception):
 
 
 class MergePlanUnstable(Exception):
-    """The graph was replaced during every planning attempt."""
+    """The graph changed under every planning attempt."""
+
+
+class LiveGraphMoved(Exception):
+    """A live read in this attempt disagrees with an earlier one; restart."""
 
 
 @dataclass(frozen=True)
@@ -247,7 +253,13 @@ class StorageGraphView:
         return self._storage.get_edges_from_to(source, target)
 
     def incident_edges(self, node_id: str) -> List[Edge]:
-        return self._storage.get_edges_for_node(node_id)
+        import networkx
+
+        try:
+            return self._storage.get_edges_for_node(node_id)
+        except networkx.NetworkXError as exc:
+            # The node was deleted between the membership test and the walk.
+            raise LiveGraphMoved(str(exc)) from exc
 
     def attachments_configured(self) -> bool:
         return self._attachments is not None
@@ -261,7 +273,7 @@ class StorageGraphView:
             return bool(
                 self._attachments.store.list(self._attachments.namespace, node_id)
             )
-        except (AttachmentStoreError, OSError, ValueError):
+        except (AttachmentStoreError, OSError, ValueError, RecursionError):
             # An index that cannot be read still means files may sit under
             # that id; flag it rather than fail the whole preview.
             return True
@@ -347,10 +359,14 @@ def compute_merge_plan(
         generation = view.generation
         try:
             plan = _Planner(raw_nodes, raw_edges, parameters, view, generation).run()
+        except LiveGraphMoved:
+            continue
         except RuntimeError as exc:
             # The planner reads without the storage lock; a live write that
-            # resizes an adjacency map mid-iteration is retried like a replace.
-            if "changed size during iteration" not in str(exc):
+            # changes an adjacency map mid-iteration ("dictionary changed size
+            # during iteration", "... keys changed during iteration") is
+            # retried like a replace.
+            if not any(race in str(exc) for race in _ITERATION_RACES):
                 raise
             continue
         if view.generation == generation:
@@ -388,13 +404,21 @@ class _Planner:
 
     def _read_node(self, node_id: str) -> Optional[Node]:
         node = self.view.get_node(node_id)
-        self.reads[("node", node_id)] = node.revision if node is not None else None
+        self._record(("node", node_id), node.revision if node is not None else None)
         return node
 
     def _read_edge(self, edge_id: str) -> Optional[Edge]:
         edge = self.view.get_edge(edge_id)
-        self.reads[("edge", edge_id)] = edge.revision if edge is not None else None
+        self._record(("edge", edge_id), edge.revision if edge is not None else None)
         return edge
+
+    def _record(self, key: Tuple[str, str], revision: Optional[int]) -> None:
+        # Decisions taken on an earlier read of the same entity must match
+        # what the digest records, so a write landing between two reads
+        # restarts the plan instead of mixing both states into it.
+        if key in self.reads and self.reads[key] != revision:
+            raise LiveGraphMoved(f"{key[0]} '{key[1]}' changed during planning")
+        self.reads[key] = revision
 
     def _is_excluded_type(self, type_name: str) -> bool:
         return (

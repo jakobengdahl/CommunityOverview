@@ -200,6 +200,30 @@ class TestAuthorization:
         assert response.json()["detail"]["error_code"] == "import_preview_busy"
         assert _client(storage).post(URL, json=_body()).status_code == 200
 
+    def test_a_failed_preview_still_frees_the_slot(self, storage, monkeypatch):
+        from backend.service import graph_merge_plan
+
+        def _boom(*args, **kwargs):
+            raise KeyError("planner failure")
+
+        monkeypatch.setattr(graph_merge_plan, "compute_merge_plan", _boom)
+        client = TestClient(_client(storage).app, raise_server_exceptions=False)
+        assert client.post(URL, json=_body()).status_code == 500
+        monkeypatch.undo()
+        assert _client(storage).post(URL, json=_body()).status_code == 200
+
+    def test_a_denied_caller_gets_403_not_busy_while_the_slot_is_held(self, storage):
+        from backend.service import import_service
+
+        assert import_service._PREVIEW_SLOT.acquire(blocking=False)
+        try:
+            denied = _client(storage, _Hook(allowed=False)).post(URL, json=_body())
+            narrowed = _client(storage, _Hook(narrowed=True)).post(URL, json=_body())
+        finally:
+            import_service._PREVIEW_SLOT.release()
+        assert denied.status_code == 403
+        assert narrowed.status_code == 409
+
     def test_authorization_runs_before_parameter_validation(self, storage):
         response = _client(storage, _Hook(allowed=False)).post(
             URL, json={"bogus": True}

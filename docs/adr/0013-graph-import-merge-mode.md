@@ -53,9 +53,9 @@ Choices it made inside the decisions above:
 - `attachments.checked` is `false` when no attachment store is configured,
   rather than reporting no flags as if the check had run; an attachment index
   that cannot be read flags its node rather than failing the preview.
-- Edges attached to a node a `skip` collision kept are listed in
-  `edges_to_skipped_nodes` as well as in `adds` (§2 (a): "every such edge
-  listed"). A `rename` whose live edge already has the same source, target
+- Edges the commit would write onto a node a `skip` collision kept are listed
+  in `edges_to_skipped_nodes`, as well as under `adds`, `overwrites` or
+  `renames` (§2 (a): "every such edge listed"). A `rename` whose live edge already has the same source, target
   and type is a duplicate-triple skip, since the renamed copy would repeat it.
 - The REST route plans in a worker thread, as planning at the document caps
   takes tens of seconds. The MCP tool plans on the server's event loop, so it
@@ -71,7 +71,8 @@ Choices it made inside the decisions above:
   document and `generation`.
 - A live edge the same plan retypes under `overwrite` is not what a document
   edge duplicates. The planner reads without the storage lock; a live write
-  that resizes an adjacency map mid-read restarts the plan like a replace.
+  that changes an adjacency map mid-read, deletes a node being walked, or
+  changes an entity the plan already read restarts the plan like a replace.
 - One preview runs at a time per process; another is refused with 503
   `import_preview_busy` and can be retried, since a preview changes nothing.
 
