@@ -166,8 +166,8 @@ class BrokerContext:
     # when the invocation was accepted. Re-bound for every tool call.
     authorization_inputs: Mapping[str, Any]
     # Live operator enablement; consulted on every call so revocation applies
-    # to a run in progress (§7.1).
-    grant_enabled: Callable[[str], bool] = lambda grant: True
+    # to a run in progress (§7.1). Required: a default would fail open.
+    grant_enabled: Callable[[str], bool]
     max_tool_calls: int = MAX_TOOL_CALLS
     max_message_bytes: int = MAX_MESSAGE_BYTES
 
@@ -213,6 +213,9 @@ class FunctionBroker:
         self._context = context
         self._calls_made = 0
         self.tool_calls: List[ToolCallRecord] = []
+        # Requests beyond the budget are counted, not recorded, so a function
+        # cannot grow host memory or the run record by repeating refused calls.
+        self.calls_over_budget = 0
 
     @property
     def context(self) -> BrokerContext:
@@ -224,6 +227,7 @@ class FunctionBroker:
         params = message.get("params")
         name = params.get("name") if isinstance(params, Mapping) else None
         started = time.monotonic()
+        self._calls_made += 1
         try:
             result = self._dispatch(params)
         except BrokerError as exc:
@@ -238,15 +242,20 @@ class FunctionBroker:
         """Answer a request the protocol layer refuses before dispatch."""
         params = message.get("params")
         name = params.get("name") if isinstance(params, Mapping) else None
+        self._calls_made += 1
         self._record(name, code, time.monotonic())
         return error_response(message.get("id"), code, text)
 
     # -- internals ---------------------------------------------------------
 
     def _record(self, name: Any, outcome: str, started: float) -> None:
+        if self._calls_made > self._context.max_tool_calls:
+            self.calls_over_budget += 1
+            return
         self.tool_calls.append(
             ToolCallRecord(
-                tool=name if isinstance(name, str) else "",
+                # Only names the contract defines: the function chose this text.
+                tool=name if name in TOOLS else "",
                 outcome=outcome,
                 duration_ms=int((time.monotonic() - started) * 1000),
             )
@@ -254,7 +263,6 @@ class FunctionBroker:
 
     def _dispatch(self, params: Any) -> Any:
         ctx = self._context
-        self._calls_made += 1
         if self._calls_made > ctx.max_tool_calls:
             raise BrokerError(
                 ERR_LIMIT_EXCEEDED, "The run has used its tool-call budget."
@@ -331,6 +339,28 @@ class FunctionBroker:
 
     @staticmethod
     def _validate_arguments(spec: ToolSpec, arguments: Mapping[str, Any]) -> None:
+        FunctionBroker._validate_keys(spec, arguments)
+        for key, cap in _ARGUMENT_CAPS.items():
+            value = arguments.get(key)
+            if key in arguments and (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not 0 <= value <= cap
+            ):
+                raise BrokerError(
+                    ERR_INVALID_ARGUMENTS, f"{key} must be an integer from 0 to {cap}."
+                )
+        if spec.method == "add_nodes":
+            nodes = arguments.get("nodes")
+            if not isinstance(nodes, list):
+                raise BrokerError(ERR_INVALID_ARGUMENTS, "nodes must be a list.")
+            for node in nodes:
+                _refuse_graph_scope(node)
+        if spec.method == "update_node":
+            _refuse_graph_scope(arguments.get("updates"))
+
+    @staticmethod
+    def _validate_keys(spec: ToolSpec, arguments: Mapping[str, Any]) -> None:
         keys = set(arguments)
         scope = keys & SCOPE_ARGUMENTS
         if scope:
@@ -350,6 +380,27 @@ class FunctionBroker:
                 ERR_INVALID_ARGUMENTS,
                 "Missing arguments: " + ", ".join(sorted(missing)),
             )
+
+
+# Bounds on work a single call can ask of the host (the session cannot be
+# interrupted while a service call runs).
+_ARGUMENT_CAPS = {"limit": 500, "depth": 3}
+
+# A node's graph scope lives in this metadata key; a function may not set it.
+_GRAPH_SCOPE_KEY = "origin_graph_id"
+
+
+def _refuse_graph_scope(payload: Any) -> None:
+    if not isinstance(payload, Mapping):
+        return
+    metadata = payload.get("metadata")
+    if _GRAPH_SCOPE_KEY in payload or (
+        isinstance(metadata, Mapping) and _GRAPH_SCOPE_KEY in metadata
+    ):
+        raise BrokerError(
+            ERR_INVALID_ARGUMENTS,
+            f"Scope is fixed by the host; not allowed: {_GRAPH_SCOPE_KEY}",
+        )
 
 
 _AUTHORIZATION_KEYS = (

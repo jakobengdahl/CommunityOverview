@@ -1,11 +1,15 @@
 """Invariants of the user-function tool broker (USER_FUNCTION_CONTRACT §6.3–§7, §9)."""
 
+import json
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 import pytest
 
 from backend.functions.broker import (
     BROKER_ERROR_CODE,
+    MAX_MESSAGE_BYTES,
+    MAX_TOOL_CALLS,
     GRANT_GRAPH_READ,
     GRANT_GRAPH_WRITE,
     BrokerContext,
@@ -18,6 +22,7 @@ from backend.runtime.authorization import (
     GraphAuthorizationContext,
     GraphAuthorizationDecision,
 )
+from backend.core import Node, NodeType
 from backend.service import GraphService
 
 INVOKER = {"actor_id": "user-42", "actor_type": "human", "auth_source": "test"}
@@ -64,13 +69,14 @@ class SpyService(GraphService):
 
 
 def make_broker(service, grants=(GRANT_GRAPH_READ, GRANT_GRAPH_WRITE), **overrides):
+    overrides.setdefault("grant_enabled", lambda grant: True)
+    overrides.setdefault("authorization_inputs", INVOKER)
     context = BrokerContext(
         run_id="job-test",
         function_id="recompute",
         function_version="1.2.0",
         declared_grants=frozenset(grants),
         correlation_id="corr-1",
-        authorization_inputs=INVOKER,
         **overrides,
     )
     return FunctionBroker(service, context)
@@ -231,7 +237,16 @@ def test_similarity_search_is_narrowed_to_graphs_the_actor_may_see(storage):
     service = SpyService(storage, authorization_hook=hook)
     broker = make_broker(service)
     add_node(broker, "Similar Local")
-    add_node(broker, "Similar Remote", metadata={"origin_graph_id": "other-graph"})
+    storage.add_nodes(
+        [
+            Node(
+                name="Similar Remote",
+                type=NodeType.ACTOR,
+                metadata={"origin_graph_id": "other-graph"},
+            )
+        ],
+        [],
+    )
     response = call(broker, "graph.find_similar", {"name": "Similar", "threshold": 0.1})
     names = [item["node"]["name"] for item in response["result"]["similar_nodes"]]
     assert "Similar Local" in names
@@ -281,3 +296,217 @@ def test_tool_call_records_hold_outcomes_but_no_arguments_or_results(service):
         ("graph.add", "grant_denied"),
     ]
     assert "secret-query" not in repr(broker.tool_calls)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"nodes": [{"name": "N", "type": "Actor", "origin_graph_id": "other"}]},
+        {
+            "nodes": [
+                {"name": "N", "type": "Actor", "metadata": {"origin_graph_id": "o"}}
+            ]
+        },
+    ],
+)
+def test_a_function_cannot_add_nodes_into_another_graph_scope(service, arguments):
+    response = call(make_broker(service), "graph.add", arguments)
+    assert error_code(response) == "invalid_arguments"
+    assert service.calls == []
+
+
+def test_a_function_cannot_move_a_node_into_another_graph_scope(service, storage):
+    broker = make_broker(service)
+    node_id = add_node(broker, "Local node")
+    response = call(
+        broker,
+        "graph.update_node",
+        {"node_id": node_id, "updates": {"metadata": {"origin_graph_id": "other"}}},
+    )
+    assert error_code(response) == "invalid_arguments"
+    assert "origin_graph_id" not in (storage.get_node(node_id).metadata or {})
+
+
+@pytest.mark.parametrize(
+    "tool, arguments",
+    [
+        ("graph.search", {"query": "x", "limit": 501}),
+        ("graph.search", {"query": "x", "limit": True}),
+        ("graph.get_related", {"node_id": "n", "depth": 4}),
+        ("graph.get_related", {"node_id": "n", "depth": -1}),
+    ],
+)
+def test_work_bounds_on_a_single_call_are_enforced(service, tool, arguments):
+    assert error_code(call(make_broker(service), tool, arguments)) == (
+        "invalid_arguments"
+    )
+
+
+def test_an_access_denied_result_from_the_service_is_reported_as_access_denied(
+    storage, hook
+):
+    class DenyingInside(GraphService):
+        def search_graph(self, query, **kwargs):
+            return {"success": False, "error_code": "access_denied", "message": "no"}
+
+    broker = make_broker(DenyingInside(storage, authorization_hook=hook))
+    assert error_code(call(broker, "graph.search", {"query": "x"})) == "access_denied"
+
+
+def test_refused_requests_count_toward_the_budget(service):
+    broker = make_broker(service, max_tool_calls=2)
+    broker.refuse(
+        {"id": 1, "params": {"name": "graph.search"}}, "concurrent_call", "busy"
+    )
+    assert "result" in call(broker, "graph.search", {"query": "a"})
+    assert error_code(call(broker, "graph.search", {"query": "b"})) == "limit_exceeded"
+
+
+def test_call_records_stay_bounded_and_never_keep_function_chosen_names(service):
+    broker = make_broker(service, max_tool_calls=3)
+    long_name = "x" * 100_000
+    for i in range(50):
+        call(broker, long_name, request_id=i)
+    assert len(broker.tool_calls) == 3
+    assert broker.calls_over_budget == 47
+    assert all(record.tool == "" for record in broker.tool_calls)
+
+
+def test_malformed_arguments_are_refused_and_handle_request_never_raises(service):
+    broker = make_broker(service)
+    for bad in ([1, 2], "query"):
+        response = broker.handle_request(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tool",
+                "params": {"name": "graph.search", "arguments": bad},
+            }
+        )
+        assert error_code(response) == "invalid_arguments"
+
+
+def test_the_hook_sees_the_service_method_as_target(service, hook):
+    call(make_broker(service), "graph.search", {"query": "x"})
+    assert {c.target for c in hook.contexts} == {"search_graph"}
+
+
+def test_every_captured_authorization_input_is_rebound_for_the_call(storage):
+    from backend.runtime.authorization import get_current_request_authorization_inputs
+
+    seen = []
+
+    class CapturingHook(RecordingHook):
+        def evaluate(self, context):
+            seen.append(get_current_request_authorization_inputs())
+            return super().evaluate(context)
+
+    inputs = {
+        "headers": {"x-communityoverview-actor-id": "h-actor"},
+        "actor_id": "user-42",
+        "actor_type": "human",
+        "auth_source": "test",
+        "workspace_id": "ws-1",
+        "workspace_kind": "team",
+        "graph_id": "graph-1",
+    }
+    broker = make_broker(
+        SpyService(storage, authorization_hook=CapturingHook()),
+        authorization_inputs=inputs,
+    )
+    call(broker, "graph.search", {"query": "x"})
+    assert seen and all(captured == inputs for captured in seen)
+
+
+def _long_message_service(storage, hook, message):
+    class Failing(GraphService):
+        def search_graph(self, query, **kwargs):
+            return {"success": False, "error": message}
+
+        def get_node_details(self, node_id):
+            return {"success": False, "error_code": "access_denied", "message": message}
+
+    return Failing(storage, authorization_hook=hook)
+
+
+def test_error_messages_are_bounded_and_never_empty(storage, hook):
+    broker = make_broker(_long_message_service(storage, hook, "e" * 5000))
+    failed = call(broker, "graph.search", {"query": "x"})
+    denied = call(broker, "graph.get_node", {"node_id": "n"})
+    assert error_code(failed) == "tool_failed"
+    assert error_code(denied) == "access_denied"
+    for response in (failed, denied):
+        assert 0 < len(response["error"]["message"]) <= 500
+
+    blank = make_broker(_long_message_service(storage, hook, "   "))
+    message = call(blank, "graph.search", {"query": "x"})["error"]["message"]
+    assert message == "The operation failed."
+
+
+def test_a_long_hook_reason_is_bounded(storage):
+    class LongReasonHook(RecordingHook):
+        def evaluate(self, context):
+            return GraphAuthorizationDecision(
+                allowed=False, reason="r" * 5000, mode="custom", source="test"
+            )
+
+    broker = make_broker(SpyService(storage, authorization_hook=LongReasonHook()))
+    response = call(broker, "graph.search", {"query": "x"})
+    assert error_code(response) == "access_denied"
+    assert len(response["error"]["message"]) <= 500
+
+
+def test_reflected_names_in_error_messages_are_bounded(service):
+    broker = make_broker(service)
+    unknown_tool = call(broker, "t" * 1000)
+    unknown_args = call(broker, "graph.search", {"query": "x", "a" * 1000: 1})
+    for response in (unknown_tool, unknown_args):
+        assert len(response["error"]["message"]) <= 500
+
+
+def test_the_response_limit_is_measured_in_bytes_and_is_inclusive(storage, hook):
+    class Fixed(GraphService):
+        payload = {}
+
+        def search_graph(self, query, **kwargs):
+            return dict(Fixed.payload)
+
+    service = Fixed(storage, authorization_hook=hook)
+    Fixed.payload = {"t": "a" * 100}
+    exact = len(json.dumps(Fixed.payload).encode("utf-8"))
+    assert "result" in call(
+        make_broker(service, max_message_bytes=exact), "graph.search", {"query": "q"}
+    )
+    Fixed.payload = {"t": "é" * 60}  # 60 characters, 120 bytes of UTF-8
+    over = make_broker(service, max_message_bytes=100)
+    assert error_code(call(over, "graph.search", {"query": "q"})) == "tool_failed"
+
+
+def test_results_are_returned_as_plain_json(storage, hook):
+    class WithDate(GraphService):
+        def search_graph(self, query, **kwargs):
+            return {"when": datetime(2026, 1, 2, tzinfo=timezone.utc)}
+
+    response = call(
+        make_broker(WithDate(storage, authorization_hook=hook)),
+        "graph.search",
+        {"query": "q"},
+    )
+    assert isinstance(response["result"]["when"], str)
+    json.dumps(response)
+
+
+def test_contract_limits_are_the_documented_maximums():
+    assert MAX_TOOL_CALLS == 200
+    assert MAX_MESSAGE_BYTES == 1024 * 1024
+
+
+def test_a_refused_request_is_recorded(service):
+    broker = make_broker(service)
+    broker.refuse(
+        {"id": 1, "params": {"name": "graph.search"}}, "concurrent_call", "busy"
+    )
+    assert (broker.tool_calls[-1].tool, broker.tool_calls[-1].outcome) == (
+        "graph.search",
+        "concurrent_call",
+    )

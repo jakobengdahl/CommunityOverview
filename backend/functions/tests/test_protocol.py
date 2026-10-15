@@ -16,7 +16,7 @@ from backend.functions.broker import (
     BrokerContext,
     FunctionBroker,
 )
-from backend.functions.protocol import OVERSIZED, LineReader, run_session
+from backend.functions.protocol import LineReader, _Oversized, run_session
 from backend.service import GraphService
 
 ENVELOPE = {"schema_version": "1.0", "invocation": {"input": {"q": "Alpha"}}}
@@ -30,6 +30,7 @@ def make_broker(storage, **overrides):
         declared_grants=frozenset({GRANT_GRAPH_READ, GRANT_GRAPH_WRITE}),
         correlation_id="corr-proto",
         authorization_inputs={"actor_id": "tester"},
+        grant_enabled=lambda grant: True,
         **overrides,
     )
     return FunctionBroker(GraphService(storage), context)
@@ -223,7 +224,7 @@ def test_the_line_reader_never_buffers_more_than_one_message(storage):
 
     reader._fill = tracking_fill
     deadline = time.monotonic() + 10
-    assert reader.read_line(deadline) is OVERSIZED
+    assert isinstance(reader.read_line(deadline), _Oversized)
     assert json.loads(reader.read_line(deadline)) == {"ok": True}
     assert reader.read_line(deadline) is None
     thread.join()
@@ -257,3 +258,238 @@ def test_a_function_that_stops_reading_cannot_hold_the_host_past_the_deadline(st
     )
     assert outcome.code == "timeout"
     assert time.monotonic() - started < 5
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        '"[" * 100_000 + "]" * 100_000',
+        """'{"jsonrpc": "2.0", "method": "result", '"""
+        """ '"params": {"status": "ok", "output": {"v": NaN}}}'""",
+    ],
+)
+def test_pathological_json_ends_the_run_as_a_protocol_error(storage, expression):
+    script = PRELUDE + f"sys.stdout.write({expression} + '\\n'); sys.stdout.flush()\n"
+    assert run_script(make_broker(storage), script).code == "protocol_error"
+
+
+def test_a_request_id_longer_than_the_limit_is_a_protocol_error(storage):
+    script = (
+        PRELUDE
+        + """
+send({"jsonrpc": "2.0", "id": "i" * 200, "method": "tool",
+      "params": {"name": "graph.search", "arguments": {"query": "a"}}})
+"""
+    )
+    assert run_script(make_broker(storage), script).code == "protocol_error"
+
+
+def test_a_result_over_the_message_limit_is_output_too_large(storage):
+    broker = make_broker(storage, max_message_bytes=4096)
+    script = (
+        PRELUDE
+        + """
+send({"jsonrpc": "2.0", "method": "result",
+      "params": {"status": "ok", "output": {"blob": "x" * 50000}}})
+"""
+    )
+    assert run_script(broker, script).code == "output_too_large"
+
+
+def test_a_blank_line_after_a_request_is_not_a_concurrent_request(storage):
+    script = (
+        PRELUDE
+        + """
+req = lambda i: {"jsonrpc": "2.0", "id": i, "method": "tool",
+                 "params": {"name": "graph.search", "arguments": {"query": "z"}}}
+answers = []
+for i in (1, 2):
+    sys.stdout.write(json.dumps(req(i)) + "\\n\\n"); sys.stdout.flush()
+    answers.append(recv())
+send({"jsonrpc": "2.0", "method": "result",
+      "params": {"status": "ok", "output": {"answers": answers}}})
+"""
+    )
+    outcome = run_script(make_broker(storage), script)
+    assert outcome.succeeded, outcome
+    assert all("result" in answer for answer in outcome.output["answers"])
+
+
+def test_file_descriptors_above_fd_setsize_are_supported():
+    read_fd, write_fd = os.pipe()
+    high_read, high_write = 1500, 1501
+    try:
+        os.dup2(read_fd, high_read)
+        os.dup2(write_fd, high_write)
+    except OSError:
+        pytest.skip("cannot open descriptors above FD_SETSIZE here")
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+    try:
+        os.write(high_write, b'{"ok": 1}\n')
+        reader = LineReader(high_read, 1024)
+        assert json.loads(reader.read_line(time.monotonic() + 5)) == {"ok": 1}
+        assert reader.has_pending() is False
+    finally:
+        os.close(high_read)
+        os.close(high_write)
+
+
+def _result_script(params_literal):
+    return (
+        PRELUDE
+        + f"""
+send({{"jsonrpc": "2.0", "method": "result", "params": {params_literal}}})
+"""
+    )
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        '{"method": "result", "params": {"status": "ok", "output": {}}}',
+        '{"jsonrpc": "1.0", "method": "result", '
+        '"params": {"status": "ok", "output": {}}}',
+        '{"jsonrpc": "2.0", "id": 1, "method": "result", '
+        '"params": {"status": "ok", "output": {}}}',
+    ],
+)
+def test_messages_outside_the_sequence_are_protocol_errors(storage, message):
+    script = PRELUDE + f"sys.stdout.write({message!r} + '\\n'); sys.stdout.flush()\n"
+    assert run_script(make_broker(storage), script).code == "protocol_error"
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        "[1]",
+        '{"status": "ok", "output": [1]}',
+        '{"status": "ok", "output": "text"}',
+        '{"status": "error", "error": "text"}',
+        '{"status": "weird", "output": {}}',
+        '{"output": {}}',
+    ],
+)
+def test_malformed_results_are_protocol_errors(storage, params):
+    outcome = run_script(make_broker(storage), _result_script(params))
+    assert outcome.code == "protocol_error"
+
+
+def test_a_final_result_without_a_trailing_newline_is_accepted(storage):
+    script = (
+        PRELUDE
+        + """
+sys.stdout.write(json.dumps({"jsonrpc": "2.0", "method": "result",
+                             "params": {"status": "ok", "output": {"v": 1}}}))
+sys.stdout.flush()
+"""
+    )
+    outcome = run_script(make_broker(storage), script)
+    assert outcome.succeeded and outcome.output == {"v": 1}
+
+
+def test_the_output_limit_is_measured_in_bytes_and_is_inclusive(storage):
+    exact = len(json.dumps({"t": "a" * 100}, separators=(",", ":")).encode())
+    ok = run_script(
+        make_broker(storage),
+        _result_script('{"status": "ok", "output": {"t": "a" * 100}}'),
+        max_output_bytes=exact,
+    )
+    assert ok.succeeded, ok
+    over = run_script(
+        make_broker(storage),
+        _result_script('{"status": "ok", "output": {"t": "\\u00e9" * 60}}'),
+        max_output_bytes=100,
+    )
+    assert over.code == "output_too_large"
+
+
+def test_function_error_code_and_message_are_bounded(storage):
+    outcome = run_script(
+        make_broker(storage),
+        _result_script(
+            '{"status": "error", "error": {"code": "c" * 5000, "message": "m" * 5000}}'
+        ),
+    )
+    assert outcome.code == "function_error"
+    assert len(outcome.function_error_code) <= 100
+    assert len(outcome.error_message) <= 1000
+
+
+def test_a_line_of_exactly_the_limit_is_accepted_and_oversize_at_eof_is_reported():
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, b"a" * 64 + b"\n" + b"b" * 200)
+    os.close(write_fd)
+    reader = LineReader(read_fd, 64)
+    deadline = time.monotonic() + 5
+    assert reader.read_line(deadline) == b"a" * 64
+    assert isinstance(reader.read_line(deadline), _Oversized)
+    assert reader.read_line(deadline) is None
+    os.close(read_fd)
+
+
+def test_a_function_that_closes_its_input_ends_the_run_as_no_result(storage):
+    # Before the invoke is written.
+    to_fn_read, to_fn_write = os.pipe()
+    from_fn_read, from_fn_write = os.pipe()
+    os.close(to_fn_read)
+    outcome = run_session(
+        make_broker(storage),
+        ENVELOPE,
+        reader_fd=from_fn_read,
+        writer_fd=to_fn_write,
+        deadline=time.monotonic() + 5,
+    )
+    assert outcome.code == "no_result"
+    for fd in (to_fn_write, from_fn_read, from_fn_write):
+        os.close(fd)
+
+    # Before a response is written.
+    to_fn_read, to_fn_write = os.pipe()
+    from_fn_read, from_fn_write = os.pipe()
+
+    def function():
+        os.read(to_fn_read, 1024 * 1024)
+        os.close(to_fn_read)
+        request = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tool",
+            "params": {"name": "graph.search", "arguments": {"query": "x"}},
+        }
+        os.write(from_fn_write, (json.dumps(request) + "\n").encode())
+
+    thread = threading.Thread(target=function)
+    thread.start()
+    outcome = run_session(
+        make_broker(storage),
+        ENVELOPE,
+        reader_fd=from_fn_read,
+        writer_fd=to_fn_write,
+        deadline=time.monotonic() + 5,
+    )
+    thread.join()
+    assert outcome.code == "no_result"
+    for fd in (to_fn_write, from_fn_read, from_fn_write):
+        os.close(fd)
+
+
+def test_a_concurrent_refusal_does_not_stick_to_later_sequential_requests(storage):
+    script = (
+        PRELUDE
+        + """
+req = lambda i: {"jsonrpc": "2.0", "id": i, "method": "tool",
+                 "params": {"name": "graph.search", "arguments": {"query": "z"}}}
+sys.stdout.write(json.dumps(req(1)) + "\\n" + json.dumps(req(2)) + "\\n")
+sys.stdout.flush()
+recv(); recv()
+send(req(3))
+third = recv()
+send({"jsonrpc": "2.0", "method": "result",
+      "params": {"status": "ok", "output": {"third": third}}})
+"""
+    )
+    outcome = run_script(make_broker(storage), script)
+    assert outcome.succeeded, outcome
+    assert "result" in outcome.output["third"]
