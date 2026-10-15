@@ -908,8 +908,8 @@ def register_mcp_tools(
         Returns:
             Dict with plan (adds, overwrites, renames, skips, conflicts,
             rejected, attachments, embeddings, events, committable) and
-            plan_digest, or an error. Requires graph mutation access with
-            full graph scope, as the commit will.
+            plan_digest, or an error. Requires graph mutation and read
+            access, both with full graph scope.
         """
         body: Dict[str, Any] = {
             "document": document,

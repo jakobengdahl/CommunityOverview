@@ -334,7 +334,8 @@ commit — when a live entity the plan relied on changes, so a future commit can
 refuse a plan that is no longer the one previewed.
 
 The preview reveals which ids exist and live field values, so it needs the
-same access as a commit: graph mutation rights with unnarrowed graph access.
+access a commit will — graph mutation rights — and read rights, both with
+unnarrowed graph access.
 `stamp_provenance: true` is refused until provenance stamping ships. The
 `preview_graph_merge` MCP tool does the same for small documents an assistant
 assembles — at most 10,000 nodes and 20,000 edges, since it plans on the

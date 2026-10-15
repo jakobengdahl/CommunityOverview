@@ -981,6 +981,41 @@ class TestSavedViewAnnotationsTheWritePathRefuses:
         assert plan.committable
 
 
+class TestUnusualIds:
+    def test_a_lone_surrogate_id_is_planned_not_fatal(self, storage):
+        plan = _plan(storage, [{"id": "a\ud800", "type": "Actor", "name": "X"}])
+        assert plan.digest.startswith("sha256:")
+
+
+class TestSettleCost:
+    def test_settling_many_duplicates_of_retyped_edges_stays_linear(self, storage):
+        import time
+
+        count = 8_000
+        storage.add_nodes(
+            [],
+            [
+                Edge(id=f"p{i:05d}", source="a1", target="i1", type="RELATES_TO")
+                for i in range(count)
+            ],
+        )
+        retypes = [
+            {"id": f"p{i:05d}", "source": "a1", "target": "i1", "type": "BELONGS_TO"}
+            for i in range(count)
+        ]
+        creates = [
+            {"id": f"n{i:05d}", "source": "a1", "target": "i1", "type": "RELATES_TO"}
+            for i in range(count)
+        ]
+        started = time.perf_counter()
+        plan = _plan(storage, [], retypes + creates, policy=MergePolicy("overwrite"))
+        elapsed = time.perf_counter() - started
+        assert plan.report["adds"]["edges"]["count"] == count
+        # Quadratic settling took several seconds here; linear takes well
+        # under one. The bound leaves room for a slow runner.
+        assert elapsed < 3.0
+
+
 class TestDigestMemory:
     def test_digest_work_does_not_multiply_the_document_text(self, storage):
         import json as _json

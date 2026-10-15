@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
-from backend.runtime.authorization import GRAPH_ACTION_MUTATE
+from backend.runtime.authorization import GRAPH_ACTION_MUTATE, GRAPH_ACTION_READ
 
 from . import access, graph_archive, graph_merge_plan
 from .graph_import import validate_import_document
@@ -576,7 +576,18 @@ def preview_merge_import(
         return access.build_access_denied_result(
             action=GRAPH_ACTION_MUTATE, target="import_graph_merge", decision=decision
         )
-    if decision.graph_access.enabled:
+    # The plan shows live field values, so the caller must also be allowed
+    # to read the whole graph, whatever a hook grants for mutation.
+    read_decision = access.evaluate_graph_access(
+        hook, action=GRAPH_ACTION_READ, target="import_graph_merge"
+    )
+    if not read_decision.allowed:
+        return access.build_access_denied_result(
+            action=GRAPH_ACTION_READ,
+            target="import_graph_merge",
+            decision=read_decision,
+        )
+    if decision.graph_access.enabled or read_decision.graph_access.enabled:
         return {
             "success": False,
             "error_code": "import_requires_full_graph_access",

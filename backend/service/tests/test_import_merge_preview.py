@@ -16,6 +16,7 @@ from backend.agents.execution import InMemoryExecutionStore
 from backend.core import Edge, GraphStorage, Node
 from backend.runtime.authorization import (
     GRAPH_ACTION_MUTATE,
+    GRAPH_ACTION_READ,
     GraphAccessNarrowing,
     GraphAuthorizationContext,
     GraphAuthorizationDecision,
@@ -27,24 +28,30 @@ URL = "/api/graph/import/merge/preview"
 
 
 class _Hook:
-    def __init__(self, *, allowed=True, narrowed=False):
+    """Decides every action alike unless ``read`` overrides the read action."""
+
+    def __init__(self, *, allowed=True, narrowed=False, read=None):
         self.allowed = allowed
         self.narrowed = narrowed
+        self.read = read  # None, or (allowed, narrowed) for GRAPH_ACTION_READ
         self.contexts = []
 
     def evaluate(
         self, context: GraphAuthorizationContext
     ) -> GraphAuthorizationDecision:
         self.contexts.append(context)
+        allowed, narrowed = self.allowed, self.narrowed
+        if self.read is not None and context.action == GRAPH_ACTION_READ:
+            allowed, narrowed = self.read
         return GraphAuthorizationDecision(
-            allowed=self.allowed,
+            allowed=allowed,
             mode="test",
             source="test",
-            reason=None if self.allowed else "nope",
+            reason=None if allowed else "nope",
             graph_access=GraphAccessNarrowing(
-                enabled=self.narrowed,
+                enabled=narrowed,
                 allow_local_graph=False,
-                include_graph_ids=("graph-a",) if self.narrowed else (),
+                include_graph_ids=("graph-a",) if narrowed else (),
             ),
         )
 
@@ -129,8 +136,18 @@ class TestAuthorization:
         hook = _Hook()
         assert _client(storage, hook).post(URL, json=_body()).status_code == 200
         assert [(c.action, c.target) for c in hook.contexts] == [
-            (GRAPH_ACTION_MUTATE, "import_graph_merge")
+            (GRAPH_ACTION_MUTATE, "import_graph_merge"),
+            (GRAPH_ACTION_READ, "import_graph_merge"),
         ]
+
+    def test_a_caller_who_may_write_but_not_read_is_refused(self, storage):
+        hook = _Hook(read=(False, False))
+        assert _client(storage, hook).post(URL, json=_body()).status_code == 403
+
+    def test_a_caller_whose_reads_are_narrowed_is_refused(self, storage):
+        hook = _Hook(read=(True, True))
+        response = _client(storage, hook).post(URL, json=_body())
+        assert response.status_code == 409
 
     def test_a_denied_caller_gets_403_and_no_plan(self, storage):
         response = _client(storage, _Hook(allowed=False)).post(URL, json=_body())

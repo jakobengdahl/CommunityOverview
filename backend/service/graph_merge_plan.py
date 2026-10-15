@@ -414,6 +414,8 @@ class _Planner:
         # Edges attached to the live node a skip collision kept (ADR §2 (a)).
         self.skipped_attach_edges: List[str] = []
         self.pair_listings: Dict[Tuple[str, str], Dict[str, List[_Listed]]] = {}
+        # (source, target, type) -> first live edge outside the retyped set
+        self.first_unexcluded: Dict[Tuple[str, str, str], Optional[_Listed]] = {}
         # (decision, location, outcome it had before the duplicate check)
         self.pending_duplicates: List[Tuple[_EdgeDecision, str, str]] = []
 
@@ -732,10 +734,18 @@ class _Planner:
             return None
         # The live edge with the document edge's own id counts too: renamed,
         # the document edge would sit beside it as a second identical triple.
-        same_type = self._pair_index(source.node_id, target.node_id).get(
-            edge.type_str, ()
-        )
-        match = next((live for live in same_type if live.id not in exclude), None)
+        key = (source.node_id, target.node_id, edge.type_str)
+        if exclude and key in self.first_unexcluded:
+            # Settling re-asks the same question for every pending duplicate
+            # of one pair and type; answer it once, not once per edge.
+            match = self.first_unexcluded[key]
+        else:
+            same_type = self._pair_index(source.node_id, target.node_id).get(
+                edge.type_str, ()
+            )
+            match = next((live for live in same_type if live.id not in exclude), None)
+            if exclude:
+                self.first_unexcluded[key] = match
         if match is None:
             return None
         self._confirm_listed_edge(match)
@@ -1044,9 +1054,9 @@ class _Planner:
             canonical,
             sort_keys=True,
             separators=(",", ":"),
-            ensure_ascii=False,
+            ensure_ascii=True,
             default=str,
-        ).encode("utf-8")
+        ).encode("ascii")
         return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 

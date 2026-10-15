@@ -78,6 +78,9 @@ Choices it made inside the decisions above:
   `import_preview_busy` and can be retried, since a preview changes nothing.
 - A `SavedView`/`VisualizationView` document node whose annotations the write
   path refuses (`saved_view_annotation_error`) is listed under `rejected`.
+- Besides the commit's `GRAPH_ACTION_MUTATE`, the preview also asks the hook
+  for `GRAPH_ACTION_READ` on the whole graph, since it returns live values; a
+  hook that grants mutation without unnarrowed reads is refused (§10).
 - For slice 2: the digest records every live entity the plan read and its
   revision, not absences a listing found — the incident edges walked for a
   subtype re-judge, or a duplicate-triple lookup that matched nothing. A write
