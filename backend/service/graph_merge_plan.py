@@ -342,7 +342,7 @@ def _snapshot(edges: List[Edge]) -> List[_Listed]:
 class _NodeDecision:
     index: int
     node: Node
-    outcome: str  # create | overwrite | unchanged | skip | rename | excluded | conflict
+    outcome: str  # create | overwrite | unchanged | skip | rename | excluded | conflict | invalid
     reason: str = ""
     live: Optional[Node] = None
     changes: Dict[str, Dict[str, Any]] = field(default_factory=dict)
@@ -496,6 +496,11 @@ class _Planner:
     def _plan_nodes(self) -> None:
         for index, node in build_document_nodes(self.raw_nodes, self.rejected):
             location = f"nodes[{index}]"
+            if not is_valid_node_type(node.type_str):
+                # Already rejected; its type string is the caller's, of any
+                # length, so it must not be judged (and quoted) once per edge.
+                self.nodes[node.id] = _NodeDecision(index, node, "invalid")
+                continue
             if not self._is_excluded_type(node.type_str) and (
                 node.type_str in _SAVED_VIEW_NODE_TYPES
             ):
@@ -592,6 +597,8 @@ class _Planner:
             node = decision.node
             if decision.outcome == "excluded":
                 return _Endpoint(node_id, "excluded")
+            if decision.outcome == "invalid":
+                return _Endpoint(node_id, "invalid")
             if decision.outcome == "conflict":
                 return _Endpoint(node_id, "conflict")
             if decision.outcome == "rename":
@@ -658,6 +665,10 @@ class _Planner:
 
         if "excluded" in (source.kind, target.kind):
             decision.outcome, decision.reason = "excluded", "system_type_excluded"
+            return decision
+        if "invalid" in (source.kind, target.kind):
+            # The endpoint node is rejected, which already blocks the commit.
+            decision.outcome = "rejected"
             return decision
         dangling = [
             (role, end)
@@ -755,9 +766,12 @@ class _Planner:
             list(target.subtypes),
         )
         if not verdict.get("allowed"):
-            message = verdict.get("message") or (
-                f"relationship type '{edge.type_str}' is not allowed between "
-                f"'{source.type_name}' and '{target.type_name}'"
+            message = describe_invalid(
+                ValueError(
+                    verdict.get("message")
+                    or f"relationship type '{edge.type_str}' is not allowed between "
+                    f"'{source.type_name}' and '{target.type_name}'"
+                )
             )
             if "live" in (source.kind, target.kind):
                 decision.outcome, decision.reason = "conflict", "inapplicable"
@@ -1055,14 +1069,26 @@ class _Planner:
         }
 
     def _digest(self) -> str:
+        # Ids have no length limit and one live id can be named by many
+        # document edges, so every id enters the canonical form as its hash,
+        # each id hashed once.
+        id_hashes: Dict[Optional[str], Optional[str]] = {None: None}
+
+        def h(value: Optional[str]) -> Optional[str]:
+            if value not in id_hashes:
+                id_hashes[value] = hashlib.sha256(
+                    value.encode("utf-8", "surrogatepass")
+                ).hexdigest()
+            return id_hashes[value]
+
         def endpoint(end: Optional[_Endpoint]) -> Any:
             if end is None:
                 return None
-            return [end.kind, end.node_id]
+            return [end.kind, h(end.node_id)]
 
         # Each entry is hashed on its own, so the canonical form below holds
-        # 64-character hashes rather than the document's text: its size does
-        # not grow with field content, however that content escapes.
+        # 64-character hashes rather than the document's text: its size grows
+        # with the number of entities and reads, not with their content.
         node_hashes = [_entry_hash(raw) for raw in self.raw_nodes]
         edge_hashes = [_entry_hash(raw) for raw in self.raw_edges]
         canonical: Dict[str, Any] = {
@@ -1086,7 +1112,7 @@ class _Planner:
                 {
                     "nodes": [
                         {
-                            "id": d.node.id,
+                            "id": h(d.node.id),
                             "outcome": d.outcome,
                             "reason": d.reason,
                             "content": node_hashes[d.index],
@@ -1095,22 +1121,22 @@ class _Planner:
                     ],
                     "edges": [
                         {
-                            "id": d.edge.id,
+                            "id": h(d.edge.id),
                             "outcome": d.outcome,
                             "reason": d.reason,
                             "source": endpoint(d.source),
                             "target": endpoint(d.target),
-                            "duplicate_of": d.duplicate_of,
+                            "duplicate_of": h(d.duplicate_of),
                             "content": edge_hashes[d.index],
                         }
                         for d in sorted(self.edges, key=lambda d: d.edge.id)
                     ],
                     # By entity, not by document position.
                     "conflicts": sorted(
-                        [c["kind"], c["id"], c["reason"]] for c in self.conflicts
+                        [c["kind"], h(c["id"]), c["reason"]] for c in self.conflicts
                     ),
                     "reads": sorted(
-                        [kind, entity_id, revision]
+                        [kind, h(entity_id), revision]
                         for (kind, entity_id), revision in self.reads.items()
                     ),
                 }

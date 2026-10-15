@@ -1222,6 +1222,54 @@ class TestRejectedCost:
         assert plan.report["adds"]["edges"]["count"] == 0
 
 
+class TestUnconfiguredTypeStrings:
+    def test_a_long_unknown_type_is_not_judged_or_quoted_per_edge(self, storage):
+        import tracemalloc
+
+        long_type = "X" * 100_000
+        nodes = [{"id": "big", "type": long_type, "name": "n"}]
+        edges = [
+            {"id": f"x{i}", "source": "big", "target": "a1", "type": "IMPLEMENTS"}
+            for i in range(500)
+        ]
+        tracemalloc.start()
+        try:
+            plan = _plan(storage, nodes, edges)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert not plan.committable
+        assert plan.report["conflicts"]["count"] == 0
+        # The node's own rejection quotes its type once; no edge quotes it.
+        assert all(
+            long_type not in item["message"]
+            for item in plan.report["rejected"]["items"]
+            if item["location"].startswith("edges")
+        )
+        # Quoting the type twice per edge would hold ~100 MB.
+        assert peak < 20 * 1024 * 1024
+
+
+class TestDigestOfLongIds:
+    def test_a_long_live_id_named_by_many_edges_is_digested_once(self, storage):
+        import tracemalloc
+
+        long_id = "z" * 50_000
+        storage.add_edge(Edge(id=long_id, source="a1", target="i1", type="RELATES_TO"))
+        edges = [
+            {"id": f"d{i}", "source": "a1", "target": "i1", "type": "RELATES_TO"}
+            for i in range(2_000)
+        ]
+        tracemalloc.start()
+        try:
+            _plan(storage, [], edges)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        # Repeating the id per duplicate would hold ~100 MB in the digest.
+        assert peak < 20 * 1024 * 1024
+
+
 class TestDescribeInvalid:
     def test_the_description_keeps_the_count_and_first_location(self):
         from backend.service.graph_import import describe_invalid
