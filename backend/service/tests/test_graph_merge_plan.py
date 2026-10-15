@@ -1155,6 +1155,31 @@ class TestGenerationRecheck:
         steady = compute_merge_plan(document, params, StorageGraphView(storage))
         assert plan.digest == steady.digest
 
+    def test_an_in_place_edge_update_after_its_listing_restarts_the_plan(self, storage):
+        class _View(StorageGraphView):
+            written = False
+
+            def get_edge(self, edge_id):
+                # A concurrent write lands between the pair listing and the
+                # by-id read; storage updates the live Edge object in place.
+                if edge_id == "e1" and not self.written:
+                    self.written = True
+                    storage.update_edge("e1", {"type": "RELATES_TO"})
+                return super().get_edge(edge_id)
+
+        document = {
+            "nodes": [],
+            "edges": [
+                {"id": "d1", "source": "a1", "target": "i1", "type": "RELATES_TO"},
+                {"id": "d2", "source": "a1", "target": "i1", "type": "BELONGS_TO"},
+            ],
+        }
+        params = MergeParameters()
+        plan = compute_merge_plan(document, params, _View(storage))
+        steady = compute_merge_plan(document, params, StorageGraphView(storage))
+        assert plan.report["adds"]["edges"]["ids"] == ["d2"]
+        assert plan.digest == steady.digest
+
     def test_an_incident_edge_deleted_during_the_rejudge_restarts_the_plan(
         self, storage
     ):

@@ -298,6 +298,21 @@ class MergePlan:
 # --- planning ---------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class _Listed:
+    """An edge as a listing returned it, copied before anything else runs."""
+
+    id: str
+    revision: int
+    type_str: str
+    source: str
+    target: str
+
+
+def _snapshot(edges: List[Edge]) -> List[_Listed]:
+    return [_Listed(e.id, e.revision, e.type_str, e.source, e.target) for e in edges]
+
+
 @dataclass(slots=True)
 class _NodeDecision:
     index: int
@@ -398,7 +413,7 @@ class _Planner:
         self.archived_attach_edges: List[str] = []
         # Edges attached to the live node a skip collision kept (ADR §2 (a)).
         self.skipped_attach_edges: List[str] = []
-        self.pair_listings: Dict[Tuple[str, str], Dict[str, List[Edge]]] = {}
+        self.pair_listings: Dict[Tuple[str, str], Dict[str, List[_Listed]]] = {}
         # (decision, location, outcome it had before the duplicate check)
         self.pending_duplicates: List[Tuple[_EdgeDecision, str, str]] = []
 
@@ -726,7 +741,7 @@ class _Planner:
         self._confirm_listed_edge(match)
         return match.id
 
-    def _pair_index(self, source: str, target: str) -> Dict[str, List[Edge]]:
+    def _pair_index(self, source: str, target: str) -> Dict[str, List["_Listed"]]:
         """The live edges from ``source`` to ``target`` by type, sorted by id:
         listed once per attempt, so many document edges between one heavily
         connected pair cost one scan of its live edges, not one each."""
@@ -735,18 +750,25 @@ class _Planner:
         if index is None:
             index = {}
             for live in sorted(
-                self.view.edges_from_to(source, target), key=lambda e: e.id
+                _snapshot(self.view.edges_from_to(source, target)),
+                key=lambda e: e.id,
             ):
                 index.setdefault(live.type_str, []).append(live)
             self.pair_listings[key] = index
         return index
 
-    def _confirm_listed_edge(self, listed: Edge) -> None:
+    def _confirm_listed_edge(self, listed: "_Listed") -> None:
         # A listing and a by-id read are two reads; an edge deleted or
         # rewritten between them must restart the plan, not be recorded as
-        # absent while a decision relied on it.
+        # absent while a decision relied on it. Edges are updated in place,
+        # so ``listed`` is a snapshot taken at listing time, never the live
+        # object itself.
         by_id = self._read_edge(listed.id)
-        if by_id is None or by_id.revision != listed.revision:
+        if (
+            by_id is None
+            or by_id.revision != listed.revision
+            or by_id.type_str != listed.type_str
+        ):
             raise LiveGraphMoved(f"edge '{listed.id}' changed during planning")
 
     def _settle_duplicates(self) -> None:
@@ -782,7 +804,7 @@ class _Planner:
             if decision.outcome != "overwrite" or "subtypes" not in decision.changes:
                 continue
             node_id = decision.node.id
-            incident = self.view.incident_edges(node_id)
+            incident = _snapshot(self.view.incident_edges(node_id))
             # The walk must have seen this node as the plan read it: a node
             # deleted or changed around the walk, or edges not incident to it,
             # mean the graph moved under the read.
