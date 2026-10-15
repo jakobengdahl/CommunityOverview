@@ -40,6 +40,7 @@ from backend.functions.manifest import (
     Manifest,
     list_function_directories,
     load_function,
+    package_fingerprint,
 )
 from backend.functions.runner import (
     LEVEL_FULL,
@@ -144,6 +145,7 @@ class FunctionService:
         self._admission_lock = threading.Lock()
         self._busy: set = set()
         self._active: Dict[str, _ActiveRun] = {}
+        self._packages: Dict[str, Tuple[tuple, LoadedFunction]] = {}
         # Runs live only in this process; a record from another boot that
         # still reads "running" was cut short by a restart.
         self._boot_id = uuid.uuid4().hex
@@ -202,7 +204,7 @@ class FunctionService:
 
     def list_functions(self) -> List[Dict[str, Any]]:
         return [
-            self._function_view(load_function(self._settings.root, name))
+            self._function_view(self._read(name))
             for name in list_function_directories(self._settings.root)
         ]
 
@@ -216,7 +218,22 @@ class FunctionService:
             self._settings.root
         ):
             raise FunctionNotFound(function_id)
-        return load_function(self._settings.root, function_id)
+        return self._read(function_id)
+
+    def _read(self, directory_name: str) -> LoadedFunction:
+        """A function's package, read and validated again only when it changed
+        on disk: validating large schemas on every request would let readers
+        spend the host's CPU."""
+        fingerprint = package_fingerprint(self._settings.root, directory_name)
+        with self._lock:
+            cached = self._packages.get(directory_name)
+        if fingerprint is not None and cached is not None and cached[0] == fingerprint:
+            return cached[1]
+        loaded = load_function(self._settings.root, directory_name)
+        if fingerprint is not None:
+            with self._lock:
+                self._packages[directory_name] = (fingerprint, loaded)
+        return loaded
 
     def _function_view(self, loaded: LoadedFunction) -> Dict[str, Any]:
         function_id = loaded.directory_name
@@ -564,7 +581,9 @@ class FunctionService:
         status, code, message = result.status, result.code, result.message
         if status == STATUS_SUCCEEDED and manifest.output_schema is not None:
             try:
-                problem = schema_problem(manifest.output_schema, result.output)
+                problem = schema_problem(
+                    manifest.output_schema, result.output, output=True
+                )
             except SchemaCheckFailed as exc:
                 problem = f"output_schema could not be applied ({exc})"
             if problem:
@@ -776,7 +795,7 @@ def _validate_input(manifest: Manifest, input_value: Any) -> None:
             )
         return
     try:
-        problem = schema_problem(manifest.input_schema, input_value, wait=False)
+        problem = schema_problem(manifest.input_schema, input_value)
     except SchemaCheckBusy:
         raise
     except SchemaCheckFailed as exc:

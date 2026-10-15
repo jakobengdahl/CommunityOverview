@@ -406,7 +406,7 @@ def test_invocations_beyond_the_check_slots_are_turned_away(harness):
     register_function_routes(app, service, service._graph_service)
     client = TestClient(app)
     taken = 0
-    while schema_check._slots.acquire(blocking=False):
+    while schema_check._input_slots.acquire(blocking=False):
         taken += 1
     try:
         response = client.post("/functions/typed/invoke", json={"input": {}})
@@ -414,7 +414,7 @@ def test_invocations_beyond_the_check_slots_are_turned_away(harness):
         assert response.headers["retry-after"] == "1"
     finally:
         for _ in range(taken):
-            schema_check._slots.release()
+            schema_check._input_slots.release()
     assert harness.store.list_jobs() == []
 
 
@@ -428,3 +428,77 @@ def test_deeply_nested_input_is_invalid_input(harness):
     for _ in range(600):
         deep = [deep]
     _rejected(invoke(harness.service, "typed", {"a": [deep, deep]}), "invalid_input")
+
+
+# --- review round 5 --------------------------------------------------------------------
+
+
+def test_a_schema_that_refers_to_itself_without_end_is_the_manifests_fault(harness):
+    harness.add("loop", "return {}", input_schema={"$ref": "#"})
+    _rejected(invoke(harness.service, "loop", {}), "invalid_manifest")
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"properties": {"$ref": {"type": "string"}}},
+        {"const": {"$ref": "http://x"}},
+        {"enum": [{"$ref": "x"}]},
+        {"default": {"$ref": "y"}},
+        {"$defs": {"$ref": {"type": "integer"}}},
+    ],
+)
+def test_data_and_names_that_look_like_references_are_not_references(schema):
+    from backend.functions.manifest import validate_manifest
+    from backend.functions.tests.test_service import manifest
+
+    _, errors = validate_manifest(
+        dict(manifest("count-nodes"), input_schema=schema),
+        "count-nodes",
+        {"main.py": b"", "function.json": b"{}"},
+    )
+    assert errors == []
+
+
+def test_a_package_is_read_again_only_when_it_changes(harness, monkeypatch):
+    import json as json_module
+
+    import backend.functions.service as service_module
+
+    harness.add("count", "return {}")
+    service = harness.service
+    reads = []
+    real = service_module.load_function
+
+    def counting(root, name):
+        reads.append(name)
+        return real(root, name)
+
+    monkeypatch.setattr(service_module, "load_function", counting)
+    service.list_functions()
+    service.get_function("count")
+    service.list_functions()
+    assert reads == ["count"]
+    path = harness.root / "count" / "function.json"
+    document = json_module.loads(path.read_text())
+    document["name"] = "Renamed"
+    path.write_text(json_module.dumps(document))
+    assert service.get_function("count")["name"] == "Renamed"
+    assert reads == ["count", "count"]
+
+
+def test_output_checks_do_not_wait_on_callers_input_checks(harness):
+    import backend.functions.schema_check as schema_check
+
+    harness.add("typed-out", "return {'n': 1}", output_schema={"type": "object"})
+    service = harness.service
+    started = invoke(service, "typed-out")
+    taken = 0
+    while schema_check._input_slots.acquire(blocking=False):
+        taken += 1
+    try:
+        run = finished(service, started, timeout=20)
+    finally:
+        for _ in range(taken):
+            schema_check._input_slots.release()
+    assert run["status"] == "succeeded"

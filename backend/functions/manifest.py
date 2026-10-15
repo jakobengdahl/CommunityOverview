@@ -220,6 +220,14 @@ def _check_schema(name, value, errors) -> Optional[Dict[str, Any]]:
 
 
 _REFERENCE_KEYWORDS = ("$ref", "$dynamicRef", "$recursiveRef")
+# Keywords whose values are data, not schemas, and keywords whose values map
+# names to subschemas (the names are never keywords).
+_DATA_KEYWORDS = frozenset(
+    {"const", "enum", "default", "examples", "dependentRequired", "required"}
+)
+_NAMED_SUBSCHEMAS = frozenset(
+    {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"}
+)
 
 
 def _refers_outside(schema: Any) -> bool:
@@ -229,13 +237,43 @@ def _refers_outside(schema: Any) -> bool:
     if not isinstance(schema, dict):
         return False
     for keyword, value in schema.items():
-        if keyword in _REFERENCE_KEYWORDS and not (
-            isinstance(value, str) and value.startswith("#")
-        ):
-            return True
-        if _refers_outside(value):
+        if keyword in _REFERENCE_KEYWORDS:
+            if not (isinstance(value, str) and value.startswith("#")):
+                return True
+        elif keyword in _DATA_KEYWORDS:
+            continue
+        elif keyword in _NAMED_SUBSCHEMAS and isinstance(value, dict):
+            if any(_refers_outside(sub) for sub in value.values()):
+                return True
+        elif _refers_outside(value):
             return True
     return False
+
+
+def package_fingerprint(root: str, directory_name: str) -> Optional[tuple]:
+    """What a package looks like on disk, without reading it: a changed file,
+    a new file or a removed one changes the fingerprint. None if unreadable."""
+    directory = os.path.join(root, directory_name)
+    entries = []
+    try:
+        for current, dirnames, filenames in os.walk(directory, followlinks=False):
+            dirnames.sort()
+            for name in sorted(dirnames) + sorted(filenames):
+                info = os.lstat(os.path.join(current, name))
+                entries.append(
+                    (
+                        os.path.relpath(os.path.join(current, name), directory),
+                        info.st_mode,
+                        info.st_size,
+                        info.st_mtime_ns,
+                        info.st_ino,
+                    )
+                )
+            if len(entries) > MAX_FILES * 2:
+                return None
+    except OSError:
+        return None
+    return tuple(entries)
 
 
 def validate_manifest(

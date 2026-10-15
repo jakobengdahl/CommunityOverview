@@ -218,9 +218,10 @@ with `#`); the host never resolves a reference over the network. It checks
 `input` and `result.output` against their schemas in a separate process with
 a time and memory limit, since a schema can cost far more than its size
 suggests. A value nested too deeply to check fails its schema (`invalid_input`
-or `invalid_output`); a check that cannot finish within its limits counts as
-the schema not applying: the invocation is `rejected` with `invalid_manifest`,
-or the run `failed` with `invalid_output`.
+or `invalid_output`). A check that cannot finish within its limits, or a schema
+that refers to itself without end, counts as the schema not applying: the
+invocation is `rejected` with `invalid_manifest`, or the run `failed` with
+`invalid_output`.
 
 Top-level fields this contract does not name are ignored, so that tooling may
 add its own annotations. A field §4.2 lists as reserved is not unknown: it is
@@ -544,7 +545,9 @@ Status meanings:
 An invocation from a caller without read access is refused before any record is
 created, so that a caller who may not read the graph cannot fill its run
 history; a caller who may read but lacks the access a function needs gets a
-`rejected` record with `access_denied`.
+`rejected` record with `access_denied`. Likewise, while the host is checking as
+many inputs as it allows at once, a further invocation is turned away to be
+retried, without a record.
 
 Records never contain secret values, credentials or tokens. Tool arguments and
 results are not recorded, because they may hold graph content the run record's
