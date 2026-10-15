@@ -295,3 +295,55 @@ def test_a_manifest_with_text_that_is_not_unicode_is_invalid(tmp_path):
     loaded = load_function(str(tmp_path), "count-nodes")
     assert not loaded.valid
     assert "not valid Unicode" in loaded.errors[0]
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {
+            "properties": {"": {"const": {"$ref": "https://x/s"}}},
+            "$ref": "#/properties//const",
+        },
+        {"properties": {"a": {"properties": {}}}, "$ref": "#/properties/a/required"},
+        {"patternProperties": {"x": {"$ref": "https://x/s"}}},
+        {"dependentSchemas": {"x": {"$ref": "https://x/s"}}},
+        {"$recursiveRef": "https://x/s"},
+    ],
+)
+def test_references_that_leave_the_schema_or_point_into_data_are_refused(schema):
+    assert errors_for(input_schema=schema)
+
+
+def test_a_reference_to_a_plain_name_anchor_is_allowed():
+    schema = {
+        "$defs": {"n": {"$anchor": "required", "type": "integer"}},
+        "$ref": "#required",
+    }
+    assert errors_for(input_schema=schema) == []
+
+
+def test_the_digest_tells_paths_and_contents_apart_and_ignores_order():
+    from backend.functions.manifest import package_digest
+
+    assert package_digest({"a": b"bc"}) != package_digest({"ab": b"c"})
+    assert package_digest({"a": b"x"}) != package_digest({"b": b"x"})
+    assert package_digest({"a": b"1", "b": b"2"}) == package_digest(
+        {"b": b"2", "a": b"1"}
+    )
+
+
+def test_a_package_may_hold_exactly_the_most_entries_and_no_more(tmp_path):
+    from backend.functions.manifest import MAX_ENTRIES
+
+    files = {"function.json": json.dumps(VALID).encode(), "main.py": b""}
+    for index in range(MAX_FILES - 2):
+        files[f"d{index}/f.py"] = b""
+    directory = _write(tmp_path, "count-nodes", files)
+    # Empty folders fill the rest: files and folders count alike.
+    for index in range(MAX_ENTRIES - 2 * MAX_FILES + 2):
+        (directory / f"empty{index}").mkdir()
+    assert load_function(str(tmp_path), "count-nodes").valid
+    (directory / "one-more").mkdir()
+    loaded = load_function(str(tmp_path), "count-nodes")
+    assert not loaded.valid
+    assert "files and folders" in loaded.errors[0]

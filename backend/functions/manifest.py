@@ -314,9 +314,8 @@ def _points_into_data(reference: str) -> bool:
     walk above never looked at could hide."""
     # The resolver percent-decodes the fragment before following it.
     reference = unquote(reference)
-    tokens = (
-        [t for t in reference[1:].split("/") if t] if reference.startswith("#/") else []
-    )
+    # An empty segment names the key "", so every segment counts.
+    tokens = reference[2:].split("/") if reference.startswith("#/") else []
     index = 0
     while index < len(tokens):
         token = tokens[index].replace("~1", "/").replace("~0", "~")

@@ -875,3 +875,73 @@ def test_a_percent_encoded_reference_into_data_is_refused(schema):
         {"main.py": b"", "function.json": b"{}"},
     )
     assert errors
+
+
+def _nested(levels, inner=None):
+    value = {} if inner is None else inner
+    for _ in range(levels - 1):
+        value = {"x": value}
+    return value
+
+
+def test_depth_below_counts_containers_and_lists_at_the_exact_limit():
+    from backend.functions.schema_check import depth_below
+
+    assert depth_below(_nested(3), 3)
+    assert not depth_below(_nested(4), 3)
+    assert depth_below([[[]]], 3)
+    assert not depth_below([[[[]]]], 3)
+
+
+@pytest.mark.parametrize("extra, fails", [(0, False), (1, True)])
+def test_output_is_accepted_up_to_the_nesting_limit(harness, extra, fails):
+    from backend.functions.service import MAX_OUTPUT_DEPTH
+
+    harness.add(
+        "deep",
+        f"""
+        value = {{}}
+        for _ in range({MAX_OUTPUT_DEPTH + extra} - 1):
+            value = {{"x": value}}
+        return value
+        """,
+    )
+    service = harness.service
+    run = finished(service, invoke(service, "deep"))
+    assert (run["status"] == "failed") is fails
+
+
+def test_deep_output_is_named_as_too_deep_even_with_an_output_schema(harness):
+    from backend.functions.service import MAX_OUTPUT_DEPTH
+
+    harness.add(
+        "deep",
+        f"""
+        value = {{}}
+        for _ in range({MAX_OUTPUT_DEPTH + 5}):
+            value = {{"x": value}}
+        return value
+        """,
+        output_schema={"type": "object"},
+    )
+    service = harness.service
+    run = finished(service, invoke(service, "deep"))
+    assert run["error"]["code"] == "invalid_output"
+    assert "nests deeper than" in run["error"]["message"]
+
+
+def test_too_deep_input_against_a_finite_schema_names_the_nesting(harness):
+    harness.add(
+        "tree",
+        "return {}",
+        input_schema={
+            "$defs": {"t": {"properties": {"c": {"$ref": "#/$defs/t"}}}},
+            "$ref": "#/$defs/t",
+        },
+    )
+    value = {}
+    for _ in range(900):
+        value = {"c": value}
+    run = invoke(harness.service, "tree", value)
+    _rejected(run, "invalid_input")
+    assert "nested too deeply" in run["error"]["message"]
