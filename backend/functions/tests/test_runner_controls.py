@@ -649,3 +649,23 @@ def test_the_helper_refuses_a_first_message_that_is_not_the_invocation():
     )
     assert completed.returncode != 0
     assert completed.stdout == b""
+
+
+def test_a_second_stop_request_is_ignored_once_the_first_is_handled():
+    script = (
+        "import signal\n"
+        "from backend.functions import sandbox\n"
+        "signal.signal(signal.SIGTERM, sandbox._on_sigterm)\n"
+        "try:\n"
+        "    sandbox._on_sigterm(signal.SIGTERM, None)\n"
+        "except sandbox._Stop:\n"
+        "    pass\n"
+        "print(signal.getsignal(signal.SIGTERM) == signal.SIG_IGN)\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        cwd=os.getcwd(),
+        timeout=30,
+    )
+    assert completed.stdout.strip() == b"True", completed.stderr
