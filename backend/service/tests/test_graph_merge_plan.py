@@ -1110,6 +1110,38 @@ class TestSubtypeReduction:
         )
         assert _conflicts(plan) == {("edge", "x1"): "inapplicable"}
 
+    def test_only_ruled_subtypes_reach_the_applicability_check(
+        self, storage, monkeypatch
+    ):
+        seen = []
+
+        def _spy(rel, s_type, t_type, s_sub=None, t_sub=None):
+            seen.append((tuple(s_sub or ()), tuple(t_sub or ())))
+            return {"allowed": True, "message": ""}
+
+        monkeypatch.setattr(
+            graph_merge_plan.config_loader, "relationship_type_allows_node_types", _spy
+        )
+        monkeypatch.setattr(
+            graph_merge_plan, "_applicability_names", lambda: frozenset({"Agency"})
+        )
+        storage.add_nodes(
+            [Node(id="h1", type="Actor", name="H", subtypes=["noise", "Agency"])], []
+        )
+        _plan(
+            storage,
+            [{"id": "a1", "type": "Actor", "name": "Alice", "subtypes": ["x", "y"]}],
+            [{"id": "x1", "source": "h1", "target": "i1", "type": "RELATES_TO"}],
+            policy=MergePolicy(default="overwrite"),
+        )
+        # The new edge from h1, and the re-judge of a1's live edge e1 after
+        # its subtype overwrite, both see only rule-named subtypes.
+        assert seen and all(
+            set(source) <= {"Agency"} and set(target) <= {"Agency"}
+            for source, target in seen
+        )
+        assert (("Agency",), ()) in seen
+
     def test_a_live_node_is_read_once_however_many_edges_name_it(self, storage):
         class _View(StorageGraphView):
             reads = 0
