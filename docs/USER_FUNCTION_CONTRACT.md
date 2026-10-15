@@ -152,8 +152,9 @@ config/functions/
     ...                  # further source files, if any
 ```
 
-The directory name equals the manifest `id`. The host reads only the directory
-of a function that is enabled (§4.4).
+The directory name equals the manifest `id`. The host reads a function's
+directory to list it with its validation state (§4.4) and runs only a function
+that is enabled.
 
 ### 4.2 Manifest fields
 

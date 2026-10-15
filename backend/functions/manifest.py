@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -46,6 +47,8 @@ MAX_PACKAGE_BYTES = 5 * 1024 * 1024
 MAX_MANIFEST_BYTES = 256 * 1024
 
 _ID_PATTERN = re.compile(r"^[a-z0-9-]{3,64}$")
+# Path segments the /functions API uses for itself.
+RESERVED_IDS = frozenset({"runs", "runner"})
 _ENTRY_SUFFIXES = {"python": (".py",), "node": (".js", ".mjs")}
 
 
@@ -84,8 +87,12 @@ def load_function(root: str, directory_name: str) -> LoadedFunction:
     directory = os.path.join(root, directory_name)
     try:
         loaded.files = _read_package(directory)
-    except (OSError, ValueError) as exc:
+    except ValueError as exc:
         loaded.errors.append(str(exc))
+        return loaded
+    except OSError as exc:
+        # The message, not the host path, is what a reader of the list sees.
+        loaded.errors.append(f"the package could not be read: {exc.strerror}")
         return loaded
     raw = loaded.files.get(MANIFEST_FILE)
     if raw is None:
@@ -140,12 +147,9 @@ def _read_package(directory: str) -> Dict[str, bytes]:
         for filename in sorted(filenames):
             path = os.path.join(current, filename)
             relative = os.path.relpath(path, directory).replace(os.sep, "/")
-            if os.path.islink(path) or not os.path.isfile(path):
-                raise ValueError(f"only regular files are allowed: {relative}")
             if len(files) >= MAX_FILES:
                 raise ValueError(f"a function may hold at most {MAX_FILES} files")
-            with open(path, "rb") as handle:
-                content = handle.read(MAX_PACKAGE_BYTES - total + 1)
+            content = _read_regular_file(path, relative, MAX_PACKAGE_BYTES - total + 1)
             total += len(content)
             if total > MAX_PACKAGE_BYTES:
                 raise ValueError(
@@ -153,6 +157,30 @@ def _read_package(directory: str) -> Dict[str, bytes]:
                 )
             files[safe_relative_path(relative)] = content
     return files
+
+
+def _read_regular_file(path: str, relative: str, limit: int) -> bytes:
+    """Read a regular file without following a link or blocking on a FIFO,
+    checked on the descriptor itself so the file cannot be swapped between
+    the check and the read."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        raise ValueError(f"only regular files are allowed: {relative}") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError(f"only regular files are allowed: {relative}")
+        chunks = []
+        remaining = limit
+        while remaining > 0:
+            chunk = os.read(fd, min(remaining, 1024 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
 
 
 def _expect(document, name, kind, errors, *, required=True):
@@ -200,6 +228,8 @@ def validate_manifest(
     if function_id is not None:
         if not _ID_PATTERN.match(function_id):
             errors.append("id must be 3-64 lowercase letters, digits or '-'")
+        elif function_id in RESERVED_IDS:
+            errors.append(f"id {function_id!r} is reserved")
         elif function_id != directory_name:
             errors.append("id must equal the directory name")
 

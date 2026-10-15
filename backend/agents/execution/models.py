@@ -278,6 +278,10 @@ def _kept_scalar(value: Any) -> Any:
     return value
 
 
+# What identifies a user-function run; kept through redaction like agent_name.
+_FUNCTION_IDENTITY_KEYS = ("function_id", "function_version", "trigger")
+
+
 def redact_job(job: ExecutionJob, now: datetime) -> None:
     """
     Strip ``job``'s content in place, keeping what an operator needs to account
@@ -286,10 +290,12 @@ def redact_job(job: ExecutionJob, now: datetime) -> None:
 
     * ``payload.event`` shrinks to ``{event_type, entity: {kind, id, type}}``
       (the entity's before/after/patch data and the event's actor attribution
-      go); every other payload key except ``agent_name`` is dropped. Kept
-      values survive only as short strings or integers.
+      go); every other payload key except ``agent_name`` (and, for a
+      user-function run, its id, version and trigger) is dropped. Kept values
+      survive only as short strings or integers.
     * ``result.summary`` is nulled and only boolean/numeric result values are
-      kept, so free text under any other key goes too.
+      kept, so free text under any other key goes too; a user-function run
+      also keeps its ``outcome`` and run-level ``code``.
     * ``last_error`` and the attribution fields ``session_id`` and ``origin``
       are nulled.
 
@@ -310,9 +316,13 @@ def redact_job(job: ExecutionJob, now: datetime) -> None:
                 "type": _kept_scalar(entity.get("type")),
             },
         }
+    if job.kind == ExecutionKind.FUNCTION:
+        for key in _FUNCTION_IDENTITY_KEYS:
+            if key in payload:
+                redacted[key] = _kept_scalar(payload[key])
     job.payload = redacted
     if isinstance(job.result, dict):
-        job.result = {
+        kept = {
             key: (
                 value
                 if key != "summary" and isinstance(value, (bool, int, float))
@@ -320,6 +330,14 @@ def redact_job(job: ExecutionJob, now: datetime) -> None:
             )
             for key, value in job.result.items()
         }
+        if job.kind == ExecutionKind.FUNCTION:
+            # A run's outcome and run-level code are a closed vocabulary
+            # (USER_FUNCTION_CONTRACT §11), not content: without them a
+            # redacted run would read as a different status.
+            for key in ("outcome", "code"):
+                if key in job.result:
+                    kept[key] = _kept_scalar(job.result[key])
+        job.result = kept
     elif job.result is not None:
         job.result = None
     job.last_error = None

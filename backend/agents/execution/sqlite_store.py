@@ -460,6 +460,10 @@ class SqliteExecutionStore:
         with self._lock:
             return self._get_by_id(job_id)
 
+    def get_by_key(self, idempotency_key: str) -> Optional[ExecutionJob]:
+        with self._lock:
+            return self._get_by_key(idempotency_key)
+
     def list_jobs(
         self,
         *,

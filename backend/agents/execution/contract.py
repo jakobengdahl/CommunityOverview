@@ -176,6 +176,11 @@ class ExecutionStoreContractTests:
         assert final.attempts == self.retry_policy.max_attempts
         assert final.dead_letter_reason
 
+    def test_a_job_is_found_by_its_idempotency_key(self, store):
+        job = store.enqueue(_job(idempotency_key="the-key"))
+        assert store.get_by_key("the-key").id == job.id
+        assert store.get_by_key("other-key") is None
+
     def test_a_terminal_failure_keeps_the_result_it_is_given(self, store):
         j = store.enqueue(_job())
         now = T0

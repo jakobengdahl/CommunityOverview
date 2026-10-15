@@ -149,6 +149,10 @@ class ExecutionStore(Protocol):
         """Return the job by id, or None."""
         ...
 
+    def get_by_key(self, idempotency_key: str) -> Optional[ExecutionJob]:
+        """Return the job holding ``idempotency_key``, or None."""
+        ...
+
     def list_jobs(
         self,
         *,

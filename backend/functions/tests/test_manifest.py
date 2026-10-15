@@ -82,6 +82,8 @@ def test_each_required_field_is_required(field):
         {"id": "Count_Nodes"},
         {"id": "ab"},
         {"id": "other-name"},
+        {"id": "runs"},
+        {"id": "runner"},
         {"runtime": "ruby"},
         {"entry_point": "../main.py"},
         {"entry_point": "/main.py"},
@@ -238,3 +240,15 @@ def test_by_default_nothing_is_enabled_and_degraded_runs_are_allowed():
     settings = FunctionsSettings.from_env({})
     assert settings.enabled == {}
     assert settings.isolation_minimum == "degraded"
+
+
+def test_a_fifo_in_a_package_makes_it_invalid_without_blocking(tmp_path):
+    directory = _write(
+        tmp_path,
+        "count-nodes",
+        {"function.json": json.dumps(VALID).encode(), "main.py": b""},
+    )
+    os.mkfifo(directory / "pipe")
+    loaded = load_function(str(tmp_path), "count-nodes")
+    assert not loaded.valid
+    assert "regular files" in loaded.errors[0]

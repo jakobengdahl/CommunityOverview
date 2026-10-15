@@ -189,6 +189,12 @@ class InMemoryExecutionStore:
             job = self._jobs.get(job_id)
             return job.copy() if job else None
 
+    def get_by_key(self, idempotency_key: str) -> Optional[ExecutionJob]:
+        with self._lock:
+            job_id = self._by_key.get(idempotency_key)
+            job = self._jobs.get(job_id) if job_id is not None else None
+            return job.copy() if job else None
+
     def list_jobs(
         self,
         *,

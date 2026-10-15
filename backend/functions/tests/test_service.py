@@ -11,6 +11,7 @@ import pytest
 from backend.agents.execution import (
     ExecutionJob,
     ExecutionKind,
+    ExecutionState,
     InMemoryExecutionStore,
     RetryPolicy,
 )
@@ -403,3 +404,154 @@ def test_functions_are_listed_with_their_validation_and_enablement(harness):
     assert not listed["bad"]["valid"] and listed["bad"]["errors"]
     with pytest.raises(FunctionNotFound):
         harness.service.get_function("absent")
+
+
+# --- records are always closed (review round 1) ------------------------------------
+
+BROKEN_REF = {"$ref": "#/$defs/missing"}
+
+
+def test_an_input_schema_that_cannot_be_applied_is_an_invalid_manifest(harness):
+    harness.add("bad-ref", "return {}", input_schema=BROKEN_REF)
+    _rejected(invoke(harness.service, "bad-ref"), "invalid_manifest")
+
+
+def test_an_output_schema_that_cannot_be_applied_fails_the_run(harness):
+    harness.add("bad-out", "return {'x': 1}", output_schema=BROKEN_REF)
+    service = harness.service
+    run = finished(service, invoke(service, "bad-out"))
+    assert (run["status"], run["error"]["code"]) == ("failed", "invalid_output")
+    assert invoke(service, "bad-out")["status"] == "running"
+
+
+def test_a_run_that_cannot_start_is_closed_and_releases_its_function(
+    harness, monkeypatch
+):
+    import backend.functions.service as service_module
+
+    harness.add("count", "return {}")
+    service = harness.service
+
+    class RefusingThread(service_module.threading.Thread):
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(service_module.threading, "Thread", RefusingThread)
+    with pytest.raises(RuntimeError):
+        invoke(service, "count", idempotency_key="k")
+    (job,) = harness.store.list_jobs()
+    run = service.get_run(job.id)
+    assert (run["status"], run["error"]["code"]) == ("failed", "runner_lost")
+    assert service.cancel_run(job.id) is False
+    monkeypatch.undo()
+    assert invoke(service, "count")["status"] == "running"
+
+
+def test_a_run_whose_outcome_cannot_be_recorded_is_closed_as_lost(harness, monkeypatch):
+    harness.add("count", "return {}")
+    service = harness.service
+
+    def broken_complete(*args, **kwargs):
+        raise OSError("database is locked")
+
+    monkeypatch.setattr(harness.store, "complete", broken_complete)
+    run = finished(service, invoke(service, "count"))
+    assert (run["status"], run["error"]["code"]) == ("failed", "runner_lost")
+    assert invoke(service, "count")["status"] == "running"
+
+
+def test_a_cancel_that_arrives_after_success_keeps_the_success(harness):
+    from backend.functions.runner import FunctionRunResult
+    from backend.functions.manifest import Manifest
+
+    harness.add("count", "return {}")
+    service = harness.service
+    started = invoke(service, "count")
+    finished(service, started)
+    job = harness.store.enqueue(
+        ExecutionJob(
+            agent_id="function:count",
+            kind=ExecutionKind.FUNCTION,
+            idempotency_key="direct",
+            state=ExecutionState.RUNNING,
+            attempts=1,
+        )
+    )
+    manifest = Manifest(
+        contract_version="1",
+        id="count",
+        version="1",
+        name="count",
+        runtime="python",
+        entry_point="main.py",
+        grants=(),
+    )
+    service._record_outcome(
+        job.id, manifest, FunctionRunResult("succeeded", output={"a": 1}), True
+    )
+    assert service.get_run(job.id)["status"] == "succeeded"
+
+
+# --- idempotency against a changed instance --------------------------------------------
+
+
+def test_a_repeated_key_returns_its_run_after_the_function_is_removed(harness):
+    import shutil
+
+    harness.add("count", "return {}")
+    service = harness.service
+    run = finished(service, invoke(service, "count", idempotency_key="keep"))
+    shutil.rmtree(harness.root / "count")
+    assert invoke(service, "count", idempotency_key="keep")["id"] == run["id"]
+
+
+def test_an_event_origin_over_the_limit_is_refused(harness):
+    harness.add("count", "return {}")
+    with pytest.raises(InvocationError):
+        invoke(harness.service, "count", event_origin="o" * 201)
+
+
+# --- redaction keeps what a run is ------------------------------------------------------
+
+
+def test_a_redacted_run_keeps_its_function_status_and_code(harness):
+    from backend.agents.execution.models import redact_job
+
+    harness.add("count", "return {}")
+    harness.add("spin", "while True:\n    pass", limits={"timeout_seconds": 1})
+    harness.add("off", "return {}", enable=False)
+    service = harness.service
+    runs = [
+        finished(service, invoke(service, "count")),
+        finished(service, invoke(service, "spin")),
+        invoke(service, "off"),
+    ]
+    for run in runs:
+        job = harness.store._jobs[run["id"]]
+        redact_job(job, datetime.now(timezone.utc))
+        redacted = service.get_run(run["id"])
+        assert redacted["redacted"] is True
+        assert (redacted["function_id"], redacted["status"]) == (
+            run["function_id"],
+            run["status"],
+        )
+        if run["error"]:
+            assert redacted["error"]["code"] == run["error"]["code"]
+
+
+def test_a_run_abandoned_by_the_retention_sweep_reads_as_lost(harness):
+    from backend.agents.execution.models import ABANDONED_REASON
+
+    job = harness.store.enqueue(
+        ExecutionJob(
+            agent_id="function:count",
+            kind=ExecutionKind.FUNCTION,
+            idempotency_key="crashed",
+            state=ExecutionState.RUNNING,
+            attempts=1,
+        )
+    )
+    harness.store.fail(job.id, error=ABANDONED_REASON)
+    run = harness.service.get_run(job.id)
+    assert (run["status"], run["error"]["code"]) == ("failed", "runner_lost")
+    assert run["function_id"] == "count"

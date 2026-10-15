@@ -115,6 +115,9 @@ class _ActiveRun:
     def __init__(self) -> None:
         self.handle: Optional[RunHandle] = None
         self.cancelled = False
+        # Set once the process has ended and the outcome is being recorded:
+        # a cancel from then on has nothing left to cancel.
+        self.finalizing = False
 
 
 class FunctionService:
@@ -133,6 +136,7 @@ class FunctionService:
         self._runner = runner or HardenedSubprocessRunner()
         self._read_cutoff = read_cutoff
         self._lock = threading.Lock()
+        self._admission_lock = threading.Lock()
         self._busy: set = set()
         self._active: Dict[str, _ActiveRun] = {}
 
@@ -211,112 +215,120 @@ class FunctionService:
         event_origin: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Start a run, or record why it cannot start (§5, §11 ``rejected``)."""
-        if idempotency_key is not None and (
-            not isinstance(idempotency_key, str)
-            or not 0 < len(idempotency_key) <= MAX_KEY_CHARS
-        ):
-            raise InvocationError(
-                f"idempotency_key must be a string of 1-{MAX_KEY_CHARS} characters"
-            )
-        if correlation_id is not None and (
-            not isinstance(correlation_id, str) or len(correlation_id) > MAX_KEY_CHARS
-        ):
-            raise InvocationError("correlation_id is too long")
-        loaded = self._load(function_id)
+        _check_text("idempotency_key", idempotency_key, allow_empty=False)
+        _check_text("correlation_id", correlation_id)
+        _check_text("event_origin", event_origin)
         key = f"fn:{function_id}:{idempotency_key or uuid.uuid4().hex}"
+        if idempotency_key is not None:
+            # A repeated key returns the earlier run in any state (§5.3), even
+            # when the function or the runner is gone since.
+            existing = self._store.get_by_key(key)
+            if existing is not None:
+                return function_run_to_dict(existing)
+        loaded = self._load(function_id)
         correlation_id = correlation_id or f"corr-{uuid.uuid4().hex}"
         authorization_inputs = get_current_request_authorization_inputs()
         attribution = access.build_mutation_attribution(target="functions.invoke")
         actor = attribution.to_dict() if attribution is not None else None
         manifest = loaded.manifest
+        recorded = dict(correlation_id=correlation_id, origin=event_origin, actor=actor)
 
         try:
             probe, limits = self._admit(loaded, input_value)
         except _Rejected as rejected:
             return self._record_rejection(
-                key,
-                function_id,
-                manifest,
-                rejected,
-                correlation_id=correlation_id,
-                origin=event_origin,
-                actor=actor,
+                key, function_id, manifest, rejected, **recorded
             )
 
-        with self._lock:
-            busy = function_id in self._busy
-            if not busy:
-                self._busy.add(function_id)
-        if busy:
-            return self._record_rejection(
-                key,
-                function_id,
-                manifest,
-                _Rejected(CODE_BUSY, "Another run of this function is in progress."),
-                correlation_id=correlation_id,
-                origin=event_origin,
-                actor=actor,
-            )
+        job = self._new_job(
+            key,
+            function_id,
+            manifest,
+            state=ExecutionState.RUNNING,
+            isolation={"level": probe.level, "missing": list(probe.missing)},
+            **recorded,
+        )
+        envelope = self._envelope(
+            job.id,
+            manifest,
+            input_value,
+            correlation_id=correlation_id,
+            event_origin=event_origin,
+            actor=actor,
+            idempotency_key=idempotency_key,
+            timeout_seconds=limits["timeout_seconds"],
+        )
+        context = BrokerContext(
+            run_id=job.id,
+            function_id=function_id,
+            function_version=manifest.version,
+            declared_grants=frozenset(manifest.grants),
+            correlation_id=correlation_id,
+            authorization_inputs=authorization_inputs,
+            grant_enabled=lambda grant: self._settings.grant_enabled(
+                function_id, grant
+            ),
+            max_tool_calls=limits["max_tool_calls"],
+        )
+        spec = RunSpec(
+            run_id=job.id,
+            runtime=manifest.runtime,
+            entry_point=manifest.entry_point,
+            files=dict(loaded.files),
+            timeout_seconds=limits["timeout_seconds"],
+            memory_mib=limits["memory_mib"],
+        )
+        thread = threading.Thread(
+            target=self._execute,
+            args=(job.id, function_id, manifest, spec, context, envelope),
+            name=f"function-run-{job.id}",
+            daemon=True,
+        )
 
-        try:
-            job = self._new_job(
-                key,
-                function_id,
-                manifest,
-                state=ExecutionState.RUNNING,
-                correlation_id=correlation_id,
-                origin=event_origin,
-                actor=actor,
-                isolation={"level": probe.level, "missing": list(probe.missing)},
-            )
+        # The busy check and the record are one step, so that an invocation
+        # repeating a key that is being recorded finds that run, not "busy".
+        with self._admission_lock:
+            with self._lock:
+                busy = function_id in self._busy
+            if busy:
+                return self._record_rejection(
+                    key,
+                    function_id,
+                    manifest,
+                    _Rejected(
+                        CODE_BUSY, "Another run of this function is in progress."
+                    ),
+                    **recorded,
+                )
             stored = self._store.enqueue(job)
             if stored.id != job.id:
-                # The key names an earlier run: return it, start nothing (§5.3).
-                self._release(function_id)
                 return function_run_to_dict(stored)
-            envelope = self._envelope(
-                stored.id,
-                manifest,
-                input_value,
-                correlation_id=correlation_id,
-                event_origin=event_origin,
-                actor=actor,
-                idempotency_key=idempotency_key,
-                timeout_seconds=limits["timeout_seconds"],
-            )
-            context = BrokerContext(
-                run_id=stored.id,
-                function_id=function_id,
-                function_version=manifest.version,
-                declared_grants=frozenset(manifest.grants),
-                correlation_id=correlation_id,
-                authorization_inputs=authorization_inputs,
-                grant_enabled=lambda grant: self._settings.grant_enabled(
-                    function_id, grant
-                ),
-                max_tool_calls=limits["max_tool_calls"],
-            )
-            spec = RunSpec(
-                run_id=stored.id,
-                runtime=manifest.runtime,
-                entry_point=manifest.entry_point,
-                files=dict(loaded.files),
-                timeout_seconds=limits["timeout_seconds"],
-                memory_mib=limits["memory_mib"],
-            )
             with self._lock:
-                self._active[stored.id] = _ActiveRun()
-            thread = threading.Thread(
-                target=self._execute,
-                args=(stored.id, function_id, manifest, spec, context, envelope),
-                name=f"function-run-{stored.id}",
-                daemon=True,
-            )
+                self._busy.add(function_id)
+                self._active[job.id] = _ActiveRun()
+        try:
             thread.start()
         except BaseException:
-            self._release(function_id)
+            self._finish_lost(
+                job.id, function_id, "The runner could not start the run."
+            )
             raise
         return function_run_to_dict(stored)
+
+    def _finish_lost(self, run_id: str, function_id: str, message: str) -> None:
+        """Close a run the host could not carry through; never leave it running."""
+        try:
+            self._store.fail(
+                run_id,
+                error=f"{CODE_RUNNER_LOST}: {message}",
+                result={"outcome": STATUS_FAILED, "code": CODE_RUNNER_LOST},
+            )
+        except Exception:  # noqa: BLE001 - the retention sweep closes it then
+            logger.exception("Could not record user-function run %s", run_id)
+        finally:
+            with self._lock:
+                self._active.pop(run_id, None)
+            self._release(function_id)
 
     def _admit(self, loaded: LoadedFunction, input_value: Any):
         """The §11 ``rejected`` checks, in order; raises _Rejected."""
@@ -462,66 +474,76 @@ class FunctionService:
     ) -> None:
         active = self._active[run_id]
         try:
-            try:
-                result = run_function(
-                    self._runner,
-                    spec,
-                    FunctionBroker(self._graph_service, context),
-                    envelope,
-                    on_start=lambda handle: self._started(active, handle),
-                )
-            except Exception:  # noqa: BLE001 - recorded as a lost run
-                logger.exception("User-function run %s could not be executed", run_id)
-                self._store.fail(
-                    run_id,
-                    error=f"{CODE_RUNNER_LOST}: The runner could not run the function.",
-                    result={"outcome": STATUS_FAILED, "code": CODE_RUNNER_LOST},
-                )
-                return
-            details = {
-                "output": None,
-                "function_error_code": result.function_error_code or None,
-                "tool_calls": [
-                    {"tool": c.tool, "outcome": c.outcome, "duration_ms": c.duration_ms}
-                    for c in result.tool_calls
-                ],
-                "usage": {
-                    "wall_ms": result.wall_ms,
-                    "peak_memory_kib": result.peak_memory_kib,
-                },
-                "log": result.log,
-                "log_truncated": result.log_truncated,
-            }
-            status, code, message = result.status, result.code, result.message
-            if status == STATUS_SUCCEEDED and manifest.output_schema is not None:
-                problem = _schema_problem(manifest.output_schema, result.output)
-                if problem:
-                    status, code = STATUS_FAILED, CODE_INVALID_OUTPUT
-                    message = f"result.output failed output_schema: {problem}"
-            if active.cancelled:
-                self._store.cancel(
-                    run_id,
-                    result=dict(
-                        details, outcome=STATUS_CANCELLED, code=None, message=""
-                    ),
-                )
-            elif status == STATUS_SUCCEEDED:
-                details["output"] = result.output
-                self._store.complete(
-                    run_id, result=dict(details, outcome=STATUS_SUCCEEDED)
-                )
-            else:
-                self._store.fail(
-                    run_id,
-                    error=f"{code}: {message}"[:1100],
-                    result=dict(details, outcome=status, code=code, message=message),
-                )
-        except Exception:  # noqa: BLE001 - recording must never kill the thread silently
+            result = run_function(
+                self._runner,
+                spec,
+                FunctionBroker(self._graph_service, context),
+                envelope,
+                on_start=lambda handle: self._started(active, handle),
+            )
+        except Exception:  # noqa: BLE001 - recorded as a lost run
+            logger.exception("User-function run %s could not be executed", run_id)
+            self._finish_lost(
+                run_id, function_id, "The runner could not run the function."
+            )
+            return
+        with self._lock:
+            active.finalizing = True
+            cancelled = active.cancelled
+        try:
+            self._record_outcome(run_id, manifest, result, cancelled)
+        except Exception:  # noqa: BLE001 - never leave the record running
             logger.exception("Recording user-function run %s failed", run_id)
-        finally:
-            with self._lock:
-                self._active.pop(run_id, None)
-            self._release(function_id)
+            self._finish_lost(
+                run_id, function_id, "The run's outcome could not be recorded."
+            )
+            return
+        with self._lock:
+            self._active.pop(run_id, None)
+        self._release(function_id)
+
+    def _record_outcome(
+        self, run_id: str, manifest: Manifest, result, cancelled: bool
+    ) -> None:
+        details = {
+            "output": None,
+            "function_error_code": result.function_error_code or None,
+            "tool_calls": [
+                {"tool": c.tool, "outcome": c.outcome, "duration_ms": c.duration_ms}
+                for c in result.tool_calls
+            ],
+            "usage": {
+                "wall_ms": result.wall_ms,
+                "peak_memory_kib": result.peak_memory_kib,
+            },
+            "log": result.log,
+            "log_truncated": result.log_truncated,
+        }
+        status, code, message = result.status, result.code, result.message
+        if status == STATUS_SUCCEEDED and manifest.output_schema is not None:
+            try:
+                problem = _schema_problem(manifest.output_schema, result.output)
+            except Exception:  # noqa: BLE001 - e.g. a $ref that does not resolve
+                problem = "output_schema could not be applied"
+            if problem:
+                status, code = STATUS_FAILED, CODE_INVALID_OUTPUT
+                message = f"result.output failed output_schema: {problem}"
+        if cancelled and status != STATUS_SUCCEEDED:
+            # Only a run the cancel actually stopped is cancelled; one that had
+            # already finished keeps its outcome.
+            self._store.cancel(
+                run_id,
+                result=dict(details, outcome=STATUS_CANCELLED, code=None, message=""),
+            )
+        elif status == STATUS_SUCCEEDED:
+            details["output"] = result.output
+            self._store.complete(run_id, result=dict(details, outcome=STATUS_SUCCEEDED))
+        else:
+            self._store.fail(
+                run_id,
+                error=f"{code}: {message}"[:1100],
+                result=dict(details, outcome=status, code=code, message=message),
+            )
 
     def _started(self, active: _ActiveRun, handle: RunHandle) -> None:
         with self._lock:
@@ -534,7 +556,7 @@ class FunctionService:
         """Terminate a run in progress (§11 ``cancelled``); False if not running."""
         with self._lock:
             active = self._active.get(run_id)
-            if active is None:
+            if active is None or active.finalizing:
                 return False
             active.cancelled = True
             handle = active.handle
@@ -617,6 +639,19 @@ class FunctionService:
         }
 
 
+def _check_text(name: str, value: Any, *, allow_empty: bool = True) -> None:
+    if value is None:
+        return
+    if (
+        not isinstance(value, str)
+        or len(value) > MAX_KEY_CHARS
+        or (not allow_empty and not value)
+    ):
+        raise InvocationError(
+            f"{name} must be a string of at most {MAX_KEY_CHARS} characters"
+        )
+
+
 def _schema_problem(schema: Dict[str, Any], value: Any) -> Optional[str]:
     error = next(iter(Draft202012Validator(schema).iter_errors(value)), None)
     return error.message[:500] if error is not None else None
@@ -640,26 +675,55 @@ def _validate_input(manifest: Manifest, input_value: Any) -> None:
                 "This function takes no input: send an empty object.",
             )
         return
-    problem = _schema_problem(manifest.input_schema, input_value)
+    try:
+        problem = _schema_problem(manifest.input_schema, input_value)
+    except Exception:  # noqa: BLE001 - e.g. a $ref that does not resolve
+        raise _Rejected(
+            CODE_INVALID_MANIFEST, "input_schema could not be applied."
+        ) from None
     if problem:
         raise _Rejected(CODE_INVALID_INPUT, f"input failed input_schema: {problem}")
 
 
+RUN_CODES = frozenset(
+    {
+        CODE_INVALID_MANIFEST,
+        CODE_NOT_ENABLED,
+        CODE_ACCESS_DENIED,
+        CODE_INVALID_INPUT,
+        "chain_depth_exceeded",
+        CODE_BUSY,
+        CODE_ISOLATION_BELOW_MINIMUM,
+        "function_error",
+        CODE_RUNNER_LOST,
+        "no_result",
+        "protocol_error",
+        "memory_exceeded",
+        "output_too_large",
+        CODE_INVALID_OUTPUT,
+        "timeout",
+    }
+)
+
+
 def _status_and_error(job: ExecutionJob) -> Tuple[str, Optional[Dict[str, str]]]:
     result = job.result or {}
-    if job.state == ExecutionState.RUNNING:
-        return STATUS_RUNNING, None
     if job.state == ExecutionState.SUCCEEDED:
         return STATUS_SUCCEEDED, None
     if job.state == ExecutionState.DEAD_LETTER:
-        code, _, message = (job.last_error or "").partition(": ")
+        prefix, _, message = (job.last_error or "").partition(": ")
+        code = result.get("code") or prefix
+        if code not in RUN_CODES:
+            # A record the host never closed itself, e.g. abandoned by the
+            # retention sweep after a crash: the runner lost control of it.
+            code, message = CODE_RUNNER_LOST, job.last_error or ""
         status = STATUS_TIMED_OUT if code == "timeout" else STATUS_FAILED
         return status, {"code": code, "message": message}
     if job.state == ExecutionState.CANCELLED:
         if result.get("outcome") == STATUS_REJECTED:
             return STATUS_REJECTED, {
-                "code": result.get("code", ""),
-                "message": result.get("message", ""),
+                "code": result.get("code") or "",
+                "message": result.get("message") or "",
             }
         return STATUS_CANCELLED, None
     return STATUS_RUNNING, None
@@ -673,7 +737,8 @@ def function_run_to_dict(job: ExecutionJob) -> Dict[str, Any]:
     tool_calls = result.get("tool_calls") or []
     return {
         "id": job.id,
-        "function_id": payload.get("function_id"),
+        "function_id": payload.get("function_id")
+        or job.agent_id.removeprefix("function:"),
         "function_version": payload.get("function_version"),
         "trigger": payload.get("trigger", TRIGGER_MANUAL),
         "status": status,
