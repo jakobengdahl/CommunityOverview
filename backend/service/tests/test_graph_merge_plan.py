@@ -1221,6 +1221,52 @@ class TestRejectedCost:
         assert plan.report["adds"]["edges"]["count"] == 0
 
 
+class TestDescribeInvalid:
+    def test_the_description_is_located_counted_and_bounded(self):
+        from backend.service.graph_import import describe_invalid
+
+        try:
+            Node(type="Actor", name="X", tags=[1] * 50)
+        except Exception as exc:  # pydantic ValidationError
+            text = describe_invalid(exc)
+        assert text.startswith("50 validation error(s): tags.0:")
+        assert text.count("tags.") == 5
+        assert "and 45 more" in text
+        assert len(text) <= 501
+
+    def test_long_text_is_cut_at_the_cap(self):
+        from backend.service.graph_import import describe_invalid
+
+        text = describe_invalid(ValueError("x" * 10_000))
+        assert len(text) == 501 and text.endswith("…")
+
+    def test_an_invalid_edge_gets_a_bounded_message(self, storage):
+        bad = {"id": "x", "source": "a1", "target": "i1", "label": [1] * 5_000}
+        plan = _plan(storage, [], [bad])
+        message = plan.report["rejected"]["items"][0]["message"]
+        assert message.startswith("invalid edge: ")
+        assert len(message) <= 520
+
+    def test_edges_after_the_issue_cap_are_still_planned(self, storage, monkeypatch):
+        monkeypatch.setattr(graph_merge_plan, "PLAN_LIST_CAP", 2)
+        bad = [{"id": f"b{i}"} for i in range(5)]  # each missing source/target
+        good = {"id": "ok", "source": "a1", "target": "i1", "type": "RELATES_TO"}
+        plan = _plan(storage, [], bad + [good])
+        assert plan.report["adds"]["edges"]["ids"] == ["ok"]
+
+
+class TestEntryHash:
+    def test_distinct_lone_surrogates_hash_differently(self):
+        first = graph_merge_plan._entry_hash({"id": "a\ud800"})
+        second = graph_merge_plan._entry_hash({"id": "a\ud801"})
+        assert first != second
+
+    def test_key_order_does_not_change_the_hash(self):
+        assert graph_merge_plan._entry_hash(
+            {"id": "a", "name": "b"}
+        ) == graph_merge_plan._entry_hash({"name": "b", "id": "a"})
+
+
 class TestDigestOfOneLargeEntry:
     def test_hashing_a_large_entry_does_not_copy_it_escaped(self, storage):
         import tracemalloc
