@@ -154,7 +154,8 @@ node's changed fields, and a merge should not leave edges behind that the same
 edge could not be created under.
 
 **Edge collisions** (same edge id): the same options apply, with `rename`
-meaning "new edge id". An edge whose endpoints differ from the live edge with
+meaning "new edge id" (the session contract's `as_new` is for nodes only; this
+extends it to edges). An edge whose endpoints differ from the live edge with
 that id is treated like a type mismatch — an edge's endpoints never change
 (`SESSION_OVERLAY_CONTRACT.md` §6.3).
 
@@ -187,8 +188,8 @@ is a conflict); (b) treat it as `dangling` unless the caller resolves it, which
 is what `SESSION_OVERLAY_CONTRACT.md` §11.2 does for a dependant of a dropped
 create ("Nothing attaches it silently"). Recommendation: **(a)** under an
 explicit `skip` policy, with every such edge listed in the plan, because
-choosing `skip` already says "the live node *is* this entity" and the preview
-shows each attachment before commit; this is a deliberate divergence from the
+choosing `skip` already says "the live node *is* this entity"; this is a
+deliberate divergence from the
 session contract, whose staged create was never asserted to be the same entity
 as the one that later took its id. Under §1 (c), per-id resolutions, the
 session behaviour (b) becomes available too.
@@ -252,7 +253,9 @@ response.
   PostgreSQL mode with several instances (ADR 0009), storage every instance can
   read.
 - **(c) Stateless digest.** Preview returns `plan_digest`, a SHA-256 over the
-  full, uncapped canonical plan (not the capped report) *including the live
+  canonical request parameters that change writes (`policy`,
+  `include_system_types`, `stamp_provenance`) and the full, uncapped
+  canonical plan (not the capped report) *including the live
   revision of every entity it reads or expects absent, and the graph's
   `generation`*. Commit sends the document,
   the policy and the digest; the server recomputes the plan, and refuses with
@@ -286,11 +289,19 @@ not by itself close it. It is closed the way `SESSION_OVERLAY_CONTRACT.md`
   still exist at the revision the plan read. Otherwise a delete inside the
   window would leave a skipped document entity neither kept nor created. An
   expectation alone does not cover these, because the merge does not write
-  those entities, and in PostgreSQL mode today's endpoint lock (`FOR KEY SHARE`
-  in `postgres_backend.py`) holds a row that is present but does not fail on
-  one that is absent. The store must verify these checks inside the unit —
-  the same check machinery the session contract assigns to slice S2, which a
-  merge needs whichever feature builds it first.
+  those entities. In PostgreSQL mode today's endpoint lock (`FOR KEY SHARE`
+  in `postgres_backend.py`) is not enough on either count: it holds a row
+  that is present but does not fail on one that is absent, and it conflicts
+  with a delete but not with an ordinary update, so a concurrent subtype
+  change could commit between the check and the merge. The store must
+  verify these checks inside the unit, holding each checked row against
+  updates too (`FOR SHARE`, or the revision compared in the statement that
+  writes). The existence checks are the machinery the session contract
+  assigns to slice S2; the revision checks on entities the merge does not
+  write go **beyond** S2 and are new work for this feature. (The alternative
+  is to accept the subtype race on attach targets as today's direct-write
+  semantics — `add_edge` does not hold its endpoints against updates
+  either — and check existence only; the reviewer may prefer that.)
 
 Revisions make the check cheap: what the commit verifies inside the unit is
 revisions, existence and `generation`, not entity content (the digest itself
@@ -300,9 +311,15 @@ covers the plan, field values included).
 needs no new plan storage, works across instances sharing a PostgreSQL store
 once the generation check above is in place, and builds on the revision
 machinery S1 already ships. A commit without a digest is allowed only when the
-policy cannot overwrite **and** `include_system_types` is false (§5): `fail`,
-`skip` or `rename` everywhere, since none of them changes a live entity, and
-no configuration-bearing node can be created unseen.
+policy is `fail` or `skip` everywhere **and** `include_system_types` is false
+(§5): neither changes a live entity, no configuration-bearing node can be
+created unseen, and a blind retry is harmless — a retry after a lost response
+(`write_outcome_unknown`) finds the first commit's entities and fails or skips
+them. `rename` is excluded: such a retry would rename, and so duplicate, the
+whole document. A caller-chosen idempotency key, like the session merge's
+`merge_id` (§11.4), would make rename retries safe too, but needs the durable
+audit record of §7 (c); it is listed as an option there, not recommended for
+the first slices.
 
 ### 4. Decision point — Atomicity, rollback and concurrency
 
@@ -456,7 +473,10 @@ graph, so a crash between the two leaves a committed merge with no record;
 they are best-effort. `import_jobs.db` is also per instance, so in PostgreSQL
 mode with several instances `GET /import` lists only the local instance's
 merges. (c) is crash-safe and shared but needs a new record kind in both
-backends' stores. Recommendation: **(a)** in the first slices, stated as
+backends' stores; it is also what a caller-chosen `import_id` idempotency key
+would need (a retried commit finds the record and returns it, as a retried
+session merge does with its `merge_id`), which would let a `rename` commit
+skip the digest safely (§3). Recommendation: **(a)** in the first slices, stated as
 best-effort, with (c) adopted if the staged-session merge record (S2) lands
 first and can be reused; retention is the same open question as for import
 jobs today.
@@ -575,9 +595,11 @@ controls proposed for it:
   or an `Agent`.
 - **Attachments.** Attachments are keyed by node id (ADR 0008). An overwrite
   keeps the live node's attachments, which then sit under content the uploader
-  did not attach them to; a rename creates a node with none. The plan should
-  flag overwritten nodes that have attachments, because ADR 0010 lets agents
-  read attachment text by node.
+  did not attach them to; a rename creates a node with none; and a create
+  whose id has an orphan attachment directory (ADR 0008 §8 keeps those after a
+  replace) would inherit files uploaded for unrelated content. The plan should
+  flag overwritten nodes with attachments and creates whose id has an orphan
+  directory, because ADR 0010 lets agents read attachment text by node.
 - **Ids.** Document ids are opaque strings, as in v1, and go through the same
   `Node`/`Edge` construction as v1 and ordinary creates; the attachment store
   never uses a node id as a path segment as-is (ADR 0008). Rename never
@@ -614,10 +636,13 @@ After acceptance, in dependency order:
    undo and one-batch persistence on both backends (§4); the backup reuse;
    `POST /import/merge` with digest checking and `import_plan_stale`; the audit
    record; per-entity events (§7); the selective vector drop for overwritten
-   nodes inside the commit unit and enqueuing the `ExecutionKind.IMPORT` job
-   for created and changed nodes (§6) — so no overwritten node ever serves a
-   stale vector, which `update_node` (re-embedding synchronously) never does
-   either. Contract tests in the in-memory, file and PostgreSQL backends.
+   nodes as part of the commit and enqueuing the `ExecutionKind.IMPORT` job
+   for created and changed nodes (§6) — so an overwritten node does not serve
+   a stale vector, as `update_node` normally does not (it re-embeds
+   synchronously, keeping the old vector only when embedding fails). On the
+   file backend vectors persist through the embedding sidecar, separately
+   from the journal batch, so the drop is atomic in memory and the slice must
+   say how it is made durable. Contract tests in the in-memory, file and PostgreSQL backends.
 3. **Embedding race guard.** The per-node revision guard in the worker (§6).
 4. **Optional, later:** per-id resolutions after preview (§1 (c)), merge for
    narrowed callers (§10 (b)), merge from an archive (§6), opt-in provenance
