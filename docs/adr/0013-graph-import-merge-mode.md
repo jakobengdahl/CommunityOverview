@@ -26,7 +26,9 @@ ADR 0009 records its sub-questions.
 
 `POST /import` (ADR 0006) and `POST /import/archive` (ADR 0007) both **replace
 the whole active graph**. Their pipeline, in `backend/service/import_service.py`
-(`_validate_backup_replace`), is:
+(`_validate_backup_replace` for steps 1–4, then `_enqueue_and_start_regeneration`
+for step 5 — or, for a compatible archive, a direct vector restore with no job),
+is:
 
 1. **Authorize** with `GRAPH_ACTION_MUTATE`, and refuse a caller whose graph
    access is narrowed (`import_requires_full_graph_access`).
@@ -118,7 +120,7 @@ A document node whose id exists in the live graph.
 | Option | Effect | Trade-offs |
 |---|---|---|
 | **skip** | Keep the live node; drop the document's version. | Safe and idempotent (re-running an import is a no-op). Silently ignores updated content unless the plan surfaces it. |
-| **overwrite** | The document's node replaces the live node, every field (the session contract's `take_session` on `id_taken`). | The only way to "update from a newer export". Destructive: live edits since the export are lost (backed up, §4). |
+| **overwrite** | The document's node replaces the live node, every caller-writable field (the session contract's `take_session` on `id_taken`); server-owned fields such as `revision` are never taken from the document, as on every write (`SESSION_OVERLAY_CONTRACT.md` §4.1). | The only way to "update from a newer export". Destructive: live edits since the export are lost (backed up, §4). |
 | **rename** | Create the document's node under a fresh id; rewrite every *document* edge that names the old id to the new id (the session contract's `as_new`). | Never loses data, but duplicates entities, and a node that was meant to be the same entity now exists twice. Renamed ids must be reported (old → new) so a caller can follow up. |
 | **fail** | Any collision blocks the whole import with the colliding ids listed. | Most conservative; makes "import into an empty-ish graph" the only easy case. |
 
@@ -162,10 +164,28 @@ replace does, and not the live graph alone):
 |---|---|
 | both in the document (created or overwritten) | Normal case; applicability judged against the resulting node types. |
 | one or both only in the live graph | Allowed — attaching new content to existing nodes is the point of merge. Applicability is judged against the **live** node's type and subtypes. |
-| an endpoint the document names under a node that is **skipped** | The edge attaches to the live node that holds the id (the session contract's `take_session` for a dependant of a dropped create). Applicability is re-judged against the live node; if it fails, the edge is a conflict. |
+| an endpoint the document names under a node that is **skipped** | See *Edges of skipped nodes* below. |
 | an endpoint the document names under a node that is **renamed** | Rewritten to the new id (§1). |
 | an endpoint in neither the document nor the live graph | **Rejected** (`dangling`). Never created as a placeholder node. |
 | an endpoint that is a live node archived (`archived: true`) | Options: allow (archive is reversible) or conflict. Recommendation: allow, reported in the plan. |
+
+**Edges of skipped nodes — options:** (a) attach the edge to the live node
+that holds the id, re-judging applicability against the live node (a failure
+is a conflict); (b) treat it as `dangling` unless the caller resolves it, which
+is what `SESSION_OVERLAY_CONTRACT.md` §11.2 does for a dependant of a dropped
+create ("Nothing attaches it silently"). Recommendation: **(a)** under an
+explicit `skip` policy, with every such edge listed in the plan, because
+choosing `skip` already says "the live node *is* this entity" and the preview
+shows each attachment before commit; this is a deliberate divergence from the
+session contract, whose staged create was never asserted to be the same entity
+as the one that later took its id. Under §1 (c), per-id resolutions, the
+session behaviour (b) becomes available too.
+
+**Edges of excluded system nodes.** When system types are excluded (§5), an
+edge incident to an excluded document node is excluded with it and listed
+under `skips`, never reported as `dangling` — otherwise importing another
+instance's export (an `Agent` → `Skill` edge, say) would block under the
+recommended defaults.
 
 **Duplicate edges** — a document edge whose `(source, target, type)` equals a
 live edge's but whose id differs. Storage does not prevent this today. Options:
@@ -182,22 +202,29 @@ that also deletes would be a third mode and is out of scope.)
 
 ### 3. Decision point — Preview (dry run) and plan binding
 
-Merge must be previewable: the node description that motivated this ADR asks
-for "what would change" before commit, and an overwrite is destructive.
+Merge must be previewable: unlike replace, its outcome depends on the live
+graph, so a caller cannot know "what would change" from the document alone,
+and an overwrite is destructive.
 
 **Plan report** (returned by the preview, and again by the commit):
 
 - `adds` — nodes and edges to create (counts, plus ids up to a cap);
-- `overwrites` — per entity, the fields that change (`base` = live value,
-  `incoming` = document value), in the shape of the session diff's `fields`;
-- `renames` — old id → new id, and the edges rewritten with it;
+- `overwrites` — per entity, the fields that change (`main` = live value,
+  `incoming` = document value; `main` as in the session diff, which also has
+  a `base` this feature has no equivalent for);
+- `renames` — the old ids that will be renamed, and the edges rewritten with
+  each. New ids are **not** in the plan: they are minted at commit and
+  returned only in the commit response, so recomputing a plan stays
+  deterministic (see the digest below);
 - `skips` — collisions kept as live, and duplicate edges skipped;
 - `conflicts` — entries that block the commit under the chosen policy (type
   mismatch, endpoint mismatch, `fail` collisions, applicability failures after
   attaching to a live node);
 - `rejected` — validation errors (unknown types, dangling edges, bad fields),
   located as `ImportIssue` already does (`nodes[3]`, `edges[7] (id=…)`);
-- `embeddings` — how many nodes would be (re)embedded (§6);
+- `embeddings` — how many merged nodes would be (re)embedded (§6), plus how
+  many live nodes already lack a vector, since the job embeds those too;
+- `events` — how many graph events the commit would emit (§7);
 - `plan_digest` — see below.
 
 Lists are capped (for example the first 1,000 ids per category) with exact
@@ -214,23 +241,49 @@ response.
   read.
 - **(c) Stateless digest.** Preview returns `plan_digest`, a SHA-256 over the
   canonical plan *including the live revision of every entity it reads or
-  expects absent*. Commit sends the document, the policy and the digest; the
-  server recomputes the plan, and refuses with `import_plan_stale` (carrying
-  the new plan) if the digest differs.
+  expects absent, and the graph's `generation`*. Commit sends the document,
+  the policy and the digest; the server recomputes the plan, and refuses with
+  `import_plan_stale` (carrying the new plan) if the digest differs.
 
-Recomputing the plan does not by itself close the window between recompute and
-apply. That window is closed the way `SESSION_OVERLAY_CONTRACT.md` §11.3 closes
-it for a staged merge: every write the commit issues carries an expectation —
-`expected_revision` for an overwrite, `expect_absent` for a create — so a live
-write that lands in between fails the commit as a whole rather than being
-overwritten. Revisions make this cheap: the digest is over revisions, not over
-entity content.
+**Why `generation` is in the digest.** Revisions alone do not detect a replace
+between preview and commit when the store assigns revisions: there
+`replace_all_nodes_and_edges` sets every imported entity's revision to `0`
+("never written under revisions"), so an untouched entity reads `0` before
+and after a second replace, and an `expected_revision=0` would still hold
+against content the user never previewed. Every replace bumps `generation`,
+so the commit also checks that `generation` is unchanged, inside the same
+locked unit as the writes. In a shared PostgreSQL store several instances
+write, so the implementation must check the generation persisted in the store
+(`graph_metadata.graph_generation`), not only the instance's in-memory counter;
+how to read it race-free there is part of slice 2.
 
-**Recommendation:** **(c)**, with expectations on every write. It needs no new
-storage, works unchanged across instances sharing a PostgreSQL store, and uses
-the revision machinery S1 already ships. A commit without a digest is allowed
-only when the policy cannot overwrite (`fail` or `skip` everywhere), because
-then nothing the user did not see can be lost.
+**Closing the window between recompute and apply.** Recomputing the plan does
+not by itself close it. It is closed the way `SESSION_OVERLAY_CONTRACT.md`
+§11.3 closes it for a staged merge, with both of its parts:
+
+- **expectations** on every write the commit issues — `expected_revision` for
+  an overwrite, `expect_absent` for a create — so a live write that lands in
+  between fails the commit as a whole rather than being overwritten;
+- **checks** on what the plan depended on without writing it: every live node
+  a document edge attaches to must still exist, and must still have the
+  revision the plan judged applicability against (its type and subtypes). An
+  expectation alone does not cover these, because the merge does not write
+  those nodes, and in PostgreSQL mode today's endpoint lock (`FOR KEY SHARE`
+  in `postgres_backend.py`) holds a row that is present but does not fail on
+  one that is absent. The store must verify these checks inside the unit —
+  the same check machinery the session contract assigns to slice S2, which a
+  merge needs whichever feature builds it first.
+
+Revisions make this cheap: the digest is over revisions and `generation`, not
+over entity content.
+
+**Recommendation:** **(c)**, with expectations and checks on every commit. It
+needs no new plan storage, works across instances sharing a PostgreSQL store
+once the generation check above is in place, and builds on the revision
+machinery S1 already ships. A commit without a digest is allowed only when the
+policy cannot overwrite **and** `include_system_types` is false (§5): `fail`,
+`skip` or `rename` everywhere, since none of them changes a live entity, and
+no configuration-bearing node can be created unseen.
 
 ### 4. Decision point — Atomicity, rollback and concurrency
 
@@ -247,17 +300,19 @@ restamps every entity and drops every vector, and it should not be a loop over
 shape is a new, narrow `GraphStorage` method (working name
 `apply_import_merge`) that, under `_lock`:
 
-1. checks every expectation against the in-memory model;
+1. checks `generation`, every expectation and every check (§3) against the
+   in-memory model;
 2. captures undo state for every entity it will touch (the existing
    `_capture`/`_undo` pair);
 3. applies creates and overwrites to the in-memory model, assigning fresh
    revisions as any write does (§4.2 of the session contract — a merge write is
    an ordinary write, not a whole-graph replace, so untouched entities keep
    their revisions);
-4. persists **one** batch: `apply_batch` on a backend declaring
-   `incremental_writes`/`transactions` (PostgreSQL), where a backend declaring
-   `revision_enforcement` re-checks expectations in the store; the existing
-   journal batch / `save()` path on the file backend;
+4. persists **one** batch through `apply_batch`, which both shipped backends
+   declare atomic (`incremental_writes` and `transactions`; on the file
+   backend it is one journal record). PostgreSQL also declares
+   `revision_enforcement`, so it re-checks expectations in the store; the §3
+   checks must be verified there too;
 5. on any failure, restores memory from the undo state and re-raises, so the
    live graph is the pre-merge graph.
 
@@ -278,13 +333,15 @@ into large graphs. Note that restoring an (a) backup with `POST /import` is a
 *replace*: it also undoes every live write made after the merge, so the
 response should say so.
 
-**Concurrency with live writes.** Planning and validation run without `_lock`
-and against a consistent read of the entities they inspect; the commit holds
+**Concurrency with live writes.** Planning and validation run without `_lock`,
+reading entities one at a time (there is no unlocked multi-entity snapshot);
+consistency is enforced at commit by the digest, expectations and checks of
+§3. The commit holds
 `_lock` for steps 1–5, so on the file backend live writes queue behind it for
 its duration (as they already do behind a replace). In PostgreSQL mode other
-instances keep writing; their writes either land before the commit's
-expectations are checked (and fail the commit with `import_plan_stale`) or
-after it (and are ordinary later writes).
+instances keep writing; a write that lands before the commit's
+expectations and checks are verified fails the commit with
+`import_plan_stale`; one that lands after is an ordinary later write.
 
 ### 5. Decision point — Schema validation and system types
 
@@ -321,7 +378,10 @@ Mechanics: the commit drops the vectors of overwritten nodes whose embedded
 text changed (so a stale vector is never served for new text), then enqueues
 the existing `ExecutionKind.IMPORT` job. The worker needs no node list: its
 `has_embedding` filter already lands it on exactly the nodes without a vector,
-the property ADR 0007 §6a relies on for partial archives.
+the property ADR 0007 §6a relies on for partial archives. That set also
+includes any live node that already lacked a vector before the merge, so the
+job may do more work than the merge alone implies; the plan reports both
+counts (§3).
 
 One gap must be closed in the implementation: the worker checks only
 `generation` before committing. A node overwritten by a direct write *while*
@@ -348,25 +408,40 @@ Node metadata travels into `graph.json`, `GET /export` and federated copies
 every consumer and change content on every overwrite. Recommendation:
 **(c)**, off by default.
 
-**Audit record.** The import job (in `import_jobs.db`) carries the plan digest,
-the policy, the counts, the backup path and per-entity outcome (created /
-overwritten / renamed old → new, with resulting revisions) — the analogue of
-the session contract's merge record (§11.5). Recommendation: always.
+**Audit record.** Every committed merge writes a record carrying the import
+id, the plan digest, the policy, the counts, the backup path and per-entity
+outcome (created / overwritten / renamed old → new, with resulting revisions)
+— the analogue of the session contract's merge record (§11.5). It cannot live
+only on the embeddings job: a merge that needs no embeddings creates no job,
+and the job can fail to start (ADR 0006 §7, `not_started`). **Where — options:**
+(a) a terminal `ExecutionKind.IMPORT` record in `import_jobs.db` written for
+every merge, separate from any embeddings job; (b) a JSON file next to the
+backup in `import-backups/`. Recommendation: **(a)**, kept as long as import
+jobs are kept today, so `GET /import` lists merges as well as replaces;
+retention is the same open question for both.
 
 **Graph events — options:** (a) none, as replace; (b) one ordinary
 `node.create`/`node.update`/`edge.create`/`edge.update` event per entity after
-the commit lands, with `event_origin` set to a fixed value (for example
-`graph-import-merge`) and `event_correlation_id` set to the import id; (c) a
-single summary event — a new event type, which changes the event contract in
-`docs/EVENT_SUBSCRIPTIONS.md`.
+the commit lands, with `event_correlation_id` set to the import id, and
+`event_origin` taken from the caller's `x-event-origin` header when given —
+as `POST /import` already forwards it — falling back to a fixed
+`graph-import-merge`; (c) a single summary event — a new event type, which
+changes the event contract in `docs/EVENT_SUBSCRIPTIONS.md`. Keeping the
+caller's origin matters: an agent that sets `agent:<id>` and lists it in its
+own `ignore_origins` (the loop-prevention pattern in
+`docs/EVENT_SUBSCRIPTIONS.md`) would otherwise receive an event for every
+entity its own merge wrote.
 
 Merge changes part of a graph other clients are looking at, so (a) leaves
-sessions, webhooks and agents blind to it. (b) keeps every existing consumer
-correct with no contract change, and lets a subscription opt out with its
-existing `ignore_origins` filter; its cost is volume — a large merge fires one
-event per entity to every matching subscription and into mutation history
-(file backend only, ADR 0009). Recommendation: **(b)**, with the event count
-included in the plan so a large merge's fan-out is visible before commit.
+sessions, webhooks and agents blind to it. (b) uses the existing
+event types and envelope, so no contract changes, and lets a subscription opt
+out with its existing `ignore_origins` filter; its cost is volume — a merge at
+the document caps fires hundreds of thousands of events to every matching
+subscription and into mutation history (file backend only, ADR 0009), which
+is an amplification risk for webhook targets and the delivery worker.
+Recommendation: **(b)**, with the event count in the plan so a large merge's
+fan-out is visible before commit; whether a large merge should instead emit a
+capped or batched form is left to measurement in slice 2 (§8).
 
 ### 8. Decision point — Size limits and performance
 
@@ -458,8 +533,27 @@ controls proposed for it:
   did not attach them to; a rename creates a node with none. The plan should
   flag overwritten nodes that have attachments, because ADR 0010 lets agents
   read attachment text by node.
-- **Ids.** Document ids are opaque strings, as in v1; rename never derives a new
-  id from the old one (§1).
+- **Ids.** Document ids are opaque strings, as in v1, and go through the same
+  `Node`/`Edge` construction as v1 and ordinary creates; the attachment store
+  never uses a node id as a path segment as-is (ADR 0008). Rename never
+  derives a new id from the old one (§1).
+- **The preview reads the live graph.** It returns live field values
+  (`overwrites.main`) and reveals which ids exist, so it is a read of the
+  graph and needs the same authorization as the commit — `GRAPH_ACTION_MUTATE`
+  and full graph access in the first slices, including the MCP preview tool.
+  Under narrowed callers (option (b) above) it must not reveal entities
+  outside the caller's scope.
+- **System types, when included.** `include_system_types: true` requires a
+  digest (§3), and creating or overwriting a system node goes through the same
+  validation its ordinary create path applies (for example to webhook
+  delivery settings), not only generic schema validation.
+- **Server-owned fields.** A document cannot supply `revision` (§1) or event
+  attribution: the event origin comes from the request's `x-event-origin`
+  header, as on every write, or the server default (§7) — never from the
+  document body.
+- **Backups accumulate.** Every merge writes a whole-graph backup (§4 (a));
+  repeated small merges grow `import-backups/` without bound, as repeated
+  replaces already do. Retention is a follow-up shared with replace.
 
 ## Proposed implementation slicing
 
