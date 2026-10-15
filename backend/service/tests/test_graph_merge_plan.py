@@ -1075,6 +1075,70 @@ class TestSubtypeLength:
         assert peak < 40 * 1024 * 1024
 
 
+class TestSubtypeReduction:
+    def test_rule_names_are_every_source_and_target_name(self):
+        from backend.config import config_loader
+
+        expected = set()
+        for rule in config_loader.get_schema()["relationship_types"].values():
+            expected.update(rule.get("source_types") or ())
+            expected.update(rule.get("target_types") or ())
+        assert graph_merge_plan._applicability_names() == frozenset(expected)
+        assert expected  # the default schema has rules to check against
+
+    def test_a_rule_on_a_later_subtype_still_applies(self, storage, monkeypatch):
+        storage.add_nodes(
+            [Node(id="m1", type="Actor", name="M", subtypes=["Other", "Agency"])], []
+        )
+
+        def _rule(rel, s_type, t_type, s_sub=None, t_sub=None):
+            allowed = "Agency" not in (t_sub or [])
+            return {"allowed": allowed, "message": "" if allowed else "no agencies"}
+
+        monkeypatch.setattr(
+            graph_merge_plan.config_loader, "relationship_type_allows_node_types", _rule
+        )
+        monkeypatch.setattr(
+            graph_merge_plan,
+            "_applicability_names",
+            lambda: frozenset({"Other", "Agency"}),
+        )
+        plan = _plan(
+            storage,
+            [],
+            [{"id": "x1", "source": "i1", "target": "m1", "type": "RELATES_TO"}],
+        )
+        assert _conflicts(plan) == {("edge", "x1"): "inapplicable"}
+
+    def test_a_live_node_is_read_once_however_many_edges_name_it(self, storage):
+        class _View(StorageGraphView):
+            reads = 0
+
+            def get_node(self, node_id):
+                if node_id == "i1":
+                    self.reads += 1
+                return super().get_node(node_id)
+
+        view = _View(storage)
+        compute_merge_plan(
+            {
+                "nodes": [],
+                "edges": [
+                    {
+                        "id": f"x{i}",
+                        "source": "a1",
+                        "target": "i1",
+                        "type": "RELATES_TO",
+                    }
+                    for i in range(50)
+                ],
+            },
+            MergeParameters(),
+            view,
+        )
+        assert view.reads == 1
+
+
 class TestDigestMemory:
     def test_digest_work_does_not_multiply_the_document_text(self, storage):
         import json as _json
