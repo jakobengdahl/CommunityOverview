@@ -1,7 +1,7 @@
 # ADR 0013 — Graph import: MERGE mode beside REPLACE
 
-- **Status:** Proposed
-- **Date:** 2026-10-15
+- **Status:** Accepted
+- **Date:** 2026-10-15 (proposed and accepted 2026-10-15)
 - **Scope:** Open-source core only
 - **Related:** [ADR 0006](0006-graph-import-replace-mode.md) (the REPLACE
   pipeline this sits beside), [ADR 0007](0007-vector-aware-export-archive.md)
@@ -13,12 +13,106 @@
   §4 (entity revisions and expectations) and §10–§11 (the staged-merge design
   this borrows its vocabulary from), [`DURABLE_EXECUTION_CONTRACT.md`](../DURABLE_EXECUTION_CONTRACT.md)
 
-This ADR designs a second import mode. It implements nothing. Each section
-headed **Decision point** lists options, trade-offs and a recommendation; the
-recommendations are proposals for the reviewer to accept or change, not
-decisions already taken. When the ADR is accepted, the chosen option for each
-point is recorded in a short "Decisions on acceptance" table at the top, the way
-ADR 0009 records its sub-questions.
+This ADR designs a second import mode. Each section headed **Decision point**
+lists options, trade-offs and a recommendation. The ADR was proposed with the
+recommendations as proposals; on acceptance the recommended option was chosen
+for every point, as recorded below.
+
+## Decisions on acceptance
+
+Accepted on 2026-10-15: the **recommended option of every decision point** is
+the decision. Nothing was changed from the recommendations.
+
+| Point | Decision |
+|---|---|
+| §1 ID-collision policy | Default `fail` for nodes and edges; granularity (b), one default plus per-type overrides; type and endpoint mismatch (ii), a conflict under every policy except `rename`; subtype change under overwrite (a), re-judge live incident edges |
+| §2 Edge handling | Endpoints in the live graph allowed; dangling rejected; archived live endpoint allowed and reported; edges of skipped nodes (a), attached to the live node; duplicate triples (b), skipped and reported; live edges never deleted |
+| §3 Preview and binding | (c) stateless digest, with expectations and checks on every commit; a commit without a digest only when every policy is `fail`/`skip` and `include_system_types` is false |
+| §4 Atomicity | (a) all-or-nothing through a new `GraphStorage` method; backup (a), the v1 whole-graph backup before every merge; `generation` not bumped |
+| §5 Validation | Unknown types (a), reject the whole import; system types (b), excluded unless `include_system_types: true` |
+| §6 Embeddings | Per-node comparison in the worker (b); PostgreSQL entity-upsert embedding commit (a) in slice 3, slice 2 refusing PostgreSQL merges until then |
+| §7 Provenance and events | Provenance (c), opt-in and off; audit record (a), best-effort in `import_jobs.db`; events (b), one ordinary event per entity |
+| §8 Size limits | v1 document caps; no separate overwrite cap (a); thresholds below |
+| §9 API surface | REST (b), separate `/import/merge/preview` and `/import/merge` routes; MCP (b), preview tool only |
+| §10 Security | Narrowed callers (a), refused; the preview needs the commit's authorization |
+
+### Slice 1 as implemented
+
+Slice 1 (the planner, `POST /import/merge/preview` and the
+`preview_graph_merge` MCP tool) ships in `backend/service/graph_merge_plan.py`.
+Choices it made inside the decisions above:
+
+- `policy.by_type` keys may name a node type or a relationship type; an edge
+  collision follows its relationship type's entry, else `policy.default`. A key
+  that names neither is refused, as are unknown request or policy fields.
+- An `overwrite` whose document entity equals the live one in every
+  caller-writable field is listed under `skips` with reason `unchanged`, so a
+  re-import of an unchanged export writes and announces nothing.
+- An edge whose endpoint resolves to a live system-type node is excluded with
+  the system nodes, not only an edge whose endpoint is a document system node.
+- `attachments.checked` is `false` when no attachment store is configured,
+  rather than reporting no flags as if the check had run; an attachment index
+  that cannot be read flags its node rather than failing the preview.
+- Edges the commit would write onto a node a `skip` collision kept are listed
+  in `edges_to_skipped_nodes`, as well as under `adds`, `overwrites` or
+  `renames` (§2 (a): "every such edge listed"). A `rename` whose live edge already has the same source, target
+  and type is a duplicate-triple skip, since the renamed copy would repeat it.
+- The REST route plans in a worker thread, as planning at the document caps
+  takes tens of seconds. The MCP tool plans on the server's event loop, so it
+  takes documents of at most 10,000 nodes and 20,000 edges (§9: "for small
+  documents an assistant assembles").
+- A `SavedView` overwrite's metadata values pass through the same sanitizer
+  every other read applies before they are returned.
+- The digest covers every document entry as sent, valid or not, as a sorted
+  multiset, so any edit to the document — a skipped entity included — makes a
+  preview stale, and reordering it does not. Per-entity outcomes, conflicts
+  (by entity) and live reads enter it as §3 (c) describes; a plan with any
+  rejected entry, which no commit can apply, digests only the request, the
+  document and `generation`.
+- A live edge the same plan retypes under `overwrite` is not what a document
+  edge duplicates. The planner reads without the storage lock; a live write
+  that changes an adjacency map mid-read, or changes or deletes an entity the
+  plan read twice — by id, or once in a listing and once by id — restarts the
+  plan like a replace.
+- One preview runs at a time per process; another is refused with 503
+  `import_preview_busy` and can be retried, since a preview changes nothing.
+- A `SavedView`/`VisualizationView` document node whose annotations the write
+  path refuses (`saved_view_annotation_error`) is listed under `rejected`.
+- Besides the commit's `GRAPH_ACTION_MUTATE`, the preview also asks the hook
+  for `GRAPH_ACTION_READ` on the whole graph, since it returns live values; a
+  hook that grants mutation without unnarrowed reads is refused (§10).
+- For slice 2: the digest records every live entity the plan read and its
+  revision, not absences a listing found — the incident edges walked for a
+  subtype re-judge, or a duplicate-triple lookup that matched nothing. A write
+  to a *different* entity between two reads is an ordinary concurrent write,
+  not a restart. Live nodes are updated in place, so one read can also see a
+  concurrent update's fields under the revision it had before, or the fields
+  of an update that is then undone. The commit's checks (§3) must cover all
+  of these.
+- Each node an edge names is resolved once per plan attempt and keeps only
+  the subtypes some relationship rule names: `subtypes` has no size limit, so
+  per-edge work must not grow with its length.
+
+### Slice 1 measurements and thresholds (§8)
+
+Measured with `scripts/measure_merge_preview.py`, which builds the
+`scripts/measure_capacity.py` fixture: a 10,000-node, 17,998-edge document
+(half colliding with live ids under `overwrite`, half new, 1,000 duplicate
+triples) against a 100,000-node, 169,997-edge graph on the file backend. A
+local development container — 4 vCPU at 2.80 GHz, 15 GB RAM, Python 3.13 — not
+a tuned benchmark machine; three runs.
+
+| Figure | Measured | Pass/fail threshold |
+|---|---|---|
+| Preview latency, median of 3 after one warm-up | 1.90–1.98 s, of which ~0.8 s is one full garbage collection over the resident graph that the preview's allocations trigger (1.1–1.3 s without it) | ≤ 2.5 s |
+| Peak memory beyond the resident graph (`tracemalloc` peak during one preview) | 74.9 MB | ≤ 160 MB |
+
+Whether a full collection lands inside a preview depends on how many objects
+the process allocated before it, so the latency threshold leaves room for one.
+Later slices re-run the script and fail a threshold they exceed. The two other
+figures §8 names, how long the commit holds `_lock` and the event fan-out at
+10,000 entities, need the commit to exist; slice 2 sets their thresholds from
+its first measurement in this table.
 
 ## Context
 
@@ -737,6 +831,5 @@ If accepted as recommended:
 
 ## What this ADR does not decide
 
-- Every **Decision point** above — they are the reviewer's to choose.
 - A "sync" mode that also deletes live entities absent from the document.
 - Merging attachments (they are not part of `graph.json`; ADR 0008 §10).

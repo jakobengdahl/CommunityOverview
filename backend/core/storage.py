@@ -3807,6 +3807,12 @@ class GraphStorage:
         subgraph = self.graph.subgraph(valid_nodes)
         return [data["data"] for _, _, data in subgraph.edges(data=True)]
 
+    def get_edges_from_to(self, source: str, target: str) -> List[Edge]:
+        """Edges directed from ``source`` to ``target``: a hash lookup, so a
+        caller checking many pairs pays for the pairs, not the graph."""
+        bundle = self.graph.get_edge_data(source, target) or {}
+        return [data["data"] for data in list(bundle.values())]
+
     def get_edges_for_node(self, node_id: str) -> List[Edge]:
         """Get all edges connected to a specific node"""
         if node_id not in self.graph:
