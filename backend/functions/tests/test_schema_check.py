@@ -77,9 +77,7 @@ def _nested(levels):
 
 
 def test_recursion_on_a_value_up_to_16_levels_is_the_schemas_fault_and_beyond_the_values():
-    from backend.functions.schema_check import SHALLOW_LEVELS
-
     schema = _long_chain_schema(40)
     with pytest.raises(SchemaCheckFailed):
-        schema_problem(schema, _nested(SHALLOW_LEVELS))
-    assert "nested too deeply" in schema_problem(schema, _nested(SHALLOW_LEVELS + 1))
+        schema_problem(schema, _nested(16))
+    assert "nested too deeply" in schema_problem(schema, _nested(17))

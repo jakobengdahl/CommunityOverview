@@ -387,6 +387,8 @@ def test_reading_a_package_reports_why_it_is_missing_and_leaks_no_descriptor(
 def test_a_manifest_may_nest_exactly_to_the_limit(tmp_path):
     from backend.functions.manifest import MAX_MANIFEST_DEPTH
 
+    assert MAX_MANIFEST_DEPTH == 64  # USER_FUNCTION_CONTRACT §8
+
     def package(levels):
         # The manifest and input_schema are two levels; default holds the
         # rest as lists around an empty one.
@@ -441,6 +443,8 @@ def test_the_digest_cannot_be_fooled_by_names_or_contents_holding_separators():
         ({"a": b":"}, {"a:": b""}),
         ({"ab": b""}, {"a": b"b"}),
         ({"a\udcff": b""}, {"a\udcfe": b""}),
+        # Without the content's length, file boundaries would be ambiguous.
+        ({"a": b"1:b:0:"}, {"a": b"", "b": b""}),
     ]
     for first, second in pairs:
         assert package_digest(first) != package_digest(second), (first, second)
