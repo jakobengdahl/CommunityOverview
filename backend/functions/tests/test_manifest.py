@@ -444,3 +444,13 @@ def test_the_digest_cannot_be_fooled_by_names_or_contents_holding_separators():
     ]
     for first, second in pairs:
         assert package_digest(first) != package_digest(second), (first, second)
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "2.1.0-rc.1+build.5", "v" + "1" * 63])
+def test_a_short_semantic_version_is_allowed(version):
+    assert errors_for(version=version) == []
+
+
+@pytest.mark.parametrize("version", ["", "9" * 65, "1.0 beta", "-1", "1/2"])
+def test_a_long_or_odd_version_makes_the_manifest_invalid(version):
+    assert errors_for(version=version)

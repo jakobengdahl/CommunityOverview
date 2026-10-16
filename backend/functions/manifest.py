@@ -56,6 +56,9 @@ MAX_MANIFEST_BYTES = 256 * 1024
 MAX_MANIFEST_DEPTH = 64
 
 _ID_PATTERN = re.compile(r"[a-z0-9-]{3,64}")
+# The version is copied into every run record and write origin, so it stays
+# short: a semantic version, with its pre-release and build parts.
+_VERSION_PATTERN = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+-]{0,63}")
 # Path segments the /functions API uses for itself.
 RESERVED_IDS = frozenset({"runs", "runner"})
 _ENTRY_SUFFIXES = {"python": (".py",), "node": (".js", ".mjs")}
@@ -400,6 +403,10 @@ def validate_manifest(
             errors.append("id must equal the directory name")
 
     version = _expect(document, "version", str, errors)
+    if version is not None and not _VERSION_PATTERN.fullmatch(version):
+        errors.append(
+            "version must be 1-64 letters, digits, '.', '+' or '-', such as 1.2.0"
+        )
     name = _expect(document, "name", str, errors)
     description = _expect(document, "description", str, errors, required=False)
 

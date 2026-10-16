@@ -186,7 +186,7 @@ that is enabled.
 |---|---|---|
 | `contract_version` | yes | The version of this contract the manifest targets. `"1"` for this document. |
 | `id` | yes | Stable identifier: lowercase letters, digits and `-`, 3–64 characters. Equals the directory name. |
-| `version` | yes | Semantic version of the function. Recorded on every run. |
+| `version` | yes | Semantic version of the function, at most 64 letters, digits, `.`, `+` or `-`. Recorded on every run. |
 | `name` | yes | Human-readable name. |
 | `description` | no | What the function does. |
 | `runtime` | yes | `python` or `node` (§10). |
