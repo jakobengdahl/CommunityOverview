@@ -45,3 +45,41 @@ def test_endlessness_is_found_by_probes_even_when_the_value_is_deep(kind):
         value = {"x": value}
     with pytest.raises(SchemaCheckFailed):
         schema_problem(schema, value)
+
+
+def test_an_object_only_endless_schema_is_found_under_a_deep_list():
+    schema = {
+        "allOf": [
+            {"if": {"type": "object"}, "then": {"$ref": "#"}},
+            {"items": {"$ref": "#"}},
+        ]
+    }
+    value = []
+    for _ in range(400):
+        value = [value]
+    with pytest.raises(SchemaCheckFailed):
+        schema_problem(schema, value)
+
+
+def _long_chain_schema(links):
+    # Each level of the value passes through ``links`` references, so the
+    # check recurses for values only a little over 16 levels deep.
+    defs = {f"r{i}": {"$ref": f"#/$defs/r{i + 1}"} for i in range(links)}
+    defs[f"r{links}"] = {"properties": {"c": {"$ref": "#/$defs/r0"}}}
+    return {"$defs": defs, "$ref": "#/$defs/r0"}
+
+
+def _nested(levels):
+    value = {}
+    for _ in range(levels - 1):
+        value = {"c": value}
+    return value
+
+
+def test_recursion_on_a_value_up_to_16_levels_is_the_schemas_fault_and_beyond_the_values():
+    from backend.functions.schema_check import SHALLOW_LEVELS
+
+    schema = _long_chain_schema(40)
+    with pytest.raises(SchemaCheckFailed):
+        schema_problem(schema, _nested(SHALLOW_LEVELS))
+    assert "nested too deeply" in schema_problem(schema, _nested(SHALLOW_LEVELS + 1))

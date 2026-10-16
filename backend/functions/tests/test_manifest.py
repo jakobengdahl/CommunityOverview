@@ -401,3 +401,46 @@ def test_a_manifest_may_nest_exactly_to_the_limit(tmp_path):
     _write(tmp_path / "b", "count-nodes", package(MAX_MANIFEST_DEPTH + 1))
     loaded = load_function(str(tmp_path / "b"), "count-nodes")
     assert "nests deeper than" in loaded.errors[0]
+
+
+def test_names_beyond_ascii_are_allowed_and_names_outside_utf8_are_shown_escaped(
+    tmp_path,
+):
+    files = {"function.json": json.dumps(VALID).encode(), "main.py": b"", "é.txt": b""}
+    directory = _write(tmp_path, "count-nodes", files)
+    assert load_function(str(tmp_path), "count-nodes").valid
+    with open(os.fsencode(directory) + b"/y\xff.txt", "wb"):
+        pass
+    loaded = load_function(str(tmp_path), "count-nodes")
+    assert loaded.errors == ["names must be valid UTF-8: y\\udcff.txt"]
+
+
+@pytest.mark.parametrize("error", [PermissionError, OSError])
+def test_a_package_that_cannot_be_read_names_the_reason_not_the_path(
+    tmp_path, monkeypatch, error
+):
+    import errno
+
+    import backend.functions.manifest as manifest_module
+    from backend.functions.manifest import read_package
+
+    def fail(directory):
+        raise error(errno.EIO, "Input/output error", "/host/secret/path")
+
+    monkeypatch.setattr(manifest_module, "_read_package", fail)
+    assert read_package(str(tmp_path), "count-nodes").errors == [
+        "the package could not be read: Input/output error"
+    ]
+
+
+def test_the_digest_cannot_be_fooled_by_names_or_contents_holding_separators():
+    from backend.functions.manifest import package_digest
+
+    pairs = [
+        ({"a": b"1:b"}, {"a:1:b": b""}),
+        ({"a": b":"}, {"a:": b""}),
+        ({"ab": b""}, {"a": b"b"}),
+        ({"a\udcff": b""}, {"a\udcfe": b""}),
+    ]
+    for first, second in pairs:
+        assert package_digest(first) != package_digest(second), (first, second)
