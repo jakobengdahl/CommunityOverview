@@ -16,7 +16,14 @@ import re
 import json
 import logging
 from typing import Dict, List, Optional, Any
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from backend.runtime.config_context import (
     resolve_federation_config_path_info,
@@ -451,6 +458,7 @@ class ConfigLoader:
             with open(self._config_path, "r", encoding="utf-8") as f:
                 raw_config = json.load(f)
 
+            self._sanitize_node_types(raw_config)
             self._sanitize_rest_interfaces(raw_config)
             self._dropped_capability_ids = self._sanitize_capabilities(raw_config)
             self._config = SchemaFileConfig(**raw_config)
@@ -475,6 +483,50 @@ class ConfigLoader:
         # System types are now managed entirely in code via SYSTEM_NODE_TYPES.
         self._strip_system_types_from_config()
         self._apply_system_types()
+
+    @staticmethod
+    def _sanitize_node_types(raw_config: Dict[str, Any]) -> None:
+        """Drop malformed ``schema.node_types`` entries in place before validation.
+
+        ``SchemaConfig.convert_node_types`` builds each ``NodeTypeConfig`` itself,
+        so one wrong-typed field (``"allows_attachments": "ture"``) would fail the
+        whole file and revert every declared node *and* relationship type to the
+        defaults — and pydantic's error would not even say which type was bad.
+        Validating each entry here drops only that type and names it.
+        """
+        schema = raw_config.get("schema")
+        if not isinstance(schema, dict):
+            return
+        raw = schema.get("node_types")
+        if raw is None:
+            return
+        if not isinstance(raw, dict):
+            logger.warning(
+                "schema.node_types must be an object, got %s — ignoring",
+                type(raw).__name__,
+            )
+            schema["node_types"] = {}
+            return
+        valid: Dict[str, Any] = {}
+        for type_name, entry in raw.items():
+            try:
+                NodeTypeConfig.model_validate(entry)
+            except ValidationError as exc:
+                fields = sorted(
+                    {
+                        ".".join(str(p) for p in err["loc"]) or "<entry>"
+                        for err in exc.errors()
+                    }
+                )
+                logger.warning(
+                    "Skipping invalid schema.node_types[%r] (field(s) %s): %s",
+                    type_name,
+                    ", ".join(fields),
+                    exc,
+                )
+                continue
+            valid[type_name] = entry
+        schema["node_types"] = valid
 
     @staticmethod
     def _sanitize_rest_interfaces(raw_config: Dict[str, Any]) -> None:

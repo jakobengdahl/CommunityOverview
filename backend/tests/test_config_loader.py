@@ -569,7 +569,7 @@ class TestConfigLoader:
         config_loader = self._load_capability_config(tmp_path, capabilities)
         config_path = tmp_path / "schema_config.json"
         broken = json.loads(config_path.read_text())
-        broken["schema"]["node_types"] = "not-an-object"
+        broken["schema"] = "not-an-object"
         config_path.write_text(json.dumps(broken))
         config_loader.reset_loader()
         return config_loader
@@ -649,7 +649,7 @@ class TestConfigLoader:
         config_loader = self._write_raw_config(
             tmp_path,
             {
-                "schema": {"node_types": "not-an-object"},
+                "schema": "not-an-object",
                 "presentation": {"title": "No Capabilities Declared"},
             },
         )
@@ -1429,3 +1429,95 @@ class TestAllowsAttachmentsSchemaField:
                 if cfg["allows_attachments"]
             ]
             assert enabled == [], f"{profile.parent.name} enables uploads on {enabled}"
+
+
+class TestNodeTypesSanitizer:
+    """One malformed node-type entry drops only that type, never the profile."""
+
+    @pytest.fixture(autouse=True)
+    def setup_and_cleanup(self):
+        from backend.config import config_loader
+
+        config_loader.reset_loader()
+        yield
+        os.environ.pop("SCHEMA_FILE", None)
+        config_loader.reset_loader()
+
+    @staticmethod
+    def _load(tmp_path, node_types):
+        from backend.config import config_loader
+
+        config_file = tmp_path / "schema_config.json"
+        config_file.write_text(
+            json.dumps(
+                {
+                    "schema": {
+                        "node_types": node_types,
+                        "relationship_types": {
+                            "USES": {"source_types": ["Good"], "target_types": ["Good"]}
+                        },
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        os.environ["SCHEMA_FILE"] = str(config_file)
+        config_loader.reset_loader()
+        return config_loader.get_schema()
+
+    @pytest.mark.parametrize("bad_value", ["ture", None, []])
+    def test_bad_allows_attachments_keeps_other_types_and_relationships(
+        self, tmp_path, bad_value
+    ):
+        schema = self._load(
+            tmp_path,
+            {
+                "Good": {"fields": ["name"], "allows_attachments": True},
+                "Bad": {"fields": ["name"], "allows_attachments": bad_value},
+            },
+        )
+
+        assert "Bad" not in schema["node_types"]
+        assert schema["node_types"]["Good"]["allows_attachments"] is True
+        assert list(schema["relationship_types"]) == ["USES"]
+
+    def test_warning_names_the_node_type_and_field(self, tmp_path, caplog):
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            self._load(
+                tmp_path,
+                {
+                    "Good": {"fields": ["name"]},
+                    "Bad": {"static": "maybe"},
+                },
+            )
+
+        skipped = [
+            r.getMessage()
+            for r in caplog.records
+            if "Skipping invalid schema.node_types" in r.getMessage()
+        ]
+        assert len(skipped) == 1
+        assert "'Bad'" in skipped[0]
+        assert "static" in skipped[0]
+
+    def test_non_object_entry_is_dropped_alone(self, tmp_path):
+        schema = self._load(
+            tmp_path, {"Good": {"fields": ["name"]}, "Broken": "not-an-object"}
+        )
+
+        assert "Broken" not in schema["node_types"]
+        assert "Good" in schema["node_types"]
+        assert list(schema["relationship_types"]) == ["USES"]
+
+    def test_non_object_node_types_is_ignored_not_fatal(self, tmp_path, caplog):
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            schema = self._load(tmp_path, ["Good"])
+
+        from backend.config import config_loader
+
+        assert set(schema["node_types"]) == set(config_loader.SYSTEM_NODE_TYPES)
+        assert list(schema["relationship_types"]) == ["USES"]
+        assert any(
+            "schema.node_types must be an object" in r.getMessage()
+            for r in caplog.records
+        )
