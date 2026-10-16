@@ -497,9 +497,9 @@ class ConfigLoader:
         schema = raw_config.get("schema")
         if not isinstance(schema, dict):
             return
-        raw = schema.get("node_types")
-        if raw is None:
+        if "node_types" not in schema:
             return
+        raw = schema["node_types"]
         if not isinstance(raw, dict):
             logger.warning(
                 "schema.node_types must be an object, got %s — ignoring",

@@ -1509,9 +1509,12 @@ class TestNodeTypesSanitizer:
         assert "Good" in schema["node_types"]
         assert list(schema["relationship_types"]) == ["USES"]
 
-    def test_non_object_node_types_is_ignored_not_fatal(self, tmp_path, caplog):
+    @pytest.mark.parametrize("bad_node_types", [["Good"], None])
+    def test_non_object_node_types_is_ignored_not_fatal(
+        self, tmp_path, caplog, bad_node_types
+    ):
         with caplog.at_level("WARNING", logger="backend.config.config_loader"):
-            schema = self._load(tmp_path, ["Good"])
+            schema = self._load(tmp_path, bad_node_types)
 
         from backend.config import config_loader
 
