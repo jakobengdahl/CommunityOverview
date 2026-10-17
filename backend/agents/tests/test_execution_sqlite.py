@@ -8,6 +8,7 @@ one property the in-memory adapter cannot: state survives a process restart
 (reopening the same database file recovers every job and its state).
 """
 
+import sqlite3
 from datetime import timedelta
 
 import pytest
@@ -19,6 +20,7 @@ from backend.agents.execution.models import (
     ExecutionState,
     RetryPolicy,
 )
+from backend.agents.execution import sqlite_store
 from backend.agents.execution.sqlite_store import SqliteExecutionStore, _to_epoch
 from backend.agents.execution.store import ExecutionStore
 from backend.agents.tests._sql_recording import RecordingConn, only_statement
@@ -327,3 +329,101 @@ def test_abandon_survives_restart(tmp_path):
         assert out.dead_letter_reason == ABANDONED_REASON
     finally:
         reopened.close()
+
+
+class _LockedOnWalSwitch:
+    """Connection proxy whose first WAL switches fail as a contended one does."""
+
+    def __init__(self, conn, failures):
+        self._conn = conn
+        self.failures = failures
+        self.attempts = 0
+
+    def execute(self, sql, *args):
+        if sql == "PRAGMA journal_mode=WAL":
+            self.attempts += 1
+            if self.attempts <= self.failures:
+                raise sqlite3.OperationalError("database is locked")
+        return self._conn.execute(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def __setattr__(self, name, value):
+        if name in ("_conn", "failures", "attempts"):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._conn, name, value)
+
+
+def _patch_connect(monkeypatch, failures):
+    proxies = []
+    real_connect = sqlite3.connect
+
+    def connect(*args, **kwargs):
+        proxy = _LockedOnWalSwitch(real_connect(*args, **kwargs), failures)
+        proxies.append(proxy)
+        return proxy
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    return proxies
+
+
+def test_wal_switch_retries_when_the_file_is_locked(tmp_path, monkeypatch):
+    """A locked WAL switch on a fresh file is retried, not raised."""
+    proxies = _patch_connect(monkeypatch, failures=3)
+    store = SqliteExecutionStore(tmp_path / "execution.db")
+    try:
+        assert proxies[0].attempts == 4
+        mode = store._conn.execute("PRAGMA journal_mode").fetchone()[0]
+        assert mode == "wal"
+    finally:
+        store.close()
+
+
+def test_wal_switch_gives_up_after_the_busy_timeout(tmp_path, monkeypatch):
+    """A switch that stays locked surfaces once the busy timeout has passed."""
+    _patch_connect(monkeypatch, failures=10**9)
+    monkeypatch.setattr(sqlite_store, "_BUSY_TIMEOUT_MS", 50)
+    with pytest.raises(sqlite3.OperationalError, match="locked"):
+        SqliteExecutionStore(tmp_path / "execution.db")
+
+
+def test_wal_switch_does_not_retry_other_errors(tmp_path, monkeypatch):
+    """Only lock contention is retried; any other failure surfaces at once."""
+    proxies = _patch_connect(monkeypatch, failures=0)
+
+    def fail(sql, *args):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(_LockedOnWalSwitch, "execute", lambda self, sql, *a: fail(sql))
+    with pytest.raises(sqlite3.OperationalError, match="disk I/O"):
+        SqliteExecutionStore(tmp_path / "execution.db")
+    assert proxies[0].attempts == 0
+
+
+def test_concurrent_first_opens_of_a_fresh_file_all_succeed(tmp_path):
+    """Several stores opening one brand-new (non-WAL) file at once all succeed."""
+    import threading
+
+    errors, stores = [], []
+    for round_no in range(10):
+        db = tmp_path / f"fresh-{round_no}.db"
+        barrier = threading.Barrier(8)
+
+        def open_store():
+            barrier.wait()
+            try:
+                stores.append(SqliteExecutionStore(db))
+            except Exception as exc:  # pragma: no cover - the failure being tested
+                errors.append(exc)
+
+        threads = [threading.Thread(target=open_store) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    for s in stores:
+        s.close()
+    assert errors == []
+    assert len(stores) == 80
