@@ -4193,23 +4193,23 @@ class GraphStorage:
         """
         collected_edges = {}
 
-        for node_id in node_ids:
-            if node_id not in self.nodes:
-                continue
+        # Filter to valid nodes that actually exist in the graph
+        valid_nodes = [nid for nid in node_ids if nid in self.nodes and nid in self.graph]
+        if not valid_nodes:
+            return []
 
-            if node_id in self.graph:
-                # Outgoing edges
-                for _, _, _, edge_data in self.graph.out_edges(
-                    node_id, keys=True, data=True
-                ):
-                    edge = edge_data["data"]
-                    collected_edges[edge.id] = edge
+        # Outgoing edges (batched)
+        for _, _, _, edge_data in self.graph.out_edges(
+            valid_nodes, keys=True, data=True
+        ):
+            edge = edge_data["data"]
+            collected_edges[edge.id] = edge
 
-                # Incoming edges
-                for _, _, _, edge_data in self.graph.in_edges(
-                    node_id, keys=True, data=True
-                ):
-                    edge = edge_data["data"]
-                    collected_edges[edge.id] = edge
+        # Incoming edges (batched)
+        for _, _, _, edge_data in self.graph.in_edges(
+            valid_nodes, keys=True, data=True
+        ):
+            edge = edge_data["data"]
+            collected_edges[edge.id] = edge
 
         return list(collected_edges.values())
