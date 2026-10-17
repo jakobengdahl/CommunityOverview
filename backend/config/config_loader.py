@@ -513,16 +513,15 @@ class ConfigLoader:
             try:
                 NodeTypeConfig.model_validate(entry)
             except ValidationError as exc:
-                fields = sorted(
-                    {
-                        ".".join(str(p) for p in err["loc"]) or "<entry>"
-                        for err in exc.errors()
-                    }
-                )
                 logger.warning(
-                    "Skipping invalid schema.node_types[%r] (field(s) %s): %s",
+                    "Skipping invalid schema.node_types[%r]%s: %s",
                     type_name,
-                    ", ".join(fields),
+                    (
+                        " (system node types are managed by code — remove it "
+                        "from your config file)"
+                        if type_name in SYSTEM_NODE_TYPES
+                        else ""
+                    ),
                     exc,
                 )
                 continue
