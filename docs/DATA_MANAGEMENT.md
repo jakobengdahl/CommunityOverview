@@ -426,8 +426,8 @@ What happens, in order:
    job, so the nodes it created or rewrote have no vectors until they are
    embedded again. The record, whose `import_id` the error response
    carries, is the trace it leaves: check it and the live graph before
-   retrying. Against a merge that did land, a retry is refused as it would
-   be after a lost response (below); a fresh preview and commit of the same
+   retrying. Against a merge that did land, a retry is refused or plans
+   nothing, as after a lost response (below); a fresh preview and commit of the same
    document under `rename` would create its renamed copies a second time.
 
 A commit may omit `plan_digest` only when every policy is `fail` or `skip`

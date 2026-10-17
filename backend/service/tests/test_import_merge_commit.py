@@ -640,6 +640,7 @@ class TestBinding:
         result = response.json()
         assert result["import_id"] is None and result["backup_path"] is None
         assert result["audit_recorded"] is None
+        assert "writes nothing" in result["message"]
         assert set(result["counts"].values()) == {0}
         assert _state(storage) == before
         assert _backups(storage) == []
