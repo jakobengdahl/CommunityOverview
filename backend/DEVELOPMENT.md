@@ -221,8 +221,8 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | `AGENTS_ENABLED` | `false` | Enable the AI agent system |
 | `AGENTS_LLM_PROVIDER` | - | LLM provider for agents (`openai` or `claude`) |
 | `AGENTS_SCHEDULER_ENABLED` | `false` | Enable in-process time-based scheduler (off for scale-to-zero) |
-| `AGENTS_RUN_HISTORY_RETENTION_DAYS` | - (keep forever) | Purge terminal AgentRuns older than this many days (minimum 7); runs left running longer than this are first abandoned (dead-lettered) so they age out too. See `docs/DURABLE_EXECUTION_CONTRACT.md` §8a |
-| `AGENTS_RUN_HISTORY_REDACT_AFTER_DAYS` | - (never) | Strip the content of terminal AgentRuns older than this many days (at most the retention) |
+| `AGENTS_RUN_HISTORY_RETENTION_DAYS` | - (keep forever) | Purge terminal AgentRuns older than this many days (minimum 7); runs left running longer than this are first abandoned (dead-lettered) so they age out too. Decided governance proposals older than this are purged too (pending ones never). See `docs/DURABLE_EXECUTION_CONTRACT.md` §8a |
+| `AGENTS_RUN_HISTORY_REDACT_AFTER_DAYS` | - (never) | Strip the content of terminal AgentRuns, and the arguments and apply outcome of decided governance proposals, older than this many days (at most the retention) |
 | `AGENTS_RUN_HISTORY_EXPORT_MAX_DAYS` | retention | How far back `GET /agents/runs` reads (at most the retention) |
 | `AGENTS_RUN_HISTORY_SWEEP_INTERVAL_HOURS` | `24` | Hours between retention sweeps |
 | `AGENTS_WORKSPACE_DIR` | `~/.communityoverview/agent-workspace` | Root the agent's filesystem tools are confined to. Use an absolute path (or one starting with `~`): a relative path resolves against the process's working directory, which can differ between the places that read the setting. Must be a directory the service user owns and others cannot write to, or the FS tools refuse it — so prefer a private path over a shared one. A uid with no home (a container run as an arbitrary uid) falls back to a per-uid directory under the system temp dir |
