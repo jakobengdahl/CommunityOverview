@@ -372,9 +372,11 @@ What happens, in order:
    written either way.
 3. **Back up.** The whole current graph is written to `import-backups/`
    exactly as `POST /api/import` does, and the merge is refused
-   (`backup_failed`) if it cannot be. Restoring that backup with
+   (`backup_failed`) if it cannot be. Every entity the merge overwrites is
+   in it at the version the merge replaces. Restoring it with
    `POST /api/import` is a *replace*: it also undoes every write made after
-   the merge.
+   the backup was written, including a write to an unrelated entity that
+   landed while the merge was being applied.
 4. **Commit, all-or-nothing.** Under the storage lock the plan is computed
    once more and must still have the same digest, so a write landing
    between step 2 and here fails the commit with `import_plan_stale` instead
@@ -412,8 +414,12 @@ What happens, in order:
 A commit may omit `plan_digest` only when every policy is `fail` or `skip`
 and `include_system_types` is false — a merge that can only add and so can
 be retried blindly; anything else is refused with `plan_digest_required`. A
-retried commit after a lost response finds its own writes and is refused as
-stale rather than applied twice. One commit runs at a time (503
+commit retried after a lost response is never applied twice: its own writes
+are now id collisions, so a `fail`-policy retry is refused as
+`import_merge_blocked`, any other retry carrying the digest as
+`import_plan_stale`, and a digest-less `skip`-policy retry succeeds having
+written nothing (though it writes another backup and audit record). Check
+`GET /api/import` for the first commit's record before retrying. One commit runs at a time (503
 `import_merge_busy`). A store failure is answered as for any direct write —
 502 `write_failed` (nothing changed) or 503 `write_outcome_unknown` — with
 the backup path. Merging is refused in PostgreSQL mode (501

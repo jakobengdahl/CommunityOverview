@@ -315,6 +315,38 @@ def test_a_failure_while_applying_puts_memory_and_vectors_back(make_storage):
     assert seen == []
 
 
+@pytest.mark.parametrize("failure", ["while_applying", "reservation"])
+def test_an_undone_merge_puts_a_stray_vector_back(make_storage, monkeypatch, failure):
+    storage = make_storage()
+    _seed(storage)
+    # A vector under the id a create takes, with no node holding it.
+    _vector(storage, "n1", 4.0)
+    writes = _writes(storage)
+    if failure == "while_applying":
+        writes.edge_creates.append(
+            Edge(id="e9", source="ghost", target="i1", type="BELONGS_TO")
+        )
+    else:
+
+        def _no_reservation(count):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(storage, "_take_revisions", _no_reservation)
+
+    with pytest.raises(Exception):
+        storage.apply_import_merge(lambda: writes)
+
+    assert "n1" not in storage.nodes
+    assert storage.vector_store.get_vector_list("n1") == [4.0, 0.0, 1.0]
+
+
+def test_a_merge_reports_the_generation_it_landed_at(make_storage):
+    storage = make_storage()
+    _seed(storage)
+    applied = storage.apply_import_merge(lambda: _writes(storage))
+    assert applied.generation == storage.generation
+
+
 def test_a_failed_revision_reservation_undoes_the_merge(make_storage, monkeypatch):
     storage = make_storage()
     _seed(storage)

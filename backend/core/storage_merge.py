@@ -62,7 +62,9 @@ class MergeWrites:
 @dataclass
 class MergeApplied:
     """What a landed merge commit wrote: each entity's resulting revision,
-    keyed by ``("node" | "edge", id)``, and how many events it fired."""
+    keyed by ``("node" | "edge", id)``, how many events it fired, and the
+    graph's generation it landed at, read under the same lock."""
 
     revisions: Dict[Tuple[str, str], int]
     events: int
+    generation: int

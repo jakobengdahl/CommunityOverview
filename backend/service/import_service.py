@@ -676,9 +676,10 @@ def _plan_preview(
 
 MERGE_EVENT_ORIGIN = "graph-import-merge"
 _MERGE_RESTORE_NOTE = (
-    "The backup holds the whole graph as it was before this merge. Restoring "
-    "it with POST /import is a replace: it also undoes every write made after "
-    "the merge."
+    "The backup holds the whole graph as it was when it was written, just "
+    "before this merge, with every entity the merge overwrote at the version "
+    "the merge replaced. Restoring it with POST /import is a replace: it also "
+    "undoes every write made after the backup was written."
 )
 
 
@@ -901,7 +902,9 @@ def _commit_merge(
                 execution_store,
                 node_count=planned.nodes_to_embed,
                 backup_path=backup_path,
-                graph_generation=storage.generation,
+                # Read inside the commit's lock: a replace landing since is
+                # then one this job reports itself superseded by.
+                graph_generation=applied.generation,
                 correlation_id=event_correlation_id or import_id,
                 session_id=None,
                 origin=event_origin or MERGE_EVENT_ORIGIN,

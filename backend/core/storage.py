@@ -3392,6 +3392,19 @@ class GraphStorage:
                 edge_ids=[edge.id for edge in writes.edge_creates]
                 + [overwrite.edge_id for overwrite in writes.edge_overwrites],
             )
+            # A vector under an id no node holds yet: dropped with the create,
+            # and put back if the merge is undone, which _undo cannot do for
+            # an entity that did not exist.
+            strays: Dict[str, List[float]] = {}
+            for node in writes.node_creates:
+                vector = self.vector_store.get_vector_list(node.id)
+                if vector is not None:
+                    strays[node.id] = vector
+
+            def undone() -> None:
+                if strays:
+                    self.vector_store.absorb_embeddings(strays)
+
             node_befores: Dict[str, Dict[str, Any]] = {}
             edge_befores: Dict[str, Dict[str, Any]] = {}
             changes: List[Tuple[str, str, Any]] = []
@@ -3439,11 +3452,16 @@ class GraphStorage:
                 )
             except BaseException:
                 self._undo(undo)
+                undone()
                 raise
 
             try:
                 self._commit(changes, undo, expectations)
-            except (EntityRevisionConflict, GraphWriteFailed, GraphWriteOutcomeUnknown):
+            except (EntityRevisionConflict, GraphWriteFailed):
+                # _commit has undone memory.
+                undone()
+                raise
+            except GraphWriteOutcomeUnknown:
                 raise
             except Exception as exc:
                 # The batch reached the store and neither it nor the
@@ -3489,7 +3507,9 @@ class GraphStorage:
                         after=entity.to_dict(),
                         context=event_context,
                     )
-            return MergeApplied(revisions=revisions, events=len(changes))
+            return MergeApplied(
+                revisions=revisions, events=len(changes), generation=self._generation
+            )
 
     def update_node(
         self,

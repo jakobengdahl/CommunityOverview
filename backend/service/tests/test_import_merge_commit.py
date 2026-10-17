@@ -298,6 +298,41 @@ class TestEmbeddingsAndAudit:
         assert storage.vector_store.has_embedding("a2")
         assert storage.vector_store.has_embedding("i1")
 
+    def test_the_job_takes_the_generation_read_inside_the_commit(
+        self, storage, job_store, monkeypatch
+    ):
+        real = storage.apply_import_merge
+
+        def _then_replace(prepare, event_context=None):
+            applied = real(prepare, event_context=event_context)
+            # A replace landing between the commit's lock and the enqueue.
+            storage.replace_all_nodes_and_edges(
+                [Node.from_dict(n.to_dict()) for n in storage.get_all_nodes()],
+                [Edge.from_dict(e.to_dict()) for e in storage.get_all_edges()],
+            )
+            return applied
+
+        monkeypatch.setattr(storage, "apply_import_merge", _then_replace)
+        result = _commit(_client(storage, job_store), _body()).json()
+        job = job_store.get(result["job_id"])
+        assert job.payload["graph_generation"] == storage.generation - 1
+
+    def test_a_retried_fail_policy_commit_is_blocked_not_reapplied(
+        self, storage, job_store
+    ):
+        client = _client(storage, job_store)
+        body = _body(
+            policy={"default": "fail"},
+            document={
+                "nodes": [{"id": "n1", "type": "Actor", "name": "New"}],
+                "edges": [],
+            },
+        )
+        assert client.post(URL, json=body).status_code == 200
+        again = client.post(URL, json=body)
+        assert again.status_code == 422
+        assert again.json()["detail"]["error_code"] == "import_merge_blocked"
+
     def test_a_metadata_only_merge_needs_no_embeddings_job(self, storage, job_store):
         document = {
             "nodes": [

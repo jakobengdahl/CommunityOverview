@@ -145,12 +145,15 @@ above:
   the lock is released, as for one found before it.
 - **Vectors.** The commit drops the vectors of created and renamed nodes (a
   stray vector under a reused id included) and of overwrites whose embedding
-  text changed, in memory inside the unit; `_undo` puts them back. On the
+  text changed, in memory inside the unit; an undone merge puts them back
+  (`_undo`, and the commit itself for a stray vector, which `_undo` cannot
+  restore under an id no node held). On the
   file backend the drop moves the vector store's revision, so the batch's
   write carries the embedding sidecar and writes it before the journal
   record, as every write that moves a vector does; a failed sidecar write is
   retried by the next write. The IMPORT job is enqueued only when the plan
-  embeds at least one node, with the generation read after the commit.
+  embeds at least one node, stamped with the generation read inside the
+  commit's lock, so a replace landing just after it supersedes the job.
 - **Failure after hand-over** on the file backend: a batch whose journal
   write and whole-graph re-save both failed raises `write_outcome_unknown`
   with memory keeping the merge, no events, and the next write re-saving the
