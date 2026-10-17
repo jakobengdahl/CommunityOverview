@@ -513,9 +513,13 @@ def test_equal_bm25_scores_are_ordered_by_ordinal_not_by_chunk_start():
 
 
 def test_equal_fused_scores_are_ordered_by_ordinal_not_by_chunk_start():
-    query = "policy"
+    # Capitalised so no chunk text equals the query string. The model prefers
+    # the second chunk, so each chunk is first in one ranking and second in the
+    # other: their fused scores are equal.
+    query = "Policy"
     segments = _equal_score_segments_with_unequal_starts()
-    model = FakeModel(query, lambda t: 0.5)
+    vectors = {" policy": [0.5, 1.0], "policy": [2.0, 1.0]}
+    model = VectorModel(query, vectors)
     result = rank_passages(
         query,
         segments,
@@ -524,6 +528,7 @@ def test_equal_fused_scores_are_ordered_by_ordinal_not_by_chunk_start():
         overlap=0,
     )
     assert result.ranking == RANKING_HYBRID
+    assert result.passages[0].score == result.passages[1].score
     assert _locator_order(result) == ["late-start", "early"]
 
 
@@ -567,10 +572,14 @@ def test_tokenize_keeps_non_ascii_letters_inside_their_words():
     ]
 
 
-def test_bm25_score_matches_the_okapi_formula_for_a_single_document():
-    (score,) = bm25_scores(["a"], [["a"]])
-    idf = math.log(1 + 0.5 / 1.5)
-    assert score == pytest.approx(idf * 2.2 / (1 + 1.2))
+def test_bm25_score_matches_the_okapi_formula_with_k1_and_b_applied():
+    # tf=2 in a 3-token document, average length 2: neither tf nor the length
+    # ratio is 1, so k1 and b both change the value.
+    scores = bm25_scores(["a"], [["a", "a", "x"], ["y"]])
+    idf = math.log(1 + 1.5 / 1.5)
+    norm = 1.2 * (1 - 0.75 + 0.75 * 3 / 2)
+    assert scores[0] == pytest.approx(idf * 2 * 2.2 / (2 + norm))
+    assert scores[1] == 0
 
 
 def test_bm25_more_occurrences_score_higher():
@@ -663,23 +672,10 @@ def test_no_chunk_is_without_word_characters():
     assert {t for c in chunks for t in tokenize(c.text)} >= {"first", "third"}
 
 
+@pytest.mark.timeout(5)
 def test_tiny_chunks_with_maximal_overlap_terminate():
-    import signal
-
-    if not hasattr(signal, "SIGALRM"):
-        pytest.skip("needs SIGALRM")
-
-    def on_alarm(signum, frame):
-        raise TimeoutError("chunk_segments did not terminate")
-
     segment = Segment("ab cd ef gh ij kl " * 5, "p")
-    previous = signal.signal(signal.SIGALRM, on_alarm)
-    signal.alarm(5)
-    try:
-        chunks = chunk_segments([segment], chunk_size=4, overlap=3)
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, previous)
+    chunks = chunk_segments([segment], chunk_size=4, overlap=3)
 
     starts = [c.start for c in chunks]
     assert starts == sorted(set(starts))
