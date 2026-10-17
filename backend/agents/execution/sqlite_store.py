@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Sequence, Union
@@ -91,6 +92,9 @@ CREATE INDEX IF NOT EXISTS idx_execution_jobs_created
 _MIGRATE_V2 = "ALTER TABLE execution_jobs ADD COLUMN redacted_at REAL"
 
 
+_BUSY_TIMEOUT_MS = 5000
+
+
 def _to_epoch(dt: Optional[datetime]) -> Optional[float]:
     """Serialize an aware datetime to epoch seconds; numeric ordering is exact."""
     if dt is None:
@@ -123,10 +127,8 @@ class SqliteExecutionStore:
         self._conn.row_factory = sqlite3.Row
         # busy_timeout first so every later statement, including the migration's
         # BEGIN IMMEDIATE, waits for a concurrent opener instead of failing.
-        # (The one-time WAL switch of a brand-new file is not covered: SQLite
-        # does not run the busy handler for it.)
-        self._conn.execute("PRAGMA busy_timeout=5000")
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+        self._enable_wal()
         # Overwrite freed pages so purged or redacted content does not linger
         # in the file.
         self._conn.execute("PRAGMA secure_delete=ON")
@@ -135,6 +137,21 @@ class SqliteExecutionStore:
     # ------------------------------------------------------------------
     # Schema / lifecycle
     # ------------------------------------------------------------------
+
+    def _enable_wal(self) -> None:
+        # The one-time switch of a brand-new file to WAL needs an exclusive lock
+        # and SQLite does not run the busy handler for it, so concurrent first
+        # openers can get "database is locked" despite busy_timeout. Retry within
+        # the same budget; once any opener wins, the mode is persistent.
+        deadline = time.monotonic() + _BUSY_TIMEOUT_MS / 1000
+        while True:
+            try:
+                self._conn.execute("PRAGMA journal_mode=WAL")
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.005)
 
     def _migrate(self) -> None:
         # One write transaction, re-reading the version inside it, so processes
