@@ -34,6 +34,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import (
+    AbstractSet,
     AsyncIterator,
     BinaryIO,
     Callable,
@@ -61,6 +62,7 @@ STALE_STAGED_UPLOAD_SECONDS = 3600
 _INDEX_FILE = "index.json"
 _BLOBS_DIR = "blobs"
 _LOCKS_DIR = ".locks"
+_QUARANTINE_DIR = ".quarantine"
 _TMP_DIR = ".tmp"
 _COPY_CHUNK = 1024 * 1024
 
@@ -181,6 +183,10 @@ class AttachmentStore(Protocol):
 
     def delete_node(self, namespace: str, node_id: str) -> int: ...
 
+    def quarantine(
+        self, namespace: str, node_id: str, attachment_ids: AbstractSet[str]
+    ) -> int: ...
+
     def iter_nodes(self, namespace: str) -> Iterator[str]: ...
 
 
@@ -247,6 +253,7 @@ class FileAttachmentStore:
         <namespace_key>/<node_key>/index.json
         <namespace_key>/<node_key>/blobs/<attachment_id>
         <namespace_key>/.locks/<node_key>.lock
+        <namespace_key>/.quarantine/<node_key>-<stamp>-<rand>/  # node-dir layout
         .tmp/                       # staged uploads
 
     ``.tmp`` sits under the same root, so committing a staged file is an
@@ -324,9 +331,13 @@ class FileAttachmentStore:
         return [_record_from_json(node_id, item) for item in data["attachments"]]
 
     def _write_index(
-        self, namespace: str, node_id: str, records: List[AttachmentRecord]
+        self,
+        namespace: str,
+        node_id: str,
+        records: List[AttachmentRecord],
+        node_dir: Optional[Path] = None,
     ) -> None:
-        node_dir = self._node_dir(namespace, node_id)
+        node_dir = node_dir or self._node_dir(namespace, node_id)
         node_dir.mkdir(parents=True, exist_ok=True)
         document = {
             "schema_version": INDEX_SCHEMA_VERSION,
@@ -521,6 +532,45 @@ class FileAttachmentStore:
                 count = 0
             shutil.rmtree(node_dir)
             return count
+
+    def quarantine(
+        self, namespace: str, node_id: str, attachment_ids: AbstractSet[str]
+    ) -> int:
+        """Move these records, and their blobs, out of the node's index.
+
+        For files left under a node id that was then created again (ADR 0008
+        sec 8): they belong to the earlier node, so they must not be listed
+        for the new one, but nothing here proves they are unwanted. They go to
+        ``<namespace_key>/.quarantine/`` in the node-directory layout, where
+        an operator can inspect or restore them. Records not named stay put.
+        """
+        with self._node_lock(namespace, node_id):
+            records = self._read_index(namespace, node_id)
+            moved = [r for r in records if r.id in attachment_ids]
+            if not moved:
+                return 0
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            target = (
+                self._namespace_dir(namespace)
+                / _QUARANTINE_DIR
+                / f"{hashed_key(node_id)}-{stamp}-{uuid.uuid4().hex[:8]}"
+            )
+            # Quarantine index first, then the live one, then the blobs: a
+            # crash at any point leaves every file named by some index.
+            self._write_index(namespace, node_id, moved, node_dir=target)
+            self._write_index(
+                namespace, node_id, [r for r in records if r.id not in attachment_ids]
+            )
+            (target / _BLOBS_DIR).mkdir(exist_ok=True)
+            for record in moved:
+                try:
+                    os.replace(
+                        self._blob_path(namespace, node_id, record.id),
+                        target / _BLOBS_DIR / record.id,
+                    )
+                except FileNotFoundError:
+                    continue
+            return len(moved)
 
     # -- maintenance ---------------------------------------------------------
 

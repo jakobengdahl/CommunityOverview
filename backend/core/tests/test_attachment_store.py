@@ -197,6 +197,30 @@ def test_delete_node_removes_every_file_of_that_node_only(store):
     assert store.delete_node(NS, "n1") == 0
 
 
+def test_quarantine_moves_only_the_named_records_and_keeps_their_bytes(store):
+    old = _upload(store, "n1", b"old")
+    new = _upload(store, "n1", b"new")
+    assert store.quarantine(NS, "n1", {old.id}) == 1
+    assert store.list(NS, "n1") == [new]
+    assert store.get_record(NS, "n1", old.id) is None
+    (target,) = (store.root / hashed_key(NS) / ".quarantine").iterdir()
+    index = json.loads((target / "index.json").read_text(encoding="utf-8"))
+    assert index["node_id"] == "n1"
+    assert [r["id"] for r in index["attachments"]] == [old.id]
+    assert (target / "blobs" / old.id).read_bytes() == b"old"
+    assert not (
+        store.root / hashed_key(NS) / hashed_key("n1") / "blobs" / old.id
+    ).exists()
+
+
+def test_quarantined_files_are_not_reported_as_a_node(store):
+    old = _upload(store, "n1")
+    store.quarantine(NS, "n1", {old.id})
+    assert store.quarantine(NS, "n1", {old.id}) == 0
+    assert list(store.iter_nodes(NS)) == ["n1"]
+    assert len(list((store.root / hashed_key(NS) / ".quarantine").iterdir())) == 1
+
+
 def test_iter_nodes_reports_node_ids_from_the_index(store):
     _upload(store, "n1")
     _upload(store, "federated::g::x")
