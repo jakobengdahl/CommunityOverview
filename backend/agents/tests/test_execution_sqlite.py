@@ -434,3 +434,93 @@ def test_concurrent_first_opens_of_a_fresh_file_all_succeed(tmp_path):
         s.close()
     assert errors == []
     assert len(stores) == 80
+
+
+def test_busy_timeout_is_set_before_the_wal_switch_and_the_migration(
+    tmp_path, monkeypatch
+):
+    """The wait budget must apply to every statement a concurrent opener can block."""
+    statements = []
+    real_connect = sqlite3.connect
+
+    class Recording(RecordingConn):
+        def __init__(self, conn):
+            super().__init__(conn)
+            self.statements = statements
+
+        def __setattr__(self, name, value):
+            if name in ("_conn", "statements"):
+                object.__setattr__(self, name, value)
+            else:
+                setattr(self._conn, name, value)
+
+    monkeypatch.setattr(
+        sqlite3, "connect", lambda *a, **k: Recording(real_connect(*a, **k))
+    )
+    SqliteExecutionStore(tmp_path / "execution.db").close()
+    sql = [s.strip() for s, _ in statements]
+    busy = sql.index(f"PRAGMA busy_timeout={sqlite_store._BUSY_TIMEOUT_MS}")
+    assert busy < sql.index("PRAGMA journal_mode=WAL")
+    assert busy < sql.index("BEGIN IMMEDIATE")
+
+
+def test_failed_migration_rolls_back_and_the_next_open_succeeds(tmp_path, monkeypatch):
+    db = tmp_path / "execution.db"
+    _v1_file(db)
+    monkeypatch.setattr(sqlite_store, "_MIGRATE_V2", "ALTER TABLE no_such ADD x REAL")
+    with pytest.raises(sqlite3.OperationalError, match="no_such"):
+        SqliteExecutionStore(db)
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(execution_jobs)")]
+        assert "redacted_at" not in cols
+    finally:
+        conn.close()
+
+    monkeypatch.undo()
+    store = SqliteExecutionStore(db)
+    try:
+        assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert "redacted_at" in store._columns()
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("concurrent_change", ["running", "redacted"])
+def test_redact_leaves_a_row_changed_after_the_read_alone(
+    tmp_path, monkeypatch, concurrent_change
+):
+    """The SQL guard, not the Python one, protects against another process."""
+    store = SqliteExecutionStore(tmp_path / "execution.db")
+    try:
+        job = store.enqueue(_job(idempotency_key="r", payload={"secret": "keep"}))
+        store.complete(job.id, result={"r": 1}, now=T0)
+        real_get = store._get_by_id
+
+        def get_then_change(job_id):
+            row = real_get(job_id)  # read as terminal and unredacted
+            if concurrent_change == "running":
+                store._conn.execute(
+                    "UPDATE execution_jobs SET state = ? WHERE id = ?",
+                    (ExecutionState.RUNNING.value, job_id),
+                )
+            else:
+                store._conn.execute(
+                    "UPDATE execution_jobs SET redacted_at = 1.0 WHERE id = ?",
+                    (job_id,),
+                )
+            store._conn.commit()
+            return row
+
+        monkeypatch.setattr(store, "_get_by_id", get_then_change)
+        assert store.redact([job.id], now=T0) == 0
+        monkeypatch.undo()
+        row = store._conn.execute(
+            "SELECT payload, redacted_at FROM execution_jobs WHERE id = ?",
+            (job.id,),
+        ).fetchone()
+        assert "keep" in row["payload"]
+        assert row["redacted_at"] == (1.0 if concurrent_change == "redacted" else None)
+    finally:
+        store.close()
