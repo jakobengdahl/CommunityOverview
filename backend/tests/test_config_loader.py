@@ -1524,3 +1524,131 @@ class TestNodeTypesSanitizer:
             "schema.node_types must be an object" in r.getMessage()
             for r in caplog.records
         )
+
+
+class TestRelationshipTypesSanitizer:
+    """One malformed relationship-type entry drops only that type, never the profile."""
+
+    @pytest.fixture(autouse=True)
+    def setup_and_cleanup(self):
+        from backend.config import config_loader
+
+        config_loader.reset_loader()
+        yield
+        os.environ.pop("SCHEMA_FILE", None)
+        config_loader.reset_loader()
+
+    @staticmethod
+    def _load(tmp_path, document):
+        from backend.config import config_loader
+
+        config_file = tmp_path / "schema_config.json"
+        config_file.write_text(json.dumps(document), encoding="utf-8")
+        os.environ["SCHEMA_FILE"] = str(config_file)
+        config_loader.reset_loader()
+        return config_loader.get_schema()
+
+    @staticmethod
+    def _document(relationship_types):
+        return {
+            "schema": {
+                "node_types": {"Good": {"fields": ["name"]}},
+                "relationship_types": relationship_types,
+            }
+        }
+
+    @pytest.mark.parametrize(
+        "bad_entry",
+        [
+            {"description": 5},
+            {"source_types": {}},
+            {"target_types": [["Good"]]},
+            "not-an-object",
+            None,
+        ],
+    )
+    def test_bad_entry_keeps_other_relationships_and_node_types(
+        self, tmp_path, bad_entry
+    ):
+        schema = self._load(
+            tmp_path,
+            self._document(
+                {
+                    "USES": {"source_types": ["Good"], "target_types": ["Good"]},
+                    "BAD": bad_entry,
+                }
+            ),
+        )
+
+        assert list(schema["relationship_types"]) == ["USES"]
+        assert "Good" in schema["node_types"]
+
+    def test_warning_names_the_relationship_type_and_field(self, tmp_path, caplog):
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            self._load(
+                tmp_path,
+                self._document({"USES": {}, "BAD": {"description": 5}}),
+            )
+
+        skipped = [
+            r.getMessage()
+            for r in caplog.records
+            if "Skipping invalid schema.relationship_types" in r.getMessage()
+        ]
+        assert len(skipped) == 1
+        assert "'BAD'" in skipped[0]
+        assert "description" in skipped[0]
+
+    @pytest.mark.parametrize("bad_value", [["USES"], None, "USES"])
+    def test_non_object_relationship_types_is_ignored_not_fatal(
+        self, tmp_path, caplog, bad_value
+    ):
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            schema = self._load(tmp_path, self._document(bad_value))
+
+        assert "Good" in schema["node_types"]
+        assert any(
+            "schema.relationship_types must be an object" in r.getMessage()
+            for r in caplog.records
+        )
+
+
+class TestRestInterfacesNull:
+    """An explicit ``rest_interfaces: null`` is ignored, not a global fallback."""
+
+    @pytest.fixture(autouse=True)
+    def setup_and_cleanup(self):
+        from backend.config import config_loader
+
+        config_loader.reset_loader()
+        yield
+        os.environ.pop("SCHEMA_FILE", None)
+        config_loader.reset_loader()
+
+    def test_null_rest_interfaces_keeps_declared_types(self, tmp_path, caplog):
+        from backend.config import config_loader
+
+        config_file = tmp_path / "schema_config.json"
+        config_file.write_text(
+            json.dumps(
+                {
+                    "schema": {
+                        "node_types": {"Good": {"fields": ["name"]}},
+                        "relationship_types": {"USES": {}},
+                    },
+                    "rest_interfaces": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        os.environ["SCHEMA_FILE"] = str(config_file)
+        config_loader.reset_loader()
+
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            schema = config_loader.get_schema()
+
+        assert "Good" in schema["node_types"]
+        assert list(schema["relationship_types"]) == ["USES"]
+        assert any(
+            "rest_interfaces must be a list" in r.getMessage() for r in caplog.records
+        )
