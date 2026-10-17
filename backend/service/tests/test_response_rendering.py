@@ -10,13 +10,17 @@ import json
 import os
 from datetime import datetime, timezone
 
+import inspect
+
 import pytest
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
+from fastapi.datastructures import Default
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.testclient import TestClient
 
 from backend.core import GraphStorage, Node, NodeType
 from backend.service import GraphService, create_rest_router
-from backend.service.json_response import GraphJSONResponse
+from backend.service.json_response import GraphJSONResponse, GraphJSONRoute
 
 LONE_SURROGATE = "\ud800"
 
@@ -101,6 +105,30 @@ class TestDeeplyNestedMetadata:
         assert _depth(response.json()["node"]["metadata"]) == 3000
         assert client.get("/api/export").status_code == 200
 
+    def test_deep_metadata_holding_nan_is_readable(self, client):
+        # NaN takes the null-substitution path, which must not recurse per level.
+        body = json.dumps(
+            {
+                "nodes": [
+                    {
+                        "id": "deep-nan",
+                        "type": "Actor",
+                        "name": "Deep NaN",
+                        "metadata": {"tree": _nested(3000), "score": float("nan")},
+                    }
+                ],
+                "edges": [],
+            }
+        )
+
+        assert _post_raw(client, "/api/nodes", body).status_code == 200
+        response = client.get("/api/nodes/deep-nan")
+        assert response.status_code == 200
+        metadata = response.json()["node"]["metadata"]
+        assert metadata["score"] is None
+        assert _depth(metadata["tree"]) == 3000
+        assert client.get("/api/export").status_code == 200
+
 
 class TestLoneSurrogates:
     # A JSON body may carry "\ud800" escapes; json.loads turns them into lone
@@ -163,6 +191,9 @@ class TestRenderingOfOrdinaryContent:
         assert response.status_code == 200
         assert response.json()["node"]["metadata"] == {"score": None, "high": None}
 
+    def test_body_is_compact_json(self):
+        assert GraphJSONResponse({"a": [1, "b"]}).body == b'{"a":[1,"b"]}'
+
     def test_route_errors_keep_their_status(self, client):
         assert client.get("/api/nodes/missing").status_code == 404
 
@@ -172,3 +203,56 @@ class TestRenderingOfOrdinaryContent:
         body = GraphJSONResponse({"at": moment}).body
 
         assert json.loads(body) == {"at": moment.isoformat()}
+
+
+class TestRoutesLeftAsTheyAre:
+    @pytest.fixture
+    def router(self) -> APIRouter:
+        router = APIRouter(route_class=GraphJSONRoute)
+
+        @router.get("/text", response_class=PlainTextResponse)
+        async def text() -> str:
+            return "plain"
+
+        @router.get("/sync")
+        def sync_route() -> dict:
+            return {"sync": True}
+
+        return router
+
+    def test_explicit_response_class_is_kept(self, router):
+        app = FastAPI()
+        app.include_router(router)
+
+        response = TestClient(app).get("/text")
+
+        assert response.text == "plain"
+        assert response.headers["content-type"].startswith("text/plain")
+
+    def test_sync_endpoint_stays_sync(self, router):
+        # A sync endpoint must keep running in the threadpool, not on the loop.
+        (route,) = [r for r in router.routes if r.path == "/sync"]
+
+        assert not inspect.iscoroutinefunction(route.endpoint)
+        app = FastAPI()
+        app.include_router(router)
+        assert TestClient(app).get("/sync").json() == {"sync": True}
+
+    def test_generator_endpoints_are_not_wrapped(self):
+        def sync_stream():
+            yield "chunk"
+
+        async def async_stream():
+            yield "chunk"
+
+        def plain():
+            return {}
+
+        for endpoint in (sync_stream, async_stream):
+            route = GraphJSONRoute(
+                "/stream", endpoint, response_class=Default(JSONResponse)
+            )
+            assert route.endpoint is endpoint
+        # Control: with the same arguments an ordinary endpoint is wrapped.
+        route = GraphJSONRoute("/plain", plain, response_class=Default(JSONResponse))
+        assert route.endpoint is not plain

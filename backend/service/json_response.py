@@ -12,7 +12,7 @@ its own reads and every export fail.
 ``GraphJSONRoute`` therefore hands an endpoint's return value straight to
 ``GraphJSONResponse``, which renders it with the standard-library encoder: no
 practical depth limit, and what UTF-8 cannot carry is written as a ``\\u``
-escape. Normal content renders byte-for-byte as before.
+escape. Ordinary content renders as the same compact UTF-8 JSON as before.
 """
 
 import functools
@@ -28,14 +28,33 @@ from fastapi.routing import APIRoute
 
 
 def _null_non_finite(value: Any) -> Any:
-    """Replace NaN/Infinity with None, as Pydantic's JSON serializer does."""
-    if isinstance(value, float) and not math.isfinite(value):
-        return None
-    if isinstance(value, dict):
-        return {key: _null_non_finite(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_null_non_finite(item) for item in value]
-    return value
+    """Replace NaN/Infinity with None, as Pydantic's JSON serializer does.
+
+    Iterative, so deep nesting cannot reach the recursion limit here either.
+    Each container is copied once (memoized by id), so a shared or circular
+    reference terminates; json.dumps then reports a circle itself.
+    """
+    copies: dict = {}
+    pending: list = []
+
+    def clean(item: Any) -> Any:
+        if isinstance(item, float) and not math.isfinite(item):
+            return None
+        if not isinstance(item, (dict, list, tuple)):
+            return item
+        if id(item) not in copies:
+            copy = dict(item) if isinstance(item, dict) else list(item)
+            copies[id(item)] = copy
+            pending.append(copy)
+        return copies[id(item)]
+
+    root = clean(value)
+    while pending:
+        container = pending.pop()
+        keys = list(container) if isinstance(container, dict) else range(len(container))
+        for key in keys:
+            container[key] = clean(container[key])
+    return root
 
 
 def _dumps(content: Any, *, ensure_ascii: bool) -> str:
