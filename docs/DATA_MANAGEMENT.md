@@ -410,7 +410,8 @@ What happens, in order:
    job store (`GET /api/import/{import_id}`, and listed by `GET /api/import`
    with `mode: "merge"`) keeps the digest, the parameters, the counts, the
    backup path, the embeddings job id and every created, overwritten and
-   renamed entity with its resulting revision. It is written after the
+   renamed entity with its resulting revision (none for an
+   `outcome_unknown` record, below). It is written after the
    graph commit, in a separate store, so it is best-effort:
    `audit_recorded: false` reports a merge that committed without one (a
    commit that writes nothing returns `null`). The record also keeps the
@@ -423,22 +424,27 @@ What happens, in order:
    reached the store, and the next write that lands (or a clean shutdown)
    saves the whole graph with it, while a crash before then can lose what
    had not reached the store. It fires no events and queues no embeddings
-   job, so the nodes it created or rewrote have no vectors until they are
-   embedded again. The record, whose `import_id` the error response
-   carries, is the trace it leaves: check it and the live graph before
-   retrying. Against a merge that did land, a retry is refused or plans
-   nothing, as after a lost response (below); a fresh preview and commit of the same
-   document under `rename` would create its renamed copies a second time.
+   job, so the nodes whose vectors it dropped (step 6) stay without one
+   until they are embedded again. The record, whose `import_id` the error
+   response carries, is the trace it leaves: check it and the live graph
+   before retrying (see retries below).
 
 A commit may omit `plan_digest` only when every policy is `fail` or `skip`
 and `include_system_types` is false — a merge that can only add and so can
-be retried blindly; anything else is refused with `plan_digest_required`. A
-commit retried after a lost response is never applied twice: its own writes
-are now id collisions, so a `fail`-policy retry is refused as
-`import_merge_blocked`, any other retry carrying the digest as
-`import_plan_stale`, and a digest-less `skip`-policy retry plans nothing
-and returns zero counts. Check `GET /api/import` for the first commit's
-record before retrying. One commit runs at a time (503
+be retried blindly; anything else is refused with `plan_digest_required`.
+
+**Retries.** The digest proves a plan is still current, not that it has not
+been applied. A commit retried after a lost response, against a merge that
+did land, is not applied again when the first commit wrote under any of
+the document's own ids — a create or an overwrite — since that write moved
+what the digest covers: a `fail`-policy retry is refused as
+`import_merge_blocked`, a retry carrying the digest as `import_plan_stale`,
+and a digest-less `skip`-policy retry plans nothing and returns zero
+counts. A commit whose every write is a **rename** leaves nothing the
+digest covers changed, so the same request with the same digest is applied
+again and creates the renamed copies a second time. Check `GET /api/import`
+for the first commit's record before retrying any commit. One commit runs
+at a time (503
 `import_merge_busy`). A store failure is answered as for any direct write —
 502 `write_failed` (nothing changed) or 503 `write_outcome_unknown` — with
 the backup path. Merging is refused in PostgreSQL mode (501

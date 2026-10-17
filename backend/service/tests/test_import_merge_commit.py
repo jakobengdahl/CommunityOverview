@@ -646,6 +646,43 @@ class TestBinding:
         assert _backups(storage) == []
         assert job_store.list_jobs() == []
 
+    def test_a_rename_only_commit_stays_current_and_so_replays(
+        self, storage, job_store
+    ):
+        # Documented (DATA_MANAGEMENT "Retries"): a digest is not single-use.
+        # Renames write fresh ids and leave every read untouched, so the same
+        # digest still matches and a resend creates a second copy.
+        client = _client(storage, job_store)
+        body = _body(
+            {"nodes": [{"id": "a1", "type": "Actor", "name": "Copy"}], "edges": []},
+            policy={"default": "rename"},
+        )
+        digest = _preview(client, body)["plan_digest"]
+        first = client.post(URL, json={**body, "plan_digest": digest})
+        second = client.post(URL, json={**body, "plan_digest": digest})
+        assert first.status_code == second.status_code == 200
+        copies = [n for n in storage.nodes.values() if n.name == "Copy"]
+        assert len(copies) == 2
+
+    def test_a_rename_commit_that_also_creates_is_stale_on_retry(
+        self, storage, job_store
+    ):
+        client = _client(storage, job_store)
+        body = _body(
+            {
+                "nodes": [
+                    {"id": "a1", "type": "Actor", "name": "Copy"},
+                    {"id": "n1", "type": "Actor", "name": "New"},
+                ],
+                "edges": [],
+            },
+            policy={"default": "rename"},
+        )
+        digest = _preview(client, body)["plan_digest"]
+        assert client.post(URL, json={**body, "plan_digest": digest}).status_code == 200
+        again = client.post(URL, json={**body, "plan_digest": digest})
+        assert again.status_code == 409
+
     def test_a_retried_commit_is_stale_not_reapplied(self, storage, job_store):
         client = _client(storage, job_store)
         body = _body()

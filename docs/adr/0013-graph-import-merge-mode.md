@@ -141,6 +141,13 @@ above:
   report's attachment and vector counts are skipped under the lock).
 - **Without a digest** the commit binds to the plan it computed before the
   backup, so a write landing between that plan and the lock still fails it.
+- **A digest is not single-use.** A committed create or overwrite moves what
+  the digest covers, so the same digest is stale afterwards; but a commit
+  whose every write is a rename (fresh ids, live entities untouched) leaves
+  the digest current, and resending it creates the renamed copies again.
+  §3 rules out only the digest-less rename retry; making a digest
+  single-use is the caller-chosen idempotency key §3 and §7 (c) defer, so
+  it is left to that decision and documented for callers.
 - A stale plan found under the lock is answered with a plan recomputed after
   the lock is released, as for one found before it.
 - **Vectors.** The commit drops the vectors of created and renamed nodes (a
