@@ -32,13 +32,12 @@ This ADR is for adding that path as a live, in-process REST endpoint —
 3. **Never leave the graph half-written**, whether validation fails, the
    commit itself fails partway, or the (asynchronous) embedding step fails.
 
-A prior Corp graph decision,
-`dec-graph-import-v1-scoped-to-replace-whole-graph-20260923`, settled the
+An earlier planning decision, tracked outside this repository, settled the
 scope question ahead of this ADR: this application has no multi-graph /
 workspace concept — one `graph.json` per running instance — so "new graph"
 means REPLACING the whole active graph atomically, not merging into it.
-Merge-with-id-collision-policy is out of scope here and tracked as
-`task-graph-import-merge-mode-followup-20260923`.
+Merge-with-id-collision-policy is out of scope here and tracked outside this
+repository.
 
 ## Decision
 
@@ -227,4 +226,4 @@ with the graph.
 - Merge-mode import, live-session/event-stream notification of a replace (a
   connected browser session does not currently learn that the graph under it
   changed), and a dedicated CLI import script are explicitly out of scope —
-  see the corresponding Task nodes on the Corp graph.
+  tracked outside this repository.

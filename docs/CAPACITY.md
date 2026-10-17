@@ -442,8 +442,8 @@ stated for one graph. `PostgresGraphPersistenceBackend` builds its own
 connection pool and its own LISTEN connection on every construction, with
 nothing shared across two of them, so `instance_count × (pool_size + 1)`
 against a stock server's 97 available connections is exactly right for this
-repository's own deployments, where one process holds one graph — Corp's
-included.
+repository's own deployments, where one process holds one graph — a
+single-graph deployment.
 
 A process built to hold more than one graph at once — one schema each, which
 is exactly what the seam `GRAPH_POSTGRES_SCHEMA` exists for ("one database can

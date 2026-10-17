@@ -220,14 +220,5 @@ status of their own.
 - Changing an existing field's meaning, the URL shape, or the delete/confirm
   semantics is a **breaking change** and requires a new contract version plus a
   migration note.
-- The requirement node `req-mcp-session-management-contract` and decision
-  `dec-session-resource-deeplink-contract` in the Corp planning graph govern this
-  document; status and evidence are tracked there, not here.
-
-## 10. Realizing tasks
-
-| Task (Corp graph) | Realizes |
-|---|---|
-| `task-implement-mcp-session-crud` | §2–§4, §6, §8 — the create/list/get/rename/delete MCP tools |
-| `task-implement-session-deeplinks` | §5 — canonical `session_url` generation and the open/not-found/expired path |
-| `task-document-agent-visualization-tools` | Tool docstrings + `backend/DEVELOPMENT.md` wire shapes |
+- Planning status and evidence for this contract are tracked outside this
+  repository, not here.
