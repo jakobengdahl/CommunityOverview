@@ -70,7 +70,7 @@ fixed black ring and drop shadow regardless of its fill colour
 (`GenericAnnotationNode.css`'s `.kind-vote_dot`) so it stays legible against
 any canvas background. As with `frame` above, this is authorized with no
 migration for annotations already stored with a `value` and/or `attachment`
-(the same 2026-08-25 owner direction, recorded on the task node): both
+(the same 2026-08-25 owner direction): both
 translator legs (`GENERIC_OVERLAY_FIELDS.vote_dot` in
 `packages/ui-graph-canvas/src/utils/annotations.js`,
 `genericAnnotationToOverlay`/`genericOverlayToAnnotation` in
@@ -2535,7 +2535,7 @@ task, or named to the specific existing component/task that already owns it.
 **Explicit non-claims.** This is a product-minimum audit, not a legal
 accessibility/WCAG-conformance review — no conformance claim (A/AA/AAA, or
 any WCAG success criterion) is made anywhere below, per the decision's own
-`out_of_scope`. It also does not propose, and found no trace of, a separate
+scope exclusions. It also does not propose, and found no trace of, a separate
 "list every annotation" panel — that alternative was considered and rejected
 (see [Human authoring surfaces](#human-authoring-surfaces)); every mechanism
 below is contextual, reached from the canvas object itself, the toolbox, or
