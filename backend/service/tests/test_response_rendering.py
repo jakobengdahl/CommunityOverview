@@ -6,11 +6,10 @@ write but broke FastAPI's default response encoding, so the node's own reads
 and every export failed. See backend/service/json_response.py.
 """
 
+import inspect
 import json
 import os
 from datetime import datetime, timezone
-
-import inspect
 
 import pytest
 from fastapi import APIRouter, FastAPI
@@ -21,6 +20,7 @@ from fastapi.testclient import TestClient
 from backend.core import GraphStorage, Node, NodeType
 from backend.service import GraphService, create_rest_router
 from backend.service.json_response import GraphJSONResponse, GraphJSONRoute
+from backend.service.serializers import _to_json_native, serialize_to_json
 
 LONE_SURROGATE = "\ud800"
 
@@ -82,52 +82,38 @@ class TestDeeplyNestedMetadata:
         (node,) = [n for n in response.json()["nodes"] if n["id"] == "deep"]
         assert _depth(node["metadata"]) == 300
 
-    def test_rest_write_and_read_far_past_the_old_depth_limit(self, client):
-        # Past both Pydantic's serializer depth and jsonable_encoder's
-        # recursion limit, so neither may sit on the response path.
-        body = json.dumps(
-            {
-                "nodes": [
-                    {
-                        "id": "deeper",
-                        "type": "Actor",
-                        "name": "Deeper",
-                        "metadata": _nested(3000),
-                    }
-                ],
-                "edges": [],
-            }
-        )
+    def test_rest_write_and_read_past_the_old_depth_limit(self, client):
+        # Past Pydantic's serializer depth; shallow enough that the request
+        # parser accepts it on Python 3.11, whose C json recurses per level.
+        body = '{"nodes":[{"id":"deeper","type":"Actor","name":"Deeper","metadata":'
+        body += '{"a":' * 800 + "{}" + "}" * 800 + '}],"edges":[]}'
 
         assert _post_raw(client, "/api/nodes", body).status_code == 200
         response = client.get("/api/nodes/deeper")
         assert response.status_code == 200
-        assert _depth(response.json()["node"]["metadata"]) == 3000
-        assert client.get("/api/export").status_code == 200
+        assert _depth(response.json()["node"]["metadata"]) == 800
 
-    def test_deep_metadata_holding_nan_is_readable(self, client):
-        # NaN takes the null-substitution path, which must not recurse per level.
-        body = json.dumps(
-            {
-                "nodes": [
-                    {
-                        "id": "deep-nan",
-                        "type": "Actor",
-                        "name": "Deep NaN",
-                        "metadata": {"tree": _nested(3000), "score": float("nan")},
-                    }
-                ],
-                "edges": [],
-            }
+    def test_node_nested_past_the_recursion_limit_is_readable(self, storage, client):
+        # Deeper than any recursive encoder or decoder can go, with a NaN that
+        # sends rendering down the fallback path too. Nothing here may recurse
+        # per level, so the body is checked as bytes, not parsed.
+        storage.add_nodes(
+            [
+                Node(
+                    id="deepest",
+                    type=NodeType.ACTOR,
+                    name="Deepest",
+                    metadata={"tree": _nested(3000), "score": float("nan")},
+                )
+            ],
+            [],
         )
 
-        assert _post_raw(client, "/api/nodes", body).status_code == 200
-        response = client.get("/api/nodes/deep-nan")
-        assert response.status_code == 200
-        metadata = response.json()["node"]["metadata"]
-        assert metadata["score"] is None
-        assert _depth(metadata["tree"]) == 3000
-        assert client.get("/api/export").status_code == 200
+        for path in ("/api/nodes/deepest", "/api/export"):
+            response = client.get(path)
+            assert response.status_code == 200, path
+            assert response.content.count(b'{"a":') == 3000
+            assert b'"score":null' in response.content
 
 
 class TestLoneSurrogates:
@@ -182,14 +168,18 @@ class TestRenderingOfOrdinaryContent:
     def test_non_finite_metadata_renders_as_null(self, client):
         body = (
             '{"nodes":[{"id":"nan","type":"Actor","name":"NaN",'
-            '"metadata":{"score":NaN,"high":Infinity}}],"edges":[]}'
+            '"metadata":{"score":NaN,"high":Infinity,"low":-Infinity}}],"edges":[]}'
         )
         assert _post_raw(client, "/api/nodes", body).status_code == 200
 
         response = client.get("/api/nodes/nan")
 
         assert response.status_code == 200
-        assert response.json()["node"]["metadata"] == {"score": None, "high": None}
+        assert response.json()["node"]["metadata"] == {
+            "score": None,
+            "high": None,
+            "low": None,
+        }
 
     def test_body_is_compact_json(self):
         assert GraphJSONResponse({"a": [1, "b"]}).body == b'{"a":[1,"b"]}'
@@ -200,9 +190,26 @@ class TestRenderingOfOrdinaryContent:
     def test_non_json_native_values_are_encoded_like_fastapi(self):
         moment = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 
-        body = GraphJSONResponse({"at": moment}).body
+        body = GraphJSONResponse({"at": moment, "name": "å"}).body
 
-        assert json.loads(body) == {"at": moment.isoformat()}
+        assert json.loads(body) == {"at": moment.isoformat(), "name": "å"}
+        assert "å".encode("utf-8") in body
+
+    def test_fallback_rendering_matches_json_and_leaves_content_alone(self):
+        shared = [float("-inf"), "å"]
+        content = {"t": (float("nan"), 1), "x": shared, "y": shared, 2: True}
+
+        body = GraphJSONResponse(content).body
+
+        assert body == '{"t":[null,1],"x":[null,"å"],"y":[null,"å"],"2":true}'.encode()
+        assert content["x"] == [float("-inf"), "å"]
+
+    def test_circular_content_is_reported_not_looped(self):
+        content: list = [float("nan")]
+        content.append(content)
+
+        with pytest.raises(ValueError):
+            GraphJSONResponse(content)
 
 
 class TestRoutesLeftAsTheyAre:
@@ -256,3 +263,28 @@ class TestRoutesLeftAsTheyAre:
         # Control: with the same arguments an ordinary endpoint is wrapped.
         route = GraphJSONRoute("/plain", plain, response_class=Default(JSONResponse))
         assert route.endpoint is not plain
+
+
+class TestSerializeToJson:
+    def test_deep_data_converts_like_the_json_round_trip(self):
+        moment = datetime(2026, 1, 2, tzinfo=timezone.utc)
+        data = {"tree": _nested(3000), 1: (moment, float("nan"))}
+
+        converted = serialize_to_json(data)
+
+        assert _depth(converted["tree"]) == 3000
+        assert converted["1"][0] == moment.isoformat()
+        assert converted["1"][1] != converted["1"][1]  # NaN survives, as in json
+        assert 1 in data and isinstance(data[1], tuple)
+
+    def test_iterative_fallback_equals_the_json_round_trip(self):
+        # Exercised directly: on Python 3.13 json.dumps itself copes with
+        # 3000 levels, so the test above takes the fallback only on 3.11.
+        moment = datetime(2026, 1, 2, tzinfo=timezone.utc)
+        shared = ["å", 2.5]
+        data = {"t": (moment, None, True), 3: shared, None: shared, "d": _nested(5)}
+
+        expected = json.loads(json.dumps(data, default=lambda o: o.isoformat()))
+
+        assert _to_json_native(data) == expected
+        assert _depth(_to_json_native(_nested(3000))) == 3000

@@ -10,8 +10,9 @@ UTF-8). Either way the route raised an unhandled 500, so one such node made
 its own reads and every export fail.
 
 ``GraphJSONRoute`` therefore hands an endpoint's return value straight to
-``GraphJSONResponse``, which renders it with the standard-library encoder: no
-practical depth limit, and what UTF-8 cannot carry is written as a ``\\u``
+``GraphJSONResponse``, which renders it with the standard-library encoder,
+falling back to an iterative encoder where that one gives up, so nesting
+depth no longer matters; what UTF-8 cannot carry is written as a ``\\u``
 escape. Ordinary content renders as the same compact UTF-8 JSON as before.
 """
 
@@ -26,48 +27,86 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
 
+from .serializers import json_key_text
 
-def _null_non_finite(value: Any) -> Any:
-    """Replace NaN/Infinity with None, as Pydantic's JSON serializer does.
 
-    Iterative, so deep nesting cannot reach the recursion limit here either.
-    Each container is copied once (memoized by id), so a shared or circular
-    reference terminates; json.dumps then reports a circle itself.
+def _iterencode(content: Any, *, ensure_ascii: bool) -> str:
+    """Compact JSON for ``content`` without recursing per nesting level.
+
+    Writes what json.dumps writes, except that NaN/Infinity become null, as
+    Pydantic's JSON serializer did. Only used when json.dumps gives up: on a
+    non-finite float, or on nesting deeper than its C encoder can recurse
+    (bounded by the interpreter's recursion limit on Python 3.11).
     """
-    copies: dict = {}
-    pending: list = []
+    encode_text = (
+        json.encoder.encode_basestring_ascii
+        if ensure_ascii
+        else json.encoder.encode_basestring
+    )
+    parts: list = []
+    open_ids: set = set()
+    # One [container, iterator, is_dict, first] frame per open container.
+    stack: list = []
 
-    def clean(item: Any) -> Any:
-        if isinstance(item, float) and not math.isfinite(item):
-            return None
-        if not isinstance(item, (dict, list, tuple)):
-            return item
-        if id(item) not in copies:
-            copy = dict(item) if isinstance(item, dict) else list(item)
-            copies[id(item)] = copy
-            pending.append(copy)
-        return copies[id(item)]
+    def emit(value: Any) -> None:
+        if isinstance(value, str):
+            parts.append(encode_text(value))
+        elif value is None:
+            parts.append("null")
+        elif value is True:
+            parts.append("true")
+        elif value is False:
+            parts.append("false")
+        elif isinstance(value, int):
+            parts.append(int.__repr__(value))
+        elif isinstance(value, float):
+            parts.append(float.__repr__(value) if math.isfinite(value) else "null")
+        elif isinstance(value, (list, tuple, dict)):
+            if id(value) in open_ids:
+                raise ValueError("Circular reference detected")
+            open_ids.add(id(value))
+            is_dict = isinstance(value, dict)
+            parts.append("{" if is_dict else "[")
+            items = iter(value.items()) if is_dict else iter(value)
+            stack.append([value, items, is_dict, True])
+        else:
+            raise TypeError(
+                f"Object of type {type(value).__name__} is not JSON serializable"
+            )
 
-    root = clean(value)
-    while pending:
-        container = pending.pop()
-        keys = list(container) if isinstance(container, dict) else range(len(container))
-        for key in keys:
-            container[key] = clean(container[key])
-    return root
+    emit(content)
+    while stack:
+        frame = stack[-1]
+        container, items, is_dict, first = frame
+        try:
+            item = next(items)
+        except StopIteration:
+            stack.pop()
+            open_ids.discard(id(container))
+            parts.append("}" if is_dict else "]")
+            continue
+        if not first:
+            parts.append(",")
+        frame[3] = False
+        if is_dict:
+            key, value = item
+            parts.append(encode_text(json_key_text(key)))
+            parts.append(":")
+            emit(value)
+        else:
+            emit(item)
+    return "".join(parts)
 
 
 def _dumps(content: Any, *, ensure_ascii: bool) -> str:
-    kwargs = {
-        "ensure_ascii": ensure_ascii,
-        "allow_nan": False,
-        "separators": (",", ":"),
-    }
     try:
-        return json.dumps(content, **kwargs)
-    except ValueError:
-        # NaN/Infinity are not JSON, but json.loads accepts them on write.
-        return json.dumps(_null_non_finite(content), **kwargs)
+        return json.dumps(
+            content, ensure_ascii=ensure_ascii, allow_nan=False, separators=(",", ":")
+        )
+    except (ValueError, RecursionError):
+        # NaN/Infinity (not JSON, though json.loads accepts them on write) or
+        # nesting past the C encoder's recursion limit.
+        return _iterencode(content, ensure_ascii=ensure_ascii)
 
 
 class GraphJSONResponse(JSONResponse):
