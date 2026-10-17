@@ -92,8 +92,6 @@ class AgentRegistry:
             else:
                 execution_store = InMemoryExecutionStore(retry_policy=history_policy)
         self._run_recorder = AgentRunRecorder(execution_store)
-        self._retention = settings.run_history_retention
-        self._retention_sweeper = RetentionSweeper(execution_store, self._retention)
 
         # Durable agent governance: proposals with persistent approve/reject.
         if proposal_store is None:
@@ -102,6 +100,10 @@ class AgentRegistry:
             else:
                 proposal_store = InMemoryProposalStore()
         self._proposal_store = proposal_store
+        self._retention = settings.run_history_retention
+        self._retention_sweeper = RetentionSweeper(
+            execution_store, self._retention, proposal_store=proposal_store
+        )
         self._governance = GovernanceManager(
             proposal_store, executor_factory=self._build_apply_executor
         )

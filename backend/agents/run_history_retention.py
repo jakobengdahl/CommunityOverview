@@ -28,9 +28,18 @@ then every interval; a failed sweep is logged and never breaks the agent
 runtime. Each sweep writes one audit record carrying only the policy, cutoffs
 and counts — never a run's id or content.
 
+The same windows apply to agent governance proposals when the sweep is given a
+proposal store: decided proposals older than the redact window have their
+``input_args``, ``apply_result`` and ``apply_error`` stripped, and decided
+proposals older than the retention are purged, both aged by when they were
+decided. A pending proposal is never touched, whatever its age.
+
 Run a sweep by hand with::
 
     python -m backend.agents.run_history_retention [--dry-run]
+
+It sweeps ``AGENTS_RUN_HISTORY_DB`` and ``AGENTS_GOVERNANCE_DB``, whichever are
+set.
 """
 
 from __future__ import annotations
@@ -46,6 +55,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, Mapping, Optional
 
 from .execution import ExecutionStore, utcnow
+from .governance.store import ProposalStore
 
 logger = logging.getLogger(__name__)
 audit_logger = logging.getLogger(f"{__name__}.audit")
@@ -189,6 +199,8 @@ class SweepReport:
     abandoned: int
     redacted: int
     purged: int
+    proposals_redacted: int = 0
+    proposals_purged: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -201,19 +213,24 @@ class SweepReport:
             "abandoned": self.abandoned,
             "redacted": self.redacted,
             "purged": self.purged,
+            "proposals_redacted": self.proposals_redacted,
+            "proposals_purged": self.proposals_purged,
         }
 
 
 def sweep(
-    store: ExecutionStore,
+    store: Optional[ExecutionStore],
     policy: RetentionPolicy,
     *,
     now: Optional[datetime] = None,
     dry_run: bool = False,
+    proposal_store: Optional[ProposalStore] = None,
 ) -> SweepReport:
     """
     Abandon runs left running past the retention, then redact, then purge the
-    terminal runs the policy has aged out.
+    terminal runs the policy has aged out; then redact and purge the decided
+    governance proposals in ``proposal_store`` on the same cutoffs. Either
+    store may be None to skip it.
 
     Idempotent: a second sweep at the same ``now`` changes nothing. With
     ``dry_run`` the counts are what a real sweep would change, and the store is
@@ -232,7 +249,7 @@ def sweep(
     )
 
     abandoned = redacted = purged = 0
-    if purge_cutoff is not None:
+    if store is not None and purge_cutoff is not None:
         ids = [job.id for job in store.list_running_older_than(purge_cutoff)]
         abandoned = (
             len(ids) if dry_run else store.abandon(ids, cutoff=purge_cutoff, now=now)
@@ -240,7 +257,7 @@ def sweep(
     # An abandoned run is unredacted and finished before the purge cutoff, which
     # is never later than the redact cutoff, so a real sweep redacts and purges
     # it below; a dry run, which abandons nothing, counts it in by hand.
-    if redact_cutoff is not None:
+    if store is not None and redact_cutoff is not None:
         ids = [
             job.id
             for job in store.list_terminal_older_than(redact_cutoff, redacted=False)
@@ -248,11 +265,24 @@ def sweep(
         redacted = len(ids) if dry_run else store.redact(ids, now=now)
         if dry_run:
             redacted += abandoned
-    if purge_cutoff is not None:
+    if store is not None and purge_cutoff is not None:
         ids = [job.id for job in store.list_terminal_older_than(purge_cutoff)]
         purged = len(ids) if dry_run else store.purge(ids)
         if dry_run:
             purged += abandoned
+
+    proposals_redacted = proposals_purged = 0
+    if proposal_store is not None and redact_cutoff is not None:
+        ids = [
+            p.id
+            for p in proposal_store.list_decided_older_than(
+                redact_cutoff, redacted=False
+            )
+        ]
+        proposals_redacted = len(ids) if dry_run else proposal_store.redact(ids)
+    if proposal_store is not None and purge_cutoff is not None:
+        ids = [p.id for p in proposal_store.list_decided_older_than(purge_cutoff)]
+        proposals_purged = len(ids) if dry_run else proposal_store.purge(ids)
 
     report = SweepReport(
         swept_at=now,
@@ -264,6 +294,8 @@ def sweep(
         abandoned=abandoned,
         redacted=redacted,
         purged=purged,
+        proposals_redacted=proposals_redacted,
+        proposals_purged=proposals_purged,
     )
     audit_logger.info("run-history retention sweep %s", json.dumps(report.to_dict()))
     return report
@@ -284,8 +316,10 @@ class RetentionSweeper:
         policy: RetentionPolicy,
         *,
         clock: Callable[[], datetime] = utcnow,
+        proposal_store: Optional[ProposalStore] = None,
     ) -> None:
         self._store = store
+        self._proposal_store = proposal_store
         self._policy = policy
         self._clock = clock
         self._stop = threading.Event()
@@ -299,7 +333,12 @@ class RetentionSweeper:
     def run_once(self) -> Optional[SweepReport]:
         """Sweep once; return the report, or None if the sweep failed."""
         try:
-            report = sweep(self._store, self._policy, now=self._clock())
+            report = sweep(
+                self._store,
+                self._policy,
+                now=self._clock(),
+                proposal_store=self._proposal_store,
+            )
         except Exception:
             logger.exception("Run-history retention sweep failed")
             return None
@@ -329,10 +368,13 @@ class RetentionSweeper:
 
 
 def main(argv: Optional[list] = None) -> int:
-    """CLI: sweep the run-history database named by AGENTS_RUN_HISTORY_DB."""
+    """CLI: sweep the AGENTS_RUN_HISTORY_DB and AGENTS_GOVERNANCE_DB databases."""
     parser = argparse.ArgumentParser(
         prog="python -m backend.agents.run_history_retention",
-        description="Apply the configured retention to durable AgentRun history.",
+        description=(
+            "Apply the configured retention to durable AgentRun history and "
+            "agent governance proposals."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -350,23 +392,35 @@ def main(argv: Optional[list] = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     db_path = os.environ.get("AGENTS_RUN_HISTORY_DB")
-    if not db_path:
-        print("error: AGENTS_RUN_HISTORY_DB is not set", file=sys.stderr)
+    governance_db = os.environ.get("AGENTS_GOVERNANCE_DB")
+    if not db_path and not governance_db:
+        print(
+            "error: neither AGENTS_RUN_HISTORY_DB nor AGENTS_GOVERNANCE_DB is set",
+            file=sys.stderr,
+        )
         return 2
-    if not os.path.isfile(db_path):
-        print(f"error: no run-history database at {db_path}", file=sys.stderr)
-        return 2
+    for path, what in ((db_path, "run-history"), (governance_db, "governance")):
+        if path and not os.path.isfile(path):
+            print(f"error: no {what} database at {path}", file=sys.stderr)
+            return 2
     if not policy.sweeps:
         print("Retention is not configured; run history is kept forever.")
         return 0
 
     from .execution import SqliteExecutionStore
+    from .governance.store import SqliteProposalStore
 
-    store = SqliteExecutionStore(db_path)
+    store = SqliteExecutionStore(db_path) if db_path else None
+    proposal_store = SqliteProposalStore(governance_db) if governance_db else None
     try:
-        report = sweep(store, policy, dry_run=args.dry_run)
+        report = sweep(
+            store, policy, dry_run=args.dry_run, proposal_store=proposal_store
+        )
     finally:
-        store.close()
+        if store is not None:
+            store.close()
+        if proposal_store is not None:
+            proposal_store.close()
     print(json.dumps(report.to_dict(), indent=2))
     return 0
 
