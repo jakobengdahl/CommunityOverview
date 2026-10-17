@@ -459,6 +459,7 @@ class ConfigLoader:
                 raw_config = json.load(f)
 
             self._sanitize_node_types(raw_config)
+            self._sanitize_relationship_types(raw_config)
             self._sanitize_rest_interfaces(raw_config)
             self._dropped_capability_ids = self._sanitize_capabilities(raw_config)
             self._config = SchemaFileConfig(**raw_config)
@@ -529,6 +530,48 @@ class ConfigLoader:
         schema["node_types"] = valid
 
     @staticmethod
+    def _sanitize_relationship_types(raw_config: Dict[str, Any]) -> None:
+        """Drop malformed ``schema.relationship_types`` entries in place.
+
+        Same hazard as ``_sanitize_node_types``: one wrong-typed field or a
+        non-object entry would fail ``SchemaFileConfig`` as a unit and revert
+        every declared node and relationship type to the defaults.
+        """
+        schema = raw_config.get("schema")
+        if not isinstance(schema, dict):
+            return
+        if "relationship_types" not in schema:
+            return
+        raw = schema["relationship_types"]
+        if not isinstance(raw, dict):
+            logger.warning(
+                "schema.relationship_types must be an object, got %s — ignoring",
+                type(raw).__name__,
+            )
+            schema["relationship_types"] = {}
+            return
+        valid: Dict[str, Any] = {}
+        for type_name, entry in raw.items():
+            try:
+                RelationshipTypeConfig.model_validate(entry)
+            except ValidationError as exc:
+                fields = sorted(
+                    {
+                        ".".join(str(p) for p in err["loc"]) or "<entry>"
+                        for err in exc.errors()
+                    }
+                )
+                logger.warning(
+                    "Skipping invalid schema.relationship_types[%r] (field(s) %s): %s",
+                    type_name,
+                    ", ".join(fields),
+                    exc,
+                )
+                continue
+            valid[type_name] = entry
+        schema["relationship_types"] = valid
+
+    @staticmethod
     def _sanitize_rest_interfaces(raw_config: Dict[str, Any]) -> None:
         """Drop malformed ``rest_interfaces`` entries in place before validation.
 
@@ -540,9 +583,9 @@ class ConfigLoader:
         ones keeps one typo from nuking the entire config, matching the per-entry
         graceful skipping the router already does for missing node_type/edge_type.
         """
-        raw = raw_config.get("rest_interfaces")
-        if raw is None:
+        if "rest_interfaces" not in raw_config:
             return
+        raw = raw_config["rest_interfaces"]
         if not isinstance(raw, list):
             logger.warning(
                 "rest_interfaces must be a list, got %s — ignoring", type(raw).__name__
