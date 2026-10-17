@@ -66,6 +66,7 @@ from backend.core.storage_search import MATCH_MODE_SUBSTRING, validate_match_mod
 from backend.runtime.authorization import use_request_authorization
 
 from . import attachments as attachment_ops
+from .json_response import GraphJSONRoute
 from .service import GraphService
 
 if TYPE_CHECKING:
@@ -1980,7 +1981,11 @@ def create_rest_router(
     Returns:
         Configured APIRouter
     """
-    router = APIRouter(prefix=prefix, tags=["graph"])
+    router = APIRouter(
+        prefix=prefix,
+        tags=["graph"],
+        route_class=GraphJSONRoute,
+    )
 
     if import_job_store is None:
         from backend.agents.execution import InMemoryExecutionStore
