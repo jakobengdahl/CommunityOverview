@@ -1500,6 +1500,30 @@ class TestNodeTypesSanitizer:
         assert "'Bad'" in skipped[0]
         assert "static" in skipped[0]
 
+    def test_malformed_system_type_warning_says_it_is_code_managed(
+        self, tmp_path, caplog
+    ):
+        from backend.config import config_loader
+
+        system_name = next(iter(config_loader.SYSTEM_NODE_TYPES))
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            self._load(
+                tmp_path,
+                {
+                    system_name: {"static": "maybe"},
+                    "Bad": {"static": "maybe"},
+                },
+            )
+
+        by_type = {
+            name: r.getMessage()
+            for r in caplog.records
+            for name in (system_name, "Bad")
+            if f"schema.node_types[{name!r}]" in r.getMessage()
+        }
+        assert "managed by code" in by_type[system_name]
+        assert "managed by code" not in by_type["Bad"]
+
     def test_non_object_entry_is_dropped_alone(self, tmp_path):
         schema = self._load(
             tmp_path, {"Good": {"fields": ["name"]}, "Broken": "not-an-object"}
