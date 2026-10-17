@@ -106,7 +106,7 @@ path):
 <public-base-url>/?session=<session_id>
 ```
 
-A path-based `/s/<id>` form was evaluated against every SaaS v1 work item and
+A path-based `/s/<id>` form was evaluated against the hosted-layer routing needs and
 rejected: URL consumers (the session context-menu "copy/share link" surface and
 the deep-link opener) are shape-agnostic, and SaaS tenant routing is **host-based**
 (`app.<tenant>.<domain>`, `preview.<tenant>.<domain>`), so a per-tenant link is
