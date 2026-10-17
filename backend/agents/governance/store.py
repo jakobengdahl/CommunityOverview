@@ -192,10 +192,6 @@ def _decided_or_updated(p: Proposal) -> datetime:
     return p.decided_at or p.updated_at
 
 
-# SQL twin of ``is_redacted``.
-_SQL_REDACTED = "input_args = '{}' AND apply_result IS NULL AND apply_error IS NULL"
-
-
 def _to_epoch(dt: Optional[datetime]) -> Optional[float]:
     return dt.astimezone(timezone.utc).timestamp() if dt is not None else None
 
@@ -344,13 +340,17 @@ class SqliteProposalStore:
     ) -> List[Proposal]:
         want = None if redacted is None else int(redacted)
         with self._lock:
+            # The parenthesised predicate is the SQL twin of ``is_redacted``.
             rows = self._conn.execute(
-                f"""
+                """
                 SELECT * FROM proposals
                 WHERE status != ? AND COALESCE(decided_at, updated_at) < ?
-                  AND (? IS NULL OR ({_SQL_REDACTED}) = ?)
+                  AND (? IS NULL OR (
+                    input_args = '{}' AND apply_result IS NULL
+                    AND apply_error IS NULL
+                  ) = ?)
                 ORDER BY COALESCE(decided_at, updated_at) ASC
-                """,  # nosec B608 - fixed SQL fragment, values are bound
+                """,
                 (ProposalStatus.PENDING.value, _to_epoch(cutoff), want, want),
             ).fetchall()
             return [self._row_to_proposal(r) for r in rows]
@@ -363,11 +363,13 @@ class SqliteProposalStore:
             for proposal_id in dict.fromkeys(proposal_ids)
         ]
         return self._write_many(
-            f"""
+            """
             UPDATE proposals SET
-                input_args = '{{}}', apply_result = NULL, apply_error = NULL
-            WHERE id = ? AND status != ? AND NOT ({_SQL_REDACTED})
-            """,  # nosec B608 - fixed SQL fragment, values are bound
+                input_args = '{}', apply_result = NULL, apply_error = NULL
+            WHERE id = ? AND status != ? AND NOT (
+                input_args = '{}' AND apply_result IS NULL AND apply_error IS NULL
+            )
+            """,
             params,
         )
 

@@ -305,8 +305,11 @@ and `apply_error` are stripped (agent, tool, status, decider and timestamps
 stay); older than the retention, they are purged. A pending proposal is never
 redacted or purged, whatever its age. The floor, clamps and idempotence above
 hold for proposals too, and the audit record adds `proposals_redacted` and
-`proposals_purged` counts. The CLI sweeps `AGENTS_GOVERNANCE_DB` as well when it
-is set, and needs at least one of the two databases.
+`proposals_purged` counts. A failing proposal store is logged and flagged as
+`proposals_failed` in that record without undoing or hiding the run-history
+part of the sweep. The CLI sweeps `AGENTS_GOVERNANCE_DB` as well when it is
+set, needs at least one of the two databases, and exits 1 when the proposal
+part failed.
 
 ## 9. Public/private boundary
 

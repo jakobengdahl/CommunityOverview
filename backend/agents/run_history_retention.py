@@ -201,6 +201,7 @@ class SweepReport:
     purged: int
     proposals_redacted: int = 0
     proposals_purged: int = 0
+    proposals_failed: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -215,6 +216,7 @@ class SweepReport:
             "purged": self.purged,
             "proposals_redacted": self.proposals_redacted,
             "proposals_purged": self.proposals_purged,
+            "proposals_failed": self.proposals_failed,
         }
 
 
@@ -234,7 +236,8 @@ def sweep(
 
     Idempotent: a second sweep at the same ``now`` changes nothing. With
     ``dry_run`` the counts are what a real sweep would change, and the store is
-    left untouched. Store errors propagate; ``RetentionSweeper`` contains them.
+    left untouched. Run-store errors propagate; ``RetentionSweeper`` contains
+    them. A proposal-store error is logged and reported as ``proposals_failed``.
     """
     now = now or utcnow()
     redact_cutoff = (
@@ -271,18 +274,25 @@ def sweep(
         if dry_run:
             purged += abandoned
 
+    # Run-history changes are committed by now; a failing proposal store must
+    # not cost them their audit record, so its error is contained and reported.
     proposals_redacted = proposals_purged = 0
-    if proposal_store is not None and redact_cutoff is not None:
-        ids = [
-            p.id
-            for p in proposal_store.list_decided_older_than(
-                redact_cutoff, redacted=False
-            )
-        ]
-        proposals_redacted = len(ids) if dry_run else proposal_store.redact(ids)
-    if proposal_store is not None and purge_cutoff is not None:
-        ids = [p.id for p in proposal_store.list_decided_older_than(purge_cutoff)]
-        proposals_purged = len(ids) if dry_run else proposal_store.purge(ids)
+    proposals_failed = False
+    try:
+        if proposal_store is not None and redact_cutoff is not None:
+            ids = [
+                p.id
+                for p in proposal_store.list_decided_older_than(
+                    redact_cutoff, redacted=False
+                )
+            ]
+            proposals_redacted = len(ids) if dry_run else proposal_store.redact(ids)
+        if proposal_store is not None and purge_cutoff is not None:
+            ids = [p.id for p in proposal_store.list_decided_older_than(purge_cutoff)]
+            proposals_purged = len(ids) if dry_run else proposal_store.purge(ids)
+    except Exception:
+        logger.exception("Governance-proposal retention sweep failed")
+        proposals_failed = True
 
     report = SweepReport(
         swept_at=now,
@@ -296,6 +306,7 @@ def sweep(
         purged=purged,
         proposals_redacted=proposals_redacted,
         proposals_purged=proposals_purged,
+        proposals_failed=proposals_failed,
     )
     audit_logger.info("run-history retention sweep %s", json.dumps(report.to_dict()))
     return report
@@ -422,7 +433,7 @@ def main(argv: Optional[list] = None) -> int:
         if proposal_store is not None:
             proposal_store.close()
     print(json.dumps(report.to_dict(), indent=2))
-    return 0
+    return 1 if report.proposals_failed else 0
 
 
 if __name__ == "__main__":
