@@ -985,11 +985,28 @@ class TestReusedNodeId:
         assert result["success"] is False
         assert store.list(NS, "doc") == [record]
 
+    @pytest.mark.parametrize(
+        "extra_nodes, edges",
+        [
+            ([], [{"source": "doc", "target": "no-such-node"}]),
+            ([{"id": "actor", "type": "Actor", "name": "Dup"}], []),
+            (
+                [],
+                [
+                    {"id": "e1", "source": "doc", "target": "actor"},
+                    {"id": "e1", "source": "doc", "target": "actor"},
+                ],
+            ),
+        ],
+        ids=["bad-edge", "duplicate-later-in-batch", "duplicate-edge-id"],
+    )
+    @pytest.mark.parametrize("store_reread", [False, True], ids=["undo", "re-read"])
     def test_node_the_store_refuses_on_a_failed_call_moves_nothing(
-        self, service, store, monkeypatch
+        self, service, store, monkeypatch, extra_nodes, edges, store_reread
     ):
-        # A bad edge fails the call; persisting the node that landed is then
-        # refused by the store, which undoes it: it never stayed.
+        # The call fails part-way; persisting the node that landed is then
+        # refused by the store, which undoes it - or re-reads a graph where
+        # another writer's node holds the id. Ours never stayed.
         record = self._leave_orphan(service, store, monkeypatch)
         from backend.core.storage_backends import EntityRevisionConflict
 
@@ -997,15 +1014,15 @@ class TestReusedNodeId:
 
         def refused(changes, undo, *args, **kwargs):
             storage._undo(undo)
+            if store_reread:
+                theirs = Node(id="doc", type="Document", name="Theirs")
+                storage.nodes["doc"] = theirs
             raise EntityRevisionConflict("node", "doc", None, 3)
 
         monkeypatch.setattr(storage, "_commit", refused)
-        result = service.add_nodes(
-            [{"id": "doc", "type": "Document", "name": "New"}],
-            [{"source": "doc", "target": "no-such-node", "type": "RELATES_TO"}],
-        )
+        nodes = [{"id": "doc", "type": "Document", "name": "New"}, *extra_nodes]
+        result = service.add_nodes(nodes, edges)
         assert result["success"] is False
-        assert storage.get_node("doc") is None
         assert store.list(NS, "doc") == [record]
 
     def test_creates_without_leftovers_never_touch_the_store(
