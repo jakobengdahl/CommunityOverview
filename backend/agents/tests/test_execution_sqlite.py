@@ -391,15 +391,22 @@ def test_wal_switch_gives_up_after_the_busy_timeout(tmp_path, monkeypatch):
 
 def test_wal_switch_does_not_retry_other_errors(tmp_path, monkeypatch):
     """Only lock contention is retried; any other failure surfaces at once."""
-    proxies = _patch_connect(monkeypatch, failures=0)
+    attempts = []
+    real_connect = sqlite3.connect
 
-    def fail(sql, *args):
-        raise sqlite3.OperationalError("disk I/O error")
+    class Failing(_LockedOnWalSwitch):
+        def execute(self, sql, *args):
+            if sql == "PRAGMA journal_mode=WAL":
+                attempts.append(sql)
+                raise sqlite3.OperationalError("disk I/O error")
+            return self._conn.execute(sql, *args)
 
-    monkeypatch.setattr(_LockedOnWalSwitch, "execute", lambda self, sql, *a: fail(sql))
+    monkeypatch.setattr(
+        sqlite3, "connect", lambda *a, **k: Failing(real_connect(*a, **k), 0)
+    )
     with pytest.raises(sqlite3.OperationalError, match="disk I/O"):
         SqliteExecutionStore(tmp_path / "execution.db")
-    assert proxies[0].attempts == 0
+    assert len(attempts) == 1
 
 
 def test_concurrent_first_opens_of_a_fresh_file_all_succeed(tmp_path):
