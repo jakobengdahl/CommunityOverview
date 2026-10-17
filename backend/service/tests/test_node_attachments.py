@@ -946,8 +946,15 @@ class TestReusedNodeId:
         [
             ([], [{"source": "doc", "target": "no-such-node", "type": "RELATES_TO"}]),
             ([{"id": "actor", "type": "Actor", "name": "Dup"}], []),
+            (
+                [],
+                [
+                    {"id": "e1", "source": "doc", "target": "actor"},
+                    {"id": "e1", "source": "doc", "target": "actor"},
+                ],
+            ),
         ],
-        ids=["bad-edge", "duplicate-later-in-batch"],
+        ids=["bad-edge", "duplicate-later-in-batch", "duplicate-edge-id"],
     )
     def test_node_kept_by_a_failed_call_loses_the_leftovers_too(
         self, service, store, monkeypatch, extra_nodes, edges

@@ -267,6 +267,31 @@ def test_quarantine_failing_midway_leaves_every_blob_named_by_an_index(
         assert handle.read() == b"old"
 
 
+def test_quarantine_moves_a_record_whose_blob_is_already_gone(store):
+    old = _upload(store, "n1")
+    (store.root / hashed_key(NS) / hashed_key("n1") / "blobs" / old.id).unlink()
+    assert store.quarantine(NS, "n1", {old.id}) == 1
+    assert store.list(NS, "n1") == []
+
+
+def test_quarantines_in_the_same_instant_do_not_collide(store, monkeypatch):
+    import backend.core.attachment_store as module
+
+    fixed = module.datetime(2026, 1, 1, tzinfo=module.timezone.utc)
+
+    class FrozenDatetime(module.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed
+
+    first = _upload(store, "n1", b"first")
+    second = _upload(store, "n1", b"second")
+    monkeypatch.setattr(module, "datetime", FrozenDatetime)
+    store.quarantine(NS, "n1", {first.id})
+    store.quarantine(NS, "n1", {second.id})
+    assert len(list((store.root / hashed_key(NS) / ".quarantine").iterdir())) == 2
+
+
 def test_iter_nodes_reports_node_ids_from_the_index(store):
     _upload(store, "n1")
     _upload(store, "federated::g::x")
