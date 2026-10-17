@@ -1597,7 +1597,28 @@ class TestRelationshipTypesSanitizer:
         ]
         assert len(skipped) == 1
         assert "'BAD'" in skipped[0]
-        assert "description" in skipped[0]
+        assert "(field(s) description)" in skipped[0]
+
+    def test_non_object_entry_warning_reads_entry_not_a_field(self, tmp_path, caplog):
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            self._load(tmp_path, self._document({"USES": {}, "BAD": "nope"}))
+
+        skipped = [
+            r.getMessage()
+            for r in caplog.records
+            if "Skipping invalid schema.relationship_types" in r.getMessage()
+        ]
+        assert len(skipped) == 1
+        assert "(field(s) <entry>)" in skipped[0]
+
+    def test_absent_relationship_types_is_silent(self, tmp_path, caplog):
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            schema = self._load(
+                tmp_path, {"schema": {"node_types": {"Good": {"fields": ["name"]}}}}
+            )
+
+        assert "Good" in schema["node_types"]
+        assert not any("relationship_types" in r.getMessage() for r in caplog.records)
 
     @pytest.mark.parametrize("bad_value", [["USES"], None, "USES"])
     def test_non_object_relationship_types_is_ignored_not_fatal(
@@ -1607,6 +1628,7 @@ class TestRelationshipTypesSanitizer:
             schema = self._load(tmp_path, self._document(bad_value))
 
         assert "Good" in schema["node_types"]
+        assert schema["relationship_types"] == {}
         assert any(
             "schema.relationship_types must be an object" in r.getMessage()
             for r in caplog.records
@@ -1652,3 +1674,20 @@ class TestRestInterfacesNull:
         assert any(
             "rest_interfaces must be a list" in r.getMessage() for r in caplog.records
         )
+
+    def test_absent_rest_interfaces_is_silent(self, tmp_path, caplog):
+        from backend.config import config_loader
+
+        config_file = tmp_path / "schema_config.json"
+        config_file.write_text(
+            json.dumps({"schema": {"node_types": {"Good": {"fields": ["name"]}}}}),
+            encoding="utf-8",
+        )
+        os.environ["SCHEMA_FILE"] = str(config_file)
+        config_loader.reset_loader()
+
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            schema = config_loader.get_schema()
+
+        assert "Good" in schema["node_types"]
+        assert not any("rest_interfaces" in r.getMessage() for r in caplog.records)
