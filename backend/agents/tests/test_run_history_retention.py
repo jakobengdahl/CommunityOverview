@@ -423,6 +423,36 @@ class TestAbandonOrphanedRuns:
         assert run["error"] == ABANDONED_REASON
         assert run["finished_at"] == "2025-11-22T12:00:00Z"
 
+    def test_sweep_rechecks_age_at_write_time_against_the_purge_cutoff(self, store):
+        """A run that shows life after it was listed is not abandoned."""
+        policy = RetentionPolicy.from_values(retention_days=30)
+        job = store.enqueue(
+            ExecutionJob(
+                agent_id="a1",
+                kind=ExecutionKind.EVENT,
+                idempotency_key="revived",
+                run_at=T0 - timedelta(days=60),
+                created_at=T0 - timedelta(days=60),
+            )
+        )
+        store.claim_next("w", now=T0 - timedelta(days=60))
+
+        class RenewsAfterListing:
+            """Delegates to the store, renewing the lease once listing is done."""
+
+            def __getattr__(self, name):
+                return getattr(store, name)
+
+            def list_running_older_than(self, cutoff):
+                listed = store.list_running_older_than(cutoff)
+                assert [j.id for j in listed] == [job.id]
+                assert store.renew_lease(job.id, "w", now=T0 - timedelta(days=1))
+                return listed
+
+        report = sweep(RenewsAfterListing(), policy, now=T0)
+        assert (report.abandoned, report.redacted, report.purged) == (0, 0, 0)
+        assert store.get(job.id).state == ExecutionState.RUNNING
+
     def test_crashed_recorder_run_ages_out(self, store):
         """The motivating case: a run recorded at start, never finalized."""
         recorder = AgentRunRecorder(store)
