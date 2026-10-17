@@ -5,7 +5,7 @@ All functions are standalone; they receive storage, the authorization hook,
 and (where required) the federation manager as explicit parameters.
 """
 
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from backend.core import (
     Edge,
@@ -105,7 +105,10 @@ def add_nodes(
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
     expect_absent: bool = False,
+    on_nodes_landed: Optional[Callable[[List[str]], None]] = None,
 ) -> Dict[str, Any]:
+    """``on_nodes_landed`` gets the ids of the nodes this call left in the
+    graph, including those a failed call keeps."""
     denied = access.authorize_graph_access(
         hook, action=GRAPH_ACTION_MUTATE, target="add_nodes"
     )
@@ -178,6 +181,10 @@ def add_nodes(
         )
     except _WRITE_ERRORS as e:
         return write_error_result(e, added_node_ids=[], added_edge_ids=[])
+    if on_nodes_landed is not None:
+        on_nodes_landed(
+            result.added_node_ids if result.success else result.landed_node_ids
+        )
     response = serialize_add_result(result)
 
     if result.success:

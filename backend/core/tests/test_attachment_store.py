@@ -221,6 +221,52 @@ def test_quarantined_files_are_not_reported_as_a_node(store):
     assert len(list((store.root / hashed_key(NS) / ".quarantine").iterdir())) == 1
 
 
+def test_two_quarantines_of_one_node_keep_both_sets(store):
+    first = _upload(store, "n1", b"first")
+    store.quarantine(NS, "n1", {first.id})
+    second = _upload(store, "n1", b"second")
+    store.quarantine(NS, "n1", {second.id})
+    targets = list((store.root / hashed_key(NS) / ".quarantine").iterdir())
+    kept = {
+        blob.name: blob.read_bytes()
+        for target in targets
+        for blob in (target / "blobs").iterdir()
+    }
+    assert len(targets) == 2
+    assert kept == {first.id: b"first", second.id: b"second"}
+
+
+@pytest.mark.parametrize("step", ["blob link", "live index write"])
+def test_quarantine_failing_midway_leaves_every_blob_named_by_an_index(
+    store, monkeypatch, step
+):
+    old = _upload(store, "n1", b"old")
+    if step == "blob link":
+
+        def fail(*args, **kwargs):
+            raise OSError("cross-device link")
+
+        monkeypatch.setattr(os, "link", fail)
+    else:
+        real_write = store._write_index
+        writes = []
+
+        def fail(*args, **kwargs):
+            writes.append(args)
+            if len(writes) == 2:
+                raise OSError("disk full")
+            return real_write(*args, **kwargs)
+
+        monkeypatch.setattr(store, "_write_index", fail)
+    with pytest.raises(OSError):
+        store.quarantine(NS, "n1", {old.id})
+    monkeypatch.undo()
+    # The live index still names the blob, and it is still where it says.
+    assert store.list(NS, "n1") == [old]
+    with store.open_read(NS, "n1", old.id) as handle:
+        assert handle.read() == b"old"
+
+
 def test_iter_nodes_reports_node_ids_from_the_index(store):
     _upload(store, "n1")
     _upload(store, "federated::g::x")

@@ -555,21 +555,24 @@ class FileAttachmentStore:
                 / _QUARANTINE_DIR
                 / f"{hashed_key(node_id)}-{stamp}-{uuid.uuid4().hex[:8]}"
             )
-            # Quarantine index first, then the live one, then the blobs: a
-            # crash at any point leaves every file named by some index.
+            # Quarantine copy first (index, then hard links to the blobs),
+            # then the live index, then the live links: at every step each
+            # blob sits beside an index that names it.
             self._write_index(namespace, node_id, moved, node_dir=target)
+            (target / _BLOBS_DIR).mkdir(exist_ok=True)
+            live_blobs = []
+            for record in moved:
+                blob = self._blob_path(namespace, node_id, record.id)
+                try:
+                    os.link(blob, target / _BLOBS_DIR / record.id)
+                except FileNotFoundError:
+                    continue
+                live_blobs.append(blob)
             self._write_index(
                 namespace, node_id, [r for r in records if r.id not in attachment_ids]
             )
-            (target / _BLOBS_DIR).mkdir(exist_ok=True)
-            for record in moved:
-                try:
-                    os.replace(
-                        self._blob_path(namespace, node_id, record.id),
-                        target / _BLOBS_DIR / record.id,
-                    )
-                except FileNotFoundError:
-                    continue
+            for blob in live_blobs:
+                blob.unlink(missing_ok=True)
             return len(moved)
 
     # -- maintenance ---------------------------------------------------------

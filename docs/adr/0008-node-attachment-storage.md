@@ -549,7 +549,8 @@ changing this design.
   the attachment ids already recorded under that id. Only once the create has
   succeeded does it call `AttachmentStore.quarantine`, which moves exactly
   those records and their blobs to `<namespace_key>/.quarantine/` and logs a
-  warning. A refused create (the id is taken, perhaps by a node this
+  warning. A create call that fails part-way keeps the nodes that landed
+  before the failure, and their leftovers are quarantined too. A refused create (the id is taken, perhaps by a node this
   instance has not seen yet) moves nothing, and a file uploaded to the new
   node in between is not in the snapshot, so it stays. Nothing is deleted:
   a quarantined file may still be wanted, and only an operator can tell. A
@@ -606,7 +607,8 @@ python scripts/validate_attachments.py --attachments <root> --namespace <ns>
 
 It walks every node directory in the one namespace given (the argument is
 required, so one graph is never checked against another graph's files) and
-classifies each finding:
+classifies each finding. `.locks/` and `.quarantine/` (§8) are not node
+directories: they are neither checked nor pruned.
 
 | Class | Finding |
 |---|---|

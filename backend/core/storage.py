@@ -2969,6 +2969,7 @@ class GraphStorage:
                             added_edge_ids=[],
                             success=False,
                             message=f"Node with ID {node.id} already exists",
+                            landed_node_ids=[n.id for n in nodes_to_embed],
                         )
 
                     # Index before `nodes` - see _external_upsert_node for why.
@@ -3034,6 +3035,7 @@ class GraphStorage:
                             added_edge_ids=[],
                             success=False,
                             message=f"Edge with ID {edge.id} already exists",
+                            landed_node_ids=[n.id for n in nodes_to_embed],
                         )
 
                     self._validate_edge_applicability(edge)
@@ -3114,6 +3116,7 @@ class GraphStorage:
                     added_edge_ids=[],
                     success=False,
                     message=f"Error during add: {str(e)}",
+                    landed_node_ids=[n.id for n in nodes_to_embed],
                 )
 
     @property

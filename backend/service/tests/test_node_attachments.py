@@ -929,6 +929,67 @@ class TestReusedNodeId:
         assert result["success"] is True
         assert service.storage.get_node("doc") is not None
 
+    def test_failing_snapshot_never_fails_the_create(self, service, store, monkeypatch):
+        self._leave_orphan(service, store, monkeypatch)
+
+        def broken(*args, **kwargs):
+            raise OSError("unreadable")
+
+        monkeypatch.setattr(store, "list", broken)
+        result = service.add_nodes(
+            [{"id": "doc", "type": "Document", "name": "New"}], []
+        )
+        assert result["success"] is True
+
+    @pytest.mark.parametrize(
+        "extra_nodes, edges",
+        [
+            ([], [{"source": "doc", "target": "no-such-node", "type": "RELATES_TO"}]),
+            ([{"id": "actor", "type": "Actor", "name": "Dup"}], []),
+        ],
+        ids=["bad-edge", "duplicate-later-in-batch"],
+    )
+    def test_node_kept_by_a_failed_call_loses_the_leftovers_too(
+        self, service, store, monkeypatch, extra_nodes, edges
+    ):
+        orphan = self._leave_orphan(service, store, monkeypatch)
+        nodes = [{"id": "doc", "type": "Document", "name": "New"}, *extra_nodes]
+        result = service.add_nodes(nodes, edges)
+        assert result["success"] is False
+        assert "landed_node_ids" not in result
+        assert service.storage.get_node("doc") is not None
+        assert store.get_record(NS, "doc", orphan.id) is None
+
+    def test_create_refused_by_the_store_moves_nothing(
+        self, service, store, monkeypatch
+    ):
+        # The id is absent from this instance's view but taken in the store,
+        # e.g. by a node another instance created: its files are not leftovers.
+        record = self._leave_orphan(service, store, monkeypatch)
+        from backend.core.storage_backends import EntityRevisionConflict
+
+        def refused(*args, **kwargs):
+            raise EntityRevisionConflict("node", "doc", None, 3)
+
+        monkeypatch.setattr(service.storage, "add_nodes", refused)
+        result = service.add_nodes(
+            [{"id": "doc", "type": "Document", "name": "New"}], []
+        )
+        assert result["success"] is False
+        assert store.list(NS, "doc") == [record]
+
+    def test_creates_without_leftovers_never_touch_the_store(
+        self, service, store, monkeypatch
+    ):
+        calls = []
+        monkeypatch.setattr(store, "quarantine", lambda *a: calls.append(a) or 0)
+        _seed(store, "doc")
+        service.add_nodes([{"type": "Document", "name": "No id"}], [])
+        service.add_nodes([{"id": "fresh", "type": "Document", "name": "F"}], [])
+        service.add_nodes([{"id": "doc", "type": "Document", "name": "Live"}], [])
+        assert calls == []
+        assert not (store.root / hashed_key(NS) / ".quarantine").exists()
+
 
 class TestStreamCapUsesNodeBudget:
     def test_stream_without_length_stops_at_the_remaining_budget(self, service, store):
