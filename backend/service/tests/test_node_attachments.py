@@ -1218,3 +1218,38 @@ class TestAlignExtensionUnit:
         assert result.endswith(".pdf")
         assert len(result.encode("utf-8")) <= 255
         assert "�" not in result
+
+
+class TestSchemaClientSurface:
+    """Clients read ``allows_attachments`` unconditionally from both surfaces."""
+
+    @staticmethod
+    def _mcp_get_schema(service):
+        from unittest.mock import MagicMock, Mock
+
+        from backend.service import register_mcp_tools
+
+        mock_mcp = Mock()
+        mock_mcp.tool = MagicMock(return_value=lambda f: f)
+        return register_mcp_tools(mock_mcp, service)["get_schema"]()
+
+    @pytest.fixture(params=["rest", "mcp"])
+    def payload(self, request, service, client):
+        if request.param == "rest":
+            response = client.get("/api/schema")
+            assert response.status_code == 200
+            return response.json()
+        return self._mcp_get_schema(service)
+
+    def test_every_node_type_carries_a_bool_flag(self, payload):
+        node_types = payload["node_types"]
+        assert {"Document", "Actor"} <= set(node_types)
+        for name, cfg in node_types.items():
+            assert isinstance(cfg["allows_attachments"], bool), name
+
+    def test_flag_reflects_the_declared_schema(self, payload):
+        assert payload["node_types"]["Document"]["allows_attachments"] is True
+        assert payload["node_types"]["Actor"]["allows_attachments"] is False
+
+    def test_payload_matches_the_loader_projection(self, payload):
+        assert payload == config_loader.get_schema()
