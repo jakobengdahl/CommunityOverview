@@ -44,7 +44,15 @@ The system generates events for:
 | `node.update` | An existing node was modified |
 | `node.delete` | A node was removed |
 | `edge.create` | A new edge was added |
+| `edge.update` | An existing edge was modified |
 | `edge.delete` | An edge was removed |
+
+A merge import (`POST /api/import/merge`, see
+[DATA_MANAGEMENT.md](DATA_MANAGEMENT.md#committing-a-merge-import)) fires these
+same events, one per entity it writes, with the caller's `x-event-origin` (or
+`graph-import-merge`) as origin — so an agent that lists its own origin in
+`ignore_origins` is not woken by its own merge. A whole-graph replace
+(`POST /api/import`) fires none.
 
 ## Subscription Configuration
 

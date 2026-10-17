@@ -1583,6 +1583,13 @@ _IMPORT_ERROR_STATUS = {
     "provenance_not_supported": 422,
     "import_plan_unstable": 503,
     "import_preview_busy": 503,
+    "plan_digest_required": 422,
+    "import_merge_blocked": 422,
+    "import_plan_stale": 409,
+    "import_merge_busy": 503,
+    "import_merge_not_supported": 501,
+    "write_failed": 502,
+    "write_outcome_unknown": 503,
 }
 
 # A generous cap on the whole multipart upload for POST /import/archive: a
@@ -1697,6 +1704,33 @@ def _register_import_endpoints(
         # caps), so it runs in a worker thread rather than on the event loop.
         with use_request_authorization(headers=request.headers):
             result = await run_in_threadpool(service.preview_merge_import, body)
+        _raise_for_access_denied(result)
+        if not result.get("success", True):
+            status_code = _IMPORT_ERROR_STATUS.get(result.get("error_code"), 400)
+            raise HTTPException(status_code=status_code, detail=result)
+        return result
+
+    @router.post("/import/merge")
+    async def commit_merge_import(
+        request: Request, body: Dict[str, Any] = Body(...)
+    ) -> Dict[str, Any]:
+        """
+        Merge ``body.document`` into the live graph (ADR 0013, slice 2):
+        the request of a preview plus its ``plan_digest``. The plan is
+        recomputed and must still have that digest (409
+        ``import_plan_stale`` with the current plan otherwise); the whole
+        graph is backed up first; the merge then applies all-or-nothing.
+        Same access as the preview.
+        """
+        # Plans twice and writes a whole-graph backup: off the event loop.
+        with use_request_authorization(headers=request.headers):
+            result = await run_in_threadpool(
+                service.commit_merge_import,
+                body,
+                import_job_store,
+                event_origin=request.headers.get("x-event-origin"),
+                event_correlation_id=request.headers.get("x-correlation-id"),
+            )
         _raise_for_access_denied(result)
         if not result.get("success", True):
             status_code = _IMPORT_ERROR_STATUS.get(result.get("error_code"), 400)
