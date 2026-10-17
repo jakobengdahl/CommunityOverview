@@ -15,7 +15,11 @@ from fastapi.testclient import TestClient
 
 from backend.config import config_loader
 from backend.core import GraphStorage, Node
-from backend.core.attachment_store import AttachmentLimits, FileAttachmentStore
+from backend.core.attachment_store import (
+    AttachmentLimits,
+    FileAttachmentStore,
+    hashed_key,
+)
 from backend.core.attachment_types import PDF, TEXT
 from backend.runtime.authorization import (
     GRAPH_ACTION_READ,
@@ -848,6 +852,190 @@ class TestNodeDeleteIsolation:
         result = service.delete_nodes(["doc"], confirmed=True)
         assert result["deleted_node_ids"] == ["doc"]
         assert service.storage.get_node("doc") is None
+
+
+class TestReusedNodeId:
+    """A node id created again never inherits the files of the node it had."""
+
+    def _leave_orphan(self, service, store, monkeypatch, node_id="doc"):
+        record = _seed(store, node_id)
+        # The graph delete succeeds but the attachment cleanup does not.
+        monkeypatch.setattr(store, "delete_node", lambda *a, **k: 0)
+        service.delete_nodes([node_id], confirmed=True)
+        monkeypatch.undo()
+        assert store.list(NS, node_id) == [record]
+        return record
+
+    def test_recreated_id_lists_none_of_the_deleted_nodes_files(
+        self, service, client, store, monkeypatch
+    ):
+        orphan = self._leave_orphan(service, store, monkeypatch)
+        result = service.add_nodes(
+            [{"id": "doc", "type": "Document", "name": "New"}], []
+        )
+        assert result["success"] is True
+        response = client.get("/api/nodes/doc/attachments")
+        assert response.json()["attachments"] == []
+        assert client.get(f"/api/nodes/doc/attachments/{orphan.id}").status_code == 404
+        # Quarantined, not destroyed.
+        quarantine = store.root / hashed_key(NS) / ".quarantine"
+        (target,) = quarantine.iterdir()
+        assert (target / "blobs" / orphan.id).read_bytes() == b"seeded"
+
+    def test_new_nodes_own_uploads_are_kept(self, service, client, store, monkeypatch):
+        self._leave_orphan(service, store, monkeypatch)
+        service.add_nodes([{"id": "doc", "type": "Document", "name": "New"}], [])
+        uploaded = _upload(client, "doc").json()
+        listed = client.get("/api/nodes/doc/attachments").json()["attachments"]
+        assert [r["id"] for r in listed] == [uploaded["id"]]
+
+    def test_upload_landing_between_create_and_quarantine_is_kept(
+        self, service, store, monkeypatch
+    ):
+        orphan = self._leave_orphan(service, store, monkeypatch)
+        real_add = service.storage.add_nodes
+        landed = []
+
+        def add_then_upload(*args, **kwargs):
+            result = real_add(*args, **kwargs)
+            landed.append(_seed(store, "doc", b"fresh"))
+            return result
+
+        monkeypatch.setattr(service.storage, "add_nodes", add_then_upload)
+        service.add_nodes([{"id": "doc", "type": "Document", "name": "New"}], [])
+        assert store.list(NS, "doc") == landed
+        assert store.get_record(NS, "doc", orphan.id) is None
+
+    def test_refused_create_leaves_a_live_nodes_files_alone(self, service, store):
+        record = _seed(store, "doc")
+        result = service.add_nodes(
+            [{"id": "doc", "type": "Document", "name": "Dup"}], []
+        )
+        assert result["success"] is False
+        assert store.list(NS, "doc") == [record]
+
+    def test_failing_quarantine_never_fails_the_create(
+        self, service, store, monkeypatch
+    ):
+        self._leave_orphan(service, store, monkeypatch)
+
+        def broken(*args, **kwargs):
+            raise OSError("read-only filesystem")
+
+        monkeypatch.setattr(store, "quarantine", broken)
+        result = service.add_nodes(
+            [{"id": "doc", "type": "Document", "name": "New"}], []
+        )
+        assert result["success"] is True
+        assert service.storage.get_node("doc") is not None
+
+    def test_failing_snapshot_never_fails_the_create(self, service, store, monkeypatch):
+        self._leave_orphan(service, store, monkeypatch)
+
+        def broken(*args, **kwargs):
+            raise OSError("unreadable")
+
+        monkeypatch.setattr(store, "list", broken)
+        result = service.add_nodes(
+            [{"id": "doc", "type": "Document", "name": "New"}], []
+        )
+        assert result["success"] is True
+
+    @pytest.mark.parametrize(
+        "extra_nodes, edges",
+        [
+            ([], [{"source": "doc", "target": "no-such-node", "type": "RELATES_TO"}]),
+            ([{"id": "actor", "type": "Actor", "name": "Dup"}], []),
+            (
+                [],
+                [
+                    {"id": "e1", "source": "doc", "target": "actor"},
+                    {"id": "e1", "source": "doc", "target": "actor"},
+                ],
+            ),
+        ],
+        ids=["bad-edge", "duplicate-later-in-batch", "duplicate-edge-id"],
+    )
+    def test_node_kept_by_a_failed_call_loses_the_leftovers_too(
+        self, service, store, monkeypatch, extra_nodes, edges
+    ):
+        orphan = self._leave_orphan(service, store, monkeypatch)
+        nodes = [{"id": "doc", "type": "Document", "name": "New"}, *extra_nodes]
+        result = service.add_nodes(nodes, edges)
+        assert result["success"] is False
+        assert "landed_node_ids" not in result
+        assert service.storage.get_node("doc") is not None
+        assert store.get_record(NS, "doc", orphan.id) is None
+
+    def test_create_refused_by_the_store_moves_nothing(
+        self, service, store, monkeypatch
+    ):
+        # The id is absent from this instance's view but taken in the store,
+        # e.g. by a node another instance created: its files are not leftovers.
+        record = self._leave_orphan(service, store, monkeypatch)
+        from backend.core.storage_backends import EntityRevisionConflict
+
+        def refused(*args, **kwargs):
+            raise EntityRevisionConflict("node", "doc", None, 3)
+
+        monkeypatch.setattr(service.storage, "add_nodes", refused)
+        result = service.add_nodes(
+            [{"id": "doc", "type": "Document", "name": "New"}], []
+        )
+        assert result["success"] is False
+        assert store.list(NS, "doc") == [record]
+
+    @pytest.mark.parametrize(
+        "extra_nodes, edges",
+        [
+            ([], [{"source": "doc", "target": "no-such-node"}]),
+            ([{"id": "actor", "type": "Actor", "name": "Dup"}], []),
+            (
+                [],
+                [
+                    {"id": "e1", "source": "doc", "target": "actor"},
+                    {"id": "e1", "source": "doc", "target": "actor"},
+                ],
+            ),
+        ],
+        ids=["bad-edge", "duplicate-later-in-batch", "duplicate-edge-id"],
+    )
+    @pytest.mark.parametrize("store_reread", [False, True], ids=["undo", "re-read"])
+    def test_node_the_store_refuses_on_a_failed_call_moves_nothing(
+        self, service, store, monkeypatch, extra_nodes, edges, store_reread
+    ):
+        # The call fails part-way; persisting the node that landed is then
+        # refused by the store, which undoes it - or re-reads a graph where
+        # another writer's node holds the id. Ours never stayed.
+        record = self._leave_orphan(service, store, monkeypatch)
+        from backend.core.storage_backends import EntityRevisionConflict
+
+        storage = service.storage
+
+        def refused(changes, undo, *args, **kwargs):
+            storage._undo(undo)
+            if store_reread:
+                theirs = Node(id="doc", type="Document", name="Theirs")
+                storage.nodes["doc"] = theirs
+            raise EntityRevisionConflict("node", "doc", None, 3)
+
+        monkeypatch.setattr(storage, "_commit", refused)
+        nodes = [{"id": "doc", "type": "Document", "name": "New"}, *extra_nodes]
+        result = service.add_nodes(nodes, edges)
+        assert result["success"] is False
+        assert store.list(NS, "doc") == [record]
+
+    def test_creates_without_leftovers_never_touch_the_store(
+        self, service, store, monkeypatch
+    ):
+        calls = []
+        monkeypatch.setattr(store, "quarantine", lambda *a: calls.append(a) or 0)
+        _seed(store, "doc")
+        service.add_nodes([{"type": "Document", "name": "No id"}], [])
+        service.add_nodes([{"id": "fresh", "type": "Document", "name": "F"}], [])
+        service.add_nodes([{"id": "doc", "type": "Document", "name": "Live"}], [])
+        assert calls == []
+        assert not (store.root / hashed_key(NS) / ".quarantine").exists()
 
 
 class TestStreamCapUsesNodeBudget:

@@ -269,6 +269,18 @@ class GraphService:
         event_correlation_id: Optional[str] = None,
         expect_absent: bool = False,
     ) -> Dict[str, Any]:
+        # Files left under an id whose node was deleted must not become the
+        # new node's (ADR 0008 sec 8): note them now, quarantine them once
+        # the node is in the graph.
+        leftovers = attachments.leftover_attachments_of_absent_nodes(
+            self._storage,
+            self._attachment_settings,
+            [
+                n["id"]
+                for n in nodes
+                if isinstance(n, dict) and isinstance(n.get("id"), str)
+            ],
+        )
         return mutations.add_nodes(
             self._storage,
             self._authorization_hook,
@@ -278,6 +290,9 @@ class GraphService:
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
             expect_absent=expect_absent,
+            on_nodes_landed=lambda landed: attachments.quarantine_leftover_attachments(
+                self._attachment_settings, leftovers, landed
+            ),
         )
 
     def resolve_teleport(

@@ -21,6 +21,9 @@ data/
 named by a hash of the node id, holding an `index.json` and the files under
 server-minted ids. It is never part of `graph.json` or `GET /export`, so back
 it up on its own; `ATTACHMENT_DIR` moves it (see `backend/DEVELOPMENT.md`).
+Files left behind by a deleted node are moved to a `.quarantine/` directory
+beside the node directories when a new node is created with the same id, so
+they never show up as the new node's attachments.
 
 ## How It Works
 
