@@ -212,7 +212,7 @@ class TestFloor:
     def test_retention_below_floor_never_purges_younger_than_floor(self, proposals):
         assert RETENTION_FLOOR_DAYS == 7
         policy = RetentionPolicy.from_values(retention_days=1)
-        inside = _proposal(proposals, decided_days_ago=6)
+        inside = _proposal(proposals, decided_days_ago=7)
         outside = _proposal(proposals, decided_days_ago=8)
         sweep(None, policy, now=T0, proposal_store=proposals)
         assert proposals.get(inside.id) is not None
@@ -318,6 +318,22 @@ class TestCli:
         monkeypatch.setenv("AGENTS_RUN_HISTORY_RETENTION_DAYS", "30")
         assert main([]) == 2
         assert not (tmp_path / "absent.db").exists()
+
+    def test_failing_proposal_sweep_exits_one_and_says_so(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        db = tmp_path / "governance.db"
+        SqliteProposalStore(db).close()
+
+        def broken(*args, **kwargs):
+            raise RuntimeError("db locked")
+
+        monkeypatch.setattr(SqliteProposalStore, "list_decided_older_than", broken)
+        monkeypatch.delenv("AGENTS_RUN_HISTORY_DB", raising=False)
+        monkeypatch.setenv("AGENTS_GOVERNANCE_DB", str(db))
+        monkeypatch.setenv("AGENTS_RUN_HISTORY_RETENTION_DAYS", "30")
+        assert main([]) == 1
+        assert json.loads(capsys.readouterr().out)["proposals_failed"] is True
 
     def test_no_database_set_exits_nonzero(self, monkeypatch):
         monkeypatch.delenv("AGENTS_RUN_HISTORY_DB", raising=False)
