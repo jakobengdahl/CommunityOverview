@@ -6,6 +6,7 @@ write but broke FastAPI's default response encoding, so the node's own reads
 and every export failed. See backend/service/json_response.py.
 """
 
+import enum
 import inspect
 import json
 import os
@@ -204,6 +205,28 @@ class TestRenderingOfOrdinaryContent:
         assert body == '{"t":[null,1],"x":[null,"å"],"y":[null,"å"],"2":true}'.encode()
         assert content["x"] == [float("-inf"), "å"]
 
+    def test_fallback_matches_json_dumps_on_awkward_values(self):
+        # The NaN sends rendering down the iterative path; everything else
+        # must come out exactly as json.dumps writes it.
+        awkward = {
+            "none": None,
+            "text": 'quote " backslash \\ newline \n å',
+            "tuple": (1, 2.5, -0.0, 10**30),
+            True: False,
+            2.5: "float key",
+            None: "none key",
+        }
+        expected = json.dumps(awkward, ensure_ascii=False, separators=(",", ":"))
+
+        body = GraphJSONResponse({"nan": float("nan"), "v": awkward}).body
+
+        assert body == ('{"nan":null,"v":' + expected + "}").encode("utf-8")
+
+    def test_fallback_escapes_a_lone_surrogate(self):
+        body = GraphJSONResponse({"nan": float("nan"), "s": LONE_SURROGATE}).body
+
+        assert body == b'{"nan":null,"s":"\\ud800"}'
+
     def test_circular_content_is_reported_not_looped(self):
         content: list = [float("nan")]
         content.append(content)
@@ -277,6 +300,18 @@ class TestSerializeToJson:
         assert converted["1"][1] != converted["1"][1]  # NaN survives, as in json
         assert 1 in data and isinstance(data[1], tuple)
 
+    def test_iterative_fallback_turns_subclasses_into_base_types(self):
+        class Kind(str, enum.Enum):
+            A = "a"
+
+        class Level(enum.IntEnum):
+            HIGH = 3
+
+        converted = _to_json_native({"k": Kind.A, "n": Level.HIGH})
+
+        assert type(converted["k"]) is str and converted["k"] == "a"
+        assert type(converted["n"]) is int and converted["n"] == 3
+
     def test_iterative_fallback_equals_the_json_round_trip(self):
         # Exercised directly: on Python 3.13 json.dumps itself copes with
         # 3000 levels, so the test above takes the fallback only on 3.11.
@@ -286,5 +321,7 @@ class TestSerializeToJson:
 
         expected = json.loads(json.dumps(data, default=lambda o: o.isoformat()))
 
-        assert _to_json_native(data) == expected
+        converted = _to_json_native(data)
+        assert converted == expected
+        assert type(converted["t"][2]) is bool
         assert _depth(_to_json_native(_nested(3000))) == 3000
