@@ -1484,7 +1484,13 @@ class TestAllowsAttachmentsSchemaField:
             os.environ["SCHEMA_FILE"] = str(profile)
             config_loader.reset_loader()
             node_types = config_loader.get_schema()["node_types"]
-            assert node_types, f"{profile.parent.name} loaded no node types"
+            declared = set(
+                json.loads(profile.read_text(encoding="utf-8"))["schema"]["node_types"]
+            )
+            assert declared, f"{profile.parent.name} declares no node types"
+            assert declared <= set(node_types), (
+                f"{profile.parent.name} fell back to defaults instead of loading"
+            )
             declaring = [
                 name for name, cfg in node_types.items() if "en" in cfg["labels"]
             ]
