@@ -412,13 +412,19 @@ What happens, in order:
    backup path, the embeddings job id and every created, overwritten and
    renamed entity with its resulting revision. It is written after the
    graph commit, in a separate store, so it is best-effort:
-   `audit_recorded: false` reports a merge that committed without one. The
-   record also keeps the caller's attribution (actor and scope), since the
-   origin and correlation id are whatever the caller sent. Its
+   `audit_recorded: false` reports a merge that committed without one (a
+   commit that writes nothing returns `null`). The record also keeps the
+   request's attribution (actor and scope) as the request context reports
+   it; in the open core that comes from request headers, so it is only as
+   trustworthy as whatever sets them in front of the service. Its
    `merge_status` is `committed`, or `outcome_unknown` for a merge answered
-   with 503 `write_outcome_unknown`: that merge stays applied in memory and
-   the next write persists it, without events, so the record (with its
-   `import_id` in the error response) is the trace it leaves.
+   with 503 `write_outcome_unknown`. Such a merge stays applied in memory
+   and can still become durable with the next write that lands (a restart
+   before then drops it). It fires no events and queues no embeddings job,
+   so its nodes have no vectors until they are embedded again, for example
+   with `scripts/generate_embeddings.py`. The record, whose `import_id` the
+   error response carries, is the trace it leaves; check it before retrying,
+   since a retry would find the merge's own writes and may plan nothing.
 
 A commit may omit `plan_digest` only when every policy is `fail` or `skip`
 and `include_system_types` is false — a merge that can only add and so can

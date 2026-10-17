@@ -843,8 +843,12 @@ def _commit_merge(
             "backup_path": None,
             "job_id": None,
             "embeddings_status": "not_needed",
-            "audit_recorded": False,
-            "message": "The plan writes nothing; the graph was not changed.",
+            # None, not False: no record was due, none was lost.
+            "audit_recorded": None,
+            "message": (
+                "This request writes nothing: every entry is skipped, unchanged "
+                "or excluded."
+            ),
         }
 
     backup_path = _write_backup(storage)
@@ -1059,8 +1063,9 @@ def _record_merge(
 
     ``status`` is ``committed``, or ``outcome_unknown`` for a merge kept in
     memory whose write could not be confirmed (no revisions then). The
-    caller's attribution is recorded, since origin and correlation are
-    caller-chosen. Written after the graph commit, in a separate store, so
+    request's attribution is recorded as the request context reports it
+    (header-derived in the open core, so as trustworthy as whatever sets
+    those headers). Written after the graph commit, in a separate store, so
     it is best-effort: a crash or a store failure between the two leaves a
     merge without a record, reported as ``audit_recorded: false``.
     """

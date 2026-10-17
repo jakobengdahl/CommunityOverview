@@ -157,17 +157,20 @@ above:
 - **Failure after hand-over** on the file backend: a batch whose journal
   write and whole-graph re-save both failed raises `write_outcome_unknown`
   with memory keeping the merge, no events, and the next write re-saving the
-  whole graph. Since that merge can still become durable unannounced, it
-  gets an audit record too, with `merge_status: "outcome_unknown"` and no
-  revisions.
+  whole graph. Since that merge can still become durable unannounced (and
+  without an embeddings job), it gets an audit record too, with
+  `merge_status: "outcome_unknown"` and no revisions.
 - **A plan that writes nothing** (every entry skipped, unchanged or
   excluded) is answered after the first plan with zero counts: no backup, no
   lock, no record. There is no write for the §3 checks to protect, and a
   digest-less `skip` commit repeated in a loop would otherwise write a
   whole-graph backup each time.
-- **Audit record.** A terminal `SUCCEEDED` IMPORT job whose id is the
-  `import_id` and whose payload carries `phase: "merge"` and the request's
-  attribution (actor and scope; origin and correlation are caller-chosen); the merge's
+- **Audit record.** A terminal IMPORT job whose id is the `import_id`. Its
+  job state is `SUCCEEDED` (the record was written); `result.merge_status`
+  says whether the merge was confirmed. Its payload carries `phase: "merge"`
+  and the request's attribution (actor and scope) as the request context
+  reports it, which in the open core is header-derived and so only as
+  trustworthy as what sets those headers; the merge's
   embeddings job carries `mode: "merge"` and the `import_id`. `GET /import`
   rows gain `mode` (`replace` for every row written before this slice).
 - **Events** fire in write order (node creates, node overwrites, edge
