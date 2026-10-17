@@ -53,6 +53,7 @@ from .storage_backends import (
     capabilities_of,
     refused_outright,
 )
+from .storage_merge import ImportMergeUnsupported, MergeApplied, MergeWrites
 from .vector_store import VectorStore, dominant_dimension, matching_dimension
 from . import storage_search
 from . import storage_history
@@ -3310,6 +3311,185 @@ class GraphStorage:
                 self.vector_store.absorb_embeddings(vectors)
                 self.save().result()
             return True
+
+    @property
+    def supports_import_merge(self) -> bool:
+        """Whether ``apply_import_merge`` can run on this backend (ADR 0013
+        §6): not on a store that assigns revisions, until slice 3."""
+        return not self._store_assigns_revisions
+
+    def apply_import_merge(
+        self,
+        prepare: Callable[[], MergeWrites],
+        event_context: Optional[EventContext] = None,
+    ) -> MergeApplied:
+        """Apply one merge import commit all-or-nothing (ADR 0013 §4).
+
+        ``prepare`` runs under ``_lock``, before anything changes, and returns
+        the writes; the caller recomputes its plan there, so every live read
+        the plan relied on is taken from a model no other writer can move
+        until this returns, and raises to refuse the commit. Each create then
+        expects its id absent and each overwrite the revision the plan read.
+        Memory is changed, the vectors of created nodes and of overwritten
+        nodes whose embedding text changed are dropped, and the whole merge
+        goes to the store as one batch through ``_commit``: fresh revisions
+        for the written entities only, ``generation`` unchanged. The dropped
+        vectors travel with that batch on the file backend: the sidecar is
+        written before the journal record, as for every write that moves a
+        vector.
+
+        A refused expectation, or any failure before the batch is handed to
+        the store, puts memory back and fires nothing. A batch that failed
+        after hand-over and could not be re-saved keeps the merge in memory
+        and raises ``GraphWriteOutcomeUnknown``; no event fires. Otherwise one
+        ordinary create or update event fires per written entity.
+
+        Raises:
+            ImportMergeUnsupported: the store assigns revisions.
+            EntityRevisionConflict, GraphWriteFailed, GraphWriteOutcomeUnknown:
+                as for every direct write (§4.4).
+            Whatever ``prepare`` raises, with nothing changed.
+        """
+        with self._lock:
+            if self._store_assigns_revisions:
+                raise ImportMergeUnsupported(
+                    "merge import is not supported on a store that assigns "
+                    "revisions yet"
+                )
+            writes = prepare()
+
+            expectations: Dict[Tuple[str, str], Any] = {}
+            for node in writes.node_creates:
+                self._check_expectation(
+                    "node", node.id, self.nodes.get(node.id), EXPECT_ABSENT
+                )
+                expectations[("node", node.id)] = EXPECT_ABSENT
+            for overwrite in writes.node_overwrites:
+                self._check_expectation(
+                    "node",
+                    overwrite.node_id,
+                    self.nodes.get(overwrite.node_id),
+                    overwrite.expected_revision,
+                )
+                expectations[("node", overwrite.node_id)] = overwrite.expected_revision
+            for edge in writes.edge_creates:
+                self._check_expectation(
+                    "edge", edge.id, self.edges.get(edge.id), EXPECT_ABSENT
+                )
+                expectations[("edge", edge.id)] = EXPECT_ABSENT
+            for overwrite in writes.edge_overwrites:
+                self._check_expectation(
+                    "edge",
+                    overwrite.edge_id,
+                    self.edges.get(overwrite.edge_id),
+                    overwrite.expected_revision,
+                )
+                expectations[("edge", overwrite.edge_id)] = overwrite.expected_revision
+
+            undo = self._capture(
+                node_ids=[node.id for node in writes.node_creates]
+                + [overwrite.node_id for overwrite in writes.node_overwrites],
+                edge_ids=[edge.id for edge in writes.edge_creates]
+                + [overwrite.edge_id for overwrite in writes.edge_overwrites],
+            )
+            node_befores: Dict[str, Dict[str, Any]] = {}
+            edge_befores: Dict[str, Dict[str, Any]] = {}
+            changes: List[Tuple[str, str, Any]] = []
+            try:
+                now = datetime.now(timezone.utc)
+                for node in writes.node_creates:
+                    # Vectors come from the embedding job, never the document.
+                    node.embedding = None
+                    # Index before `nodes`, as everywhere that adds.
+                    self._searchable_text_cache[node.id] = self._build_match_fields(
+                        node
+                    )
+                    self.nodes[node.id] = node
+                    self.graph.add_node(node.id, data=node)
+                    changes.append(("node", "upsert", node))
+                for overwrite in writes.node_overwrites:
+                    node = self.nodes[overwrite.node_id]
+                    node_befores[node.id] = node.to_dict()
+                    for name, value in overwrite.fields.items():
+                        setattr(node, name, value)
+                    node.updated_at = now
+                    self.graph.nodes[node.id]["data"] = node
+                    self._searchable_text_cache[node.id] = self._build_match_fields(
+                        node
+                    )
+                    changes.append(("node", "upsert", node))
+                for edge in writes.edge_creates:
+                    # networkx would add a missing endpoint as a bare node.
+                    if edge.source not in self.nodes or edge.target not in self.nodes:
+                        raise ValueError(f"edge '{edge.id}' names a missing node")
+                    self.edges[edge.id] = edge
+                    self.graph.add_edge(
+                        edge.source, edge.target, key=edge.id, data=edge
+                    )
+                    changes.append(("edge", "upsert", edge))
+                for overwrite in writes.edge_overwrites:
+                    edge = self.edges[overwrite.edge_id]
+                    edge_befores[edge.id] = edge.to_dict()
+                    for name, value in overwrite.fields.items():
+                        setattr(edge, name, value)
+                    changes.append(("edge", "upsert", edge))
+                self.vector_store.remove_nodes_embeddings(
+                    [node.id for node in writes.node_creates]
+                    + [o.node_id for o in writes.node_overwrites if o.drop_vector]
+                )
+            except BaseException:
+                self._undo(undo)
+                raise
+
+            try:
+                self._commit(changes, undo, expectations)
+            except (EntityRevisionConflict, GraphWriteFailed, GraphWriteOutcomeUnknown):
+                raise
+            except Exception as exc:
+                # The batch reached the store and neither it nor the
+                # whole-graph re-save landed: memory keeps the merge, and the
+                # next write carries the whole graph again.
+                self._resync_pending = True
+                logger.warning(f"a merge import could not be persisted: {exc}")
+                raise GraphWriteOutcomeUnknown(
+                    "the merge is applied in memory but could not be confirmed "
+                    "written; re-read before retrying"
+                ) from exc
+
+            revisions: Dict[Tuple[str, str], int] = {}
+            for kind, _, entity in changes:
+                revisions[(kind, entity.id)] = entity.revision
+                if kind == "node":
+                    before = node_befores.get(entity.id)
+                    self._emit_event(
+                        event_type=(
+                            EventType.NODE_CREATE
+                            if before is None
+                            else EventType.NODE_UPDATE
+                        ),
+                        entity_kind=EntityKind.NODE,
+                        entity_id=entity.id,
+                        entity_type=entity.type_str,
+                        before=before,
+                        after=entity.to_dict(),
+                        context=event_context,
+                    )
+                else:
+                    before = edge_befores.get(entity.id)
+                    self._emit_event(
+                        event_type=(
+                            EventType.EDGE_CREATE
+                            if before is None
+                            else EventType.EDGE_UPDATE
+                        ),
+                        entity_kind=EntityKind.EDGE,
+                        entity_id=entity.id,
+                        entity_type=entity.type_str,
+                        before=before,
+                        after=entity.to_dict(),
+                        context=event_context,
+                    )
+            return MergeApplied(revisions=revisions, events=len(changes))
 
     def update_node(
         self,
