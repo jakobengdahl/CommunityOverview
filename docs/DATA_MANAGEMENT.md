@@ -418,13 +418,17 @@ What happens, in order:
    it; in the open core that comes from request headers, so it is only as
    trustworthy as whatever sets them in front of the service. Its
    `merge_status` is `committed`, or `outcome_unknown` for a merge answered
-   with 503 `write_outcome_unknown`. Such a merge stays applied in memory
-   and can still become durable with the next write that lands (a restart
-   before then drops it). It fires no events and queues no embeddings job,
-   so its nodes have no vectors until they are embedded again, for example
-   with `scripts/generate_embeddings.py`. The record, whose `import_id` the
-   error response carries, is the trace it leaves; check it before retrying,
-   since a retry would find the merge's own writes and may plan nothing.
+   with 503 `write_outcome_unknown`. Whether such a merge survives is not
+   known when it is answered: it is applied in memory, it may already have
+   reached the store, and the next write that lands (or a clean shutdown)
+   saves the whole graph with it, while a crash before then can lose what
+   had not reached the store. It fires no events and queues no embeddings
+   job, so the nodes it created or rewrote have no vectors until they are
+   embedded again. The record, whose `import_id` the error response
+   carries, is the trace it leaves: check it and the live graph before
+   retrying. Against a merge that did land, a retry is refused as it would
+   be after a lost response (below); a fresh preview and commit of the same
+   document under `rename` would create its renamed copies a second time.
 
 A commit may omit `plan_digest` only when every policy is `fail` or `skip`
 and `include_system_types` is false — a merge that can only add and so can
@@ -432,9 +436,9 @@ be retried blindly; anything else is refused with `plan_digest_required`. A
 commit retried after a lost response is never applied twice: its own writes
 are now id collisions, so a `fail`-policy retry is refused as
 `import_merge_blocked`, any other retry carrying the digest as
-`import_plan_stale`, and a digest-less `skip`-policy retry succeeds having
-written nothing (though it writes another backup and audit record). Check
-`GET /api/import` for the first commit's record before retrying. One commit runs at a time (503
+`import_plan_stale`, and a digest-less `skip`-policy retry plans nothing
+and returns zero counts. Check `GET /api/import` for the first commit's
+record before retrying. One commit runs at a time (503
 `import_merge_busy`). A store failure is answered as for any direct write —
 502 `write_failed` (nothing changed) or 503 `write_outcome_unknown` — with
 the backup path. Merging is refused in PostgreSQL mode (501
