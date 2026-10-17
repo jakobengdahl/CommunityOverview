@@ -455,6 +455,54 @@ class TestEmbeddingsAndAudit:
         assert job_row["import_id"] == result["import_id"]
         assert client.get(f"/api/graph/import/{result['import_id']}").status_code == 200
 
+    def test_the_audit_record_carries_the_callers_attribution(self, storage, job_store):
+        seen = _events(storage)
+        result = _commit(_client(storage, job_store), _body()).json()
+        attribution = seen[0].origin.attribution
+        payload = job_store.get(result["import_id"]).payload
+        assert payload["attribution"] == (
+            attribution.to_dict() if attribution is not None else None
+        )
+
+    def test_the_embeddings_job_takes_the_callers_origin_and_correlation(
+        self, storage, job_store
+    ):
+        result = _commit(
+            _client(storage, job_store),
+            _body(),
+            **{"x-event-origin": "agent:importer", "x-correlation-id": "corr-9"},
+        ).json()
+        job = job_store.get(result["job_id"])
+        assert job.origin == "agent:importer"
+        assert job.correlation_id == "corr-9"
+
+    def test_an_unknown_outcome_is_still_recorded(
+        self, storage, job_store, monkeypatch
+    ):
+        storage.flush()
+        backend = storage._persistence_backend
+
+        def _fail(*args, **kwargs):
+            raise OSError("disk gone")
+
+        client = _client(storage, job_store)
+        body = _body()
+        digest = _preview(client, body)["plan_digest"]
+        monkeypatch.setattr(backend, "apply_batch", _fail)
+        monkeypatch.setattr(backend, "save_graph_data", _fail)
+        response = client.post(URL, json={**body, "plan_digest": digest})
+        monkeypatch.undo()
+
+        assert response.status_code == 503
+        detail = response.json()["detail"]
+        assert detail["error_code"] == "write_outcome_unknown"
+        assert detail["audit_recorded"] is True
+        record = job_store.get(detail["import_id"])
+        assert record.result == {"merge_status": "outcome_unknown"}
+        assert record.payload["outcomes"]["nodes"]["overwritten"] == [["a1", None]]
+        row = client.get(f"/api/graph/import/{detail['import_id']}").json()
+        assert row["merge_status"] == "outcome_unknown"
+
     def test_a_replace_row_keeps_its_mode(self, storage, job_store):
         client = _client(storage, job_store)
         client.post("/api/graph/import", json={"nodes": [], "edges": []})
@@ -558,6 +606,31 @@ class TestBinding:
         assert detail["plan"]["conflicts"]["count"] == 1
         assert _state(storage) == before
         assert _backups(storage) == []
+
+    def test_a_commit_that_writes_nothing_takes_no_backup_lock_or_record(
+        self, storage, job_store, monkeypatch
+    ):
+        def _no_lock(*args, **kwargs):
+            raise AssertionError("a no-op commit must not take the lock")
+
+        monkeypatch.setattr(storage, "apply_import_merge", _no_lock)
+        document = {
+            "nodes": [{"id": "a1", "type": "Actor", "name": "Changed"}],
+            "edges": [
+                {"id": "e1", "source": "a1", "target": "i1", "type": "BELONGS_TO"}
+            ],
+        }
+        before = _state(storage)
+        response = _client(storage, job_store).post(
+            URL, json=_body(document, policy={"default": "skip"})
+        )
+        assert response.status_code == 200, response.text
+        result = response.json()
+        assert result["import_id"] is None and result["backup_path"] is None
+        assert set(result["counts"].values()) == {0}
+        assert _state(storage) == before
+        assert _backups(storage) == []
+        assert job_store.list_jobs() == []
 
     def test_a_retried_commit_is_stale_not_reapplied(self, storage, job_store):
         client = _client(storage, job_store)
@@ -672,7 +745,9 @@ class TestWindowBetweenPlanAndLock:
         self, storage, job_store, monkeypatch
     ):
         document = {
-            "nodes": [],
+            # A create too, so the commit has something to write and takes the
+            # lock; a plan that writes nothing returns before it.
+            "nodes": [{"id": "n7", "type": "Actor", "name": "Seven"}],
             "edges": [
                 {"id": "dup", "source": "a1", "target": "i1", "type": "BELONGS_TO"}
             ],

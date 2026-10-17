@@ -157,9 +157,17 @@ above:
 - **Failure after hand-over** on the file backend: a batch whose journal
   write and whole-graph re-save both failed raises `write_outcome_unknown`
   with memory keeping the merge, no events, and the next write re-saving the
-  whole graph.
+  whole graph. Since that merge can still become durable unannounced, it
+  gets an audit record too, with `merge_status: "outcome_unknown"` and no
+  revisions.
+- **A plan that writes nothing** (every entry skipped, unchanged or
+  excluded) is answered after the first plan with zero counts: no backup, no
+  lock, no record. There is no write for the §3 checks to protect, and a
+  digest-less `skip` commit repeated in a loop would otherwise write a
+  whole-graph backup each time.
 - **Audit record.** A terminal `SUCCEEDED` IMPORT job whose id is the
-  `import_id` and whose payload carries `phase: "merge"`; the merge's
+  `import_id` and whose payload carries `phase: "merge"` and the request's
+  attribution (actor and scope; origin and correlation are caller-chosen); the merge's
   embeddings job carries `mode: "merge"` and the `import_id`. `GET /import`
   rows gain `mode` (`replace` for every row written before this slice).
 - **Events** fire in write order (node creates, node overwrites, edge
@@ -198,7 +206,9 @@ event — and a smaller share, about 1.5 s, in the plan recomputed under the
 lock. That is
 the existing per-event cost every direct write pays, now paid once per
 merged entity while live writes queue behind the lock (reads take no lock).
-The lock hold scales with the merged entities, not the graph, as §8 asks.
+The lock hold scales with the document (the plan recomputed under it) and
+the merged entities (the writes and their events), not with the graph, as §8
+asks.
 Whether a large merge should emit a capped or batched form instead (§7) is
 an event-contract change and is left to a decision on these figures; the
 delivery-queue depth at return was 0 only because the measurement's

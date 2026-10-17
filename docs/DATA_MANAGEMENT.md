@@ -369,7 +369,9 @@ What happens, in order:
    the parameters or a live entity the plan relied on changed, or the graph
    was replaced — is refused with `import_plan_stale`, carrying the current
    plan and its digest to review and commit instead. Nothing has been
-   written either way.
+   written either way. A plan that writes nothing — every entry skipped,
+   unchanged or excluded — returns here with `success: true`, zero counts
+   and no `import_id`: no backup, no lock, no record.
 3. **Back up.** The whole current graph is written to `import-backups/`
    exactly as `POST /api/import` does, and the merge is refused
    (`backup_failed`) if it cannot be. Every entity the merge overwrites is
@@ -387,7 +389,8 @@ What happens, in order:
    `renamed` as old → new pairs (at most 1,000 listed; `count` is exact).
    Live edges the document does not name are never deleted. Other writes
    wait while this step holds the lock (reads do not); it grows with the
-   number of entities merged, not the size of the graph — see ADR 0013,
+   size of the document and the number of entities merged, not the size of
+   the graph — see ADR 0013,
    "Slice 2 measurements", for figures.
 5. **Events.** One ordinary `node.create`, `node.update`, `edge.create` or
    `edge.update` event per written entity, after the batch lands. Their
@@ -409,7 +412,13 @@ What happens, in order:
    backup path, the embeddings job id and every created, overwritten and
    renamed entity with its resulting revision. It is written after the
    graph commit, in a separate store, so it is best-effort:
-   `audit_recorded: false` reports a merge that committed without one.
+   `audit_recorded: false` reports a merge that committed without one. The
+   record also keeps the caller's attribution (actor and scope), since the
+   origin and correlation id are whatever the caller sent. Its
+   `merge_status` is `committed`, or `outcome_unknown` for a merge answered
+   with 503 `write_outcome_unknown`: that merge stays applied in memory and
+   the next write persists it, without events, so the record (with its
+   `import_id` in the error response) is the trace it leaves.
 
 A commit may omit `plan_digest` only when every policy is `fail` or `skip`
 and `include_system_types` is false — a merge that can only add and so can

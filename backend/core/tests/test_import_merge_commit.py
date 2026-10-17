@@ -362,6 +362,22 @@ def test_a_merge_reports_the_generation_it_landed_at(make_storage):
     assert applied.generation == storage.generation
 
 
+@pytest.mark.parametrize("end", ["source", "target"])
+def test_an_edge_to_a_missing_node_is_refused_not_invented(make_storage, end):
+    storage = make_storage()
+    _seed(storage)
+    writes = _writes(storage)
+    ends = {"source": "a2", "target": "i1", end: "ghost"}
+    writes.edge_creates.append(Edge(id="e9", type="RELATES_TO", **ends))
+    before = _state(storage)
+
+    with pytest.raises(ValueError, match="missing node"):
+        storage.apply_import_merge(lambda: writes)
+
+    assert _state(storage) == before
+    assert not storage.graph.has_node("ghost")
+
+
 def test_a_failed_revision_reservation_undoes_the_merge(make_storage, monkeypatch):
     storage = make_storage()
     _seed(storage)
@@ -412,6 +428,7 @@ def test_a_batch_lost_after_hand_over_is_an_unknown_outcome_without_events(
     _seed(storage)
     storage.flush()
     backend = storage._persistence_backend
+    _vector(storage, "n1", 4.0)
     seen = _events(storage)
 
     def _fail(*args, **kwargs):
@@ -423,7 +440,9 @@ def test_a_batch_lost_after_hand_over_is_an_unknown_outcome_without_events(
     with pytest.raises(GraphWriteOutcomeUnknown):
         storage.apply_import_merge(lambda: _writes(storage))
 
-    # Memory keeps the merge (ADR §4 step 5); nothing announced it.
+    # Memory keeps the merge (ADR §4 step 5); nothing announced it, and the
+    # created node does not get the stray vector its id held back.
+    assert not storage.vector_store.has_embedding("n1")
     assert storage.nodes["a1"].name == "Alice B"
     assert "n1" in storage.nodes
     assert seen == []

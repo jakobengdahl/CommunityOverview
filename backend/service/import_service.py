@@ -57,6 +57,7 @@ from .serializers import serialize_edges, serialize_nodes
 if TYPE_CHECKING:
     from backend.agents.execution import ExecutionJob, ExecutionStore
     from backend.core import GraphStorage
+    from backend.core.events.models import EventContext
     from backend.core.storage_merge import MergeWrites
     from backend.runtime.authorization import GraphAuthorizationHook
 
@@ -826,6 +827,26 @@ def _commit_merge(
     # Without a caller digest the commit binds to the plan just computed.
     bound_digest = plan.digest
 
+    if not _plan_writes(plan.report):
+        # Every entry is skipped, unchanged or excluded: no backup, lock or
+        # record, so a repeated no-op commit costs a plan and nothing else.
+        return {
+            "success": True,
+            "import_id": None,
+            "plan": plan.report,
+            "plan_digest": bound_digest,
+            "counts": {key: 0 for key in _COUNT_KEYS},
+            "renamed": {
+                "nodes": graph_merge_plan.capped_renames({}),
+                "edges": graph_merge_plan.capped_renames({}),
+            },
+            "backup_path": None,
+            "job_id": None,
+            "embeddings_status": "not_needed",
+            "audit_recorded": False,
+            "message": "The plan writes nothing; the graph was not changed.",
+        }
+
     backup_path = _write_backup(storage)
     if backup_path is None:
         return {
@@ -874,24 +895,37 @@ def _commit_merge(
     except ImportMergeUnsupported as exc:
         return {"success": False, "error_code": exc.code, "message": str(exc)}
     except (GraphWriteFailed, GraphWriteOutcomeUnknown) as exc:
-        return {
+        failure: Dict[str, Any] = {
             "success": False,
             "error_code": exc.code,
             "message": str(exc),
             "backup_path": backup_path,
         }
+        if isinstance(exc, GraphWriteOutcomeUnknown) and "planned" in minted:
+            # The merge is in memory and the next write may persist it, with
+            # no events: the audit trail is the one record of it.
+            failure["import_id"] = import_id
+            failure["audit_recorded"] = _record_merge(
+                execution_store,
+                import_id=import_id,
+                status="outcome_unknown",
+                digest=bound_digest,
+                parameters=parameters,
+                counts=_counts(minted["planned"], events=0),
+                backup_path=backup_path,
+                embeddings_job_id=None,
+                planned=minted["planned"],
+                minted=minted["result"],
+                revisions={},
+                event_context=event_context,
+                correlation_id=event_correlation_id or import_id,
+                origin=event_origin or MERGE_EVENT_ORIGIN,
+            )
+        return failure
 
     planned: "graph_merge_plan.PlannedWrites" = minted["planned"]
     result: "graph_merge_plan.MintedWrites" = minted["result"]
-    counts = {
-        "nodes_created": len(planned.node_creates),
-        "nodes_overwritten": len(planned.node_overwrites),
-        "nodes_renamed": len(planned.node_renames),
-        "edges_created": len(planned.edge_creates),
-        "edges_overwritten": len(planned.edge_overwrites),
-        "edges_renamed": len(planned.edge_renames),
-        "events": applied.events,
-    }
+    counts = _counts(planned, events=applied.events)
 
     job_id: Optional[str] = None
     embeddings_status = "not_needed"
@@ -930,6 +964,7 @@ def _commit_merge(
     audit_recorded = _record_merge(
         execution_store,
         import_id=import_id,
+        status="committed",
         digest=bound_digest,
         parameters=parameters,
         counts=counts,
@@ -938,6 +973,7 @@ def _commit_merge(
         planned=planned,
         minted=result,
         revisions=applied.revisions,
+        event_context=event_context,
         correlation_id=event_correlation_id or import_id,
         origin=event_origin or MERGE_EVENT_ORIGIN,
     )
@@ -963,10 +999,50 @@ def _commit_merge(
     return response
 
 
+_COUNT_KEYS = (
+    "nodes_created",
+    "nodes_overwritten",
+    "nodes_renamed",
+    "edges_created",
+    "edges_overwritten",
+    "edges_renamed",
+    "events",
+)
+
+
+def _plan_writes(report: Dict[str, Any]) -> int:
+    """How many entities a plan's report says the commit writes."""
+    return sum(
+        report[group][kind]["count"]
+        for group in ("adds", "overwrites", "renames")
+        for kind in ("nodes", "edges")
+    )
+
+
+def _counts(
+    planned: "graph_merge_plan.PlannedWrites", *, events: int
+) -> Dict[str, int]:
+    return dict(
+        zip(
+            _COUNT_KEYS,
+            (
+                len(planned.node_creates),
+                len(planned.node_overwrites),
+                len(planned.node_renames),
+                len(planned.edge_creates),
+                len(planned.edge_overwrites),
+                len(planned.edge_renames),
+                events,
+            ),
+        )
+    )
+
+
 def _record_merge(
     execution_store: "ExecutionStore",
     *,
     import_id: str,
+    status: str,
     digest: str,
     parameters: "graph_merge_plan.MergeParameters",
     counts: Dict[str, int],
@@ -975,14 +1051,18 @@ def _record_merge(
     planned: "graph_merge_plan.PlannedWrites",
     minted: "graph_merge_plan.MintedWrites",
     revisions: Dict[Tuple[str, str], int],
+    event_context: Optional["EventContext"],
     correlation_id: str,
     origin: str,
 ) -> bool:
     """Write the merge's audit record: a terminal IMPORT job (ADR §7 (a)).
 
-    Written after the graph commit, in a separate store, so it is
-    best-effort: a crash or a store failure between the two leaves a
-    committed merge without a record, reported as ``audit_recorded: false``.
+    ``status`` is ``committed``, or ``outcome_unknown`` for a merge kept in
+    memory whose write could not be confirmed (no revisions then). The
+    caller's attribution is recorded, since origin and correlation are
+    caller-chosen. Written after the graph commit, in a separate store, so
+    it is best-effort: a crash or a store failure between the two leaves a
+    merge without a record, reported as ``audit_recorded: false``.
     """
     from backend.agents.execution import ExecutionJob, ExecutionKind, ExecutionState
 
@@ -1009,6 +1089,11 @@ def _record_merge(
                     "counts": counts,
                     "backup_path": backup_path,
                     "embeddings_job_id": embeddings_job_id,
+                    "attribution": (
+                        event_context.attribution.to_dict()
+                        if event_context is not None and event_context.attribution
+                        else None
+                    ),
                     "outcomes": {
                         "nodes": {
                             "created": outcome(
@@ -1030,7 +1115,7 @@ def _record_merge(
                         },
                     },
                 },
-                result={"merge_status": "committed"},
+                result={"merge_status": status},
                 correlation_id=correlation_id,
                 origin=origin,
                 created_at=now,
@@ -1089,6 +1174,7 @@ def import_job_to_dict(job: "ExecutionJob") -> Dict[str, Any]:
     if payload.get("phase") == "merge":
         # A merge's audit record: its embeddings are a separate job's.
         view.update(
+            merge_status=result.get("merge_status"),
             plan_digest=payload.get("plan_digest"),
             counts=payload.get("counts"),
             embeddings_job_id=payload.get("embeddings_job_id"),
