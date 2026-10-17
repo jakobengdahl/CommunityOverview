@@ -468,6 +468,15 @@ class TestGraphStorageCRUD:
         assert "Max 10" in result.message
 
 
+def _without_generation(monkeypatch, storage):
+    """Make embedding generation unavailable, as in an env with no model."""
+
+    def no_generation(nodes):
+        raise RuntimeError("no embedding model")
+
+    monkeypatch.setattr(storage.vector_store, "update_nodes_embeddings", no_generation)
+
+
 class TestRejectedAddNodesLeavesNoInlineVector:
     """A rejected add_nodes keeps whatever landed before the rejection, and a
     node that landed must hold its supplied vector in the index, never on the
@@ -479,15 +488,6 @@ class TestRejectedAddNodesLeavesNoInlineVector:
         seen = []
         storage.add_system_listener(seen.append)
         return seen
-
-    @staticmethod
-    def _without_generation(monkeypatch, storage):
-        def no_generation(nodes):
-            raise RuntimeError("no embedding model")
-
-        monkeypatch.setattr(
-            storage.vector_store, "update_nodes_embeddings", no_generation
-        )
 
     @pytest.mark.parametrize("repeat_existing", [False, True])
     def test_a_landed_node_carries_no_embedding_into_later_events(
@@ -516,7 +516,7 @@ class TestRejectedAddNodesLeavesNoInlineVector:
         assert (event.entity.after or {}).get("embedding") is None
 
     def test_a_landed_node_keeps_its_supplied_vector(self, temp_storage, monkeypatch):
-        self._without_generation(monkeypatch, temp_storage)
+        _without_generation(monkeypatch, temp_storage)
         temp_storage.add_nodes(
             [
                 Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5]),
@@ -565,7 +565,7 @@ class TestRejectedAddNodesLeavesNoInlineVector:
     def test_a_raise_mid_batch_settles_the_landed_vector(
         self, temp_storage, monkeypatch
     ):
-        self._without_generation(monkeypatch, temp_storage)
+        _without_generation(monkeypatch, temp_storage)
         self._raise_on_second_node(monkeypatch, temp_storage)
 
         result = temp_storage.add_nodes(
@@ -611,7 +611,7 @@ class TestRejectedAddNodesLeavesNoInlineVector:
     def test_the_settled_vector_survives_a_reload(
         self, temp_storage, monkeypatch, failure
     ):
-        self._without_generation(monkeypatch, temp_storage)
+        _without_generation(monkeypatch, temp_storage)
         if failure == "raise":
             self._raise_on_second_node(monkeypatch, temp_storage)
         second_id = "a" if failure == "duplicate_id" else "boom"
@@ -637,12 +637,7 @@ class TestRejectedAddNodesLeavesNoInlineVector:
     def test_settling_after_a_successful_adoption_keeps_the_vector(
         self, temp_storage, monkeypatch
     ):
-        def no_generation(nodes):
-            raise RuntimeError("no embedding model")
-
-        monkeypatch.setattr(
-            temp_storage.vector_store, "update_nodes_embeddings", no_generation
-        )
+        _without_generation(monkeypatch, temp_storage)
 
         result = temp_storage.add_nodes(
             [Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5])],
@@ -657,7 +652,7 @@ class TestRejectedAddNodesLeavesNoInlineVector:
         )
 
     def test_every_landed_vector_in_a_batch_is_settled(self, temp_storage, monkeypatch):
-        self._without_generation(monkeypatch, temp_storage)
+        _without_generation(monkeypatch, temp_storage)
         result = temp_storage.add_nodes(
             [
                 Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5]),
@@ -677,7 +672,7 @@ class TestRejectedAddNodesLeavesNoInlineVector:
     def test_a_supplied_vector_replaces_an_orphan_index_vector_for_a_new_id(
         self, temp_storage, monkeypatch
     ):
-        self._without_generation(monkeypatch, temp_storage)
+        _without_generation(monkeypatch, temp_storage)
         temp_storage.vector_store.load_vectors({"a": [0.75, 1.0]})
 
         result = temp_storage.add_nodes(
@@ -718,12 +713,7 @@ class TestAdoptionKeepsVectorsIfTheIndexRaises:
     def test_a_transient_load_failure_in_add_nodes_does_not_lose_the_vector(
         self, temp_storage, monkeypatch
     ):
-        def no_generation(nodes):
-            raise RuntimeError("no embedding model")
-
-        monkeypatch.setattr(
-            temp_storage.vector_store, "update_nodes_embeddings", no_generation
-        )
+        _without_generation(monkeypatch, temp_storage)
         load = temp_storage.vector_store.load_vectors
         calls = []
 
@@ -947,6 +937,8 @@ class TestFailedAddNodesGeneratesLandedVectors:
         assert "does not exist" in result.message
         assert calls == [["a"]]
         assert temp_storage.get_node("a") is not None
+        assert temp_storage.get_node("a").embedding is None
+        assert temp_storage.vector_store.get_vector_list("a") is None
 
     def test_a_generation_failure_on_a_failed_add_keeps_its_result(
         self, temp_storage, monkeypatch
@@ -985,20 +977,11 @@ class TestAdoptionSettlesSuppliedVectors:
     ones it accepts, and the ones it cannot use are cleared rather than left
     for later events to carry."""
 
-    @staticmethod
-    def _without_generation(monkeypatch, storage):
-        def no_generation(nodes):
-            raise RuntimeError("no embedding model")
-
-        monkeypatch.setattr(
-            storage.vector_store, "update_nodes_embeddings", no_generation
-        )
-
     @pytest.mark.parametrize("unusable", [[0.1, 0.2, 0.3], []])
     def test_an_unusable_vector_is_cleared_from_the_node(
         self, temp_storage, monkeypatch, unusable
     ):
-        self._without_generation(monkeypatch, temp_storage)
+        _without_generation(monkeypatch, temp_storage)
         temp_storage.vector_store.load_vectors({"anchor": [1.0, 0.0]})
 
         result = temp_storage.add_nodes(
@@ -1019,7 +1002,7 @@ class TestAdoptionSettlesSuppliedVectors:
     ):
         # Zero-length vectors outnumber the real one, so without the filter
         # they would set the width whatever the tie-break or node order.
-        self._without_generation(monkeypatch, temp_storage)
+        _without_generation(monkeypatch, temp_storage)
         vectors = {"z": [], "y": [], "b": [0.1, 0.2]}
 
         result = temp_storage.add_nodes(
@@ -1050,7 +1033,7 @@ class TestAdoptionSettlesSuppliedVectors:
     ):
         # One zero-length vector against one real one ties on count, so without
         # the filter the width seen first would decide the batch.
-        self._without_generation(monkeypatch, temp_storage)
+        _without_generation(monkeypatch, temp_storage)
         vectors = {"z": [], "b": [0.1, 0.2]}
 
         result = temp_storage.add_nodes(
@@ -1077,7 +1060,7 @@ class TestAdoptionSettlesSuppliedVectors:
     def test_a_supplied_vector_replaces_an_orphan_index_vector_for_a_new_id(
         self, temp_storage, monkeypatch
     ):
-        self._without_generation(monkeypatch, temp_storage)
+        _without_generation(monkeypatch, temp_storage)
         temp_storage.vector_store.load_vectors({"a": [0.75, 1.0]})
 
         result = temp_storage.add_nodes(
