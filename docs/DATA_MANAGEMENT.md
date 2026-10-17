@@ -440,9 +440,10 @@ the document's own ids — a create or an overwrite — since that write moved
 what the digest covers: a `fail`-policy retry is refused as
 `import_merge_blocked`, a retry carrying the digest as `import_plan_stale`,
 and a digest-less `skip`-policy retry plans nothing and returns zero
-counts. A commit whose every write is a **rename** leaves nothing the
-digest covers changed, so the same request with the same digest is applied
-again and creates the renamed copies a second time. Check `GET /api/import`
+counts. A commit whose only writes are **renames** writes nothing under
+the document's ids and can leave everything the digest covers unchanged —
+a node rename always does — and when it does, the same request with the
+same digest is applied again and creates the renamed copies a second time. Check `GET /api/import`
 for the first commit's record before retrying any commit. One commit runs
 at a time (503
 `import_merge_busy`). A store failure is answered as for any direct write —

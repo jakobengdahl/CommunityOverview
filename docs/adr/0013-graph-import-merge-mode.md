@@ -143,8 +143,10 @@ above:
   backup, so a write landing between that plan and the lock still fails it.
 - **A digest is not single-use.** A committed create or overwrite moves what
   the digest covers, so the same digest is stale afterwards; but a commit
-  whose every write is a rename (fresh ids, live entities untouched) leaves
-  the digest current, and resending it creates the renamed copies again.
+  whose only writes are renames (fresh ids, live entities untouched) can
+  leave the digest current — a node rename always does, while a renamed
+  edge between live nodes is a duplicate of its own copy on the next plan
+  — and resending it then creates the renamed copies again.
   §3 rules out only the digest-less rename retry; making a digest
   single-use is the caller-chosen idempotency key §3 and §7 (c) defer, so
   it is left to that decision and documented for callers.
