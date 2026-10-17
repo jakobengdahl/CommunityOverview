@@ -978,6 +978,29 @@ class TestReusedNodeId:
         assert result["success"] is False
         assert store.list(NS, "doc") == [record]
 
+    def test_node_the_store_refuses_on_a_failed_call_moves_nothing(
+        self, service, store, monkeypatch
+    ):
+        # A bad edge fails the call; persisting the node that landed is then
+        # refused by the store, which undoes it: it never stayed.
+        record = self._leave_orphan(service, store, monkeypatch)
+        from backend.core.storage_backends import EntityRevisionConflict
+
+        storage = service.storage
+
+        def refused(changes, undo, *args, **kwargs):
+            storage._undo(undo)
+            raise EntityRevisionConflict("node", "doc", None, 3)
+
+        monkeypatch.setattr(storage, "_commit", refused)
+        result = service.add_nodes(
+            [{"id": "doc", "type": "Document", "name": "New"}],
+            [{"source": "doc", "target": "no-such-node", "type": "RELATES_TO"}],
+        )
+        assert result["success"] is False
+        assert storage.get_node("doc") is None
+        assert store.list(NS, "doc") == [record]
+
     def test_creates_without_leftovers_never_touch_the_store(
         self, service, store, monkeypatch
     ):
