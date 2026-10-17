@@ -218,6 +218,36 @@ class TestCommit:
         assert storage.nodes["a1"].to_dict() == live_alice
         assert storage.edges["e1"].source == "a1"
 
+    def test_a_document_edge_into_a_renamed_node_is_rewritten_too(
+        self, storage, job_store
+    ):
+        document = {
+            "nodes": [{"id": "i1", "type": "Initiative", "name": "Other X"}],
+            "edges": [
+                {"id": "e5", "source": "a2", "target": "i1", "type": "BELONGS_TO"}
+            ],
+        }
+        body = _body(document, policy={"default": "rename"})
+        result = _commit(_client(storage, job_store), body).json()
+        (pair,) = result["renamed"]["nodes"]["items"]
+        assert storage.edges["e5"].target == pair["new_id"]
+        assert storage.edges["e5"].source == "a2"
+
+    def test_the_audit_record_lists_renamed_edges(self, storage, job_store):
+        document = {
+            "nodes": [],
+            "edges": [
+                {"id": "e1", "source": "a2", "target": "i1", "type": "BELONGS_TO"}
+            ],
+        }
+        body = _body(document, policy={"default": "rename"})
+        result = _commit(_client(storage, job_store), body).json()
+        (pair,) = result["renamed"]["edges"]["items"]
+        record = job_store.get(result["import_id"])
+        assert record.payload["outcomes"]["edges"]["renamed"] == [
+            ["e1", pair["new_id"], storage.edges[pair["new_id"]].revision]
+        ]
+
     def test_the_documents_revision_is_never_taken(self, storage, job_store):
         document = _document()
         document["nodes"][0]["revision"] = 999_999
@@ -332,6 +362,44 @@ class TestEmbeddingsAndAudit:
         again = client.post(URL, json=body)
         assert again.status_code == 422
         assert again.json()["detail"]["error_code"] == "import_merge_blocked"
+
+    def test_a_metadata_only_overwrite_keeps_its_vector(self, storage, job_store):
+        storage.vector_store.absorb_embeddings({"a1": [1.0, 0.0]})
+        document = {
+            "nodes": [
+                {"id": "a1", "type": "Actor", "name": "Alice", "metadata": {"k": 1}}
+            ],
+            "edges": [],
+        }
+        _commit(_client(storage, job_store), _body(document))
+        assert storage.vector_store.has_embedding("a1")
+
+    def test_an_aliases_only_overwrite_drops_the_vector_and_queues_a_job(
+        self, storage, job_store
+    ):
+        storage.vector_store.absorb_embeddings({"a1": [1.0, 0.0]})
+        document = {
+            "nodes": [
+                {"id": "a1", "type": "Actor", "name": "Alice", "aliases": ["Ali"]}
+            ],
+            "edges": [],
+        }
+        result = _commit(_client(storage, job_store), _body(document)).json()
+        assert not storage.vector_store.has_embedding("a1")
+        assert job_store.get(result["job_id"]).payload["node_count"] == 1
+
+    def test_a_rename_only_merge_queues_a_job_for_the_new_node(
+        self, storage, job_store
+    ):
+        document = {
+            "nodes": [{"id": "a1", "type": "Actor", "name": "Alice"}],
+            "edges": [],
+        }
+        result = _commit(
+            _client(storage, job_store), _body(document, policy={"default": "rename"})
+        ).json()
+        assert result["embeddings_status"] == "queued"
+        assert job_store.get(result["job_id"]).payload["node_count"] == 1
 
     def test_a_metadata_only_merge_needs_no_embeddings_job(self, storage, job_store):
         document = {
@@ -651,6 +719,7 @@ class TestAccess:
         "hook, status",
         [
             (_Hook(allowed=False), 403),
+            (_Hook(allowed=False, read=(True, False)), 403),
             (_Hook(read=(False, False)), 403),
             (_Hook(narrowed=True), 409),
             (_Hook(read=(True, True)), 409),

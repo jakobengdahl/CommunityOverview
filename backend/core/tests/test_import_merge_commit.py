@@ -220,6 +220,7 @@ def test_an_overwrite_takes_only_the_fields_it_names(make_storage):
     assert after["type"] == before["type"]
     assert after["created_at"] == before["created_at"]
     assert after["tags"] == before["tags"]
+    assert storage.nodes["a1"].updated_at > Node.from_dict(before).updated_at
 
 
 def test_vectors_drop_for_created_and_rewritten_text_and_stay_for_the_rest(
@@ -340,6 +341,20 @@ def test_an_undone_merge_puts_a_stray_vector_back(make_storage, monkeypatch, fai
     assert storage.vector_store.get_vector_list("n1") == [4.0, 0.0, 1.0]
 
 
+def test_a_created_node_never_brings_its_own_vector(make_storage):
+    storage = make_storage()
+    _seed(storage)
+    writes = _writes(storage)
+    writes.node_creates[0].embedding = [9.0, 9.0, 9.0]
+    storage.apply_import_merge(lambda: writes)
+    storage.flush()
+    assert not storage.vector_store.has_embedding("n1")
+    assert storage.nodes["n1"].embedding is None
+    reopened = make_storage()
+    reopened.load()
+    assert not reopened.vector_store.has_embedding("n1")
+
+
 def test_a_merge_reports_the_generation_it_landed_at(make_storage):
     storage = make_storage()
     _seed(storage)
@@ -413,6 +428,13 @@ def test_a_batch_lost_after_hand_over_is_an_unknown_outcome_without_events(
     assert "n1" in storage.nodes
     assert seen == []
     monkeypatch.undo()
+    # The next write that lands carries the whole graph, the merge included.
+    storage.add_nodes([Node(id="later", type="Actor", name="Later")], [])
+    storage.flush()
+    reopened = make_storage()
+    reopened.load()
+    assert reopened.nodes["a1"].name == "Alice B"
+    assert "n1" in reopened.nodes and "later" in reopened.nodes
 
 
 class _EnforcingBackend(InMemoryGraphPersistenceBackend):
