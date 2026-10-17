@@ -54,7 +54,7 @@ requirement — see [Unrecognised annotation
 data](#unrecognised-annotation-data)), so a stored `frame` is simply an
 unrecognised kind now, dropped while normalising like any other, never
 reaching the canvas. It does not crash — that guarantee is exactly what
-the tolerance for unexpected data built, and
+the unexpected-data tolerance change built, and
 `AnnotationBadData.test.jsx`/`annotationModel.test.js` pin a stored `frame`
 specifically as a regression case, not just "some unknown kind".
 
@@ -955,7 +955,7 @@ this selected" presence marker (`ClaimMap`, `selection_claimed`/
 `selection_released`): last-write-wins, never checked before a write. See the
 next paragraph for the mechanism that actually is exclusive.
 
-**Status update (the exclusive edit lease change, deciding
+**Status update (the exclusive edit lease change, settling
 the agent-ops versus claim-map decision):** exclusivity is now a genuinely
 separate, first-actual-editor-wins **edit lease** (`LeaseMap`,
 `backend/core/session_hub.py`), acquired via `edit_lease_acquired`/
@@ -2289,7 +2289,7 @@ see; that enforcement is not in this repository.
 
 `shape` carries two independent visual settings, `style.fill` and
 `style.border`, each either a CSS colour string or the literal string
-`"transparent"` — the same
+`"transparent"` (the frame-into-shape merge) — the same
 `style`-not-`content` convention `fontSize`/`font`/`textAlign` already use —
 see [MCP access](#mcp-access) and `create_annotation`'s docstring
 (`backend/service/mcp_tools.py`). An omitted `fill` defaults to a solid grey
@@ -2337,7 +2337,7 @@ type.
 
 ### Typography controls (`text`, `shape`)
 
-`text` and `shape` are the only two
+`text` and `shape` (the text alignment and font change) are the only two
 kinds with editable free text (see above), so they are the only two kinds
 this task adds typography to: a nine-position text-alignment grid
 (`top-left` through `bottom-right`, matching `content.attachment.anchor`'s
