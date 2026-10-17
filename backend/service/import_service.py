@@ -42,6 +42,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
+from backend.core.storage_backends import (
+    EntityRevisionConflict,
+    GraphWriteFailed,
+    GraphWriteOutcomeUnknown,
+)
+from backend.core.storage_merge import ImportMergeUnsupported
 from backend.runtime.authorization import GRAPH_ACTION_MUTATE, GRAPH_ACTION_READ
 
 from . import access, graph_archive, graph_merge_plan
@@ -51,6 +57,7 @@ from .serializers import serialize_edges, serialize_nodes
 if TYPE_CHECKING:
     from backend.agents.execution import ExecutionJob, ExecutionStore
     from backend.core import GraphStorage
+    from backend.core.storage_merge import MergeWrites
     from backend.runtime.authorization import GraphAuthorizationHook
 
     from .attachments import AttachmentSettings
@@ -60,6 +67,7 @@ logger = logging.getLogger(__name__)
 BACKUP_SUBDIR = "import-backups"
 
 _PREVIEW_SLOT = threading.BoundedSemaphore(1)
+_COMMIT_SLOT = threading.BoundedSemaphore(1)
 
 
 def _iso(dt: Optional[datetime]) -> Optional[str]:
@@ -106,8 +114,11 @@ def _enqueue_embedding_job(
     correlation_id: Optional[str],
     session_id: Optional[str],
     origin: Optional[str],
+    merge_import_id: Optional[str] = None,
 ) -> "ExecutionJob":
     from backend.agents.execution import ExecutionJob, ExecutionKind
+
+    merge = {"mode": "merge", "import_id": merge_import_id} if merge_import_id else {}
 
     job = ExecutionJob(
         agent_id="system:graph-import",
@@ -124,6 +135,7 @@ def _enqueue_embedding_job(
             # overwrites that later import's content — see
             # GraphStorage.commit_generation_embeddings.
             "graph_generation": graph_generation,
+            **merge,
         },
         correlation_id=correlation_id,
         session_id=session_id,
@@ -553,22 +565,13 @@ def import_graph_archive(
     )
 
 
-def preview_merge_import(
-    storage: "GraphStorage",
-    hook: "GraphAuthorizationHook",
-    body: Any,
-    *,
-    attachment_settings: Optional["AttachmentSettings"] = None,
-    max_nodes: Optional[int] = None,
-    max_edges: Optional[int] = None,
-) -> Dict[str, Any]:
-    """Plan a MERGE import without writing anything (ADR 0013, slice 1).
+def _authorize_merge(hook: "GraphAuthorizationHook") -> Optional[Dict[str, Any]]:
+    """The refusal for a caller who may not preview or commit a merge, or
+    None (ADR 0013 §10).
 
-    Authorized as the merge commit will be (``GRAPH_ACTION_MUTATE``) and,
-    since the plan reveals which ids exist and the live value of every field
-    an overwrite would change, as a whole-graph read (``GRAPH_ACTION_READ``);
-    refused when either is denied or narrowed (ADR 0013 §10). No backup, no
-    job, no graph write.
+    Both need ``GRAPH_ACTION_MUTATE`` and, since a plan reveals which ids
+    exist and the live value of every field an overwrite would change, a
+    whole-graph ``GRAPH_ACTION_READ``; a caller narrowed on either is refused.
     """
     decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_MUTATE, target="import_graph_merge"
@@ -593,10 +596,33 @@ def preview_merge_import(
             "success": False,
             "error_code": "import_requires_full_graph_access",
             "message": (
-                "A merge preview reads the whole live graph and is refused while "
-                "the caller's access is narrowed to a subset of it."
+                "A merge reads the whole live graph and is refused while the "
+                "caller's access is narrowed to a subset of it."
             ),
         }
+    return None
+
+
+def preview_merge_import(
+    storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
+    body: Any,
+    *,
+    attachment_settings: Optional["AttachmentSettings"] = None,
+    max_nodes: Optional[int] = None,
+    max_edges: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Plan a MERGE import without writing anything (ADR 0013, slice 1).
+
+    Authorized as the merge commit will be (``GRAPH_ACTION_MUTATE``) and,
+    since the plan reveals which ids exist and the live value of every field
+    an overwrite would change, as a whole-graph read (``GRAPH_ACTION_READ``);
+    refused when either is denied or narrowed (ADR 0013 §10). No backup, no
+    job, no graph write.
+    """
+    refusal = _authorize_merge(hook)
+    if refusal is not None:
+        return refusal
 
     # Planning holds the document and a plan in memory for up to tens of
     # seconds at the caps; one at a time per process keeps a caller from
@@ -648,6 +674,376 @@ def _plan_preview(
     return {"success": True, "plan": plan.report, "plan_digest": plan.digest}
 
 
+MERGE_EVENT_ORIGIN = "graph-import-merge"
+_MERGE_RESTORE_NOTE = (
+    "The backup holds the whole graph as it was before this merge. Restoring "
+    "it with POST /import is a replace: it also undoes every write made after "
+    "the merge."
+)
+
+
+class _StalePlan(Exception):
+    """The plan recomputed under the storage lock is not the bound one."""
+
+
+def commit_merge_import(
+    storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
+    execution_store: "ExecutionStore",
+    body: Any,
+    *,
+    attachment_settings: Optional["AttachmentSettings"] = None,
+    event_origin: Optional[str] = None,
+    event_correlation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Commit a MERGE import (ADR 0013, slice 2).
+
+    Authorized as the preview is. The plan is recomputed and must match the
+    caller's ``plan_digest`` (optional only when the policy can change no
+    live entity, ADR §3); then the whole graph is backed up as v1 does; then
+    ``GraphStorage.apply_import_merge`` recomputes the plan once more under
+    its lock, refuses the commit if the digest moved, and applies it
+    all-or-nothing. Afterwards, best-effort: an embeddings job for the nodes
+    left without a vector, and an audit record in the import job store.
+    """
+    refusal = _authorize_merge(hook)
+    if refusal is not None:
+        return refusal
+    if not storage.supports_import_merge:
+        return {
+            "success": False,
+            "error_code": ImportMergeUnsupported.code,
+            "message": (
+                "Merge import is not supported on a shared (PostgreSQL) graph "
+                "store yet; nothing was changed."
+            ),
+        }
+    try:
+        document, parameters, digest = graph_merge_plan.parse_merge_commit_request(body)
+    except graph_merge_plan.MergeRequestError as exc:
+        return _merge_request_error(exc)
+    if digest is None and not parameters.digest_optional:
+        return {
+            "success": False,
+            "error_code": "plan_digest_required",
+            "message": (
+                "This merge can overwrite, rename or include system-type nodes, so "
+                "it must name the plan_digest of the preview it applies."
+            ),
+        }
+
+    # One commit at a time: it plans twice and writes a whole-graph backup.
+    if not _COMMIT_SLOT.acquire(blocking=False):
+        return {
+            "success": False,
+            "error_code": "import_merge_busy",
+            "message": "Another merge import is running; retry shortly.",
+        }
+    try:
+        return _commit_merge(
+            storage,
+            execution_store,
+            document,
+            parameters,
+            digest,
+            graph_merge_plan.StorageGraphView(storage, attachment_settings),
+            event_origin=event_origin,
+            event_correlation_id=event_correlation_id,
+        )
+    finally:
+        _COMMIT_SLOT.release()
+
+
+def _merge_request_error(exc: "graph_merge_plan.MergeRequestError") -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "success": False,
+        "error_code": exc.error_code,
+        "message": exc.message,
+    }
+    if exc.errors:
+        result["errors"] = [issue.to_dict() for issue in exc.errors]
+    return result
+
+
+def _plan_or_error(
+    document: Any,
+    parameters: "graph_merge_plan.MergeParameters",
+    view: "graph_merge_plan.StorageGraphView",
+) -> Tuple[Optional["graph_merge_plan.MergePlan"], Optional[Dict[str, Any]]]:
+    try:
+        return graph_merge_plan.compute_merge_plan(document, parameters, view), None
+    except graph_merge_plan.MergeRequestError as exc:
+        return None, _merge_request_error(exc)
+    except graph_merge_plan.MergePlanUnstable as exc:
+        return None, {
+            "success": False,
+            "error_code": "import_plan_unstable",
+            "message": f"{exc}; retry.",
+        }
+
+
+def _stale(plan: "graph_merge_plan.MergePlan") -> Dict[str, Any]:
+    return {
+        "success": False,
+        "error_code": "import_plan_stale",
+        "message": (
+            "The live graph or the request no longer matches the previewed plan; "
+            "nothing was changed. Review the current plan and commit its digest."
+        ),
+        "plan": plan.report,
+        "plan_digest": plan.digest,
+    }
+
+
+def _commit_merge(
+    storage: "GraphStorage",
+    execution_store: "ExecutionStore",
+    document: Any,
+    parameters: "graph_merge_plan.MergeParameters",
+    digest: Optional[str],
+    view: "graph_merge_plan.StorageGraphView",
+    *,
+    event_origin: Optional[str],
+    event_correlation_id: Optional[str],
+) -> Dict[str, Any]:
+    plan, error = _plan_or_error(document, parameters, view)
+    if error is not None:
+        return error
+    assert plan is not None
+    if not plan.committable:
+        return {
+            "success": False,
+            "error_code": "import_merge_blocked",
+            "message": (
+                "The plan has rejected or conflicting entries; nothing was changed."
+            ),
+            "plan": plan.report,
+            "plan_digest": plan.digest,
+        }
+    if digest is not None and digest != plan.digest:
+        return _stale(plan)
+    # Without a caller digest the commit binds to the plan just computed.
+    bound_digest = plan.digest
+
+    backup_path = _write_backup(storage)
+    if backup_path is None:
+        return {
+            "success": False,
+            "error_code": "backup_failed",
+            "message": (
+                "Could not write a pre-merge backup of the current graph; the "
+                "merge was refused and the graph was not changed."
+            ),
+        }
+
+    import_id = f"merge-{uuid.uuid4()}"
+    event_context = access.build_event_context(
+        target="import_graph_merge",
+        event_origin=event_origin or MERGE_EVENT_ORIGIN,
+        event_correlation_id=event_correlation_id or import_id,
+    )
+    minted: Dict[str, Any] = {}
+
+    def prepare() -> "MergeWrites":
+        # Under the storage lock: nothing can move between this plan and the
+        # writes it yields, so its digest covers every read the writes rely on.
+        try:
+            locked = graph_merge_plan.compute_merge_plan(
+                document, parameters, view, for_commit=True
+            )
+        except (
+            graph_merge_plan.MergeRequestError,
+            graph_merge_plan.MergePlanUnstable,
+        ) as exc:
+            raise _StalePlan() from exc
+        if locked.digest != bound_digest or locked.writes is None:
+            raise _StalePlan()
+        minted["planned"] = locked.writes
+        minted["result"] = graph_merge_plan.mint_writes(locked.writes)
+        return minted["result"].writes
+
+    try:
+        applied = storage.apply_import_merge(prepare, event_context=event_context)
+    except (_StalePlan, EntityRevisionConflict):
+        fresh, error = _plan_or_error(document, parameters, view)
+        if error is not None:
+            return error
+        assert fresh is not None
+        return _stale(fresh)
+    except ImportMergeUnsupported as exc:
+        return {"success": False, "error_code": exc.code, "message": str(exc)}
+    except (GraphWriteFailed, GraphWriteOutcomeUnknown) as exc:
+        return {
+            "success": False,
+            "error_code": exc.code,
+            "message": str(exc),
+            "backup_path": backup_path,
+        }
+
+    planned: "graph_merge_plan.PlannedWrites" = minted["planned"]
+    result: "graph_merge_plan.MintedWrites" = minted["result"]
+    counts = {
+        "nodes_created": len(planned.node_creates),
+        "nodes_overwritten": len(planned.node_overwrites),
+        "nodes_renamed": len(planned.node_renames),
+        "edges_created": len(planned.edge_creates),
+        "edges_overwritten": len(planned.edge_overwrites),
+        "edges_renamed": len(planned.edge_renames),
+        "events": applied.events,
+    }
+
+    job_id: Optional[str] = None
+    embeddings_status = "not_needed"
+    embeddings_message: Optional[str] = None
+    if planned.nodes_to_embed:
+        try:
+            job = _enqueue_embedding_job(
+                execution_store,
+                node_count=planned.nodes_to_embed,
+                backup_path=backup_path,
+                graph_generation=storage.generation,
+                correlation_id=event_correlation_id or import_id,
+                session_id=None,
+                origin=event_origin or MERGE_EVENT_ORIGIN,
+                merge_import_id=import_id,
+            )
+            _start_embedding_drain(execution_store, storage)
+            job_id, embeddings_status = job.id, "queued"
+        except Exception as exc:
+            # The merge is committed; only its embeddings did not start.
+            logger.error(
+                "Merge import %s committed but its embedding job could not be "
+                "started: %s",
+                import_id,
+                exc,
+            )
+            embeddings_status = "not_started"
+            embeddings_message = (
+                "The merge was committed, but background embedding generation "
+                f"could not be started: {exc}. Run scripts/generate_embeddings.py "
+                "to generate embeddings for the merged nodes."
+            )
+
+    audit_recorded = _record_merge(
+        execution_store,
+        import_id=import_id,
+        digest=bound_digest,
+        parameters=parameters,
+        counts=counts,
+        backup_path=backup_path,
+        embeddings_job_id=job_id,
+        planned=planned,
+        minted=result,
+        revisions=applied.revisions,
+        correlation_id=event_correlation_id or import_id,
+        origin=event_origin or MERGE_EVENT_ORIGIN,
+    )
+
+    response: Dict[str, Any] = {
+        "success": True,
+        "import_id": import_id,
+        "plan": plan.report,
+        "plan_digest": bound_digest,
+        "counts": counts,
+        "renamed": {
+            "nodes": graph_merge_plan.capped_renames(result.renamed_nodes),
+            "edges": graph_merge_plan.capped_renames(result.renamed_edges),
+        },
+        "backup_path": backup_path,
+        "backup_note": _MERGE_RESTORE_NOTE,
+        "job_id": job_id,
+        "embeddings_status": embeddings_status,
+        "audit_recorded": audit_recorded,
+    }
+    if embeddings_message is not None:
+        response["embeddings_message"] = embeddings_message
+    return response
+
+
+def _record_merge(
+    execution_store: "ExecutionStore",
+    *,
+    import_id: str,
+    digest: str,
+    parameters: "graph_merge_plan.MergeParameters",
+    counts: Dict[str, int],
+    backup_path: str,
+    embeddings_job_id: Optional[str],
+    planned: "graph_merge_plan.PlannedWrites",
+    minted: "graph_merge_plan.MintedWrites",
+    revisions: Dict[Tuple[str, str], int],
+    correlation_id: str,
+    origin: str,
+) -> bool:
+    """Write the merge's audit record: a terminal IMPORT job (ADR §7 (a)).
+
+    Written after the graph commit, in a separate store, so it is
+    best-effort: a crash or a store failure between the two leaves a
+    committed merge without a record, reported as ``audit_recorded: false``.
+    """
+    from backend.agents.execution import ExecutionJob, ExecutionKind, ExecutionState
+
+    def outcome(kind: str, ids: List[str]) -> List[List[Any]]:
+        return [[entity_id, revisions.get((kind, entity_id))] for entity_id in ids]
+
+    def renamed(kind: str, mapping: Dict[str, str]) -> List[List[Any]]:
+        return [[old, new, revisions.get((kind, new))] for old, new in mapping.items()]
+
+    now = datetime.now(timezone.utc)
+    try:
+        execution_store.enqueue(
+            ExecutionJob(
+                id=import_id,
+                agent_id="system:graph-import",
+                kind=ExecutionKind.IMPORT,
+                idempotency_key=f"import:{import_id}",
+                state=ExecutionState.SUCCEEDED,
+                payload={
+                    "phase": "merge",
+                    "mode": "merge",
+                    "plan_digest": digest,
+                    "parameters": parameters.canonical(),
+                    "counts": counts,
+                    "backup_path": backup_path,
+                    "embeddings_job_id": embeddings_job_id,
+                    "outcomes": {
+                        "nodes": {
+                            "created": outcome(
+                                "node", [n.id for n in planned.node_creates]
+                            ),
+                            "overwritten": outcome(
+                                "node", [n.id for n, _, _ in planned.node_overwrites]
+                            ),
+                            "renamed": renamed("node", minted.renamed_nodes),
+                        },
+                        "edges": {
+                            "created": outcome(
+                                "edge", [e.id for e in planned.edge_creates]
+                            ),
+                            "overwritten": outcome(
+                                "edge", [e.id for e, _ in planned.edge_overwrites]
+                            ),
+                            "renamed": renamed("edge", minted.renamed_edges),
+                        },
+                    },
+                },
+                result={"merge_status": "committed"},
+                correlation_id=correlation_id,
+                origin=origin,
+                created_at=now,
+                updated_at=now,
+                started_at=now,
+                finished_at=now,
+            )
+        )
+        return True
+    except Exception as exc:
+        logger.error(
+            "Merge import %s: could not write its audit record: %s", import_id, exc
+        )
+        return False
+
+
 _STATUS_LABELS = None  # populated lazily to avoid importing execution eagerly
 
 
@@ -670,9 +1066,10 @@ def import_job_to_dict(job: "ExecutionJob") -> Dict[str, Any]:
     """Map a stored import ``ExecutionJob`` to the API's status view."""
     payload = job.payload or {}
     result = job.result or {}
-    return {
+    view = {
         "id": job.id,
         "kind": job.kind.value,
+        "mode": payload.get("mode") or "replace",
         "status": _status_labels().get(job.state, job.state.value),
         "embeddings_status": result.get("embeddings_status"),
         "embeddings_message": result.get("message"),
@@ -686,6 +1083,16 @@ def import_job_to_dict(job: "ExecutionJob") -> Dict[str, Any]:
         "started_at": _iso(job.started_at),
         "finished_at": _iso(job.finished_at),
     }
+    if payload.get("phase") == "merge":
+        # A merge's audit record: its embeddings are a separate job's.
+        view.update(
+            plan_digest=payload.get("plan_digest"),
+            counts=payload.get("counts"),
+            embeddings_job_id=payload.get("embeddings_job_id"),
+        )
+    elif view["mode"] == "merge":
+        view["import_id"] = payload.get("import_id")
+    return view
 
 
 def get_import_job(

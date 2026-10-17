@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Protocol, Tuple
 
@@ -31,6 +32,7 @@ from backend.core.models import (
     is_valid_relationship_type,
 )
 
+from backend.core.storage_merge import EdgeOverwrite, MergeWrites, NodeOverwrite
 from backend.core.session_annotations import (
     sanitize_saved_view_metadata,
     saved_view_annotation_error,
@@ -134,6 +136,15 @@ class MergeParameters:
     include_system_types: bool = False
     stamp_provenance: bool = False
 
+    @property
+    def digest_optional(self) -> bool:
+        """ADR §3: a commit may omit the digest only when it can change no
+        live entity, create no configuration-bearing node unseen, and be
+        retried blindly — every policy ``fail`` or ``skip``, system types
+        excluded. A blind ``rename`` retry would duplicate the document."""
+        policies = {self.policy.default, *(p for _, p in self.policy.by_type)}
+        return policies <= {"fail", "skip"} and not self.include_system_types
+
     def canonical(self) -> Dict[str, Any]:
         return {
             "policy": self.policy.canonical(),
@@ -178,6 +189,27 @@ def parse_merge_request(body: Any) -> Tuple[Any, MergeParameters]:
         include_system_types=include_system_types,
         stamp_provenance=False,
     )
+
+
+_MAX_DIGEST_CHARS = 128
+
+
+def parse_merge_commit_request(
+    body: Any,
+) -> Tuple[Any, MergeParameters, Optional[str]]:
+    """Split a commit request body into ``(document, parameters, digest)``:
+    the preview's fields plus an optional ``plan_digest``."""
+    if not isinstance(body, dict):
+        raise _invalid("the request body must be a JSON object")
+    digest = body.get("plan_digest")
+    if digest is not None and (
+        not isinstance(digest, str) or len(digest) > _MAX_DIGEST_CHARS
+    ):
+        raise _invalid('"plan_digest" must be the string a preview returned')
+    document, parameters = parse_merge_request(
+        {key: value for key, value in body.items() if key != "plan_digest"}
+    )
+    return document, parameters, digest
 
 
 def _parse_policy(raw: Any) -> MergePolicy:
@@ -290,10 +322,92 @@ class StorageGraphView:
 
 
 @dataclass
+class PlannedWrites:
+    """The writes a committable plan makes, before rename ids are minted.
+
+    Document entities as planned; ``renamed_nodes`` and ``renamed_edges`` keep
+    their document ids, and every edge here still names a renamed node by its
+    document id. ``mint_writes`` turns this into the storage layer's shape.
+    """
+
+    node_creates: List[Node] = field(default_factory=list)
+    node_renames: List[Node] = field(default_factory=list)
+    # (document node, live revision read, embedding text changed)
+    node_overwrites: List[Tuple[Node, int, bool]] = field(default_factory=list)
+    edge_creates: List[Edge] = field(default_factory=list)
+    edge_renames: List[Edge] = field(default_factory=list)
+    # (document edge, live revision read)
+    edge_overwrites: List[Tuple[Edge, int]] = field(default_factory=list)
+
+    @property
+    def nodes_to_embed(self) -> int:
+        return (
+            len(self.node_creates)
+            + len(self.node_renames)
+            + sum(1 for _, _, text_changed in self.node_overwrites if text_changed)
+        )
+
+
+@dataclass
+class MintedWrites:
+    writes: MergeWrites
+    # document id -> id minted at commit
+    renamed_nodes: Dict[str, str]
+    renamed_edges: Dict[str, str]
+
+
+def mint_writes(planned: PlannedWrites) -> MintedWrites:
+    """Mint a fresh id per rename, as an ordinary create does, and point the
+    document's own edges at the renamed nodes (ADR §1). Never derived from
+    the old id."""
+    renamed_nodes = {node.id: str(uuid.uuid4()) for node in planned.node_renames}
+    renamed_edges = {edge.id: str(uuid.uuid4()) for edge in planned.edge_renames}
+
+    def placed_edge(edge: Edge, edge_id: str) -> Edge:
+        return edge.model_copy(
+            update={
+                "id": edge_id,
+                "source": renamed_nodes.get(edge.source, edge.source),
+                "target": renamed_nodes.get(edge.target, edge.target),
+            }
+        )
+
+    writes = MergeWrites(
+        node_creates=list(planned.node_creates)
+        + [
+            node.model_copy(update={"id": renamed_nodes[node.id]})
+            for node in planned.node_renames
+        ],
+        node_overwrites=[
+            NodeOverwrite(
+                node_id=node.id,
+                expected_revision=revision,
+                fields={name: getattr(node, name) for name in NODE_OVERWRITE_FIELDS},
+                drop_vector=text_changed,
+            )
+            for node, revision, text_changed in planned.node_overwrites
+        ],
+        edge_creates=[placed_edge(edge, edge.id) for edge in planned.edge_creates]
+        + [placed_edge(edge, renamed_edges[edge.id]) for edge in planned.edge_renames],
+        edge_overwrites=[
+            EdgeOverwrite(
+                edge_id=edge.id,
+                expected_revision=revision,
+                fields={name: getattr(edge, name) for name in EDGE_OVERWRITE_FIELDS},
+            )
+            for edge, revision in planned.edge_overwrites
+        ],
+    )
+    return MintedWrites(writes, renamed_nodes, renamed_edges)
+
+
+@dataclass
 class MergePlan:
     report: Dict[str, Any]
     digest: str
     committable: bool
+    # Set only when planned for a commit, and only for a committable plan.
+    writes: Optional[PlannedWrites] = None
 
 
 # --- planning ---------------------------------------------------------------
@@ -380,8 +494,14 @@ def compute_merge_plan(
     *,
     max_nodes: Optional[int] = None,
     max_edges: Optional[int] = None,
+    for_commit: bool = False,
 ) -> MergePlan:
     """Plan merging ``document`` into the live graph ``view`` reads; write nothing.
+
+    ``for_commit`` plans for the commit's locked unit: the plan carries its
+    ``writes`` and no report, since the report's attachment and vector
+    counts read beyond the document and the commit answers with the report
+    of the plan it checked before taking the lock.
 
     Raises ``MergeRequestError`` (``validation_failed``) when the document's
     shape or size cannot be judged entity by entity, and ``MergePlanUnstable``
@@ -399,7 +519,9 @@ def compute_merge_plan(
     for _attempt in range(MAX_PLAN_ATTEMPTS):
         generation = view.generation
         try:
-            plan = _Planner(raw_nodes, raw_edges, parameters, view, generation).run()
+            plan = _Planner(raw_nodes, raw_edges, parameters, view, generation).run(
+                for_commit
+            )
         except LiveGraphMoved:
             continue
         except RecursionError as exc:
@@ -937,17 +1059,52 @@ class _Planner:
 
     # -- assembly -------------------------------------------------------------
 
-    def run(self) -> MergePlan:
+    def run(self, for_commit: bool = False) -> MergePlan:
         self._plan_nodes()
         self._plan_edges()
         self._settle_duplicates()
         self._rejudge_incident_edges()
-        live_without_vector = self.view.nodes_without_vector()
-        report = self._report(live_without_vector)
         digest = self._digest()
         committable = not self.rejected.total and not self.conflicts
+        if for_commit:
+            return MergePlan(
+                report={},
+                digest=digest,
+                committable=committable,
+                writes=self._writes() if committable else None,
+            )
+        live_without_vector = self.view.nodes_without_vector()
+        report = self._report(live_without_vector)
         report["committable"] = committable
         return MergePlan(report=report, digest=digest, committable=committable)
+
+    def _writes(self) -> PlannedWrites:
+        writes = PlannedWrites()
+        for d in sorted(self.nodes.values(), key=lambda d: d.node.id):
+            if d.outcome == "create":
+                writes.node_creates.append(d.node)
+            elif d.outcome == "rename":
+                writes.node_renames.append(d.node)
+            elif d.outcome == "overwrite":
+                revision = self.reads[("node", d.node.id)]
+                assert revision is not None
+                writes.node_overwrites.append(
+                    (
+                        d.node,
+                        revision,
+                        any(name in d.changes for name in EMBEDDING_FIELDS),
+                    )
+                )
+        for e in sorted(self.edges, key=lambda e: e.edge.id):
+            if e.outcome == "create":
+                writes.edge_creates.append(e.edge)
+            elif e.outcome == "rename":
+                writes.edge_renames.append(e.edge)
+            elif e.outcome == "overwrite":
+                revision = self.reads[("edge", e.edge.id)]
+                assert revision is not None
+                writes.edge_overwrites.append((e.edge, revision))
+        return writes
 
     def _renamed_edge_rewrites(self) -> Dict[str, List[str]]:
         rewrites: Dict[str, List[str]] = {}
@@ -1189,6 +1346,16 @@ def _field_changes(live: Any, incoming: Any, fields: Tuple[str, ...]) -> Dict[st
         if main != new:
             changes[name] = {"main": main, "incoming": new}
     return changes
+
+
+def capped_renames(mapping: Dict[str, str]) -> Dict[str, Any]:
+    """Renamed ids, old -> new, for a commit response: exact count, the first
+    ``PLAN_LIST_CAP`` pairs by old id."""
+    items = [
+        {"old_id": old, "new_id": mapping[old]}
+        for old in sorted(mapping)[:PLAN_LIST_CAP]
+    ]
+    return {"count": len(mapping), "items": items}
 
 
 def _capped_ids(ids: List[str]) -> Dict[str, Any]:

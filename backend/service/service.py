@@ -745,6 +745,28 @@ class GraphService:
             max_edges=max_edges,
         )
 
+    def commit_merge_import(
+        self,
+        body: Any,
+        execution_store: "ExecutionStore",
+        event_origin: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Commit a MERGE import bound to a previewed plan. See
+        ``backend.service.import_service.commit_merge_import`` and
+        docs/adr/0013-graph-import-merge-mode.md.
+        """
+        return import_service.commit_merge_import(
+            self._storage,
+            self._authorization_hook,
+            execution_store,
+            body,
+            attachment_settings=self._attachment_settings,
+            event_origin=event_origin,
+            event_correlation_id=event_correlation_id,
+        )
+
     def get_import_job(
         self, execution_store: "ExecutionStore", job_id: str
     ) -> Optional[Dict[str, Any]]:
