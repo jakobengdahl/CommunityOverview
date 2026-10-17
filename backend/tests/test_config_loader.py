@@ -1393,12 +1393,54 @@ class TestAllowsAttachmentsSchemaField:
         """Clients may read the key unconditionally, on any node type."""
         schema = self._load(tmp_path, {"Declared": {"fields": ["name"]}})
 
+        assert "Declared" in schema["node_types"], "sweep would be vacuous"
         missing = [
             name
             for name, cfg in schema["node_types"].items()
             if "allows_attachments" not in cfg
         ]
         assert missing == []
+
+    def test_flag_is_typed_bool_and_coerces_a_false_string(self, tmp_path):
+        """A hand-written "false" must not leak through as a truthy string."""
+        from backend.config.config_loader import NodeTypeConfig
+
+        assert NodeTypeConfig.model_fields["allows_attachments"].annotation is bool
+        schema = self._load(
+            tmp_path,
+            {"Stringy": {"fields": ["name"], "allows_attachments": "false"}},
+        )
+
+        assert schema["node_types"]["Stringy"]["allows_attachments"] is False
+
+    RICH = {
+        "fields": ["name", "description", "identifier"],
+        "static": True,
+        "category": "system",
+        "description": "A rich type",
+        "color": "#112233",
+        "icon": "FileEarmarkFill",
+        "ui_form": "skill",
+        "labels": {"sv": "Rik", "en": "Rich"},
+        "context_menu": [
+            {"id": "one", "label": "One"},
+            {"id": "two", "label": "Two"},
+        ],
+        "allows_attachments": True,
+    }
+
+    def test_flag_is_independent_of_and_does_not_disturb_sibling_fields(self, tmp_path):
+        """The flag holds beside non-default static/category, and every
+        sibling field reaches clients unchanged."""
+        from backend.config.config_loader import NodeTypeConfig
+
+        schema = self._load(tmp_path, {"Rich": self.RICH, "Plain": {}})
+
+        assert "Rich" in schema["node_types"], "fixture must not be vacuous"
+        rich = schema["node_types"]["Rich"]
+        assert rich == self.RICH
+        assert set(schema["node_types"]["Plain"]) == set(NodeTypeConfig.model_fields)
+        assert schema["node_types"]["Plain"]["allows_attachments"] is False
 
     def test_system_node_types_do_not_allow_attachments(self):
         """Code-injected system types stay at the default."""
@@ -1429,6 +1471,26 @@ class TestAllowsAttachmentsSchemaField:
                 if cfg["allows_attachments"]
             ]
             assert enabled == [], f"{profile.parent.name} enables uploads on {enabled}"
+
+    def test_no_shipped_profile_declares_an_en_label(self):
+        """docs/PROFILES.md says no profile shows a translated type name."""
+        from backend.config import config_loader
+
+        config_dir = Path(__file__).parent.parent.parent / "config"
+        profiles = sorted(config_dir.glob("*/schema_config.json"))
+        assert profiles, "no profile schema_config.json files found"
+
+        for profile in profiles:
+            os.environ["SCHEMA_FILE"] = str(profile)
+            config_loader.reset_loader()
+            node_types = config_loader.get_schema()["node_types"]
+            assert node_types, f"{profile.parent.name} loaded no node types"
+            declaring = [
+                name for name, cfg in node_types.items() if "en" in cfg["labels"]
+            ]
+            assert declaring == [], (
+                f"{profile.parent.name} declares en labels on {declaring}"
+            )
 
 
 class TestNodeTypesSanitizer:
