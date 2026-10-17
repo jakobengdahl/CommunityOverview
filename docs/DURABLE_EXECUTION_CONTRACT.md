@@ -297,6 +297,20 @@ its redacted and purged counts include the runs it would abandon.
 `GET /agents/runs/retention-policy` returns the effective policy and the last
 sweep's record.
 
+The same sweep applies these windows to agent governance proposals (the
+`AGENTS_GOVERNANCE_DB` store, or the in-memory one). Only decided proposals
+(approved, rejected, applied or apply-failed) are touched, aged by when they
+were decided: older than the redact window, their `input_args`, `apply_result`
+and `apply_error` are stripped (agent, tool, status, decider and timestamps
+stay); older than the retention, they are purged. A pending proposal is never
+redacted or purged, whatever its age. The floor, clamps and idempotence above
+hold for proposals too, and the audit record adds `proposals_redacted` and
+`proposals_purged` counts. A failing proposal store is logged and flagged as
+`proposals_failed` in that record without undoing or hiding the run-history
+part of the sweep. The CLI sweeps `AGENTS_GOVERNANCE_DB` as well when it is
+set, needs at least one of the two databases, and exits 1 when the proposal
+part failed.
+
 ## 9. Public/private boundary
 
 This contract covers only generic core reliability. It deliberately excludes:
