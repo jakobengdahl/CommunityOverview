@@ -236,28 +236,33 @@ def test_two_quarantines_of_one_node_keep_both_sets(store):
     assert kept == {first.id: b"first", second.id: b"second"}
 
 
-@pytest.mark.parametrize("step", ["blob link", "live index write"])
+def test_quarantine_moves_blobs_where_hard_links_are_unsupported(store, monkeypatch):
+    old = _upload(store, "n1", b"old")
+
+    def no_links(*args, **kwargs):
+        raise PermissionError("operation not permitted")
+
+    monkeypatch.setattr(os, "link", no_links)
+    assert store.quarantine(NS, "n1", {old.id}) == 1
+    assert store.list(NS, "n1") == []
+    (target,) = (store.root / hashed_key(NS) / ".quarantine").iterdir()
+    assert (target / "blobs" / old.id).read_bytes() == b"old"
+
+
 def test_quarantine_failing_midway_leaves_every_blob_named_by_an_index(
-    store, monkeypatch, step
+    store, monkeypatch
 ):
     old = _upload(store, "n1", b"old")
-    if step == "blob link":
+    real_write = store._write_index
+    writes = []
 
-        def fail(*args, **kwargs):
-            raise OSError("cross-device link")
+    def fail(*args, **kwargs):
+        writes.append(args)
+        if len(writes) == 2:
+            raise OSError("disk full")
+        return real_write(*args, **kwargs)
 
-        monkeypatch.setattr(os, "link", fail)
-    else:
-        real_write = store._write_index
-        writes = []
-
-        def fail(*args, **kwargs):
-            writes.append(args)
-            if len(writes) == 2:
-                raise OSError("disk full")
-            return real_write(*args, **kwargs)
-
-        monkeypatch.setattr(store, "_write_index", fail)
+    monkeypatch.setattr(store, "_write_index", fail)
     with pytest.raises(OSError):
         store.quarantine(NS, "n1", {old.id})
     monkeypatch.undo()

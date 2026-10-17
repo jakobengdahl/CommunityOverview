@@ -567,6 +567,15 @@ class FileAttachmentStore:
                     os.link(blob, target / _BLOBS_DIR / record.id)
                 except FileNotFoundError:
                     continue
+                except OSError:
+                    # A share without hard links: move instead. Until the live
+                    # index is rewritten it names a missing blob, which
+                    # open_read already reads as "not found".
+                    try:
+                        os.replace(blob, target / _BLOBS_DIR / record.id)
+                    except FileNotFoundError:
+                        pass
+                    continue
                 live_blobs.append(blob)
             self._write_index(
                 namespace, node_id, [r for r in records if r.id not in attachment_ids]
