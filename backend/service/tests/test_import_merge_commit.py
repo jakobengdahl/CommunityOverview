@@ -432,6 +432,7 @@ class TestEmbeddingsAndAudit:
 
         record = job_store.get(result["import_id"])
         assert record.state == ExecutionState.SUCCEEDED
+        assert record.result == {"merge_status": "committed"}
         payload = record.payload
         assert payload["plan_digest"] == result["plan_digest"]
         assert payload["parameters"]["policy"]["default"] == "overwrite"
@@ -448,6 +449,7 @@ class TestEmbeddingsAndAudit:
         rows = client.get("/api/graph/import").json()
         merge_row = next(r for r in rows if r["id"] == result["import_id"])
         assert merge_row["mode"] == "merge"
+        assert merge_row["merge_status"] == "committed"
         assert merge_row["plan_digest"] == result["plan_digest"]
         assert merge_row["embeddings_status"] is None
         job_row = next(r for r in rows if r["id"] == result["job_id"])
@@ -455,14 +457,22 @@ class TestEmbeddingsAndAudit:
         assert job_row["import_id"] == result["import_id"]
         assert client.get(f"/api/graph/import/{result['import_id']}").status_code == 200
 
-    def test_the_audit_record_carries_the_callers_attribution(self, storage, job_store):
+    def test_the_audit_record_carries_the_requests_attribution(
+        self, storage, job_store
+    ):
         seen = _events(storage)
-        result = _commit(_client(storage, job_store), _body()).json()
-        attribution = seen[0].origin.attribution
-        payload = job_store.get(result["import_id"]).payload
-        assert payload["attribution"] == (
-            attribution.to_dict() if attribution is not None else None
-        )
+        result = _commit(
+            _client(storage, job_store),
+            _body(),
+            **{
+                "x-communityoverview-actor-id": "user-42",
+                "x-communityoverview-actor-type": "user",
+            },
+        ).json()
+        attribution = job_store.get(result["import_id"]).payload["attribution"]
+        assert attribution["actor"]["actor_id"] == "user-42"
+        assert attribution["actor"]["actor_type"] == "user"
+        assert attribution == seen[0].origin.attribution.to_dict()
 
     def test_the_embeddings_job_takes_the_callers_origin_and_correlation(
         self, storage, job_store
@@ -499,7 +509,9 @@ class TestEmbeddingsAndAudit:
         assert detail["audit_recorded"] is True
         record = job_store.get(detail["import_id"])
         assert record.result == {"merge_status": "outcome_unknown"}
+        assert record.payload["counts"]["events"] == 0
         assert record.payload["outcomes"]["nodes"]["overwritten"] == [["a1", None]]
+        assert record.payload["outcomes"]["nodes"]["created"] == [["n1", None]]
         row = client.get(f"/api/graph/import/{detail['import_id']}").json()
         assert row["merge_status"] == "outcome_unknown"
 
@@ -860,6 +872,19 @@ class TestRefusals:
         assert response.status_code == 503
         assert response.json()["detail"]["error_code"] == "backup_failed"
         assert _state(storage) == before
+
+    def test_a_write_that_did_not_land_leaves_no_audit_record(
+        self, storage, job_store, monkeypatch
+    ):
+        def _prepare_then_fail(prepare, event_context=None):
+            prepare()
+            raise GraphWriteFailed("did not land")
+
+        monkeypatch.setattr(storage, "apply_import_merge", _prepare_then_fail)
+        response = _commit(_client(storage, job_store), _body())
+        assert response.status_code == 502
+        assert "audit_recorded" not in response.json()["detail"]
+        assert job_store.list_jobs() == []
 
     @pytest.mark.parametrize(
         "error, status",
