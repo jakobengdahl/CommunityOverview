@@ -14,6 +14,12 @@ its own reads and every export fail.
 falling back to an iterative encoder where that one gives up, so nesting
 depth no longer matters; what UTF-8 cannot carry is written as a ``\\u``
 escape. Ordinary content renders as the same compact UTF-8 JSON as before.
+
+Error responses echo request text too (a duplicate id in a 400's detail, the
+rejected ``input`` of a 422), and FastAPI's default handlers render them with
+Starlette's strict encoder, turning the intended 4xx into a 500.
+``install_error_handlers`` replaces them with ones that differ only in the
+response class.
 """
 
 import functools
@@ -22,10 +28,14 @@ import json
 import math
 from typing import Any, Callable
 
+from fastapi import FastAPI, Request
 from fastapi.datastructures import DefaultPlaceholder
 from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
+from fastapi.utils import is_body_allowed_for_status_code
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .serializers import json_key_text
 
@@ -166,3 +176,28 @@ class GraphJSONRoute(APIRoute):
         ):
             endpoint = _render_return_value(endpoint, kwargs.get("status_code") or 200)
         super().__init__(path, endpoint, **kwargs)
+
+
+async def _http_exception_handler(
+    request: Request, exc: StarletteHTTPException
+) -> Response:
+    headers = getattr(exc, "headers", None)
+    if not is_body_allowed_for_status_code(exc.status_code):
+        return Response(status_code=exc.status_code, headers=headers)
+    return GraphJSONResponse(
+        {"detail": exc.detail}, status_code=exc.status_code, headers=headers
+    )
+
+
+async def _validation_exception_handler(
+    request: Request, exc: RequestValidationError
+) -> Response:
+    return GraphJSONResponse(
+        {"detail": jsonable_encoder(exc.errors())}, status_code=422
+    )
+
+
+def install_error_handlers(app: FastAPI) -> None:
+    """Render HTTP and request-validation errors with ``GraphJSONResponse``."""
+    app.add_exception_handler(StarletteHTTPException, _http_exception_handler)
+    app.add_exception_handler(RequestValidationError, _validation_exception_handler)
