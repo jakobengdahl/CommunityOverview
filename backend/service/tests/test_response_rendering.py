@@ -13,14 +13,19 @@ import os
 from datetime import datetime, timezone
 
 import pytest
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.datastructures import Default
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.testclient import TestClient
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend.core import GraphStorage, Node, NodeType
 from backend.service import GraphService, create_rest_router
-from backend.service.json_response import GraphJSONResponse, GraphJSONRoute
+from backend.service.json_response import (
+    GraphJSONResponse,
+    GraphJSONRoute,
+    install_error_handlers,
+)
 from backend.service.serializers import _to_json_native, serialize_to_json
 
 LONE_SURROGATE = "\ud800"
@@ -325,3 +330,101 @@ class TestSerializeToJson:
         assert converted == expected
         assert type(converted["t"][2]) is bool
         assert _depth(_to_json_native(_nested(3000))) == 3000
+
+
+class TestErrorResponses:
+    @pytest.fixture
+    def error_client(self, storage: GraphStorage) -> TestClient:
+        app = FastAPI()
+        install_error_handlers(app)
+        app.include_router(create_rest_router(GraphService(storage)), prefix="/api")
+        return TestClient(app, raise_server_exceptions=False)
+
+    def test_duplicate_id_echoing_a_lone_surrogate_keeps_its_conflict_status(
+        self, error_client
+    ):
+        node = '{"nodes":[{"id":"dup\\ud800","type":"Actor","name":"A"}],"edges":[]'
+        assert _post_raw(error_client, "/api/nodes", node + "}").status_code == 200
+
+        response = _post_raw(
+            error_client, "/api/nodes", node + ',"expect_absent":true}'
+        )
+
+        assert response.status_code == 409
+        assert response.json()["detail"]["entity_id"] == "dup\ud800"
+
+    def test_validation_error_input_with_a_lone_surrogate_stays_422(self, error_client):
+        body = '{"nodes":"bad\\ud800","edges":[]}'
+
+        response = _post_raw(error_client, "/api/nodes", body)
+
+        assert response.status_code == 422
+        assert response.json()["detail"][0]["input"] == "bad\ud800"
+
+    def test_ordinary_error_bodies_match_the_framework_defaults(self, storage):
+        def build(install: bool) -> TestClient:
+            app = FastAPI()
+            if install:
+                install_error_handlers(app)
+            app.include_router(create_rest_router(GraphService(storage)), prefix="/api")
+            return TestClient(app, raise_server_exceptions=False)
+
+        for method, path, body in (
+            ("get", "/api/nodes/missing-å", None),
+            ("post", "/api/nodes", '{"nodes":"bad"}'),
+        ):
+            responses = []
+            for install in (False, True):
+                kwargs = (
+                    {}
+                    if body is None
+                    else {
+                        "content": body,
+                        "headers": {"content-type": "application/json"},
+                    }
+                )
+                responses.append(getattr(build(install), method)(path, **kwargs))
+            default, custom = responses
+            assert default.status_code == custom.status_code >= 400
+            assert default.content == custom.content
+            assert default.headers["content-type"] == custom.headers["content-type"]
+
+    def test_headers_and_bodyless_statuses_are_preserved(self):
+        app = FastAPI()
+        install_error_handlers(app)
+
+        @app.get("/denied")
+        def denied():
+            raise HTTPException(401, "no", headers={"WWW-Authenticate": "Bearer"})
+
+        @app.get("/not-modified")
+        def not_modified():
+            raise HTTPException(304, headers={"ETag": "v1"})
+
+        @app.get("/no-content")
+        def no_content():
+            raise HTTPException(204, headers={"X-Kept": "1"})
+
+        client = TestClient(app)
+        assert client.get("/denied").headers["www-authenticate"] == "Bearer"
+        for path, status, header in (
+            ("/not-modified", 304, ("etag", "v1")),
+            ("/no-content", 204, ("x-kept", "1")),
+        ):
+            response = client.get(path)
+            assert response.status_code == status
+            assert response.content == b""
+            assert response.headers[header[0]] == header[1]
+
+    def test_starlette_level_http_exceptions_are_covered(self):
+        app = FastAPI()
+        install_error_handlers(app)
+
+        @app.get("/raw")
+        def raw():
+            raise StarletteHTTPException(409, "x" + LONE_SURROGATE)
+
+        response = TestClient(app).get("/raw")
+
+        assert response.status_code == 409
+        assert response.json() == {"detail": "x" + LONE_SURROGATE}
