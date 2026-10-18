@@ -9,7 +9,7 @@ and every export failed. See backend/service/json_response.py.
 import enum
 import inspect
 import json
-import os
+import sys
 from datetime import datetime, timezone
 
 import pytest
@@ -20,13 +20,20 @@ from fastapi.testclient import TestClient
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend.core import GraphStorage, Node, NodeType
+from backend.core.storage_backends import BackendCapabilities
 from backend.service import GraphService, create_rest_router
 from backend.service.json_response import (
     GraphJSONResponse,
     GraphJSONRoute,
+    _iterencode,
     install_error_handlers,
 )
-from backend.service.serializers import _to_json_native, serialize_to_json
+from backend.service import serializers
+from backend.service.serializers import (
+    _to_json_native,
+    json_key_text,
+    serialize_to_json,
+)
 
 LONE_SURROGATE = "\ud800"
 
@@ -48,9 +55,71 @@ def _depth(value: dict) -> int:
     return depth
 
 
+class _DiscardingBackend:
+    """Snapshot backend that keeps nothing.
+
+    The deep nodes below cannot always be persisted (a lone surrogate, or
+    nesting past what the file backend's encoder takes); building them into a
+    storage without persistence keeps these tests independent of whether the
+    save succeeds or its failure is swallowed.
+    """
+
+    def exists(self) -> bool:
+        return False
+
+    def load_graph_data(self) -> dict:
+        return {"nodes": [], "edges": []}
+
+    def save_graph_data(self, data: dict) -> None:
+        pass
+
+    def default_graph_name(self) -> str:
+        return "discarding"
+
+    def capabilities(self) -> BackendCapabilities:
+        return BackendCapabilities()
+
+
 @pytest.fixture
-def storage(temp_dir) -> GraphStorage:
-    return GraphStorage(json_path=os.path.join(temp_dir, "graph.json"))
+def storage() -> GraphStorage:
+    return GraphStorage(persistence_backend=_DiscardingBackend())
+
+
+class _Odd(int):
+    def __repr__(self) -> str:
+        return "odd-int"
+
+    __str__ = __repr__
+
+
+class _OddFloat(float):
+    def __repr__(self) -> str:
+        return "odd-float"
+
+    __str__ = __repr__
+
+
+@pytest.fixture
+def low_recursion_limit():
+    """Make RecursionError reachable for modest nesting on any Python.
+
+    Python 3.11 ties the C json encoder to this limit; later versions use a
+    fixed C stack bound that ignores it, which `_beyond_the_encoder` covers.
+    """
+    previous = sys.getrecursionlimit()
+    sys.setrecursionlimit(200)
+    try:
+        yield
+    finally:
+        sys.setrecursionlimit(previous)
+
+
+def _beyond_the_encoder() -> dict:
+    """Nesting json.dumps gives up on whatever the Python version."""
+    content = _nested(50_000)
+    with pytest.raises(RecursionError):
+        json.dumps(content)  # control: the branch under test is reachable
+    return content
 
 
 @pytest.fixture
@@ -240,6 +309,81 @@ class TestRenderingOfOrdinaryContent:
             GraphJSONResponse(content)
 
 
+class TestRecursionFallback:
+    def test_rendering_past_the_encoder_depth_uses_the_iterative_encoder(
+        self, low_recursion_limit
+    ):
+        body = GraphJSONResponse({"tree": _beyond_the_encoder()}).body
+
+        assert body.count(b'{"a":') == 50_000
+
+    def test_serialize_to_json_past_the_encoder_depth_converts_iteratively(
+        self, low_recursion_limit
+    ):
+        converted = serialize_to_json({"tree": _beyond_the_encoder()})
+
+        assert _depth(converted["tree"]) == 50_000
+
+
+class TestIterativeEncoderEdges:
+    def test_unsupported_type_is_a_type_error_naming_it(self):
+        with pytest.raises(TypeError, match="Object of type object is not JSON"):
+            _iterencode({"x": [object()]}, ensure_ascii=False)
+
+    def test_int_and_float_subclasses_render_as_their_json_base(self):
+        content = {_Odd(5): _Odd(6), _OddFloat(2.5): [_OddFloat(0.5)]}
+
+        text = _iterencode(content, ensure_ascii=False)
+
+        assert text == json.dumps(content, separators=(",", ":"))
+        assert text == '{"5":6,"2.5":[0.5]}'
+
+    def test_key_text_of_subclasses_matches_json_dumps(self):
+        assert json_key_text(_Odd(5)) == "5"
+        assert json_key_text(_OddFloat(2.5)) == "2.5"
+
+
+class TestRouteStatusAndPassthrough:
+    @pytest.fixture
+    def client(self) -> TestClient:
+        router = APIRouter(route_class=GraphJSONRoute)
+
+        @router.post("/made", status_code=201)
+        async def made() -> dict:
+            return {"ok": LONE_SURROGATE}
+
+        @router.get("/own")
+        async def own() -> dict:
+            return PlainTextResponse("own body", status_code=202)
+
+        @router.get("/gone")
+        def gone() -> dict:
+            raise HTTPException(410, "gone")
+
+        app = FastAPI()
+        app.include_router(router)
+        return TestClient(app)
+
+    def test_declared_status_code_is_kept(self, client):
+        response = client.post("/made")
+
+        assert response.status_code == 201
+        assert response.json() == {"ok": LONE_SURROGATE}
+
+    def test_a_returned_response_is_passed_through_untouched(self, client):
+        response = client.get("/own")
+
+        assert response.status_code == 202
+        assert response.text == "own body"
+        assert response.headers["content-type"].startswith("text/plain")
+
+    def test_raised_http_exceptions_keep_their_status(self, client):
+        response = client.get("/gone")
+
+        assert response.status_code == 410
+        assert response.json() == {"detail": "gone"}
+
+
 class TestRoutesLeftAsTheyAre:
     @pytest.fixture
     def router(self) -> APIRouter:
@@ -330,6 +474,57 @@ class TestSerializeToJson:
         assert converted == expected
         assert type(converted["t"][2]) is bool
         assert _depth(_to_json_native(_nested(3000))) == 3000
+
+
+class TestSharedAndCircularReferences:
+    @pytest.fixture(autouse=True)
+    def bounded_conversion(self, monkeypatch):
+        # Every container the converter visits converts its keys, so a lost
+        # memo (which would walk a cycle forever) trips this bound and fails
+        # the test in place instead of hanging or growing without limit.
+        calls = 0
+
+        def bounded(key):
+            nonlocal calls
+            calls += 1
+            if calls > 1000:
+                raise AssertionError("conversion did not terminate on a cycle")
+            return json_key_text(key)
+
+        monkeypatch.setattr(serializers, "json_key_text", bounded)
+
+    def test_a_dict_that_contains_itself_converts_to_a_copy_that_does(self):
+        data: dict = {"n": 1}
+        data["self"] = data
+
+        converted = _to_json_native(data)
+
+        assert converted is not data
+        assert converted["self"] is converted and converted["n"] == 1
+
+    def test_a_list_cycle_through_a_dict_terminates(self):
+        items: list = []
+        data = {"items": items}
+        items.append(data)
+
+        converted = _to_json_native(data)
+
+        assert converted["items"][0] is converted
+
+    def test_shared_references_stay_shared(self):
+        shared = {"v": 1}
+
+        converted = _to_json_native({"x": shared, "y": [shared]})
+
+        assert converted["x"] is converted["y"][0]
+        assert converted["x"] is not shared
+
+    def test_serialize_to_json_reports_a_cycle_as_json_does(self):
+        data: dict = {}
+        data["self"] = data
+
+        with pytest.raises(ValueError):
+            serialize_to_json(data)
 
 
 class TestErrorResponses:
