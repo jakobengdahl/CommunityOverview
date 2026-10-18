@@ -203,6 +203,13 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | `GRAPH_POSTGRES_SCHEMA` | `public` | Schema holding the graph tables; one database can serve several graphs |
 | `GRAPH_POSTGRES_POOL_SIZE` | *(backend default)* | Pooled connections per instance, on top of one dedicated `LISTEN` connection; must be at least 1 |
 | `GRAPH_POSTGRES_SCOPE` | *(unset)* | Opaque identifier tagging this instance's rows and narrowing the rows it reads (`postgres` only). Unset keeps no scopes apart; set-but-empty, or set without `GRAPH_BACKEND=postgres`, fails at boot. See [PERSISTENCE_BACKENDS.md](../docs/PERSISTENCE_BACKENDS.md) |
+| `ATTACHMENT_DIR` | `<graph stem>.attachments` next to the graph | Root of the node attachment store. Required for attachments with `GRAPH_BACKEND=postgres` (every instance serving the schema must share it); without it the attachment routes answer `503 attachments_unavailable` |
+| `ATTACHMENT_NAMESPACE` | graph file stem, or `pg:<GRAPH_POSTGRES_SCHEMA>` | Separates graphs sharing one attachment root; keep it for the graph's life |
+| `ATTACHMENT_BACKEND` | `file` | Attachment store backend; an unrecognised value fails at boot |
+| `ATTACHMENT_MAX_FILE_BYTES` | `26214400` (25 MiB) | Largest single file; `0` or less fails at boot |
+| `ATTACHMENT_MAX_FILES_PER_NODE` | `10` | Most files on one node; `0` or less fails at boot |
+| `ATTACHMENT_MAX_BYTES_PER_NODE` | `104857600` (100 MiB) | Most bytes on one node; `0` or less fails at boot |
+| `ATTACHMENT_ALLOWED_TYPES` | every detected type | Comma-separated MIME types narrowing the accepted set; a type the detector does not know, or a value naming no type at all, fails at boot |
 | `HISTORY_MAX_EVENTS` | `100000` | Mutation-history records retained (file backend only — a non-file `GRAPH_BACKEND` keeps no history); `0` removes the count cap (age trimming, if configured, still applies) |
 | `HISTORY_MAX_AGE_DAYS` | *(unset)* | Drop history records older than this many days (file backend only); unset keeps them regardless of age |
 | `API_PREFIX` | `/api` | REST API URL prefix |
@@ -214,6 +221,10 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | `AGENTS_ENABLED` | `false` | Enable the AI agent system |
 | `AGENTS_LLM_PROVIDER` | - | LLM provider for agents (`openai` or `claude`) |
 | `AGENTS_SCHEDULER_ENABLED` | `false` | Enable in-process time-based scheduler (off for scale-to-zero) |
+| `AGENTS_RUN_HISTORY_RETENTION_DAYS` | - (keep forever) | Purge terminal AgentRuns older than this many days (minimum 7); runs left running longer than this are first abandoned (dead-lettered) so they age out too. Decided governance proposals older than this are purged too (pending ones never). See `docs/DURABLE_EXECUTION_CONTRACT.md` §8a |
+| `AGENTS_RUN_HISTORY_REDACT_AFTER_DAYS` | - (never) | Strip the content of terminal AgentRuns, and the arguments and apply outcome of decided governance proposals, older than this many days (at most the retention) |
+| `AGENTS_RUN_HISTORY_EXPORT_MAX_DAYS` | retention | How far back `GET /agents/runs` reads (at most the retention) |
+| `AGENTS_RUN_HISTORY_SWEEP_INTERVAL_HOURS` | `24` | Hours between retention sweeps |
 | `AGENTS_WORKSPACE_DIR` | `~/.communityoverview/agent-workspace` | Root the agent's filesystem tools are confined to. Use an absolute path (or one starting with `~`): a relative path resolves against the process's working directory, which can differ between the places that read the setting. Must be a directory the service user owns and others cannot write to, or the FS tools refuse it — so prefer a private path over a shared one. A uid with no home (a container run as an arbitrary uid) falls back to a per-uid directory under the system temp dir |
 
 ## Building Frontend
@@ -452,13 +463,17 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | POST | `/api/search` | Search nodes |
 | GET | `/api/nodes/{id}` | Get node details |
 | POST | `/api/nodes/{id}/related` | Get related nodes |
-| POST | `/api/nodes` | Add nodes and edges |
-| PATCH | `/api/nodes/{id}` | Update a node |
-| DELETE | `/api/nodes` | Delete nodes |
+| POST | `/api/nodes` | Add nodes and edges (`expect_absent` optional; see *Entity revisions*) |
+| PATCH | `/api/nodes/{id}` | Update a node (`expected_revision` optional) |
+| DELETE | `/api/nodes` | Delete nodes (`expected_revisions` optional) |
 | POST | `/api/nodes/archive` | Archive/unarchive nodes (`archived` flag; hide-by-default vs. permanent delete) |
+| GET | `/api/nodes/{id}/attachments` | List a node's attached files: `{attachments, limits, uploads_allowed}`. A `federated::` node lists empty with `uploads_allowed: false`. See [Node attachments](#node-attachments) |
+| POST | `/api/nodes/{id}/attachments?filename=<name>` | Attach one file; the body is the raw bytes (not multipart). `201` with the new record. Refusals: `413 attachment_too_large`, `409 node_attachment_limit`, `415 unsupported_attachment_type`, `422 attachments_not_allowed`, `422 federated_node`, `409 node_archived` |
+| GET | `/api/nodes/{id}/attachments/{attachment_id}` | Download one file, streamed, always as `Content-Disposition: attachment` with `nosniff`, a sandboxing CSP and `no-store` |
+| DELETE | `/api/nodes/{id}/attachments/{attachment_id}` | Delete one file: `{success: true}` |
 | POST | `/api/edges` | Add edges |
-| PATCH | `/api/edges/{id}` | Update an edge |
-| DELETE | `/api/edges/{id}` | Delete an edge |
+| PATCH | `/api/edges/{id}` | Update an edge (`expected_revision` optional) |
+| DELETE | `/api/edges/{id}` | Delete an edge (`expected_revision` optional) |
 | POST | `/api/edges/archive` | Archive/unarchive edges (`archived` flag) |
 | GET | `/api/history` | Recent graph mutation history (newest first; `limit`, `offset`) |
 | GET | `/api/nodes/{id}/history` | Mutation history for a single node |
@@ -475,6 +490,7 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | GET | `/api/export/archive` | Export the graph as a ZIP archive: `graph.json` (same content as `/api/export`), `embeddings.bin` (the live vector store's embeddings in the sidecar's own binary format, omitted when there are no vectors), and `manifest.json` (schema version, embedding model/dimension, per-member SHA-256 checksums, node/edge counts). See [DATA_MANAGEMENT.md](../docs/DATA_MANAGEMENT.md#importing-a-vector-aware-archive) and [ADR 0007](../docs/adr/0007-vector-aware-export-archive.md) |
 | POST | `/api/import` | Replace the ENTIRE active graph with the posted document (same shape as `/api/export`). Validates fully before writing; on success normally returns a `job_id` for the background embedding job (`null` in the rare case that starting it itself failed — see `embeddings_status: "not_started"`). See [DATA_MANAGEMENT.md](../docs/DATA_MANAGEMENT.md#importing-a-graph) and [ADR 0006](../docs/adr/0006-graph-import-replace-mode.md) |
 | POST | `/api/import/archive` | Multipart upload of a ZIP produced by `/api/export/archive` (or a plain `graph.json` zipped with no manifest/embeddings at all). Runs the same validate → backup → replace pipeline as `/api/import`; a compatible manifest (checksums verified, `embedding_model` matches this instance's live model) restores vectors directly — fully covered: `embeddings_status: "restored"`, no job; only partially covered (some imported node ids have no vector in `embeddings.bin`): `embeddings_status: "restored_partial"`, covered subset restored synchronously plus a background job scoped to just the uncovered nodes; otherwise (incompatible or missing manifest) the graph still imports and embeddings are (re)generated by the same background job `/api/import` uses. A corrupt ZIP or a checksum failure on any member the manifest names is rejected (`archive_integrity_failed`) before anything is written. See [DATA_MANAGEMENT.md](../docs/DATA_MANAGEMENT.md#importing-a-vector-aware-archive) and [ADR 0007](../docs/adr/0007-vector-aware-export-archive.md) |
+| POST | `/api/import/merge/preview` | Read-only MERGE plan: body `{document, policy?, include_system_types?, stamp_provenance?}`; returns `plan` (adds, overwrites, renames, skips, conflicts, rejected, attachment flags, embeddings and events counts, `committable`) and `plan_digest`. Writes nothing; needs graph mutation and read access, both with unnarrowed graph scope; `stamp_provenance: true` is refused; one preview at a time (503 `import_preview_busy` otherwise). MCP tool `preview_graph_merge` does the same for documents of at most 10,000 nodes / 20,000 edges. See [DATA_MANAGEMENT.md](../docs/DATA_MANAGEMENT.md#previewing-a-merge-import) and [ADR 0013](../docs/adr/0013-graph-import-merge-mode.md) |
 | GET | `/api/import/{job_id}` | Status of one import's background embedding job (`queued`/`running`/`succeeded`/`failed`/`cancelled`, plus `embeddings_status`) |
 | GET | `/api/import` | List import jobs, newest first |
 | GET | `/api/{custom-path}` | Config-driven dedicated interface for one node/edge type (see Custom REST Interfaces below). Registered only for configured types. |
@@ -482,13 +498,53 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | GET | `/api/views/{name}` | Get a saved view |
 | GET | `/api/views` | List saved views |
 | GET | `/agents/schedules` | List all agent schedules (for external scheduler reconciliation) |
-| GET | `/agents/runs` | List durable AgentRun history (filter by `agent_id`, `kind`, `status`, `limit`), newest-first |
+| GET | `/agents/runs` | List durable AgentRun history (filter by `agent_id`, `kind`, `status`, `limit`), newest-first, limited to the retention read window |
+| GET | `/agents/runs/retention-policy` | Effective run-history retention policy and the last sweep's content-free record |
 | GET | `/agents/runs/{run_id}` | Get a single AgentRun by id |
 | GET | `/agents/proposals` | List agent proposals (filter by `agent_id`, `status`, `limit`), newest-first |
 | GET | `/agents/proposals/{proposal_id}` | Get a single proposal by id |
 | POST | `/agents/proposals/{proposal_id}/approve` | Approve a proposal (applies the action for act_after_approval agents) |
 | POST | `/agents/proposals/{proposal_id}/reject` | Reject a proposal |
 | POST | `/agents/{id}/trigger` | Fire a scheduled agent immediately (used by GCP Cloud Scheduler) |
+
+### Node attachments
+
+Files attached to a node live in their own store beside the graph, never in
+the graph document, `GET /export`, mutation history or federation. The design
+is [ADR 0008](../docs/adr/0008-node-attachment-storage.md); the code is
+`backend/core/attachment_store.py` (the store), `backend/core/attachment_types.py`
+(type detection) and `backend/service/attachments.py` (authorization and the
+per-route checks).
+
+- **Uploads need the schema flag.** A node type accepts uploads only with
+  `allows_attachments: true` (see [PROFILES.md](../docs/PROFILES.md)). Files
+  already attached stay listable, downloadable and deletable when the flag is
+  off, and when the node is archived.
+- **Authorization** runs in the service layer on every request: the read
+  routes are `read` on `list_node_attachments` / `get_node_attachment`, upload
+  and delete are `mutate` on `add_node_attachment` / `delete_node_attachment`.
+  A node the caller cannot see answers `404`, exactly like a missing one.
+- **Limits** (the `ATTACHMENT_MAX_*` settings above) are checked from
+  `Content-Length` before the body is read, again while it streams, and once
+  more under the per-node lock at commit. The smaller of the per-file limit
+  and the node's remaining byte budget decides the error: the per-file limit
+  is `413 attachment_too_large`, the node budget `409 node_attachment_limit`.
+- **Types** are detected from the bytes: PDF, PNG, JPEG, WebP, DOCX, XLSX,
+  PPTX, ODT, ODS, ODP, and UTF-8 text (`text/csv` for a `.csv` name, otherwise
+  `text/plain`). Text whose first non-blank character is `<` is refused, as are
+  HTML, SVG, XML, executables, bare archives and archives with an oversized
+  (over 1 MiB) or ZIP64 central directory. The client's `Content-Type` is
+  stored for diagnosis only and never served.
+- **Names** are sanitised (path parts, control and bidi characters removed,
+  255 UTF-8 bytes at most), then made to agree with the detected type:
+  `report.docm` holding a Word document is stored as `report.docm.docx`, and a
+  text file keeps its extension only when it is inert text (`.txt`, `.md`,
+  `.json`, `.log`, `.yaml` and similar) or has none (`README` stays
+  `README`), so `run.bat` is stored as `run.bat.txt`.
+- **Deleting a node** removes its files after the graph delete succeeds.
+  Archiving keeps them. REPLACE import does not touch the store.
+- **No MCP tool** exists for attachments yet; the service functions take bytes
+  or an async iterator, so one can be added without going through HTTP.
 
 ### Generic search filters (`/api/search` and the `search_graph` MCP tool)
 
@@ -723,6 +779,35 @@ Example — set one metadata key and remove another, only if the node is unchang
   "expected_updated_at": "2026-08-13T09:15:04.123456+00:00"
 }
 ```
+
+### Entity revisions
+
+Every node and edge a read returns carries `revision`: a server-owned stamp
+from one graph-wide counter, moved by every write and never reused
+([`SESSION_OVERLAY_CONTRACT.md` §4](../docs/SESSION_OVERLAY_CONTRACT.md#4-entity-revisions)).
+A `revision` a caller sends is dropped — never stored, never folded into
+`metadata`. A write may carry an expectation:
+
+| Request | Field | Holds when |
+|---|---|---|
+| `PATCH /api/nodes/{id}`, MCP `update_node` | `expected_revision` | the node's revision still equals it |
+| `PATCH /api/edges/{id}`, `DELETE /api/edges/{id}` | `expected_revision` | the edge's revision still equals it |
+| `DELETE /api/nodes`, MCP `delete_nodes` | `expected_revisions` (id → revision) | every listed node still has it |
+| `POST /api/nodes`, MCP `add_nodes` | `expect_absent` | no node or edge in the request exists yet |
+
+`expected_updated_at` keeps working; when both it and `expected_revision` are
+given, both must hold. A refused or failed write answers with an `error`
+code and a `message`:
+
+| `error` | HTTP | Meaning |
+|---|---|---|
+| `entity_revision_conflict` | 409 | the expectation did not hold; carries `entity_kind`, `entity_id`, `current_revision` (null when absent). Nothing was written. |
+| `write_failed` | 502 | the write did not land and nothing changed: refused by the store, confirmed absent on two reads of a shared store, or (file backend) its revisions could not be reserved. |
+| `write_outcome_unknown` | 503 | shared store only: whether it landed could not be told. Re-read before retrying. |
+
+Over MCP the same fields come back with `success: false`. Archive and the
+bulk edge delete accept expectations in `GraphStorage` but not yet over the
+API.
 
 ### Custom REST Interfaces (config-driven)
 

@@ -46,6 +46,7 @@ from backend.core.session_manager import SessionManager
 
 from backend.core import GraphStorage
 from backend.service import GraphService, create_rest_router, register_mcp_tools
+from backend.service.json_response import install_error_handlers
 from backend.service.mcp_tools import _push_to_session
 from backend.ui import ChatService, DocumentService, create_ui_router
 from backend.agents import AgentRegistry, AgentsSettings
@@ -62,6 +63,7 @@ from .diagnostics import build_startup_diagnostics, emit_startup_diagnostics_log
 from .logging_config import configure_root_logging
 from .middleware import add_auth_middleware, add_cors_middleware, compute_auth_active
 from .mcp_mount import build_mcp_instructions, mount_mcp
+from .attachments import build_attachment_settings
 from .persistence import build_persistence_backend
 from .session_stream import register_session_stream
 from .tool_routes import register_tool_routes
@@ -96,6 +98,8 @@ def create_app(
         description="REST API and MCP server for community knowledge graph operations",
         version="1.0.0",
     )
+
+    install_error_handlers(app)
 
     # Middleware order matters: auth is installed first so CORS (added next)
     # wraps it as the outermost layer, letting preflight requests through.
@@ -144,7 +148,11 @@ def create_app(
     graph_storage.setup_events(enabled=True)
 
     # Initialize GraphService
-    graph_service = GraphService(graph_storage, federation_manager=federation_manager)
+    graph_service = GraphService(
+        graph_storage,
+        federation_manager=federation_manager,
+        attachment_settings=build_attachment_settings(config, graph_storage),
+    )
 
     # Run federation startup sync (best effort, never blocks startup on failures)
     federation_manager.sync_on_startup()

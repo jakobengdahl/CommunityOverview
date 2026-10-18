@@ -206,6 +206,7 @@ class AttachmentStore(Protocol):
     def discard(self, staged: StagedUpload) -> None: ...
     def delete(self, namespace: str, node_id: str, attachment_id: str) -> bool: ...
     def delete_node(self, namespace: str, node_id: str) -> int: ...
+    def quarantine(self, namespace: str, node_id: str, attachment_ids: AbstractSet[str]) -> int: ...  # §8
     def iter_nodes(self, namespace: str) -> Iterator[str]: ...
 ```
 
@@ -543,6 +544,28 @@ changing this design.
 - **Node deleted:** the service calls `AttachmentStore.delete_node` after the
   graph delete has succeeded, never before. A crash between the two leaves an
   orphan node directory, never a live node that has lost its files.
+- **Node id created again:** an orphan node directory must not become the
+  files of a new node that reuses the id. Before `GraphService.add_nodes`
+  creates a node with a caller-given id that the graph does not hold, it notes
+  the attachment ids already recorded under that id. Once the node is in the
+  graph it calls `AttachmentStore.quarantine`, which moves exactly those
+  records and their blobs to `<namespace_key>/.quarantine/` and logs a
+  warning. A create call that fails part-way keeps the nodes that landed
+  before the failure, and their leftovers are quarantined too.
+  - A create that is refused moves nothing: the id is taken locally, or, with
+    `expect_absent`, in a store that enforces revisions (perhaps by a node
+    this instance has not seen yet). Without `expect_absent`, such a store
+    lets the create replace the node it has not seen, and that node's files
+    are then quarantined as the earlier node's.
+  - A file uploaded to the new node after the snapshot is not in it, so it
+    stays.
+  - Nothing is deleted: a quarantined file may still be wanted, and only an
+    operator can tell. A failure is logged and never fails the create.
+  - A crash between the create and the quarantine, or a write whose outcome
+    is unknown, leaves the old files listed under the new node.
+  - Graph imports do not take this path: a REPLACE import may be a restore
+    (below), and a merge plan flags new nodes whose id has leftover files
+    instead.
 - **Graph import in REPLACE mode (ADR 0006):** the attachment store is not
   touched. Nodes that do not survive the import leave orphan node
   directories. They are not deleted automatically, because the import may be
@@ -592,7 +615,8 @@ python scripts/validate_attachments.py --attachments <root> --namespace <ns>
 
 It walks every node directory in the one namespace given (the argument is
 required, so one graph is never checked against another graph's files) and
-classifies each finding:
+classifies each finding. `.locks/` and `.quarantine/` (§8) are not node
+directories: they are neither checked nor pruned.
 
 | Class | Finding |
 |---|---|
@@ -696,6 +720,7 @@ data/active/
     <namespace_key>/<node_key>/index.json
     <namespace_key>/<node_key>/blobs/<attachment_id>
     <namespace_key>/.locks/<node_key>.lock
+    <namespace_key>/.quarantine/<node_key>-<stamp>-<rand>/   # §8; node-dir layout
     .tmp/                               # staged uploads; stale ones swept at start-up
 ```
 
@@ -743,6 +768,32 @@ The UI task builds against these rules:
   - a generic fallback
 - **Strings:** all of them go under an `attachments.` prefix in both
   `frontend/web/src/i18n/en.json` and `sv.json`.
+
+## Implementation notes
+
+Recorded when the store and the REST API landed. They change how two rules
+above are applied; the rest of the decision stands as written.
+
+- **§11, PostgreSQL without `ATTACHMENT_DIR`:** the instance boots, logs a
+  warning, and the attachment routes answer `503 attachments_unavailable`.
+  Refusing boot would stop every existing PostgreSQL deployment from starting
+  on upgrade. The safety property the rule protects still holds: no
+  per-instance local directory is ever invented.
+- **§7, file-name sanitising, one more step:** after the type is detected
+  (§5), a stored name whose extension does not belong to that type gets the
+  type's extension appended (`report.docm` is stored as `report.docm.docx`),
+  and a `text/plain` name gets `.txt` appended unless its extension is one a
+  desktop opens as inert text (`.txt`, `.md`, `.json`, `.log`, `.yaml` and
+  similar, or none at all), so `.bat`, `.js`, `.hta`, `.rtf` or `.rdp` never
+  survive.
+  Trailing dots and spaces are ignored when reading the extension. The bytes
+  are unchanged; only the name the browser saves the download under is.
+  Bidirectional formatting characters are removed with the control
+  characters in step 3.
+- **§5, archives:** a ZIP whose central directory is larger than 1 MiB, or
+  that uses ZIP64, is refused before it is parsed. A real office document
+  needs neither, and parsing a directory of hundreds of thousands of empty
+  members costs seconds and hundreds of MB.
 
 ## Consequences
 

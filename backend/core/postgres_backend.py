@@ -80,8 +80,10 @@ from psycopg_pool import ConnectionPool
 from backend.core.storage_backends import (
     BackendCapabilities,
     EntityOperation,
+    EntityRevisionConflict,
     ExternalChange,
     ExternalChangeRefused,
+    WriteRefusedByStore,
 )
 
 logger = logging.getLogger(__name__)
@@ -121,6 +123,22 @@ SCOPED_TABLES = ("graph_nodes", "graph_edges")
 # metadata keeps its file-backend shape, while the PostgreSQL schema still has
 # a single durable claim tying it to the graph identity that opened it.
 GRAPH_IDENTITY_KEY = "_postgres_graph_identity"
+
+# The graph-wide revision counter (docs/SESSION_OVERLAY_CONTRACT.md §4.2): one
+# sequence per schema, so every instance writing the store draws from it and
+# no two writes share a value. Only ever advanced - by nextval, and by a
+# whole-graph save raising it past what it wrote - never set lower.
+REVISION_SEQUENCE = "graph_revision_seq"
+
+# Each entity a write touches carries that write's token inside its doc, so
+# after a failure the writer can tell whether its own write committed
+# (§4.4). Server-internal: stripped from every entity a read returns.
+WRITE_TOKEN_KEY = "_write_token"
+
+# How long reading a failed write's evidence may wait for a connection. It
+# runs with the application's storage lock held, so a store that is down must
+# not hold it for the pool's whole default wait, twice.
+EVIDENCE_CONNECT_TIMEOUT_SECONDS = 5.0
 
 # Connections are the resource that scales with instance count, and the
 # server's ceiling is shared by every instance at once: stock PostgreSQL
@@ -239,6 +257,19 @@ def _channel_for(schema: str) -> str:
     return "co_graph_" + hashlib.sha256(schema.encode("utf-8")).hexdigest()[:32]
 
 
+def _without_token(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """An entity as a read returns it: the write token is the store's own."""
+    if WRITE_TOKEN_KEY in doc:
+        doc = dict(doc)
+        doc.pop(WRITE_TOKEN_KEY, None)
+    return doc
+
+
+def _stored_revision(doc: Dict[str, Any]) -> int:
+    value = doc.get("revision") if isinstance(doc, dict) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
 class ScopeIsolationUnavailable(RuntimeError):
     """A scope was configured and the store cannot keep rows apart by it.
 
@@ -251,7 +282,7 @@ class ScopeIsolationUnavailable(RuntimeError):
     """
 
 
-class CrossScopeWriteRefused(RuntimeError):
+class CrossScopeWriteRefused(WriteRefusedByStore):
     """An entity write named an id that belongs to another scope.
 
     `id` is the primary key of the table rather than of the table per scope,
@@ -354,6 +385,19 @@ class PostgresGraphPersistenceBackend:
             sql.Identifier(self.schema), sql.Identifier(name)
         )
 
+    def _sequence_regclass(self) -> str:
+        """The revision sequence as a regclass literal, quoted as identifiers.
+
+        Passed as a parameter and cast, so the schema name reaches the server
+        as data; quoted, so a mixed-case schema or one containing a dot names
+        exactly this sequence rather than being folded or split.
+        """
+
+        def quote(name: str) -> str:
+            return '"' + name.replace('"', '""') + '"'
+
+        return f"{quote(self.schema)}.{quote(REVISION_SEQUENCE)}"
+
     def _create_missing(self, conn, table: str, columns: str) -> None:
         """Create one table, asking only when it is not already there.
 
@@ -447,6 +491,31 @@ class PostgresGraphPersistenceBackend:
                         "only_row boolean PRIMARY KEY DEFAULT true"
                         " CHECK (only_row), doc jsonb NOT NULL",
                     )
+                    # Same catalog guard as the tables: a role provisioned
+                    # with DML only finds the sequence an operator created
+                    # and is not asked for CREATE it does not hold.
+                    if not conn.execute(
+                        "SELECT 1 FROM pg_class c JOIN pg_namespace n"
+                        " ON n.oid = c.relnamespace"
+                        " WHERE n.nspname = %s AND c.relname = %s",
+                        (self.schema, REVISION_SEQUENCE),
+                    ).fetchone():
+                        try:
+                            conn.execute(
+                                sql.SQL("CREATE SEQUENCE IF NOT EXISTS {}").format(
+                                    self._table(REVISION_SEQUENCE)
+                                )
+                            )
+                        except psycopg.errors.InsufficientPrivilege as exc:
+                            # A store provisioned before entity revisions, for
+                            # a role that may not create: say what to add.
+                            raise RuntimeError(
+                                f"the revision sequence "
+                                f"{self.schema}.{REVISION_SEQUENCE} does not exist "
+                                f"and this role may not create it; provision it "
+                                f"and grant USAGE, SELECT, UPDATE on it - see "
+                                f"docs/PERSISTENCE_BACKENDS.md"
+                            ) from exc
             # Outside the migration transaction, on purpose, and one
             # connection each. Every level of the traversal filters on
             # doc->>'source' and doc->>'target', which no index covers by
@@ -924,6 +993,7 @@ class PostgresGraphPersistenceBackend:
             transactions=True,
             change_notification=True,
             store_traversal=True,
+            revision_enforcement=True,
         )
 
     # -- traversal contract --------------------------------------------------
@@ -1153,7 +1223,7 @@ class PostgresGraphPersistenceBackend:
                 self._bind_scope(conn)
                 where, scope_params = self._where_scope()
                 nodes = [
-                    row[0]
+                    _without_token(row[0])
                     for row in conn.execute(
                         sql.SQL("SELECT doc FROM {}{} ORDER BY id").format(
                             self._table("graph_nodes"), where
@@ -1162,7 +1232,7 @@ class PostgresGraphPersistenceBackend:
                     )
                 ]
                 edges = [
-                    row[0]
+                    _without_token(row[0])
                     for row in conn.execute(
                         sql.SQL("SELECT doc FROM {}{} ORDER BY id").format(
                             self._table("graph_edges"), where
@@ -1253,6 +1323,25 @@ class PostgresGraphPersistenceBackend:
                     ).format(self._table("graph_metadata")),
                     (psycopg.types.json.Jsonb(metadata),),
                 )
+                # The save keeps the revisions it was handed (§4.2), so the
+                # counter is raised past them. Only raised: GREATEST against
+                # the sequence's own value, and safe to read-then-set because
+                # every entity write holds the save lock in SHARE mode and
+                # this transaction holds it exclusively - no nextval can run
+                # on this schema in between.
+                highest = max(
+                    [_stored_revision(doc) for doc in nodes]
+                    + [_stored_revision(doc) for doc in edges]
+                    + [0]
+                )
+                if highest > 0:
+                    conn.execute(
+                        sql.SQL(
+                            "SELECT setval(%s::regclass, GREATEST("
+                            "(SELECT last_value FROM {}), %s))"
+                        ).format(self._table(REVISION_SEQUENCE)),
+                        (self._sequence_regclass(), highest),
+                    )
                 # A whole-graph save replaced everything, including rows it
                 # never named. Naming what changed would mean diffing the
                 # store against itself, which is the case unknown() exists
@@ -1321,19 +1410,23 @@ class PostgresGraphPersistenceBackend:
     # only pairs - and what happens then is written down at apply_batch.
     DEADLOCK_RETRIES = 3
 
-    def upsert_node(self, node: Dict[str, Any]) -> None:
-        self.apply_batch([EntityOperation.upsert_node(node)])
+    def upsert_node(self, node: Dict[str, Any]) -> Optional[int]:
+        return (self.apply_batch([EntityOperation.upsert_node(node)]) or [None])[0]
 
     def delete_node(self, node_id: str) -> None:
         self.apply_batch([EntityOperation.delete_node(node_id)])
 
-    def upsert_edge(self, edge: Dict[str, Any]) -> None:
-        self.apply_batch([EntityOperation.upsert_edge(edge)])
+    def upsert_edge(self, edge: Dict[str, Any]) -> Optional[int]:
+        return (self.apply_batch([EntityOperation.upsert_edge(edge)]) or [None])[0]
 
     def delete_edge(self, edge_id: str) -> None:
         self.apply_batch([EntityOperation.delete_edge(edge_id)])
 
-    def apply_batch(self, operations: Sequence[EntityOperation]) -> None:
+    def apply_batch(
+        self,
+        operations: Sequence[EntityOperation],
+        write_token: Optional[str] = None,
+    ) -> List[Optional[int]]:
         """Apply the operations in order, in one transaction.
 
         This is where the shared store starts paying: a renamed node costs
@@ -1376,17 +1469,43 @@ class PostgresGraphPersistenceBackend:
         propagates and the next write is a whole-graph one. That is the
         behaviour this backend had before entity writes existed, so the
         worst case degrades rather than corrupts.
+
+        Every upsert takes the next value of the store's revision sequence in
+        the statement that writes it, and the revisions are returned in
+        operation order (None for a delete). An operation's expectation is a
+        condition of that same statement; one that does not hold raises
+        EntityRevisionConflict and the transaction rolls back, so nothing in
+        the batch lands and nothing is announced. `write_token` is stored in
+        every entity written - see `read_write_evidence`.
         """
         self._ensure_schema()
         for attempt in range(self.DEADLOCK_RETRIES + 1):
             try:
-                self._apply_batch_once(operations)
-                return
+                return self._apply_batch_once(operations, write_token)
             except psycopg.errors.DeadlockDetected:
                 if attempt == self.DEADLOCK_RETRIES:
                     raise
+            except (
+                psycopg.DataError,
+                psycopg.ProgrammingError,
+                UnicodeEncodeError,
+            ) as exc:
+                # No SQLSTATE means the driver refused a value before the
+                # statement left - a NUL in an id, which a text parameter
+                # cannot carry, or a lone surrogate, which UTF-8 cannot
+                # encode. Nothing was sent, so nothing landed; said so,
+                # or the caller would read the store back for a write that
+                # never reached it.
+                if getattr(exc, "sqlstate", None) is None:
+                    raise WriteRefusedByStore(
+                        f"the driver refused a value in the batch: {exc}"
+                    ) from exc
+                raise
+        raise AssertionError("unreachable")  # pragma: no cover
 
-    def _apply_batch_once(self, operations: Sequence[EntityOperation]) -> None:
+    def _apply_batch_once(
+        self, operations: Sequence[EntityOperation], write_token: Optional[str]
+    ) -> List[Optional[int]]:
         with self._pool.connection() as conn:
             with conn.transaction():
                 # Same reason as the save: last-writer-wins on a contended
@@ -1400,39 +1519,188 @@ class PostgresGraphPersistenceBackend:
                     (SAVE_LOCK_KEY, self.schema),
                 )
                 self._claim_or_check_graph_identity(conn)
-                for operation in operations:
-                    self._apply_one(conn, operation)
+                self._hold_endpoints(conn, operations)
+                revisions = [
+                    self._apply_one(conn, operation, write_token)
+                    for operation in operations
+                ]
                 # Inside the transaction, so the announcement is atomic with
                 # what it announces: the server holds it until commit and
                 # discards it on rollback. A batch that deadlocks and retries
                 # therefore announces once, from the attempt that committed,
                 # and a batch that fails announces nothing at all.
                 self._announce(conn, operations)
+                return revisions
 
-    def _apply_one(self, conn, operation: EntityOperation) -> None:
+    def _hold_endpoints(self, conn, operations: Sequence[EntityOperation]) -> None:
+        """Hold the endpoints the batch's edge upserts name, until commit.
+
+        So a node delete on another instance, which locks the row it removes,
+        is ordered against the edge write rather than interleaved with it
+        (§11.3). KEY SHARE, the weakest lock that does that: it conflicts
+        with a delete but not with an ordinary update of the node, so editing
+        a node never waits for someone drawing an edge to it. An endpoint the
+        batch upserts itself is skipped - its own upsert holds the row more
+        strongly. One single-row statement per endpoint, in sorted order, so
+        two batches over the same nodes take them in the same order, and
+        each is a primary-key lookup whatever the table's size.
+        """
+        upserted = {
+            op.entity_id
+            for op in operations
+            if op.kind == "node" and op.action == "upsert"
+        }
+        endpoints = sorted(
+            {
+                str(op.payload.get(end))
+                for op in operations
+                if op.kind == "edge" and op.action == "upsert" and op.payload
+                for end in ("source", "target")
+                if op.payload.get(end) is not None
+            }
+            - upserted
+        )
+        if not endpoints:
+            return
+        scope, scope_params = self._and_scope()
+        statement = sql.SQL("SELECT 1 FROM {} WHERE id = %s{} FOR KEY SHARE").format(
+            self._table("graph_nodes"), scope
+        )
+        for endpoint in endpoints:
+            conn.execute(statement, (endpoint, *scope_params))
+
+    def _stored_revision_of(self, conn, table: str, entity_id: str) -> Optional[int]:
+        """The visible row's revision, or None when there is no such row."""
+        scope, scope_params = self._and_scope()
+        row = conn.execute(
+            sql.SQL(
+                "SELECT COALESCE((doc->>'revision')::bigint, 0) FROM {} WHERE id = %s{}"
+            ).format(self._table(table), scope),
+            (entity_id, *scope_params),
+        ).fetchone()
+        return None if row is None else int(row[0])
+
+    def _refuse(self, conn, table: str, operation: EntityOperation):
+        current = self._stored_revision_of(conn, table, operation.entity_id)
+        return EntityRevisionConflict(
+            operation.kind,
+            operation.entity_id,
+            None if operation.expect_absent else operation.expected_revision,
+            current,
+        )
+
+    def _apply_one(
+        self, conn, operation: EntityOperation, write_token: Optional[str]
+    ) -> Optional[int]:
         table = "graph_nodes" if operation.kind == "node" else "graph_edges"
         if operation.action == "delete":
             # The predicate is not redundant with the policy: where the server
             # cannot enforce one, this is what stops an instance deleting a row
-            # that is not its to delete.
+            # that is not its to delete. The DELETE locks the row it removes,
+            # which is what orders a node delete against an edge create that
+            # holds the same row for share (§11.3).
             scope, scope_params = self._and_scope()
-            conn.execute(
-                sql.SQL("DELETE FROM {} WHERE id = %s{}").format(
-                    self._table(table), scope
-                ),
-                (operation.entity_id, *scope_params),
-            )
-            return
-        columns, placeholders = self._insert_shape()
-        if not self._scope_column:
-            conn.execute(
+            if operation.expected_revision is None:
+                conn.execute(
+                    sql.SQL("DELETE FROM {} WHERE id = %s{}").format(
+                        self._table(table), scope
+                    ),
+                    (operation.entity_id, *scope_params),
+                )
+                return None
+            cursor = conn.execute(
                 sql.SQL(
-                    "INSERT INTO {} ({}) VALUES ({})"
-                    " ON CONFLICT (id) DO UPDATE SET doc = EXCLUDED.doc"
-                ).format(self._table(table), columns, placeholders),
-                self._insert_params(operation.entity_id, operation.payload),
+                    "DELETE FROM {} WHERE id = %s"
+                    " AND COALESCE((doc->>'revision')::bigint, 0) = %s{}"
+                ).format(self._table(table), scope),
+                (operation.entity_id, operation.expected_revision, *scope_params),
             )
-            return
+            if cursor.rowcount == 0:
+                raise self._refuse(conn, table, operation)
+            return None
+
+        # The stored doc is the payload with the store's own revision and
+        # this write's token laid over it: whatever revision the instance
+        # sent is not the one that lands.
+        doc_expr = sql.SQL(
+            "%s::jsonb || jsonb_build_object("
+            "'revision', nextval(%s::regclass), {token_key}, %s::text)"
+        ).format(token_key=sql.Literal(WRITE_TOKEN_KEY))
+        doc_params = (
+            psycopg.types.json.Jsonb(operation.payload),
+            self._sequence_regclass(),
+            write_token,
+        )
+        scoped = self._scope_column
+        columns = (
+            sql.SQL("id, doc, ") + sql.Identifier(SCOPE_COLUMN)
+            if scoped
+            else sql.SQL("id, doc")
+        )
+        values = (
+            sql.SQL("%s, ") + doc_expr + sql.SQL(", %s")
+            if scoped
+            else sql.SQL("%s, ") + doc_expr
+        )
+        value_params = (operation.entity_id, *doc_params) + (
+            (self._scope,) if scoped else ()
+        )
+        returning = sql.SQL(" RETURNING (doc->>'revision')::bigint")
+
+        if operation.expect_absent:
+            row = conn.execute(
+                sql.SQL("INSERT INTO {} ({}) VALUES (").format(
+                    self._table(table), columns
+                )
+                + values
+                + sql.SQL(") ON CONFLICT (id) DO NOTHING")
+                + returning,
+                value_params,
+            ).fetchone()
+            if row is None:
+                conflict = self._refuse(conn, table, operation)
+                if conflict.current_revision is None:
+                    # Taken, but by a row this instance may not see.
+                    raise self._cross_scope(operation)
+                raise conflict
+            return int(row[0])
+
+        if operation.expected_revision is not None:
+            scope, scope_params = self._and_scope()
+            assign = sql.SQL("doc = ") + doc_expr
+            assign_params: Tuple = doc_params
+            if scoped:
+                assign = assign + sql.SQL(", {} = %s").format(
+                    sql.Identifier(SCOPE_COLUMN)
+                )
+                assign_params = assign_params + (self._scope,)
+            row = conn.execute(
+                sql.SQL("UPDATE {} SET ").format(self._table(table))
+                + assign
+                + sql.SQL(
+                    " WHERE id = %s AND COALESCE((doc->>'revision')::bigint, 0) = %s"
+                )
+                + scope
+                + returning,
+                assign_params
+                + (operation.entity_id, operation.expected_revision)
+                + scope_params,
+            ).fetchone()
+            if row is None:
+                raise self._refuse(conn, table, operation)
+            return int(row[0])
+
+        if not scoped:
+            row = conn.execute(
+                sql.SQL("INSERT INTO {} ({}) VALUES (").format(
+                    self._table(table), columns
+                )
+                + values
+                + sql.SQL(") ON CONFLICT (id) DO UPDATE SET doc = EXCLUDED.doc")
+                + returning,
+                value_params,
+            ).fetchone()
+            return int(row[0])
         # The scope travels with the row. A row written before this instance
         # had a scope carries none, and adopting it here is what stops the
         # store drifting into two kinds of row that the whole-graph save would
@@ -1447,35 +1715,68 @@ class PostgresGraphPersistenceBackend:
         # that had none. Measured before this predicate existed: the other
         # scope's node was gone and its next load returned nothing.
         #
-        # The row count is read rather than assumed, because a DO UPDATE whose
-        # WHERE does not match is not an error - the statement affects no rows
-        # and raises nothing, which would tell the caller a write happened that
-        # did not. Measured on PostgreSQL 16: 0 for exactly that case, and 1
-        # for a fresh insert, an own-scope update and a row carrying no scope.
-        cursor = conn.execute(
-            sql.SQL(
-                "INSERT INTO {} ({}) VALUES ({})"
-                " ON CONFLICT (id) DO UPDATE"
+        # No row back is read rather than assumed away, because a DO UPDATE
+        # whose WHERE does not match is not an error - the statement affects
+        # no rows and raises nothing, which would tell the caller a write
+        # happened that did not.
+        row = conn.execute(
+            sql.SQL("INSERT INTO {} ({}) VALUES (").format(self._table(table), columns)
+            + values
+            + sql.SQL(
+                ") ON CONFLICT (id) DO UPDATE"
                 " SET doc = EXCLUDED.doc, {col} = EXCLUDED.{col}"
                 " WHERE ({bare}.{col} IS NULL OR {bare}.{col} = %s)"
-            ).format(
-                self._table(table),
-                columns,
-                placeholders,
-                col=sql.Identifier(SCOPE_COLUMN),
-                bare=sql.Identifier(table),
-            ),
-            self._insert_params(operation.entity_id, operation.payload)
-            + (self._scope,),
+            ).format(col=sql.Identifier(SCOPE_COLUMN), bare=sql.Identifier(table))
+            + returning,
+            value_params + (self._scope,),
+        ).fetchone()
+        if row is None:
+            raise self._cross_scope(operation)
+        return int(row[0])
+
+    def _cross_scope(self, operation: EntityOperation) -> "CrossScopeWriteRefused":
+        return CrossScopeWriteRefused(
+            f"{operation.kind} {operation.entity_id!r} in schema "
+            f"{self.schema!r} carries a scope this instance may not write. "
+            f"An id is unique across the whole table, so two scopes cannot "
+            f"both hold one - see docs/PERSISTENCE_BACKENDS.md, "
+            f"'Keeping scopes apart'."
         )
-        if cursor.rowcount == 0:
-            raise CrossScopeWriteRefused(
-                f"{operation.kind} {operation.entity_id!r} in schema "
-                f"{self.schema!r} carries a scope this instance may not write. "
-                f"An id is unique across the whole table, so two scopes cannot "
-                f"both hold one - see docs/PERSISTENCE_BACKENDS.md, "
-                f"'Keeping scopes apart'."
-            )
+
+    def read_write_evidence(
+        self, keys: Sequence[Tuple[str, str]]
+    ) -> Dict[Tuple[str, str], Optional[Tuple[int, Optional[str]]]]:
+        """What a failed write can be judged on: each entity's stored revision
+        and the token of the write that last wrote it, or None when absent.
+
+        One snapshot for all of them, so a write that committed between two
+        tables' reads cannot look half landed.
+        """
+        self._ensure_schema()
+        found: Dict[Tuple[str, str], Optional[Tuple[int, Optional[str]]]] = {
+            (kind, entity_id): None for kind, entity_id in keys
+        }
+        with self._pool.connection(timeout=EVIDENCE_CONNECT_TIMEOUT_SECONDS) as conn:
+            with conn.transaction():
+                conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                self._bind_scope(conn)
+                scope, scope_params = self._and_scope()
+                for kind, table in (("node", "graph_nodes"), ("edge", "graph_edges")):
+                    ids = [entity_id for k, entity_id in keys if k == kind]
+                    if not ids:
+                        continue
+                    rows = conn.execute(
+                        sql.SQL(
+                            "SELECT id, COALESCE((doc->>'revision')::bigint, 0),"
+                            " doc->>{} FROM {} WHERE id = ANY(%s){}"
+                        ).format(
+                            sql.Literal(WRITE_TOKEN_KEY), self._table(table), scope
+                        ),
+                        (ids, *scope_params),
+                    ).fetchall()
+                    for entity_id, revision, token in rows:
+                        found[(kind, entity_id)] = (int(revision), token)
+        return found
 
     # -- change notification -------------------------------------------------
 
@@ -1852,7 +2153,9 @@ class PostgresGraphPersistenceBackend:
                 )
             else:
                 operations.append(
-                    EntityOperation(kind, "upsert", entity_id, dict(doc))  # type: ignore[arg-type]
+                    EntityOperation(
+                        kind, "upsert", entity_id, dict(_without_token(doc))
+                    )  # type: ignore[arg-type]
                 )
         return operations
 

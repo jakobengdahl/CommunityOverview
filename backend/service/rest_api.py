@@ -20,7 +20,8 @@ Usage:
 import asyncio
 import json
 import logging
-from typing import TYPE_CHECKING, List, Optional, Dict, Any
+from typing import TYPE_CHECKING, Annotated, List, Optional, Dict, Any
+from urllib.parse import quote
 from fastapi import (
     APIRouter,
     File,
@@ -33,6 +34,8 @@ from fastapi import (
 )
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import Response, StreamingResponse
+from starlette.background import BackgroundTask
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, field_validator
 from pydantic import ValidationError as PydanticValidationError
 
@@ -41,6 +44,8 @@ from backend.config.config_loader import (
     get_public_base_url,
     get_rest_interfaces,
 )
+from backend.core.attachment_store import copy_stream
+from backend.core.attachment_types import TEXT_TYPES
 from backend.core.image_ingest import (
     DEFAULT_MAX_SOURCE_IMAGE_BYTES,
     ImageFetchError,
@@ -60,6 +65,8 @@ from backend.core.session_annotations import (
 from backend.core.storage_search import MATCH_MODE_SUBSTRING, validate_match_mode
 from backend.runtime.authorization import use_request_authorization
 
+from . import attachments as attachment_ops
+from .json_response import GraphJSONRoute
 from .service import GraphService
 
 if TYPE_CHECKING:
@@ -193,6 +200,14 @@ class AddNodesRequest(BaseModel):
     edges: List[Dict[str, Any]] = Field(
         default_factory=list, description="Edges to add"
     )
+    expect_absent: bool = Field(
+        False,
+        description=(
+            "Every create expects no entity with its id to exist; otherwise "
+            "nothing is added and the request fails with 409 "
+            "entity_revision_conflict."
+        ),
+    )
     # Event context (optional, for webhooks/loop prevention)
     event_origin: Optional[str] = Field(
         None, description="Source of mutation (web-ui, mcp, system, agent:<id>)"
@@ -224,6 +239,14 @@ class UpdateNodeRequest(BaseModel):
             "The update is rejected with 409 if the node changed since then."
         ),
     )
+    expected_revision: Optional[int] = Field(
+        None,
+        ge=0,
+        description=(
+            "The node's `revision` as the caller last read it. The update is "
+            "rejected with 409 entity_revision_conflict if it has moved."
+        ),
+    )
     # Event context (optional, for webhooks/loop prevention)
     event_origin: Optional[str] = Field(
         None, description="Source of mutation (web-ui, mcp, system, agent:<id>)"
@@ -243,6 +266,14 @@ class DeleteNodesRequest(BaseModel):
         ..., max_length=10, description="Node IDs to delete (max 10)"
     )
     confirmed: bool = Field(False, description="Confirmation flag")
+    expected_revisions: Optional[Dict[str, Annotated[int, Field(ge=0)]]] = Field(
+        None,
+        max_length=10,
+        description=(
+            "Node id -> the revision it must still have. Any mismatch deletes "
+            "nothing and fails with 409 entity_revision_conflict."
+        ),
+    )
     # Event context (optional, for webhooks/loop prevention)
     event_origin: Optional[str] = Field(
         None, description="Source of mutation (web-ui, mcp, system, agent:<id>)"
@@ -311,6 +342,11 @@ class UpdateEdgeRequest(BaseModel):
     updates: Dict[str, Any] = Field(
         ..., description="Fields to update (type, label, metadata)"
     )
+    expected_revision: Optional[int] = Field(
+        None,
+        ge=0,
+        description="The edge's `revision` as last read; 409 if it has moved.",
+    )
     event_origin: Optional[str] = Field(None, description="Source of mutation")
     event_session_id: Optional[str] = Field(
         None, description="Session ID for loop prevention"
@@ -323,6 +359,11 @@ class UpdateEdgeRequest(BaseModel):
 class DeleteEdgeRequest(BaseModel):
     """Request model for deleting a single edge."""
 
+    expected_revision: Optional[int] = Field(
+        None,
+        ge=0,
+        description="The edge's `revision` as last read; 409 if it has moved.",
+    )
     event_origin: Optional[str] = Field(None, description="Source of mutation")
     event_session_id: Optional[str] = Field(
         None, description="Session ID for loop prevention"
@@ -511,11 +552,36 @@ def _fetch_and_optimize_image(image_data: Optional[str], image_url: Optional[str
     return optimize_image(raw)
 
 
+# A direct write's refusal (docs/SESSION_OVERLAY_CONTRACT.md §16.3) and the
+# status it is answered with.
+_WRITE_ERROR_STATUS = {
+    "entity_revision_conflict": 409,
+    "write_failed": 502,
+    "write_outcome_unknown": 503,
+}
+
+
 def _raise_for_access_denied(result: Dict[str, Any]) -> None:
+    """Raise for a refusal the generic status checks would misreport: access
+    denied, and a write refused by its expectation or by the store."""
     if result.get("error_code") == "access_denied":
         raise HTTPException(
             status_code=403, detail=result.get("message") or result.get("error")
         )
+    status = _WRITE_ERROR_STATUS.get(result.get("error"))
+    if status is not None and result.get("success") is False:
+        detail = {
+            key: result[key]
+            for key in (
+                "error",
+                "message",
+                "entity_kind",
+                "entity_id",
+                "current_revision",
+            )
+            if key in result
+        }
+        raise HTTPException(status_code=status, detail=detail)
 
 
 async def _read_body_within_cap(
@@ -698,6 +764,7 @@ def _register_node_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_origin=request.event_origin,
                 event_session_id=request.event_session_id,
                 event_correlation_id=request.event_correlation_id,
+                expect_absent=request.expect_absent,
             )
         _raise_for_access_denied(result)
         if not result.get("success", True):
@@ -718,6 +785,7 @@ def _register_node_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_correlation_id=request.event_correlation_id,
                 metadata_merge=request.metadata_merge,
                 expected_updated_at=request.expected_updated_at,
+                expected_revision=request.expected_revision,
             )
         _raise_for_access_denied(result)
         if result.get("conflict"):
@@ -738,6 +806,7 @@ def _register_node_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_origin=request.event_origin,
                 event_session_id=request.event_session_id,
                 event_correlation_id=request.event_correlation_id,
+                expected_revisions=request.expected_revisions,
             )
         _raise_for_access_denied(result)
         if not result.get("success", True):
@@ -798,6 +867,7 @@ def _register_edge_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_origin=request.event_origin,
                 event_session_id=request.event_session_id,
                 event_correlation_id=request.event_correlation_id,
+                expected_revision=request.expected_revision,
             )
         _raise_for_access_denied(result)
         if not result.get("success", True):
@@ -817,6 +887,7 @@ def _register_edge_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_origin=request.event_origin if request else None,
                 event_session_id=request.event_session_id if request else None,
                 event_correlation_id=request.event_correlation_id if request else None,
+                expected_revision=request.expected_revision if request else None,
             )
         _raise_for_access_denied(result)
         if not result.get("success", True):
@@ -1509,6 +1580,10 @@ _IMPORT_ERROR_STATUS = {
     "backup_failed": 503,
     "replace_failed": 502,
     "archive_integrity_failed": 422,
+    "invalid_parameters": 422,
+    "provenance_not_supported": 422,
+    "import_plan_unstable": 503,
+    "import_preview_busy": 503,
 }
 
 # A generous cap on the whole multipart upload for POST /import/archive: a
@@ -1603,6 +1678,26 @@ def _register_import_endpoints(
                 event_origin=request.headers.get("x-event-origin"),
                 event_correlation_id=request.headers.get("x-correlation-id"),
             )
+        _raise_for_access_denied(result)
+        if not result.get("success", True):
+            status_code = _IMPORT_ERROR_STATUS.get(result.get("error_code"), 400)
+            raise HTTPException(status_code=status_code, detail=result)
+        return result
+
+    @router.post("/import/merge/preview")
+    async def preview_merge_import(
+        request: Request, body: Dict[str, Any] = Body(...)
+    ) -> Dict[str, Any]:
+        """
+        Plan merging ``body.document`` into the live graph without writing
+        anything (ADR 0013, slice 1). Returns the per-entity plan and a
+        ``plan_digest`` a later merge commit will be bound to. Requires graph
+        mutation and read access, both with full graph scope.
+        """
+        # Planning is CPU-bound and linear in the document (up to the v1
+        # caps), so it runs in a worker thread rather than on the event loop.
+        with use_request_authorization(headers=request.headers):
+            result = await run_in_threadpool(service.preview_merge_import, body)
         _raise_for_access_denied(result)
         if not result.get("success", True):
             status_code = _IMPORT_ERROR_STATUS.get(result.get("error_code"), 400)
@@ -1722,6 +1817,139 @@ def _register_single_custom_interface(
             return result
 
 
+# ==================== Node Attachments ====================
+# ADR 0008 section 7. Authorization and every per-route check live in
+# backend/service/attachments.py; these routes only translate HTTP.
+
+_ATTACHMENT_ERROR_STATUS = {
+    attachment_ops.ATTACHMENT_ERROR_NOT_FOUND: 404,
+    attachment_ops.ATTACHMENT_ERROR_UNAVAILABLE: 503,
+    attachment_ops.ATTACHMENT_ERROR_FEDERATED: 422,
+    attachment_ops.ATTACHMENT_ERROR_NOT_ALLOWED: 422,
+    attachment_ops.ATTACHMENT_ERROR_ARCHIVED: 409,
+    attachment_ops.ATTACHMENT_ERROR_TOO_LARGE: 413,
+    attachment_ops.ATTACHMENT_ERROR_NODE_LIMIT: 409,
+    attachment_ops.ATTACHMENT_ERROR_UNSUPPORTED_TYPE: 415,
+    attachment_ops.ATTACHMENT_ERROR_INDEX_CORRUPT: 500,
+}
+
+
+def _raise_for_attachment_error(result: Dict[str, Any]) -> None:
+    _raise_for_access_denied(result)
+    if result.get("success"):
+        return
+    code = result.get("error_code") or ""
+    raise HTTPException(
+        status_code=_ATTACHMENT_ERROR_STATUS.get(code, 500),
+        detail={"error": code, "message": result.get("error") or ""},
+    )
+
+
+def _declared_content_length(http_request: Request) -> Optional[int]:
+    raw = http_request.headers.get("content-length")
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value >= 0 else None
+
+
+def _content_disposition(filename: str) -> str:
+    """Always ``attachment``, with an ASCII fallback and an RFC 5987 name."""
+    fallback = "".join(
+        "_" if (ord(ch) > 126 or ch in '"\\' or ord(ch) < 32) else ch for ch in filename
+    )
+    encoded = quote(filename, safe="")
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}"
+
+
+def _attachment_download_headers(record: Dict[str, Any]) -> Dict[str, str]:
+    return {
+        "Content-Disposition": _content_disposition(record["filename"]),
+        "Content-Length": str(record["size"]),
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "Cache-Control": "private, no-store",
+    }
+
+
+def _register_attachment_endpoints(router: APIRouter, service: GraphService) -> None:
+    # The store reads files and takes OS locks, so its calls run off the event
+    # loop. asyncio.to_thread copies the context, so the request authorization
+    # bound below reaches the service call.
+    @router.get("/nodes/{node_id}/attachments")
+    async def list_node_attachments(node_id: str, request: Request) -> Dict[str, Any]:
+        """List a node's attachments, the limits, and whether uploads are allowed."""
+        with use_request_authorization(headers=request.headers):
+            result = await asyncio.to_thread(service.list_node_attachments, node_id)
+        _raise_for_attachment_error(result)
+        return {
+            "attachments": result["attachments"],
+            "limits": result["limits"],
+            "uploads_allowed": result["uploads_allowed"],
+        }
+
+    @router.post("/nodes/{node_id}/attachments", status_code=201)
+    async def add_node_attachment(
+        node_id: str,
+        request: Request,
+        filename: str = Query("", max_length=4096),
+    ) -> Dict[str, Any]:
+        """Attach one file to a node.
+
+        The body is the raw file bytes, not multipart: a multipart body is
+        spooled by the framework before the handler runs, which would defeat
+        the size checks. The name comes from ``filename``; the declared type
+        from ``Content-Type`` and is kept for diagnosis only.
+        """
+        with use_request_authorization(headers=request.headers):
+            result = await service.add_node_attachment(
+                node_id,
+                filename=filename,
+                declared_content_type=request.headers.get("content-type"),
+                content=request.stream(),
+                content_length=_declared_content_length(request),
+            )
+        _raise_for_attachment_error(result)
+        return result["attachment"]
+
+    @router.get("/nodes/{node_id}/attachments/{attachment_id}")
+    async def download_node_attachment(
+        node_id: str, attachment_id: str, request: Request
+    ) -> StreamingResponse:
+        """Stream one attachment back, always as a download."""
+        with use_request_authorization(headers=request.headers):
+            result = await asyncio.to_thread(
+                service.open_node_attachment, node_id, attachment_id
+            )
+        _raise_for_attachment_error(result)
+        record = result["attachment"]
+        stream = result["stream"]
+        media_type = record["content_type"]
+        if media_type in TEXT_TYPES:
+            media_type = f"{media_type}; charset=utf-8"
+        return StreamingResponse(
+            copy_stream(stream),
+            media_type=media_type,
+            headers=_attachment_download_headers(record),
+            background=BackgroundTask(stream.close),
+        )
+
+    @router.delete("/nodes/{node_id}/attachments/{attachment_id}")
+    async def delete_node_attachment(
+        node_id: str, attachment_id: str, request: Request
+    ) -> Dict[str, Any]:
+        """Delete one attachment from a node."""
+        with use_request_authorization(headers=request.headers):
+            result = await asyncio.to_thread(
+                service.delete_node_attachment, node_id, attachment_id
+            )
+        _raise_for_attachment_error(result)
+        return {"success": True}
+
+
 # ==================== Router Factory ====================
 
 
@@ -1753,7 +1981,11 @@ def create_rest_router(
     Returns:
         Configured APIRouter
     """
-    router = APIRouter(prefix=prefix, tags=["graph"])
+    router = APIRouter(
+        prefix=prefix,
+        tags=["graph"],
+        route_class=GraphJSONRoute,
+    )
 
     if import_job_store is None:
         from backend.agents.execution import InMemoryExecutionStore
@@ -1768,6 +2000,7 @@ def create_rest_router(
     _register_metadata_endpoints(router, service)
     _register_views_endpoints(router, service)
     _register_export_endpoints(router, service)
+    _register_attachment_endpoints(router, service)
     _register_import_endpoints(router, service, import_job_store)
     if session_manager is not None:
         _register_session_endpoints(router, service, session_manager)

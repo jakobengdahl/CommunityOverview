@@ -29,6 +29,7 @@ is a historical archive.
 | [PERSISTENCE_BACKENDS.md](PERSISTENCE_BACKENDS.md) | The storage seam: what a persistence backend implements, and how mutations reach it |
 | [EVENT_SUBSCRIPTIONS.md](EVENT_SUBSCRIPTIONS.md) | Webhook / graph-mutation event system |
 | [AGENT_SCHEDULING.md](AGENT_SCHEDULING.md) | Time-based agent schedule triggers |
+| [USER_FUNCTION_CONTRACT.md](USER_FUNCTION_CONTRACT.md) | Sandboxed user-defined functions: manifest, broker protocol, grants, limits, run records (draft contract) |
 | [FEDERATED_GRAPH_DESIGN.md](FEDERATED_GRAPH_DESIGN.md) | Federation design and its implementation status |
 | [MULTI_USER_SESSIONS_DESIGN.md](MULTI_USER_SESSIONS_DESIGN.md) | Shared-session design and implementation record (implemented) |
 | [SESSION_OVERLAY_CONTRACT.md](SESSION_OVERLAY_CONTRACT.md) | Staged editing in a session: entity revisions, the layer, composed reads, merge (draft contract) |

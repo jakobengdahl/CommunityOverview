@@ -17,6 +17,7 @@ from .worker import AgentWorker, ProcessingResult
 from .mcp_loader import MCPLoader
 from .scheduler import AgentScheduler
 from .run_history import AgentRunRecorder, STATUS_TO_STATE
+from .run_history_retention import RetentionSweeper
 from .execution import (
     ExecutionKind,
     ExecutionStore,
@@ -99,6 +100,10 @@ class AgentRegistry:
             else:
                 proposal_store = InMemoryProposalStore()
         self._proposal_store = proposal_store
+        self._retention = settings.run_history_retention
+        self._retention_sweeper = RetentionSweeper(
+            execution_store, self._retention, proposal_store=proposal_store
+        )
         self._governance = GovernanceManager(
             proposal_store, executor_factory=self._build_apply_executor
         )
@@ -175,6 +180,10 @@ class AgentRegistry:
 
         Loads agent configurations and starts workers for enabled agents.
         """
+        # Retention applies to history already at rest, so it runs even when
+        # the agent runtime itself is disabled. A no-op when unconfigured.
+        self._retention_sweeper.start()
+
         if not self.settings.enabled:
             logger.info("Agent system is disabled, skipping startup")
             return
@@ -205,6 +214,7 @@ class AgentRegistry:
         logger.info("Stopping agent registry...")
 
         self._scheduler.stop()
+        self._retention_sweeper.stop()
 
         with self._lock:
             for agent_id, worker in list(self._workers.items()):
@@ -529,12 +539,26 @@ class AgentRegistry:
                 return []
             states = [state]
         return self._run_recorder.list_runs(
-            agent_id=agent_id, kind=kind_enum, states=states, limit=limit
+            agent_id=agent_id,
+            kind=kind_enum,
+            states=states,
+            limit=limit,
+            created_after=self._retention.read_cutoff(),
         )
 
     def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
-        """Return a single AgentRun by id, or None."""
-        return self._run_recorder.get_run(run_id)
+        """Return a single AgentRun by id, or None (also outside the read window)."""
+        return self._run_recorder.get_run(
+            run_id, created_after=self._retention.read_cutoff()
+        )
+
+    def get_run_retention_policy(self) -> Dict[str, Any]:
+        """The effective run-history retention policy and the last sweep's record."""
+        last = self._retention_sweeper.last_report
+        return {
+            **self._retention.to_dict(),
+            "last_sweep": last.to_dict() if last is not None else None,
+        }
 
     # ------------------------------------------------------------------
     # Governance: proposals

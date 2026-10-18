@@ -11,7 +11,7 @@ Callers (rest_api.py, mcp_tools.py, …) continue to use this class unchanged;
 public method signatures are preserved exactly.
 """
 
-from typing import TYPE_CHECKING, List, Optional, Dict, Any
+from typing import TYPE_CHECKING, AsyncIterator, List, Optional, Dict, Any, Union
 
 from backend.core import GraphStorage
 from backend.core.storage_search import MATCH_MODE_SUBSTRING
@@ -22,7 +22,8 @@ from backend.runtime.authorization import (
 )
 from backend.federation import FederationManager
 
-from . import queries, mutations, views, import_service
+from . import attachments, queries, mutations, views, import_service
+from .attachments import AttachmentSettings
 
 import logging
 
@@ -52,10 +53,14 @@ class GraphService:
         storage: GraphStorage,
         federation_manager: Optional[FederationManager] = None,
         authorization_hook: Optional[GraphAuthorizationHook] = None,
+        attachment_settings: Optional[AttachmentSettings] = None,
     ):
         self._storage = storage
         self._federation_manager = federation_manager
         self._authorization_hook = authorization_hook or DefaultGraphAuthorizationHook()
+        # None leaves the node attachment routes answering
+        # ``attachments_unavailable``; see backend/api_host/attachments.py.
+        self._attachment_settings = attachment_settings
 
     @property
     def storage(self) -> GraphStorage:
@@ -71,6 +76,69 @@ class GraphService:
         hook instance the hosted layer swaps in, rather than a fresh default.
         """
         return self._authorization_hook
+
+    @property
+    def attachment_settings(self) -> Optional[AttachmentSettings]:
+        return self._attachment_settings
+
+    # ==================== Node Attachments ====================
+    # See backend/service/attachments.py and ADR 0008.
+
+    def list_node_attachments(self, node_id: str) -> Dict[str, Any]:
+        return attachments.list_node_attachments(
+            self._storage, self._authorization_hook, self._attachment_settings, node_id
+        )
+
+    def get_node_attachment_record(
+        self, node_id: str, attachment_id: str
+    ) -> Dict[str, Any]:
+        return attachments.get_node_attachment_record(
+            self._storage,
+            self._authorization_hook,
+            self._attachment_settings,
+            node_id,
+            attachment_id,
+        )
+
+    def open_node_attachment(self, node_id: str, attachment_id: str) -> Dict[str, Any]:
+        return attachments.open_node_attachment(
+            self._storage,
+            self._authorization_hook,
+            self._attachment_settings,
+            node_id,
+            attachment_id,
+        )
+
+    async def add_node_attachment(
+        self,
+        node_id: str,
+        *,
+        filename: Optional[str],
+        declared_content_type: Optional[str],
+        content: Union[bytes, AsyncIterator[bytes]],
+        content_length: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        return await attachments.add_node_attachment(
+            self._storage,
+            self._authorization_hook,
+            self._attachment_settings,
+            node_id,
+            filename=filename,
+            declared_content_type=declared_content_type,
+            content=content,
+            content_length=content_length,
+        )
+
+    def delete_node_attachment(
+        self, node_id: str, attachment_id: str
+    ) -> Dict[str, Any]:
+        return attachments.delete_node_attachment(
+            self._storage,
+            self._authorization_hook,
+            self._attachment_settings,
+            node_id,
+            attachment_id,
+        )
 
     # ==================== Search Operations ====================
 
@@ -199,7 +267,20 @@ class GraphService:
         event_origin: Optional[str] = None,
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
+        expect_absent: bool = False,
     ) -> Dict[str, Any]:
+        # Files left under an id whose node was deleted must not become the
+        # new node's (ADR 0008 sec 8): note them now, quarantine them once
+        # the node is in the graph.
+        leftovers = attachments.leftover_attachments_of_absent_nodes(
+            self._storage,
+            self._attachment_settings,
+            [
+                n["id"]
+                for n in nodes
+                if isinstance(n, dict) and isinstance(n.get("id"), str)
+            ],
+        )
         return mutations.add_nodes(
             self._storage,
             self._authorization_hook,
@@ -208,6 +289,10 @@ class GraphService:
             event_origin=event_origin,
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
+            expect_absent=expect_absent,
+            on_nodes_landed=lambda landed: attachments.quarantine_leftover_attachments(
+                self._attachment_settings, leftovers, landed
+            ),
         )
 
     def resolve_teleport(
@@ -259,6 +344,7 @@ class GraphService:
         event_correlation_id: Optional[str] = None,
         metadata_merge: bool = False,
         expected_updated_at: Optional[str] = None,
+        expected_revision: Optional[int] = None,
     ) -> Dict[str, Any]:
         return mutations.update_node(
             self._storage,
@@ -270,6 +356,7 @@ class GraphService:
             event_correlation_id=event_correlation_id,
             metadata_merge=metadata_merge,
             expected_updated_at=expected_updated_at,
+            expected_revision=expected_revision,
         )
 
     def delete_nodes(
@@ -279,8 +366,9 @@ class GraphService:
         event_origin: Optional[str] = None,
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
+        expected_revisions: Optional[Dict[str, int]] = None,
     ) -> Dict[str, Any]:
-        return mutations.delete_nodes(
+        result = mutations.delete_nodes(
             self._storage,
             self._authorization_hook,
             node_ids,
@@ -288,7 +376,14 @@ class GraphService:
             event_origin=event_origin,
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
+            expected_revisions=expected_revisions,
         )
+        # After the graph delete, never before: a crash in between leaves an
+        # orphan attachment directory, not a live node without its files.
+        attachments.delete_attachments_of_nodes(
+            self._attachment_settings, result.get("deleted_node_ids") or []
+        )
+        return result
 
     def archive_nodes(
         self,
@@ -355,6 +450,7 @@ class GraphService:
         event_origin: Optional[str] = None,
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
+        expected_revision: Optional[int] = None,
     ) -> Dict[str, Any]:
         return mutations.update_edge(
             self._storage,
@@ -364,6 +460,7 @@ class GraphService:
             event_origin=event_origin,
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
+            expected_revision=expected_revision,
         )
 
     def delete_edge(
@@ -372,6 +469,7 @@ class GraphService:
         event_origin: Optional[str] = None,
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
+        expected_revision: Optional[int] = None,
     ) -> Dict[str, Any]:
         return mutations.delete_edge(
             self._storage,
@@ -380,6 +478,7 @@ class GraphService:
             event_origin=event_origin,
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
+            expected_revision=expected_revision,
         )
 
     def delete_edges(
@@ -639,6 +738,26 @@ class GraphService:
             event_origin=event_origin,
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
+        )
+
+    def preview_merge_import(
+        self,
+        body: Any,
+        max_nodes: Optional[int] = None,
+        max_edges: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Read-only MERGE import plan and digest. See
+        ``backend.service.import_service.preview_merge_import`` and
+        docs/adr/0013-graph-import-merge-mode.md.
+        """
+        return import_service.preview_merge_import(
+            self._storage,
+            self._authorization_hook,
+            body,
+            attachment_settings=self._attachment_settings,
+            max_nodes=max_nodes,
+            max_edges=max_edges,
         )
 
     def get_import_job(

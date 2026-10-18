@@ -223,15 +223,31 @@ def test_denial_does_not_reveal_whether_the_node_exists():
     assert present.to_dict() == absent.to_dict()
 
 
-def test_the_requested_id_supplies_the_graph_when_the_node_is_missing():
+def test_the_graph_segment_of_a_missing_nodes_id_decides_its_visibility():
+    # The pair is what makes this non-vacuous: the node segment names the one
+    # admitted graph and the graph segment names an excluded one. Reading the
+    # wrong segment would admit it and answer unknown_node instead.
     target = teleport.resolve_teleport_target(
         node_metadata=None,
         node_exists=False,
-        graph_access_matches=_allow_only("other-graph"),
-        node_id="federated::remote-a::no-such-node",
+        graph_access_matches=_allow_only("admitted-graph"),
+        node_id="federated::excluded-graph::admitted-graph",
     )
 
     assert target.status == teleport.STATUS_PERMISSION_DENIED
+
+
+def test_a_missing_node_in_a_visible_graph_is_an_unknown_node():
+    # The positive half: with no id fallback at all the graph would read as ""
+    # and be denied, so this fails if the requested id supplies nothing.
+    target = teleport.resolve_teleport_target(
+        node_metadata=None,
+        node_exists=False,
+        graph_access_matches=_allow_only("admitted-graph"),
+        node_id="federated::admitted-graph::no-such-node",
+    )
+
+    assert target.status == teleport.STATUS_UNKNOWN_NODE
 
 
 def test_a_missing_local_id_is_an_unknown_node():
@@ -671,6 +687,25 @@ def test_an_owned_parameter_is_removed_rather_than_inherited():
     ],
 )
 def test_deployment_origin_rejects_anything_that_is_not_a_web_url(url):
+    assert teleport.deployment_origin(url) == ""
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # urlsplit itself raises ValueError
+        "http://[::1/app",
+        # .port raises ValueError
+        "http://host:99999/app",
+        "http://host:notaport/app",
+        # parses, but names no host
+        "http:///app",
+        "https://:8080/app",
+    ],
+)
+def test_deployment_origin_degrades_malformed_urls_to_no_origin(url):
+    # An operator-configured gui_url can be malformed; it must read as "not a
+    # route" rather than raise, because nothing above this call catches.
     assert teleport.deployment_origin(url) == ""
 
 

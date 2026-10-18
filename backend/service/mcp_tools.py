@@ -82,7 +82,7 @@ from backend.core.session_annotations import (
 )
 from backend.config.config_loader import build_session_url
 from backend.runtime.authorization import GRAPH_ACTION_MUTATE, GRAPH_ACTION_READ
-from . import access
+from . import access, graph_merge_plan
 from .service import GraphService
 
 # Server-owned session state records node x/y but not rendered node dimensions
@@ -620,6 +620,7 @@ def register_mcp_tools(
         edges: List[Dict[str, Any]],
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
+        expect_absent: bool = False,
     ) -> Dict[str, Any]:
         """
         Add new nodes and edges to the graph
@@ -639,6 +640,9 @@ def register_mcp_tools(
             edges: List of edge objects (source, target, type). Type is optional.
             event_session_id: Optional session ID for webhook loop prevention
             event_correlation_id: Optional correlation ID for chaining events
+            expect_absent: When True, every node and edge must not exist yet;
+                if one does, nothing is added and the result carries
+                error="entity_revision_conflict".
 
         Returns:
             Dict with result (added_node_ids, added_edge_ids, success, message)
@@ -649,6 +653,7 @@ def register_mcp_tools(
             event_origin="mcp",
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
+            expect_absent=expect_absent,
         )
 
     @register_tool
@@ -659,6 +664,7 @@ def register_mcp_tools(
         expected_updated_at: Optional[str] = None,
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
+        expected_revision: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Update an existing node
@@ -679,6 +685,9 @@ def register_mcp_tools(
                 `current_updated_at` so you can re-read and retry.
             event_session_id: Optional session ID for webhook loop prevention
             event_correlation_id: Optional correlation ID for chaining events
+            expected_revision: Optional. The node's `revision` as you last
+                read it; if it has moved, nothing is written and the result
+                has error="entity_revision_conflict" and `current_revision`.
 
         Returns:
             Dict with updated node or error
@@ -691,6 +700,7 @@ def register_mcp_tools(
             event_correlation_id=event_correlation_id,
             metadata_merge=metadata_merge,
             expected_updated_at=expected_updated_at,
+            expected_revision=expected_revision,
         )
 
     @register_tool
@@ -699,6 +709,7 @@ def register_mcp_tools(
         confirmed: bool = False,
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
+        expected_revisions: Optional[Dict[str, int]] = None,
     ) -> Dict[str, Any]:
         """
         Delete nodes from the graph (max 10 at a time)
@@ -710,6 +721,9 @@ def register_mcp_tools(
             confirmed: Must be True to execute deletion
             event_session_id: Optional session ID for webhook loop prevention
             event_correlation_id: Optional correlation ID for chaining events
+            expected_revisions: Optional map of node id -> the `revision` it
+                must still have. Any mismatch deletes nothing and returns
+                error="entity_revision_conflict".
 
         Returns:
             Dict with result (deleted_node_ids, affected_edge_ids, success, message)
@@ -720,6 +734,7 @@ def register_mcp_tools(
             event_origin="mcp",
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
+            expected_revisions=expected_revisions,
         )
 
     @register_tool
@@ -866,6 +881,48 @@ def register_mcp_tools(
             Dict with statistics (total_nodes, total_edges, nodes_by_type, edges_by_type)
         """
         return service.get_graph_stats()
+
+    @register_tool
+    def preview_graph_merge(
+        document: Dict[str, Any],
+        policy: Optional[Dict[str, Any]] = None,
+        include_system_types: bool = False,
+        stamp_provenance: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Preview merging a small graph document (at most 10,000 nodes and
+        20,000 edges) into the live graph. Writes
+        NOTHING: returns the plan a merge import would apply and its
+        plan_digest. There is no MCP tool that commits a merge.
+
+        Args:
+            document: {"nodes": [...], "edges": [...]} in the export shape
+            policy: what to do when a document id already exists live —
+                {"default": "fail"|"skip"|"overwrite"|"rename",
+                 "by_type": {"<node or relationship type>": "<policy>"}};
+                default is fail
+            include_system_types: also merge system nodes (Agent,
+                EventSubscription, ...); excluded by default
+            stamp_provenance: not supported yet; must be false
+
+        Returns:
+            Dict with plan (adds, overwrites, renames, skips, conflicts,
+            rejected, attachments, embeddings, events, committable) and
+            plan_digest, or an error. Requires graph mutation and read
+            access, both with full graph scope.
+        """
+        body: Dict[str, Any] = {
+            "document": document,
+            "include_system_types": include_system_types,
+            "stamp_provenance": stamp_provenance,
+        }
+        if policy is not None:
+            body["policy"] = policy
+        return service.preview_merge_import(
+            body,
+            max_nodes=graph_merge_plan.MCP_PREVIEW_MAX_NODES,
+            max_edges=graph_merge_plan.MCP_PREVIEW_MAX_EDGES,
+        )
 
     @register_tool
     def list_node_types() -> Dict[str, Any]:

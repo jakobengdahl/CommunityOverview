@@ -43,6 +43,64 @@ def json_serializer(obj: Any) -> Any:
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
+def json_key_text(key: Any) -> str:
+    """Convert a dict key the way json.dumps does (skipkeys=False)."""
+    if isinstance(key, str):
+        return key
+    if key is True:
+        return "true"
+    if key is False:
+        return "false"
+    if key is None:
+        return "null"
+    if isinstance(key, int):
+        return int.__repr__(key)
+    if isinstance(key, float):
+        return float.__repr__(key)
+    raise TypeError(f"keys must be str, int, float, bool or None, not {type(key)}")
+
+
+def _to_json_native(data: Any) -> Any:
+    """The json.dumps/json.loads round trip of serialize_to_json, iteratively.
+
+    Containers are copied once each (memoized by id), so shared references
+    stay shared and a circular one terminates.
+    """
+    copies: Dict[int, Any] = {}
+    pending: List[Any] = []
+
+    def convert(value: Any) -> Any:
+        if isinstance(value, bool) or value is None:
+            return value
+        # Subclasses (an enum member, say) come back as their JSON base type.
+        if isinstance(value, str):
+            return str.__str__(value)
+        if isinstance(value, int):
+            return int(value)
+        if isinstance(value, float):
+            return float(value)
+        if isinstance(value, (dict, list, tuple)):
+            if id(value) not in copies:
+                copy: Any = dict(value) if isinstance(value, dict) else list(value)
+                copies[id(value)] = copy
+                pending.append(copy)
+            return copies[id(value)]
+        return convert(json_serializer(value))
+
+    root = convert(data)
+    while pending:
+        container = pending.pop()
+        if isinstance(container, dict):
+            items = list(container.items())
+            container.clear()
+            for key, value in items:
+                container[json_key_text(key)] = convert(value)
+        else:
+            for index, value in enumerate(container):
+                container[index] = convert(value)
+    return root
+
+
 def serialize_to_json(data: Any) -> Any:
     """
     Serialize data to JSON-compatible format.
@@ -50,7 +108,13 @@ def serialize_to_json(data: Any) -> Any:
     Uses custom serializer for datetime objects.
     Returns a JSON-safe dict/list structure.
     """
-    return json.loads(json.dumps(data, default=json_serializer))
+    try:
+        return json.loads(json.dumps(data, default=json_serializer))
+    except RecursionError:
+        # Nesting past the C json recursion limit, which Python 3.11 ties to
+        # the interpreter's; a graph may still hold such a node, so convert
+        # without recursing rather than fail its read and every export.
+        return _to_json_native(data)
 
 
 def serialize_node(node: Node) -> Dict[str, Any]:

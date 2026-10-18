@@ -20,6 +20,8 @@ Event System:
 import importlib.util
 import logging
 import threading
+import time
+import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import List, Dict, Optional, Any, TYPE_CHECKING, Callable, Tuple
 from datetime import datetime, timezone
@@ -41,11 +43,15 @@ from .models import (
 from .embedding_sidecar import EmbeddingSidecarError, FileEmbeddingSidecar
 from .storage_backends import (
     EntityOperation,
+    EntityRevisionConflict,
     ExternalChange,
     ExternalChangeRefused,
     FileGraphPersistenceBackend,
     GraphPersistenceBackend,
+    GraphWriteFailed,
+    GraphWriteOutcomeUnknown,
     capabilities_of,
+    refused_outright,
 )
 from .vector_store import VectorStore, dominant_dimension, matching_dimension
 from . import storage_search
@@ -60,6 +66,9 @@ logger = logging.getLogger(__name__)
 # The origin stamped on events that report a change another writer made, so a
 # subscriber reacting by writing can tell them from its own instance's work.
 EXTERNAL_CHANGE_ORIGIN = "external-change"
+
+# The expectation a create carries: no entity with that id exists (§4.3).
+EXPECT_ABSENT = object()
 
 if TYPE_CHECKING:
     from .events.dispatcher import EventDispatcher
@@ -213,6 +222,24 @@ class _BootGate:
                 self._listener(change)
 
 
+class _Undo:
+    """What a write's entities were before it, for putting memory back.
+
+    `nodes` and `edges` map each touched id to its prior serialized form, or
+    None where the write created it; `vectors` holds the prior vector of each
+    touched node. Captured before memory changes, consumed only when a
+    write is refused or did not land (§4.4), and applied without events:
+    none has fired for the write yet.
+    """
+
+    __slots__ = ("nodes", "edges", "vectors")
+
+    def __init__(self) -> None:
+        self.nodes: Dict[str, Optional[Dict[str, Any]]] = {}
+        self.edges: Dict[str, Optional[Dict[str, Any]]] = {}
+        self.vectors: Dict[str, Optional[List[float]]] = {}
+
+
 class GraphStorage:
     """
     Manages graph storage with NetworkX + JSON persistence.
@@ -222,6 +249,21 @@ class GraphStorage:
     - File operations use OS-level file locking for multi-process safety
     - Writes are atomic (temp file + rename) to prevent corruption
     """
+
+    # How far a single-writer store's revision reservation is raised at a
+    # time (docs/SESSION_OVERLAY_CONTRACT.md §4.2). Each raise is one durable
+    # write of its own - on the file backend a checkpoint of the whole graph -
+    # so the block is large: at 1,000 every 1,000-node add_nodes paid for a
+    # checkpoint, measured as more than doubling its latency. A crash or a
+    # restart skips at most this many values and never reuses one; revisions
+    # are only compared, so skipped values cost nothing.
+    REVISION_RESERVATION_BLOCK = 100_000
+
+    # How long a shared-store write that failed is given to finish landing
+    # before the second evidence read (§4.4). It has to exceed the store's own
+    # commit path - a commit that was flushing when the connection dropped -
+    # and it is paid only on a failed write, while holding the storage lock.
+    WRITE_RESOLVE_DELAY_SECONDS = 1.0
 
     def __init__(
         self,
@@ -261,6 +303,31 @@ class GraphStorage:
         # write (see _persist), and a backend that declares more than it
         # implements is refused here rather than on the first mutation.
         self._backend_capabilities = capabilities_of(self._persistence_backend)
+        # Who chooses an entity's revision (§4.4). A store that enforces
+        # revisions assigns them in the statement that writes, and every write
+        # waits for it. Any other backend has this instance as its only
+        # writer, so the counter is kept here, behind a durable reservation.
+        self._store_assigns_revisions = self._backend_capabilities.revision_enforcement
+        # A durable reservation is a single writer's: on a store others write
+        # too, persisting it would mean a whole-graph write over theirs.
+        self._reserves_revisions = not (
+            self._store_assigns_revisions
+            or self._backend_capabilities.change_notification
+        )
+        if (
+            self._backend_capabilities.change_notification
+            and not self._store_assigns_revisions
+        ):
+            logger.warning(
+                f"{type(self._persistence_backend).__name__} is shared "
+                f"(change_notification) but does not enforce revisions; "
+                f"revisions are counted per instance and are not unique "
+                f"across instances"
+            )
+        # The next revision this instance hands out, and the durable ceiling
+        # it may hand out up to (exclusive). Single-writer stores only.
+        self._next_revision = 1
+        self._revision_reservation = 0
         self.json_path = getattr(
             self._persistence_backend, "json_path", Path(json_path)
         )
@@ -777,9 +844,20 @@ class GraphStorage:
                     self._snapshotted_vector_revision = None
                 else:
                     self._persisted_vector_revision = self.vector_store.revision
+                # The new store's first reservation rides on its first write,
+                # so ordinary writes never wait for one (see _reserve_ahead).
+                reserving = (
+                    self._reserves_revisions
+                    and self._next_revision >= self._revision_reservation
+                )
+                if reserving:
+                    ceiling = self._next_revision + self.REVISION_RESERVATION_BLOCK
+                    self.graph_metadata["revision_reservation"] = ceiling
                 # Wait for the initial file write to complete so callers can
                 # immediately open the file (e.g. creating a second storage instance).
                 self.save().result()
+                if reserving:
+                    self._revision_reservation = ceiling
                 return
 
             try:
@@ -896,6 +974,17 @@ class GraphStorage:
                         edge.source, edge.target, key=edge.id, data=edge
                     )
 
+                self._raise_revision_counter(
+                    max(
+                        [n.revision for n in nodes.values()]
+                        + [e.revision for e in edges.values()]
+                        + [0]
+                    )
+                )
+                if bootstrap_if_missing:
+                    # Not on a refresh, which must never write.
+                    self._reserve_ahead()
+
                 self._load_embeddings()
 
                 logger.info(
@@ -906,6 +995,377 @@ class GraphStorage:
             except Exception as e:
                 logger.error(f"Error loading graph: {e}")
                 raise
+
+    # -- revisions (docs/SESSION_OVERLAY_CONTRACT.md §4) ---------------------
+
+    def _raise_revision_counter(self, highest: int) -> None:
+        """Bring a single-writer counter past what the store holds.
+
+        Callers must hold _lock. Never lowered: the counter starts at the
+        persisted reservation - values below it may have been handed out
+        before a crash - or one past the highest revision held, whichever is
+        higher, and stays where it is if it is already beyond both.
+        """
+        if self._store_assigns_revisions:
+            return
+        raw = (self.graph_metadata or {}).get("revision_reservation", 0)
+        try:
+            reserved = int(raw)
+        except (TypeError, ValueError):
+            logger.warning(f"ignoring non-integer revision_reservation {raw!r}")
+            reserved = 0
+        self._revision_reservation = max(self._revision_reservation, reserved)
+        self._next_revision = max(
+            self._next_revision, self._revision_reservation, highest + 1, 1
+        )
+        if self._revision_reservation > reserved:
+            # A reload must not hand the next snapshot a lower ceiling than
+            # the one already made durable.
+            self.graph_metadata["revision_reservation"] = self._revision_reservation
+
+    def _reserve_ahead(self) -> None:
+        """Reserve a block at load, so ordinary writes never wait for it.
+
+        Callers must hold _lock. Without this the first write after every
+        start would pay for a durable reservation - a checkpoint of the whole
+        file - on its own latency. Best effort: a failure here is reported
+        and the first write reserves instead.
+        """
+        if not self._reserves_revisions:
+            return
+        if self._next_revision < self._revision_reservation:
+            return
+        try:
+            self._reserve_revisions(
+                self._next_revision + self.REVISION_RESERVATION_BLOCK
+            )
+        except Exception as exc:
+            logger.warning(
+                f"could not reserve revisions at load ({exc}); the first "
+                f"write will reserve them instead"
+            )
+
+    def _take_revisions(self, count: int) -> int:
+        """Hand out `count` consecutive revisions; return the first.
+
+        Single-writer stores only; callers must hold _lock. Before a value at
+        or above the durable reservation leaves here, the reservation is
+        raised past it in a durable write of its own and waited for, so a
+        crash afterwards skips values rather than repeating one (§4.2).
+        """
+        first = self._next_revision
+        if count <= 0:
+            return first
+        last = first + count - 1
+        if self._reserves_revisions and last >= self._revision_reservation:
+            self._reserve_revisions(last + 1 + self.REVISION_RESERVATION_BLOCK)
+        self._next_revision = last + 1
+        return first
+
+    def _reserve_revisions(self, ceiling: int) -> None:
+        """Durably raise the reservation to `ceiling`. Callers hold _lock.
+
+        Through the write queue, so it lands after every write already
+        issued; waited for, which is safe under the lock because queued work
+        never takes it. A backend with no reservation of its own gets a
+        whole-graph save, which carries the reservation in its metadata.
+        """
+        previous = self.graph_metadata.get("revision_reservation")
+        self.graph_metadata["revision_reservation"] = ceiling
+        try:
+            reserve = getattr(self._persistence_backend, "reserve_revisions", None)
+            if callable(reserve) and not self._resync_pending:
+                self._io_executor.submit(reserve, ceiling).result()
+            else:
+                self.save().result()
+        except Exception:
+            if previous is None:
+                self.graph_metadata.pop("revision_reservation", None)
+            else:
+                self.graph_metadata["revision_reservation"] = previous
+            raise
+        self._revision_reservation = ceiling
+
+    @staticmethod
+    def _check_expectation(
+        kind: str, entity_id: str, entity: Any, expected: Any
+    ) -> None:
+        """Refuse a write whose expectation this instance's model refutes.
+
+        `expected` is an int (`expected_revision`) or EXPECT_ABSENT. An
+        absent entity never matches a revision, so an update or delete
+        expecting one is refused with no current revision.
+        """
+        current = None if entity is None else entity.revision
+        if expected is EXPECT_ABSENT:
+            if current is not None:
+                raise EntityRevisionConflict(kind, entity_id, None, current)
+            return
+        if current is None or current != expected:
+            raise EntityRevisionConflict(kind, entity_id, expected, current)
+
+    def _capture(self, node_ids=(), edge_ids=()) -> _Undo:
+        """The current state of the given entities, before a write changes
+        them. Callers must hold _lock."""
+        undo = _Undo()
+        for node_id in node_ids:
+            node = self.nodes.get(node_id)
+            undo.nodes[node_id] = None if node is None else node.to_dict()
+            undo.vectors[node_id] = (
+                None if node is None else self.vector_store.get_vector_list(node_id)
+            )
+        for edge_id in edge_ids:
+            edge = self.edges.get(edge_id)
+            undo.edges[edge_id] = None if edge is None else edge.to_dict()
+        return undo
+
+    def _undo(self, undo: _Undo) -> None:
+        """Put memory back to `undo`, silently. Callers must hold _lock.
+
+        No event: the write being undone has not fired one. Edges that must
+        end absent go first and edges that must come back go last, so no
+        edge is ever installed without both endpoints.
+        """
+        for edge_id, before in undo.edges.items():
+            if before is None:
+                edge = self.edges.pop(edge_id, None)
+                if edge is not None and self.graph.has_edge(
+                    edge.source, edge.target, key=edge_id
+                ):
+                    self.graph.remove_edge(edge.source, edge.target, key=edge_id)
+        touched: Dict[str, Tuple[Optional[Node], Any]] = {}
+        for node_id, before in undo.nodes.items():
+            if before is None:
+                self.nodes.pop(node_id, None)
+                if self.graph.has_node(node_id):
+                    self.graph.remove_node(node_id)
+                self._searchable_text_cache.pop(node_id, None)
+                touched[node_id] = (None, None)
+                continue
+            node = Node.from_dict(dict(before))
+            node.embedding = None
+            # Index before `nodes`, as everywhere that adds.
+            self._searchable_text_cache[node_id] = self._build_match_fields(node)
+            self.nodes[node_id] = node
+            self.graph.add_node(node_id, data=node)
+            touched[node_id] = (node, undo.vectors.get(node_id))
+        for edge_id, before in undo.edges.items():
+            if before is None:
+                continue
+            edge = Edge.from_dict(dict(before))
+            existing = self.edges.get(edge_id)
+            if existing is not None and self.graph.has_edge(
+                existing.source, existing.target, key=edge_id
+            ):
+                self.graph.remove_edge(existing.source, existing.target, key=edge_id)
+            self.edges[edge_id] = edge
+            self.graph.add_edge(edge.source, edge.target, key=edge_id, data=edge)
+        try:
+            self._settle_vector_index(touched)
+        except Exception as exc:
+            logger.warning(f"could not restore vectors after an undone write: {exc}")
+
+    def _commit(
+        self,
+        changes: List[Tuple[str, str, Any]],
+        undo: _Undo,
+        expectations: Optional[Dict[Tuple[str, str], Any]] = None,
+    ) -> None:
+        """Stamp revisions on a write already applied to memory, and persist it.
+
+        Callers must hold _lock and must not have fired the write's events
+        yet. `changes` lists ("node" | "edge", "upsert" | "delete", entity or
+        id) in the order the store applies them; `undo` is the state captured
+        before memory changed; `expectations` maps (kind, id) to the
+        expected revision or EXPECT_ABSENT, already checked against memory.
+
+        A single-writer store takes revisions from this instance's counter and
+        keeps today's fire-and-forget write, except that a write carrying an
+        expectation waits for the store. A store that enforces revisions is
+        always waited for: it assigns the revisions, may refuse the
+        expectation (memory is undone, EntityRevisionConflict raised), and a
+        failure is resolved on the write's own evidence (§4.4).
+        """
+        expectations = expectations or {}
+        upserted = [entity for _, action, entity in changes if action == "upsert"]
+
+        if not self._store_assigns_revisions:
+            # An empty write still goes to _persist, as it always has: on a
+            # snapshot backend that is a save, which callers rely on.
+            try:
+                first = self._take_revisions(len(upserted))
+            except Exception as exc:
+                self._undo(undo)
+                logger.warning(f"could not reserve revisions: {exc}")
+                raise GraphWriteFailed(
+                    "could not reserve revisions for the write"
+                ) from exc
+            for offset, entity in enumerate(upserted):
+                entity.revision = first + offset
+            future = self._persist(self._operations(changes, expectations))
+            if expectations:
+                self._await_landing(future)
+            return
+
+        if not changes:
+            return
+        operations = self._operations(changes, expectations)
+        token = uuid.uuid4().hex
+        future = self._io_executor.submit(
+            self._do_apply, tuple(operations), token=token
+        )
+        self._last_write = future
+        try:
+            revisions = future.result()
+        except EntityRevisionConflict:
+            self._undo(undo)
+            raise
+        except ExternalChangeRefused:
+            raise
+        except Exception as exc:
+            if refused_outright(exc):
+                # Refused inside the transaction: nothing landed and nothing
+                # is in flight, so there is no evidence worth waiting for.
+                logger.warning(f"the store refused a write: {exc}")
+                self._undo(undo)
+                raise GraphWriteFailed("the store refused the write") from exc
+            revisions = self._resolve_failed_write(operations, undo, token, exc)
+        stamps = iter(revisions or [])
+        for (_, action, entity), revision in zip(changes, stamps):
+            if action == "upsert" and revision is not None:
+                entity.revision = revision
+
+    def _operations(
+        self,
+        changes: List[Tuple[str, str, Any]],
+        expectations: Dict[Tuple[str, str], Any],
+    ) -> List[EntityOperation]:
+        """The entity operations for `changes`. Callers must hold _lock."""
+        operations: List[EntityOperation] = []
+        for kind, action, entity in changes:
+            entity_id = entity if action == "delete" else entity.id
+            expected = expectations.get((kind, entity_id))
+            if action == "delete":
+                payload = None
+            elif kind == "node":
+                payload = self._serialize_node(entity)
+            else:
+                payload = entity.to_dict()
+            operations.append(
+                EntityOperation(
+                    kind,  # type: ignore[arg-type]
+                    action,  # type: ignore[arg-type]
+                    entity_id,
+                    payload,
+                    expected_revision=(
+                        expected
+                        if expected is not None and expected is not EXPECT_ABSENT
+                        else None
+                    ),
+                    expect_absent=expected is EXPECT_ABSENT,
+                )
+            )
+        return operations
+
+    def _await_landing(self, future: "Future[Any]") -> None:
+        """Wait for a single-writer write with an expectation (§4.4).
+
+        A write that failed is still in memory, and is re-issued with the
+        whole graph exactly as an unawaited one would be - here, before
+        returning, so the caller is told only once it has landed.
+        """
+        try:
+            future.result()
+            return
+        except Exception:
+            heal = self._heal_if_needed()
+            if heal is None:
+                raise
+        heal.result()
+
+    def _resolve_failed_write(
+        self,
+        operations: List[EntityOperation],
+        undo: _Undo,
+        token: str,
+        failure: BaseException,
+    ) -> List[Optional[int]]:
+        """Decide a failed shared-store write on its own evidence (§4.4).
+
+        Callers must hold _lock. Returns the stored revisions when the write
+        landed after all; otherwise raises GraphWriteFailed (memory undone)
+        or GraphWriteOutcomeUnknown (graph re-read from the store).
+        """
+        keys = [(op.kind, op.entity_id) for op in operations]
+        upsert_keys = [
+            (op.kind, op.entity_id) for op in operations if op.action == "upsert"
+        ]
+        before: Dict[Tuple[str, str], Optional[int]] = {}
+        for kind, entity_id in keys:
+            prior = (undo.nodes if kind == "node" else undo.edges).get(entity_id)
+            before[(kind, entity_id)] = (
+                None if prior is None else int(prior.get("revision") or 0)
+            )
+
+        def unchanged(evidence) -> bool:
+            for key in keys:
+                now = evidence.get(key)
+                if before[key] is None:
+                    if now is not None:
+                        return False
+                elif now is None or now[0] != before[key]:
+                    return False
+            return True
+
+        readings = []
+        for attempt in range(2):
+            if attempt:
+                time.sleep(self.WRITE_RESOLVE_DELAY_SECONDS)
+            try:
+                evidence = self._persistence_backend.read_write_evidence(keys)  # type: ignore[attr-defined]
+            except Exception as exc:
+                logger.warning(f"could not read back a failed write: {exc}")
+                readings = None
+                break
+            if upsert_keys and all(
+                evidence.get(key) is not None and evidence[key][1] == token
+                for key in upsert_keys
+            ):
+                # Every entity it wrote carries its token, and the batch is
+                # atomic: it committed, only the acknowledgement was lost.
+                logger.warning(
+                    f"a write reported a failure but landed ({failure}); completing it"
+                )
+                return [
+                    evidence[(op.kind, op.entity_id)][0]
+                    if op.action == "upsert"
+                    else None
+                    for op in operations
+                ]
+            readings.append(evidence)
+
+        # The store's own error text stays in the log: it can name hosts,
+        # roles and schemas, and the caller is owed only the outcome.
+        logger.warning(f"a write failed: {failure}")
+        if readings and len(readings) == 2 and all(unchanged(r) for r in readings):
+            self._undo(undo)
+            raise GraphWriteFailed("the write did not land") from failure
+
+        # Neither confirmed nor ruled out. Memory may hold a write the store
+        # does not, or lack one it does; the store is the authority, so the
+        # graph is re-read from it. A delete always ends here: no token
+        # survives on a row that is gone.
+        try:
+            self.load(bootstrap_if_missing=False)
+        except Exception as exc:
+            logger.warning(
+                f"could not re-read the graph after a write of unknown "
+                f"outcome ({exc}); memory may differ from the store until "
+                f"the next reported change"
+            )
+        raise GraphWriteOutcomeUnknown(
+            "could not confirm whether the write landed; re-read before retrying"
+        ) from failure
 
     def save(self) -> "Future[None]":
         """
@@ -1469,12 +1929,19 @@ class GraphStorage:
         operations: Tuple[EntityOperation, ...],
         vectors: Optional[Dict[str, Any]] = None,
         vector_revision: Optional[int] = None,
-    ) -> None:
+        token: Optional[str] = None,
+    ) -> Optional[List[Optional[int]]]:
         """Hand entity operations to the backend, on the executor thread.
 
         A single operation goes to its own method; more than one go to
         apply_batch, which the backend has declared atomic. Exceptions are
         re-raised, as in _do_save_to_disk, so the Future carries them.
+
+        A backend that enforces revisions always gets apply_batch with the
+        write's token, and its stored revisions are the result. Its failures
+        raise no resync: the caller is waiting and resolves them itself, and
+        re-issuing this instance's graph over a shared store is the overwrite
+        §4.4 exists to remove.
         """
         if vectors is not None:
             # Written first, as in _do_save_to_disk: an orphaned vector is
@@ -1482,6 +1949,8 @@ class GraphStorage:
             self._persist_vectors(vectors, vector_revision)
 
         backend = self._persistence_backend
+        if self._store_assigns_revisions:
+            return backend.apply_batch(operations, write_token=token)  # type: ignore[call-arg]
         try:
             if len(operations) > 1:
                 backend.apply_batch(operations)
@@ -2383,6 +2852,8 @@ class GraphStorage:
         nodes: List[Node],
         edges: List[Edge],
         event_context: Optional[EventContext] = None,
+        *,
+        expect_absent: bool = False,
     ) -> AddNodesResult:
         """
         Add nodes and edges.
@@ -2394,8 +2865,30 @@ class GraphStorage:
             nodes: List of nodes to add
             edges: List of edges to add
             event_context: Optional context for event tracking and loop prevention
+            expect_absent: Every create carries the expectation that no entity
+                with its id exists (§4.3). Checked for the whole call before
+                anything changes, and again by a store that enforces
+                revisions; a refusal raises EntityRevisionConflict and adds
+                nothing.
+
+        Raises:
+            EntityRevisionConflict, GraphWriteFailed, GraphWriteOutcomeUnknown:
+                the write was refused or could not be completed; nothing was
+                added and no event fired.
         """
         with self._lock:
+            expectations: Dict[Tuple[str, str], Any] = {}
+            if expect_absent:
+                for node in nodes:
+                    self._check_expectation(
+                        "node", node.id, self.nodes.get(node.id), EXPECT_ABSENT
+                    )
+                    expectations[("node", node.id)] = EXPECT_ABSENT
+                for edge in edges:
+                    self._check_expectation(
+                        "edge", edge.id, self.edges.get(edge.id), EXPECT_ABSENT
+                    )
+                    expectations[("edge", edge.id)] = EXPECT_ABSENT
             added_node_ids = []
             added_edge_ids = []
             # What has landed in memory but not yet reached the store. A
@@ -2406,20 +2899,25 @@ class GraphStorage:
             unpersisted_nodes: List[Node] = []
             unpersisted_edges: List[Edge] = []
 
+            def commit_created(created_nodes, created_edges) -> None:
+                undo = _Undo()
+                for node in created_nodes:
+                    undo.nodes[node.id] = None
+                    undo.vectors[node.id] = None
+                for edge in created_edges:
+                    undo.edges[edge.id] = None
+                self._commit(
+                    [("node", "upsert", node) for node in created_nodes]
+                    + [("edge", "upsert", edge) for edge in created_edges],
+                    undo,
+                    expectations,
+                )
+
             def persist_landed() -> None:
                 if not (unpersisted_nodes or unpersisted_edges):
                     return
                 try:
-                    self._persist(
-                        [
-                            EntityOperation.upsert_node(self._serialize_node(node))
-                            for node in unpersisted_nodes
-                        ]
-                        + [
-                            EntityOperation.upsert_edge(edge.to_dict())
-                            for edge in unpersisted_edges
-                        ]
-                    )
+                    commit_created(unpersisted_nodes, unpersisted_edges)
                 except Exception as persist_error:
                     # The failure being handled may be the persist itself
                     # (executor shut down); the caller still gets its result.
@@ -2427,6 +2925,11 @@ class GraphStorage:
 
             nodes_to_embed: List[Node] = []
             generation_attempted = False
+
+            def still_landed() -> List[str]:
+                # After persist_landed: a store that refused it has undone
+                # the nodes (or re-read the graph), and those did not stay.
+                return [n.id for n in nodes_to_embed if self.nodes.get(n.id) is n]
 
             def generate_landed_vectors() -> None:
                 # Once per call: an exit after the attempt - a rejected edge -
@@ -2471,6 +2974,7 @@ class GraphStorage:
                             added_edge_ids=[],
                             success=False,
                             message=f"Node with ID {node.id} already exists",
+                            landed_node_ids=still_landed(),
                         )
 
                     # Index before `nodes` - see _external_upsert_node for why.
@@ -2536,6 +3040,7 @@ class GraphStorage:
                             added_edge_ids=[],
                             success=False,
                             message=f"Edge with ID {edge.id} already exists",
+                            landed_node_ids=still_landed(),
                         )
 
                     self._validate_edge_applicability(edge)
@@ -2547,15 +3052,9 @@ class GraphStorage:
                     added_edge_ids.append(edge.id)
                     unpersisted_edges.append(edge)
 
-                self._persist(
-                    [
-                        EntityOperation.upsert_node(self._serialize_node(node))
-                        for node in nodes_to_embed
-                    ]
-                    + [
-                        EntityOperation.upsert_edge(self.edges[edge_id].to_dict())
-                        for edge_id in added_edge_ids
-                    ]
+                commit_created(
+                    nodes_to_embed,
+                    [self.edges[edge_id] for edge_id in added_edge_ids],
                 )
                 unpersisted_nodes.clear()
                 unpersisted_edges.clear()
@@ -2605,6 +3104,15 @@ class GraphStorage:
                     message=f"Added {len(added_node_ids)} nodes and {len(added_edge_ids)} edges",
                 )
 
+            except (
+                EntityRevisionConflict,
+                GraphWriteFailed,
+                GraphWriteOutcomeUnknown,
+            ):
+                # The write itself was refused or failed, and _commit has
+                # already put memory where the store is. Persisting "what
+                # landed" now would write exactly what was just refused.
+                raise
             except Exception as e:
                 settle_landed_vectors()
                 persist_landed()
@@ -2613,6 +3121,7 @@ class GraphStorage:
                     added_edge_ids=[],
                     success=False,
                     message=f"Error during add: {str(e)}",
+                    landed_node_ids=still_landed(),
                 )
 
     @property
@@ -2719,6 +3228,23 @@ class GraphStorage:
                 self.graph_metadata = previous_metadata
                 self._generation = previous_generation
 
+            # Replacing a graph restamps it (§4.2): an expectation taken
+            # against the old content must not match the new. Reserved in one
+            # durable step, before anything is swapped in. A store that
+            # assigns revisions itself does not restamp; see below and
+            # docs/PERSISTENCE_BACKENDS.md.
+            if not self._store_assigns_revisions:
+                first = self._take_revisions(len(nodes) + len(edges))
+                for offset, entity in enumerate([*nodes, *edges]):
+                    entity.revision = first + offset
+            else:
+                # The document's revisions are not this store's. Kept, a
+                # whole-graph save would raise the store's counter to them -
+                # to its ceiling, for a document that asks - so the imported
+                # entities read as never written under revisions instead.
+                for entity in [*nodes, *edges]:
+                    entity.revision = 0
+
             new_nodes = {node.id: node for node in nodes}
             new_edges = {edge.id: edge for edge in edges}
 
@@ -2801,6 +3327,7 @@ class GraphStorage:
         *,
         metadata_merge: bool = False,
         expected_updated_at: Optional[Any] = None,
+        expected_revision: Optional[int] = None,
     ) -> Optional[Node]:
         """
         Update an existing node.
@@ -2826,13 +3353,25 @@ class GraphStorage:
                 version token: two writes within the same microsecond tick would
                 share a timestamp, so this guards against realistic interleaving,
                 not adversarial same-tick races.
+            expected_revision: Optional expectation (§4.3): the update applies
+                only while the node's ``revision`` equals this. Checked here
+                and again by a store that enforces revisions. When both this
+                and ``expected_updated_at`` are given, both must hold.
 
         Raises:
             StaleUpdateError: if ``expected_updated_at`` no longer matches the
                 node's live ``updated_at``.
+            EntityRevisionConflict: if ``expected_revision`` does not hold,
+                including for a node that does not exist.
+            GraphWriteFailed, GraphWriteOutcomeUnknown: a shared-store write
+                that did not land, or whose landing is unknown (§4.4).
             ValueError: if the resulting node fails model validation.
         """
         with self._lock:
+            if expected_revision is not None:
+                self._check_expectation(
+                    "node", node_id, self.nodes.get(node_id), expected_revision
+                )
             if node_id not in self.nodes:
                 return None
 
@@ -2867,6 +3406,8 @@ class GraphStorage:
             }
             # "archived" is reserved so a generic update can neither set it directly
             # nor fold it into metadata — archiving goes through set_nodes_archived.
+            # "revision" is server-owned (§4.1): dropped, never folded into
+            # metadata.
             reserved_fields = {
                 "id",
                 "type",
@@ -2874,6 +3415,7 @@ class GraphStorage:
                 "created_at",
                 "updated_at",
                 "archived",
+                "revision",
             }
 
             # Build the candidate state and validate it through the model BEFORE
@@ -2928,6 +3470,8 @@ class GraphStorage:
             except Exception as exc:
                 raise ValueError(f"Invalid node update: {exc}") from exc
 
+            undo = self._capture(node_ids=[node_id])
+
             # Apply the validated field values to the live node.
             for key in allowed_fields:
                 setattr(node, key, getattr(validated, key))
@@ -2950,7 +3494,13 @@ class GraphStorage:
                 except Exception as embed_error:
                     logger.warning(f"could not update embedding: {embed_error}")
 
-            self._persist([EntityOperation.upsert_node(self._serialize_node(node))])
+            self._commit(
+                [("node", "upsert", node)],
+                undo,
+                {("node", node_id): expected_revision}
+                if expected_revision is not None
+                else None,
+            )
 
             # Emit update event
             node_type = (
@@ -2973,6 +3523,8 @@ class GraphStorage:
         node_ids: List[str],
         archived: bool,
         event_context: Optional[EventContext] = None,
+        *,
+        expected_revisions: Optional[Dict[str, int]] = None,
     ) -> List[Node]:
         """Set the ``archived`` flag on the given nodes.
 
@@ -2982,44 +3534,60 @@ class GraphStorage:
         get an idempotent view; only nodes whose flag actually changed emit an
         update event, and the graph is saved once if anything changed.
 
+        ``expected_revisions`` maps node ids to the revision each must still
+        have (§4.3). Every one is checked before anything changes; one that
+        does not hold raises EntityRevisionConflict and archives nothing.
+
         Thread-safe: protected by _lock for the entire operation.
         """
         with self._lock:
+            for node_id, expected in (expected_revisions or {}).items():
+                self._check_expectation(
+                    "node", node_id, self.nodes.get(node_id), expected
+                )
             found: List[Node] = []
-            changed: List[Node] = []
+            # A node whose flag already matches takes no write, so its
+            # revision does not move; an expectation on it was checked above.
+            to_change: Dict[str, Node] = {}
             for node_id in node_ids:
                 node = self.nodes.get(node_id)
                 if node is None:
                     continue
                 found.append(node)
-                if node.archived == archived:
-                    continue
+                if node.archived != archived:
+                    to_change.setdefault(node_id, node)
 
-                before_state = node.to_dict()
+            undo = self._capture(node_ids=list(to_change))
+            before_states: Dict[str, Dict[str, Any]] = {}
+            for node in to_change.values():
+                before_states[node.id] = node.to_dict()
                 node.archived = archived
                 node.updated_at = datetime.now(timezone.utc)
-                self.graph.nodes[node_id]["data"] = node
-                changed.append(node)
+                self.graph.nodes[node.id]["data"] = node
 
+            self._commit(
+                [("node", "upsert", node) for node in to_change.values()],
+                undo,
+                {
+                    ("node", node_id): expected
+                    for node_id, expected in (expected_revisions or {}).items()
+                    if node_id in before_states
+                },
+            )
+
+            # After the write, so each event carries the revision it landed at.
+            for node in to_change.values():
                 node_type = (
                     node.type.value if hasattr(node.type, "value") else str(node.type)
                 )
                 self._emit_event(
                     event_type=EventType.NODE_UPDATE,
                     entity_kind=EntityKind.NODE,
-                    entity_id=node_id,
+                    entity_id=node.id,
                     entity_type=node_type,
-                    before=before_state,
+                    before=before_states[node.id],
                     after=node.to_dict(),
                     context=event_context,
-                )
-
-            if changed:
-                self._persist(
-                    [
-                        EntityOperation.upsert_node(self._serialize_node(node))
-                        for node in changed
-                    ]
                 )
 
             return found
@@ -3029,6 +3597,8 @@ class GraphStorage:
         node_ids: List[str],
         confirmed: bool = False,
         event_context: Optional[EventContext] = None,
+        *,
+        expected_revisions: Optional[Dict[str, int]] = None,
     ) -> DeleteNodesResult:
         """
         Delete nodes (max 10 at a time for safety).
@@ -3040,6 +3610,10 @@ class GraphStorage:
             node_ids: List of node IDs to delete
             confirmed: Must be True to execute deletion
             event_context: Optional context for event tracking and loop prevention
+            expected_revisions: node id -> the revision it must still have
+                (§4.3). All are checked before anything is deleted; one that
+                does not hold raises EntityRevisionConflict. Incident edges
+                deleted with a node carry no expectation.
         """
         with self._lock:
             if len(node_ids) > 10:
@@ -3058,12 +3632,21 @@ class GraphStorage:
                     message="Deletion requires confirmed=True parameter",
                 )
 
+            for node_id, expected in (expected_revisions or {}).items():
+                self._check_expectation(
+                    "node", node_id, self.nodes.get(node_id), expected
+                )
+
             deleted_node_ids = []
             affected_edge_ids = []
 
             # Capture before states for events
             node_before_states: Dict[str, Dict[str, Any]] = {}
             edge_before_states: Dict[str, Dict[str, Any]] = {}
+
+            present = [nid for nid in dict.fromkeys(node_ids) if nid in self.nodes]
+            incident = [edge.id for edge in self.get_incident_edges(present)]
+            undo = self._capture(node_ids=present, edge_ids=incident)
 
             try:
                 for node_id in node_ids:
@@ -3113,15 +3696,14 @@ class GraphStorage:
 
                 # Edges first, for the same reason the events below go out in
                 # that order: an edge must never outlive an endpoint in the store.
-                self._persist(
-                    [
-                        EntityOperation.delete_edge(edge_id)
-                        for edge_id in edge_before_states
-                    ]
-                    + [
-                        EntityOperation.delete_node(node_id)
-                        for node_id in deleted_node_ids
-                    ]
+                self._commit(
+                    [("edge", "delete", edge_id) for edge_id in edge_before_states]
+                    + [("node", "delete", node_id) for node_id in deleted_node_ids],
+                    undo,
+                    {
+                        ("node", node_id): expected
+                        for node_id, expected in (expected_revisions or {}).items()
+                    },
                 )
 
                 # Emit delete events for edges (before nodes, to maintain referential integrity info)
@@ -3157,6 +3739,12 @@ class GraphStorage:
                     message=f"Deleted {len(deleted_node_ids)} nodes and {len(affected_edge_ids)} edges",
                 )
 
+            except (
+                EntityRevisionConflict,
+                GraphWriteFailed,
+                GraphWriteOutcomeUnknown,
+            ):
+                raise
             except Exception as e:
                 return DeleteNodesResult(
                     deleted_node_ids=[],
@@ -3227,6 +3815,12 @@ class GraphStorage:
         subgraph = self.graph.subgraph(valid_nodes)
         return [data["data"] for _, _, data in subgraph.edges(data=True)]
 
+    def get_edges_from_to(self, source: str, target: str) -> List[Edge]:
+        """Edges directed from ``source`` to ``target``: a hash lookup, so a
+        caller checking many pairs pays for the pairs, not the graph."""
+        bundle = self.graph.get_edge_data(source, target) or {}
+        return [data["data"] for data in list(bundle.values())]
+
     def get_edges_for_node(self, node_id: str) -> List[Edge]:
         """Get all edges connected to a specific node"""
         if node_id not in self.graph:
@@ -3250,6 +3844,8 @@ class GraphStorage:
         edge_id: str,
         updates: Dict,
         event_context: Optional[EventContext] = None,
+        *,
+        expected_revision: Optional[int] = None,
     ) -> Optional[Edge]:
         """
         Update an existing edge.
@@ -3260,8 +3856,14 @@ class GraphStorage:
             edge_id: ID of the edge to update
             updates: Dict with fields to update (type, label, metadata)
             event_context: Optional context for event tracking
+            expected_revision: Optional expectation (§4.3); a mismatch, or an
+                edge that does not exist, raises EntityRevisionConflict.
         """
         with self._lock:
+            if expected_revision is not None:
+                self._check_expectation(
+                    "edge", edge_id, self.edges.get(edge_id), expected_revision
+                )
             if edge_id not in self.edges:
                 return None
 
@@ -3280,10 +3882,17 @@ class GraphStorage:
             validated_edge = Edge.from_dict(candidate)
             self._validate_edge_applicability(validated_edge)
 
+            undo = self._capture(edge_ids=[edge_id])
             for key in allowed_fields:
                 setattr(edge, key, getattr(validated_edge, key))
 
-            self._persist([EntityOperation.upsert_edge(edge.to_dict())])
+            self._commit(
+                [("edge", "upsert", edge)],
+                undo,
+                {("edge", edge_id): expected_revision}
+                if expected_revision is not None
+                else None,
+            )
 
             # Emit update event
             edge_type = (
@@ -3306,47 +3915,62 @@ class GraphStorage:
         edge_ids: List[str],
         archived: bool,
         event_context: Optional[EventContext] = None,
+        *,
+        expected_revisions: Optional[Dict[str, int]] = None,
     ) -> List[Edge]:
         """Set the ``archived`` flag on the given edges.
 
         Mirrors :meth:`set_nodes_archived`: archived edges are hidden from
         search/traversal by default but remain in the graph. Returns every edge
         that was found; only edges whose flag changed emit an update event, and
-        the graph is saved once if anything changed.
+        the graph is saved once if anything changed. ``expected_revisions``
+        works as it does there.
 
         Thread-safe: protected by _lock for the entire operation.
         """
         with self._lock:
+            for edge_id, expected in (expected_revisions or {}).items():
+                self._check_expectation(
+                    "edge", edge_id, self.edges.get(edge_id), expected
+                )
             found: List[Edge] = []
-            changed: List[Edge] = []
+            to_change: Dict[str, Edge] = {}
             for edge_id in edge_ids:
                 edge = self.edges.get(edge_id)
                 if edge is None:
                     continue
                 found.append(edge)
-                if edge.archived == archived:
-                    continue
+                if edge.archived != archived:
+                    to_change.setdefault(edge_id, edge)
 
-                before_state = edge.to_dict()
+            undo = self._capture(edge_ids=list(to_change))
+            before_states: Dict[str, Dict[str, Any]] = {}
+            for edge in to_change.values():
+                before_states[edge.id] = edge.to_dict()
                 edge.archived = archived
-                changed.append(edge)
 
+            self._commit(
+                [("edge", "upsert", edge) for edge in to_change.values()],
+                undo,
+                {
+                    ("edge", edge_id): expected
+                    for edge_id, expected in (expected_revisions or {}).items()
+                    if edge_id in before_states
+                },
+            )
+
+            for edge in to_change.values():
                 edge_type = (
                     edge.type.value if hasattr(edge.type, "value") else str(edge.type)
                 )
                 self._emit_event(
                     event_type=EventType.EDGE_UPDATE,
                     entity_kind=EntityKind.EDGE,
-                    entity_id=edge_id,
+                    entity_id=edge.id,
                     entity_type=edge_type,
-                    before=before_state,
+                    before=before_states[edge.id],
                     after=edge.to_dict(),
                     context=event_context,
-                )
-
-            if changed:
-                self._persist(
-                    [EntityOperation.upsert_edge(edge.to_dict()) for edge in changed]
                 )
 
             return found
@@ -3355,6 +3979,8 @@ class GraphStorage:
         self,
         edge_id: str,
         event_context: Optional[EventContext] = None,
+        *,
+        expected_revision: Optional[int] = None,
     ) -> bool:
         """
         Delete a single edge.
@@ -3364,13 +3990,20 @@ class GraphStorage:
         Args:
             edge_id: ID of the edge to delete
             event_context: Optional context for event tracking
+            expected_revision: Optional expectation (§4.3); a mismatch, or an
+                edge that does not exist, raises EntityRevisionConflict.
 
         Returns:
             True if edge was deleted, False if not found
         """
         with self._lock:
+            if expected_revision is not None:
+                self._check_expectation(
+                    "edge", edge_id, self.edges.get(edge_id), expected_revision
+                )
             if edge_id not in self.edges:
                 return False
+            undo = self._capture(edge_ids=[edge_id])
 
             edge = self.edges[edge_id]
             before_state = edge.to_dict()
@@ -3387,7 +4020,13 @@ class GraphStorage:
             # Remove from edges dict
             del self.edges[edge_id]
 
-            self._persist([EntityOperation.delete_edge(edge_id)])
+            self._commit(
+                [("edge", "delete", edge_id)],
+                undo,
+                {("edge", edge_id): expected_revision}
+                if expected_revision is not None
+                else None,
+            )
 
             # Emit delete event
             self._emit_event(
@@ -3406,11 +4045,24 @@ class GraphStorage:
         self,
         edge_ids: List[str],
         event_context: Optional[EventContext] = None,
+        *,
+        expected_revisions: Optional[Dict[str, int]] = None,
     ) -> DeleteEdgesResult:
-        """Delete edges by ID. Limit enforcement is the caller's responsibility."""
+        """Delete edges by ID. Limit enforcement is the caller's responsibility.
+
+        ``expected_revisions`` maps edge ids to the revision each must still
+        have (§4.3), all checked before anything is deleted.
+        """
         with self._lock:
+            for edge_id, expected in (expected_revisions or {}).items():
+                self._check_expectation(
+                    "edge", edge_id, self.edges.get(edge_id), expected
+                )
             deleted_edge_ids = []
             edge_before_states: Dict[str, Dict[str, Any]] = {}
+            undo = self._capture(
+                edge_ids=[eid for eid in dict.fromkeys(edge_ids) if eid in self.edges]
+            )
 
             try:
                 for edge_id in edge_ids:
@@ -3428,11 +4080,13 @@ class GraphStorage:
                     del self.edges[edge_id]
                     deleted_edge_ids.append(edge_id)
 
-                self._persist(
-                    [
-                        EntityOperation.delete_edge(edge_id)
-                        for edge_id in deleted_edge_ids
-                    ]
+                self._commit(
+                    [("edge", "delete", edge_id) for edge_id in deleted_edge_ids],
+                    undo,
+                    {
+                        ("edge", edge_id): expected
+                        for edge_id, expected in (expected_revisions or {}).items()
+                    },
                 )
 
                 for edge_id in deleted_edge_ids:
@@ -3453,6 +4107,12 @@ class GraphStorage:
                     success=True,
                     message=f"Deleted {len(deleted_edge_ids)} edges",
                 )
+            except (
+                EntityRevisionConflict,
+                GraphWriteFailed,
+                GraphWriteOutcomeUnknown,
+            ):
+                raise
             except Exception as e:
                 return DeleteEdgesResult(
                     deleted_edge_ids=[],
@@ -3464,6 +4124,8 @@ class GraphStorage:
         self,
         edge: Edge,
         event_context: Optional[EventContext] = None,
+        *,
+        expect_absent: bool = False,
     ) -> Optional[str]:
         """
         Add a single edge between existing nodes.
@@ -3473,11 +4135,17 @@ class GraphStorage:
         Args:
             edge: Edge object to add
             event_context: Optional context for event tracking
+            expect_absent: the create expects no edge with this id to exist
+                (§4.3); one that does raises EntityRevisionConflict.
 
         Returns:
             Edge ID if successful, None if failed
         """
         with self._lock:
+            if expect_absent:
+                self._check_expectation(
+                    "edge", edge.id, self.edges.get(edge.id), EXPECT_ABSENT
+                )
             # Validate source and target exist
             if edge.source not in self.nodes:
                 # Try name resolution
@@ -3499,10 +4167,16 @@ class GraphStorage:
 
             self._validate_edge_applicability(edge)
 
+            undo = _Undo()
+            undo.edges[edge.id] = None
             self.edges[edge.id] = edge
             self.graph.add_edge(edge.source, edge.target, key=edge.id, data=edge)
 
-            self._persist([EntityOperation.upsert_edge(edge.to_dict())])
+            self._commit(
+                [("edge", "upsert", edge)],
+                undo,
+                {("edge", edge.id): EXPECT_ABSENT} if expect_absent else None,
+            )
 
             # Emit create event
             edge_type = (

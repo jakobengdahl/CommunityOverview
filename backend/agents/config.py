@@ -17,6 +17,7 @@ from backend.config.model_profiles import (
     ProfileResolution,
     resolve_profile_reference,
 )
+from backend.agents.run_history_retention import RetentionPolicy
 from backend.agents.secrets import (
     SECRET_REF_PREFIX,
     is_secret_ref,
@@ -254,7 +255,11 @@ class MCPIntegration:
             "description": self.description,
             "transport": self.transport.value,
             "url": self.url,
-            "command": self.command,
+            # `command` is deliberately omitted: the argv is operator-supplied and
+            # can carry host paths (e.g. the agent workspace root under the
+            # service account's home), and this dict is served over HTTP by the
+            # agents routes. No client needs it; the subprocess reads
+            # `self.command` directly.
             # Redact literal env values so an inline secret is never serialized;
             # secret://<name> references name a secret rather than holding its
             # value, so they are safe to expose.
@@ -384,6 +389,9 @@ class AgentsSettings:
     # writes to. When unset, run history is kept in a volatile in-memory store
     # (lost on restart) so standalone/dev runs need no file.
     run_history_db: Optional[str] = None
+    # Retention for run history (see run_history_retention.py). The default
+    # keeps history forever and never sweeps.
+    run_history_retention: RetentionPolicy = field(default_factory=RetentionPolicy)
     # Durable agent proposals (governance): path to the SQLite file the proposal
     # store writes to. When unset, proposals live in a volatile in-memory store.
     governance_db: Optional[str] = None
@@ -415,6 +423,10 @@ class AgentsSettings:
             AGENTS_EVENT_TIMEOUT: Event processing timeout in seconds (default: 60)
             AGENTS_RUN_HISTORY_DB: Path to the SQLite file for durable AgentRun
                 history (optional; in-memory/volatile when unset)
+            AGENTS_RUN_HISTORY_RETENTION_DAYS, AGENTS_RUN_HISTORY_REDACT_AFTER_DAYS,
+            AGENTS_RUN_HISTORY_EXPORT_MAX_DAYS, AGENTS_RUN_HISTORY_SWEEP_INTERVAL_HOURS:
+                Run-history retention (optional; history is kept forever when
+                unset). An invalid value raises ValueError.
             AGENTS_GOVERNANCE_DB: Path to the SQLite file for durable agent
                 proposals (optional; in-memory/volatile when unset)
         """
@@ -482,6 +494,7 @@ class AgentsSettings:
             event_timeout=float(os.environ.get("AGENTS_EVENT_TIMEOUT", "60")),
             model_profiles=model_profiles,
             run_history_db=os.environ.get("AGENTS_RUN_HISTORY_DB") or None,
+            run_history_retention=RetentionPolicy.from_env(),
             governance_db=os.environ.get("AGENTS_GOVERNANCE_DB") or None,
         )
 

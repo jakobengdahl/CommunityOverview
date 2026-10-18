@@ -5,9 +5,17 @@ All functions are standalone; they receive storage, the authorization hook,
 and (where required) the federation manager as explicit parameters.
 """
 
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
-from backend.core import Edge, Node, NodeType, StaleUpdateError
+from backend.core import (
+    Edge,
+    EntityRevisionConflict,
+    GraphWriteFailed,
+    GraphWriteOutcomeUnknown,
+    Node,
+    NodeType,
+    StaleUpdateError,
+)
 from backend.core.session_annotations import saved_view_annotation_error
 from backend.runtime.authorization import (
     GRAPH_ACTION_MUTATE,
@@ -50,6 +58,33 @@ _NODE_MODEL_FIELDS = {
     "updated_at",
 }
 
+# Server-owned (docs/SESSION_OVERLAY_CONTRACT.md §4.1): a caller-supplied
+# revision is dropped, never folded into metadata like other unknown keys.
+_SERVER_OWNED_FIELDS = frozenset({"revision"})
+
+# What a direct write can be refused or fail with, beyond validation.
+_WRITE_ERRORS = (EntityRevisionConflict, GraphWriteFailed, GraphWriteOutcomeUnknown)
+
+
+def write_error_result(exc: Exception, **extra: Any) -> Dict[str, Any]:
+    """The refusal a direct write answers with (§16.3): an `error` code, a
+    `message`, and for a conflict the entity and its `current_revision`."""
+    result: Dict[str, Any] = {
+        "success": False,
+        "error": getattr(exc, "code", "write_failed"),
+        "message": str(exc),
+        **extra,
+    }
+    if isinstance(exc, EntityRevisionConflict):
+        result.update(
+            conflict=True,
+            entity_kind=exc.kind,
+            entity_id=exc.entity_id,
+            current_revision=exc.current_revision,
+        )
+    return result
+
+
 # add_nodes/update_node are the only write paths a SavedView's
 # annotation_document/annotations ever go through (there is no dedicated
 # "save view" mutation — the frontend posts a plain node through add_nodes).
@@ -69,7 +104,11 @@ def add_nodes(
     event_origin: Optional[str] = None,
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
+    expect_absent: bool = False,
+    on_nodes_landed: Optional[Callable[[List[str]], None]] = None,
 ) -> Dict[str, Any]:
+    """``on_nodes_landed`` gets the ids of the nodes this call left in the
+    graph, including those a failed call keeps."""
     denied = access.authorize_graph_access(
         hook, action=GRAPH_ACTION_MUTATE, target="add_nodes"
     )
@@ -82,7 +121,9 @@ def add_nodes(
     try:
         node_objects = []
         for n in nodes:
-            node_dict = dict(n)
+            node_dict = {
+                k: v for k, v in dict(n).items() if k not in _SERVER_OWNED_FIELDS
+            }
             extra = {k: v for k, v in node_dict.items() if k not in _NODE_MODEL_FIELDS}
             if extra:
                 meta = dict(node_dict.get("metadata") or {})
@@ -101,7 +142,10 @@ def add_nodes(
                         "added_edge_ids": [],
                     }
             node_objects.append(node)
-        edge_objects = [Edge(**e) for e in edges]
+        edge_objects = [
+            Edge(**{k: v for k, v in dict(e).items() if k not in _SERVER_OWNED_FIELDS})
+            for e in edges
+        ]
     except Exception as e:
         return {
             "success": False,
@@ -117,7 +161,30 @@ def add_nodes(
         event_correlation_id=event_correlation_id,
     )
 
-    result = storage.add_nodes(node_objects, edge_objects, event_context=event_context)
+    try:
+        result = storage.add_nodes(
+            node_objects,
+            edge_objects,
+            event_context=event_context,
+            expect_absent=expect_absent,
+        )
+    except EntityRevisionConflict as e:
+        # A create expecting absence needs only to know the id is taken. The
+        # taken entity may be one this caller cannot see, so nothing about it
+        # - its revision included - goes back.
+        return write_error_result(
+            EntityRevisionConflict(e.kind, e.entity_id, None, None),
+            message=f"{e.kind} {e.entity_id!r} already exists",
+            current_revision=None,
+            added_node_ids=[],
+            added_edge_ids=[],
+        )
+    except _WRITE_ERRORS as e:
+        return write_error_result(e, added_node_ids=[], added_edge_ids=[])
+    if on_nodes_landed is not None:
+        on_nodes_landed(
+            result.added_node_ids if result.success else result.landed_node_ids
+        )
     response = serialize_add_result(result)
 
     if result.success:
@@ -142,6 +209,7 @@ def update_node(
     event_correlation_id: Optional[str] = None,
     metadata_merge: bool = False,
     expected_updated_at: Optional[str] = None,
+    expected_revision: Optional[int] = None,
 ) -> Dict[str, Any]:
     decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_MUTATE, target="update_node"
@@ -180,7 +248,10 @@ def update_node(
             event_context=event_context,
             metadata_merge=metadata_merge,
             expected_updated_at=expected_updated_at,
+            expected_revision=expected_revision,
         )
+    except _WRITE_ERRORS as e:
+        return write_error_result(e)
     except StaleUpdateError as e:
         return {
             "success": False,
@@ -212,6 +283,7 @@ def delete_nodes(
     event_origin: Optional[str] = None,
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
+    expected_revisions: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
     decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_MUTATE, target="delete_nodes"
@@ -223,6 +295,19 @@ def delete_nodes(
         denied.setdefault("deleted_node_ids", [])
         denied.setdefault("affected_edge_ids", [])
         return denied
+
+    # An expectation is a condition on a node this call deletes; one on any
+    # other node would be checked against memory and never by the store.
+    stray = sorted(set(expected_revisions or {}) - set(node_ids))
+    if stray:
+        return {
+            "success": False,
+            "message": (
+                f"expected_revisions names nodes this call does not delete: {stray}"
+            ),
+            "deleted_node_ids": [],
+            "affected_edge_ids": [],
+        }
 
     if decision.graph_access.enabled:
         node_ids = [
@@ -238,7 +323,28 @@ def delete_nodes(
         event_correlation_id=event_correlation_id,
     )
 
-    result = storage.delete_nodes(node_ids, confirmed, event_context=event_context)
+    if expected_revisions and decision.graph_access.enabled:
+        # An expectation on a node this caller may not see is answered as if
+        # it were absent, never with its revision.
+        visible = set(node_ids)
+        hidden = [nid for nid in expected_revisions if nid not in visible]
+        if hidden:
+            return write_error_result(
+                EntityRevisionConflict(
+                    "node", hidden[0], expected_revisions[hidden[0]], None
+                ),
+                deleted_node_ids=[],
+                affected_edge_ids=[],
+            )
+    try:
+        result = storage.delete_nodes(
+            node_ids,
+            confirmed,
+            event_context=event_context,
+            expected_revisions=expected_revisions,
+        )
+    except _WRITE_ERRORS as e:
+        return write_error_result(e, deleted_node_ids=[], affected_edge_ids=[])
     return access.attach_mutation_attribution(
         serialize_delete_result(result), event_context
     )
@@ -278,7 +384,12 @@ def set_nodes_archived(
         event_correlation_id=event_correlation_id,
     )
 
-    nodes = storage.set_nodes_archived(node_ids, archived, event_context=event_context)
+    try:
+        nodes = storage.set_nodes_archived(
+            node_ids, archived, event_context=event_context
+        )
+    except _WRITE_ERRORS as e:
+        return write_error_result(e, node_ids=[])
     return access.attach_mutation_attribution(
         {
             "success": True,
@@ -345,6 +456,8 @@ def add_edge(
 
     try:
         edge_id = storage.add_edge(edge, event_context=event_context)
+    except _WRITE_ERRORS as e:
+        return write_error_result(e)
     except ValueError as e:
         return {"success": False, "message": str(e)}
     if not edge_id:
@@ -372,6 +485,7 @@ def update_edge(
     event_origin: Optional[str] = None,
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
+    expected_revision: Optional[int] = None,
 ) -> Dict[str, Any]:
     decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_MUTATE, target="update_edge"
@@ -394,8 +508,13 @@ def update_edge(
 
     try:
         updated_edge = storage.update_edge(
-            edge_id, updates, event_context=event_context
+            edge_id,
+            updates,
+            event_context=event_context,
+            expected_revision=expected_revision,
         )
+    except _WRITE_ERRORS as e:
+        return write_error_result(e)
     except ValueError as e:
         return {"success": False, "message": str(e)}
     if not updated_edge:
@@ -414,6 +533,7 @@ def delete_edge(
     event_origin: Optional[str] = None,
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
+    expected_revision: Optional[int] = None,
 ) -> Dict[str, Any]:
     decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_MUTATE, target="delete_edge"
@@ -434,7 +554,12 @@ def delete_edge(
         event_correlation_id=event_correlation_id,
     )
 
-    deleted = storage.delete_edge(edge_id, event_context=event_context)
+    try:
+        deleted = storage.delete_edge(
+            edge_id, event_context=event_context, expected_revision=expected_revision
+        )
+    except _WRITE_ERRORS as e:
+        return write_error_result(e)
     if not deleted:
         return {"success": False, "error": f"Edge with ID {edge_id} not found"}
 
@@ -492,7 +617,10 @@ def delete_edges(
         event_correlation_id=event_correlation_id,
     )
 
-    result = storage.delete_edges(edge_ids, event_context=event_context)
+    try:
+        result = storage.delete_edges(edge_ids, event_context=event_context)
+    except _WRITE_ERRORS as e:
+        return write_error_result(e, deleted_edge_ids=[])
     return access.attach_mutation_attribution(
         serialize_delete_edges_result(result), event_context
     )
@@ -534,7 +662,12 @@ def set_edges_archived(
         event_correlation_id=event_correlation_id,
     )
 
-    edges = storage.set_edges_archived(edge_ids, archived, event_context=event_context)
+    try:
+        edges = storage.set_edges_archived(
+            edge_ids, archived, event_context=event_context
+        )
+    except _WRITE_ERRORS as e:
+        return write_error_result(e, edge_ids=[])
     return access.attach_mutation_attribution(
         {
             "success": True,
@@ -728,9 +861,12 @@ def adopt_federated_node(
     if storage.get_node(source_reference.id) is None:
         nodes_to_add.append(source_reference)
 
-    result = storage.add_nodes(
-        nodes_to_add, [lineage_edge], event_context=event_context
-    )
+    try:
+        result = storage.add_nodes(
+            nodes_to_add, [lineage_edge], event_context=event_context
+        )
+    except _WRITE_ERRORS as e:
+        return write_error_result(e, added_node_ids=[], added_edge_ids=[])
 
     if not result.success:
         return serialize_add_result(result)

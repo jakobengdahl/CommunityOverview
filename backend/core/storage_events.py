@@ -47,7 +47,15 @@ def emit_event(
     delivery pipeline.
     """
     patch_data = None
-    if before and after and event_type == EventType.NODE_UPDATE:
+    if (
+        before
+        and after
+        and event_type
+        in (
+            EventType.NODE_UPDATE,
+            EventType.EDGE_UPDATE,
+        )
+    ):
         patch_data = {
             key: after[key]
             for key in after

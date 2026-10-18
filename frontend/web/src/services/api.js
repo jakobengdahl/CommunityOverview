@@ -371,6 +371,65 @@ export async function getSchema() {
   return apiFetch(`${API_BASE}/schema`);
 }
 
+// ============================================================
+// Node attachments (ADR 0008)
+// ============================================================
+
+function attachmentsUrl(nodeId) {
+  return `${API_BASE}/nodes/${encodeURIComponent(nodeId)}/attachments`;
+}
+
+/**
+ * The attachment routes answer errors as {detail: {error, message}}, which
+ * apiFetch would flatten to "[object Object]"; keep the code so the UI can
+ * map it to a translated message.
+ */
+async function attachmentFetch(url, options = {}) {
+  const response = await fetch(url, options);
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    const detail = body && typeof body.detail === 'object' && body.detail ? body.detail : {};
+    const error = new Error(
+      detail.message || (typeof body.detail === 'string' ? body.detail : '') || ''
+    );
+    error.status = response.status;
+    error.code = detail.error || '';
+    throw error;
+  }
+  return response.json();
+}
+
+/**
+ * List a node's attachments.
+ * @returns {Promise<{attachments: Array, limits: Object, uploads_allowed: boolean}>}
+ */
+export async function listNodeAttachments(nodeId) {
+  return attachmentFetch(attachmentsUrl(nodeId));
+}
+
+/**
+ * Attach one file to a node. The body is the raw bytes, not multipart.
+ * @param {string} nodeId
+ * @param {File} file
+ * @returns {Promise<Object>} the stored attachment record
+ */
+export async function uploadNodeAttachment(nodeId, file) {
+  return attachmentFetch(`${attachmentsUrl(nodeId)}?filename=${encodeURIComponent(file.name)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': file.type || 'application/octet-stream' },
+    body: file,
+  });
+}
+
+/** The download route; the server always serves it as an attachment. */
+export function getNodeAttachmentUrl(nodeId, attachmentId) {
+  return `${attachmentsUrl(nodeId)}/${encodeURIComponent(attachmentId)}`;
+}
+
+export async function deleteNodeAttachment(nodeId, attachmentId) {
+  return attachmentFetch(getNodeAttachmentUrl(nodeId, attachmentId), { method: 'DELETE' });
+}
+
 /**
  * Get the presentation configuration
  * @returns {Promise<{title: string, introduction: string, colors: Object, prompt_prefix: string, prompt_suffix: string}>}

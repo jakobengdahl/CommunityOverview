@@ -13,7 +13,17 @@ data/
     graph.journal.ndjson    # Mutations not yet folded into graph.json (see below)
     graph.embeddings.bin    # Embedding vectors for that graph (see below)
     graph.history.ndjson    # Mutation history sidecar
+    graph.attachments/      # Files attached to nodes (see below)
 ```
+
+`graph.attachments/` is the node attachment store
+([ADR 0008](adr/0008-node-attachment-storage.md)): one directory per node,
+named by a hash of the node id, holding an `index.json` and the files under
+server-minted ids. It is never part of `graph.json` or `GET /export`, so back
+it up on its own; `ATTACHMENT_DIR` moves it (see `backend/DEVELOPMENT.md`).
+Files left behind by a deleted node are moved to a `.quarantine/` directory
+beside the node directories when a new node is created with the same id, so
+they never show up as the new node's attachments.
 
 ## How It Works
 
@@ -206,8 +216,8 @@ the full design) replaces the ENTIRE active graph with a posted document in
 the same shape `GET /api/export` returns — a `nodes` list and an `edges` list.
 This is a **REPLACE, not a merge**: every id in the document becomes the live
 graph's content exactly, and any node or edge from the previous graph that
-does not also appear in the document is gone. There is no per-id
-merge/collision policy in this version (tracked as a follow-up).
+does not also appear in the document is gone. To see what a document would
+do to the live graph *without* replacing it, use the merge preview below.
 
 What happens, in order:
 
@@ -272,6 +282,69 @@ job is still running.
 
 To undo an import, re-run `POST /api/import` with the content of the backup
 file it wrote.
+
+## Previewing a merge import
+
+`POST /api/import/merge/preview` (see
+[ADR 0013](adr/0013-graph-import-merge-mode.md)) plans merging a document
+*into* the live graph instead of replacing it, and **writes nothing**: no
+graph change, no backup, no job, no events. Committing a merge is a later
+slice; today the preview is a dry run you can act on by editing the document
+or by importing with `POST /api/import`.
+
+```http
+POST /api/import/merge/preview
+{ "document": { "nodes": [...], "edges": [...] },
+  "policy": { "default": "fail", "by_type": { "Actor": "overwrite" } },
+  "include_system_types": false }
+→ 200 { "success": true, "plan": {...}, "plan_digest": "sha256:…" }
+```
+
+- **Collisions.** A document node or edge whose id already exists live follows
+  its policy: `fail` (the default — a conflict that blocks the merge), `skip`
+  (keep the live entity), `overwrite` (take the document's name, description,
+  summary, tags, subtypes, aliases and metadata; for an edge its type, label
+  and metadata), or `rename` (create it under a new id minted at commit, with
+  the document's own edges rewritten to it). `by_type` overrides the default
+  per node type or relationship type. A node whose type differs from the live
+  node's, or an edge whose endpoints differ, is a conflict unless its policy
+  is `rename`.
+- **Edges** may attach to live nodes; an endpoint that is neither in the
+  document nor live is rejected as dangling, never created as a placeholder.
+  A document edge repeating a live edge's source, target and type under
+  another id is skipped as a duplicate. An overwrite that changes a node's
+  subtypes re-checks its live edges, and one that would become inapplicable
+  is a conflict.
+- **System types** (`Agent`, `EventSubscription`, `SavedView`, `Skill`, …) and
+  every edge touching one are skipped unless `include_system_types` is `true`.
+- **Validation** is v1's: an unknown node or relationship type, a duplicate id
+  within the document or a malformed entity is listed under `rejected` and
+  blocks the merge. The v1 size caps apply.
+
+The `plan` lists `adds`, `overwrites` (each changed field's `main` = live and
+`incoming` = document value), `renames`, `skips`, `conflicts`, `rejected`,
+attachment flags (overwritten nodes that have attachments, and new nodes whose
+id has leftover attachment files), `edges_to_archived_nodes`,
+`edges_to_skipped_nodes` (document edges attached to a live node a `skip`
+kept), how many nodes
+would be (re)embedded and how many graph events a commit would emit. Each list
+holds at most 1,000 entries; its `count` is always exact. `committable` is
+`false` while anything is rejected or in conflict. `plan_digest` changes when
+the request or the document changes (not when it is merely reordered, and not
+for an entry's `revision` field, which a write ignores), or the
+graph is replaced, and — unless something is rejected, which blocks any
+commit — when a live entity the plan relied on changes, so a future commit can
+refuse a plan that is no longer the one previewed.
+
+The preview reveals which ids exist and live field values, so it needs the
+access a commit will — graph mutation rights — and read rights, both with
+unnarrowed graph access.
+`stamp_provenance: true` is refused until provenance stamping ships. The
+`preview_graph_merge` MCP tool does the same for small documents an assistant
+assembles — at most 10,000 nodes and 20,000 edges, since it plans on the
+server's event loop; there is no MCP tool that commits a merge. One preview
+runs at a time; a second is refused with 503 `import_preview_busy` and can
+simply be retried.
 
 ## Importing a vector-aware archive
 
@@ -550,7 +623,7 @@ The current application still uses file-based graph persistence as the default r
 - early hosted-readiness work where the focus is on seams, contracts, and operational hooks
 
 For the long-term shared SaaS architecture, the target is different:
-- multiple graphs or workspaces should eventually be served by shared application/service instances
+- multiple graphs or workspaces should eventually be served within a shared application/service environment, each graph by its own core runtime process or processes — a core process binds exactly one graph, though federation can add search over others ([ADR 0009](./adr/0009-dual-mode-graph-storage-seam.md)), and routing a request to a process that binds its graph lives outside the core
 - user access to graphs should be controlled through application-managed identity and authorization
 - the storage layer should eventually support shared persistence with row-based or equivalent record-level access constraints
 

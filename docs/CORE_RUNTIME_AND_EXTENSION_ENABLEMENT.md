@@ -29,13 +29,14 @@ For standalone open-core operation, the baseline assumption remains:
 - the core does not require a built-in SaaS-style user directory or billing model
 - authentication can be handled externally by infrastructure or gateway controls such as IAP, reverse proxy auth, or equivalent perimeter patterns
 
-For the target SaaS model, tenant-aware operation should not imply one dedicated application stack per graph.
+For the target SaaS model, tenant-aware operation should not imply a dedicated application stack (its own environment, gateway and database server) per graph. Within the shared environment, though, each graph is bound by its own core runtime process or processes: a core process binds exactly one graph at boot, whichever persistence backend it uses ([ADR 0009](./adr/0009-dual-mode-graph-storage-seam.md)). Several graphs are served by running several core processes; no core process binds more than one graph of its own (federation lets a process search other graphs, which does not change the one graph it binds).
 
 The default target hosted architecture is:
 - one shared application/service environment per deployment tier or region
-- multiple graphs or customer workspaces served by the same runtime instances
-- graph selection, search scope, rendering scope, and mutation scope controlled by application identity and authorization
-- isolation enforced through configuration, graph scoping, authorization, and data-layer controls
+- multiple graphs or customer workspaces served within that environment, each graph by its own core runtime process or processes (a shared persistence backend lets several processes bind the same graph; no process binds several graphs)
+- routing a request to a process that binds its graph done outside the core; the `graph_id` a request declares never switches the store — it reaches the authorization context and the audit record, and any narrowing comes from the authorization decision, limited to the process's own graph and its federation peers
+- search scope, rendering scope, and mutation scope within a graph controlled by application identity and authorization
+- isolation enforced through configuration, one store per graph, authorization, and data-layer controls
 
 This means the core should prepare for:
 - shared-hosting deployments where a service layer manages users, teams, workspaces, and graph access outside the standalone core defaults
@@ -114,7 +115,7 @@ Target outcomes:
 - clear separation between shared application settings and per-context settings
 - safer loading of context-specific graph, schema, prompt, and auth-related configuration
 - easier automation of context provisioning outside the core
-- support for graph- or workspace-scoped configuration inside a shared hosted service, not only one-config-per-deployment assumptions
+- support for per-process graph or workspace configuration within a shared hosted environment, not only one-config-per-deployment assumptions
 
 Likely core changes:
 - stronger config layering rules
@@ -129,8 +130,8 @@ Target outcomes:
 - pluggable identity context for requests
 - clean boundaries between application roles and infrastructure access
 - ability to layer in stronger operator or admin models later
-- graph-scoped authorization decisions so shared service instances can restrict which graphs, nodes, and edges a user can access
-- workspace-aware graph selection that can work with personal workspaces and team workspaces managed by an external service layer
+- graph-scoped authorization decisions so a core instance can restrict which graphs (its own and federated peers), nodes, and edges a user can access
+- workspace-aware request scope: workspace and graph context declared by an external service layer that manages personal and team workspaces, feeding authorization and audit (choosing which graph serves a request stays outside the core, as above)
 
 Likely core changes:
 - request identity abstraction

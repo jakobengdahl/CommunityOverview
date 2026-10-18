@@ -42,9 +42,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
-from backend.runtime.authorization import GRAPH_ACTION_MUTATE
+from backend.runtime.authorization import GRAPH_ACTION_MUTATE, GRAPH_ACTION_READ
 
-from . import access, graph_archive
+from . import access, graph_archive, graph_merge_plan
 from .graph_import import validate_import_document
 from .serializers import serialize_edges, serialize_nodes
 
@@ -53,9 +53,13 @@ if TYPE_CHECKING:
     from backend.core import GraphStorage
     from backend.runtime.authorization import GraphAuthorizationHook
 
+    from .attachments import AttachmentSettings
+
 logger = logging.getLogger(__name__)
 
 BACKUP_SUBDIR = "import-backups"
+
+_PREVIEW_SLOT = threading.BoundedSemaphore(1)
 
 
 def _iso(dt: Optional[datetime]) -> Optional[str]:
@@ -547,6 +551,101 @@ def import_graph_archive(
         or "the archive's embeddings could not be used",
         archive_compatible=False,
     )
+
+
+def preview_merge_import(
+    storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
+    body: Any,
+    *,
+    attachment_settings: Optional["AttachmentSettings"] = None,
+    max_nodes: Optional[int] = None,
+    max_edges: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Plan a MERGE import without writing anything (ADR 0013, slice 1).
+
+    Authorized as the merge commit will be (``GRAPH_ACTION_MUTATE``) and,
+    since the plan reveals which ids exist and the live value of every field
+    an overwrite would change, as a whole-graph read (``GRAPH_ACTION_READ``);
+    refused when either is denied or narrowed (ADR 0013 §10). No backup, no
+    job, no graph write.
+    """
+    decision = access.evaluate_graph_access(
+        hook, action=GRAPH_ACTION_MUTATE, target="import_graph_merge"
+    )
+    if not decision.allowed:
+        return access.build_access_denied_result(
+            action=GRAPH_ACTION_MUTATE, target="import_graph_merge", decision=decision
+        )
+    # The plan shows live field values, so the caller must also be allowed
+    # to read the whole graph, whatever a hook grants for mutation.
+    read_decision = access.evaluate_graph_access(
+        hook, action=GRAPH_ACTION_READ, target="import_graph_merge"
+    )
+    if not read_decision.allowed:
+        return access.build_access_denied_result(
+            action=GRAPH_ACTION_READ,
+            target="import_graph_merge",
+            decision=read_decision,
+        )
+    if decision.graph_access.enabled or read_decision.graph_access.enabled:
+        return {
+            "success": False,
+            "error_code": "import_requires_full_graph_access",
+            "message": (
+                "A merge preview reads the whole live graph and is refused while "
+                "the caller's access is narrowed to a subset of it."
+            ),
+        }
+
+    # Planning holds the document and a plan in memory for up to tens of
+    # seconds at the caps; one at a time per process keeps a caller from
+    # stacking them. A refused preview is retryable and changed nothing.
+    if not _PREVIEW_SLOT.acquire(blocking=False):
+        return {
+            "success": False,
+            "error_code": "import_preview_busy",
+            "message": "Another merge preview is running; retry shortly.",
+        }
+    try:
+        return _plan_preview(storage, body, attachment_settings, max_nodes, max_edges)
+    finally:
+        _PREVIEW_SLOT.release()
+
+
+def _plan_preview(
+    storage: "GraphStorage",
+    body: Any,
+    attachment_settings: Optional["AttachmentSettings"],
+    max_nodes: Optional[int],
+    max_edges: Optional[int],
+) -> Dict[str, Any]:
+    try:
+        document, parameters = graph_merge_plan.parse_merge_request(body)
+        plan = graph_merge_plan.compute_merge_plan(
+            document,
+            parameters,
+            graph_merge_plan.StorageGraphView(storage, attachment_settings),
+            max_nodes=max_nodes,
+            max_edges=max_edges,
+        )
+    except graph_merge_plan.MergeRequestError as exc:
+        result: Dict[str, Any] = {
+            "success": False,
+            "error_code": exc.error_code,
+            "message": exc.message,
+        }
+        if exc.errors:
+            result["errors"] = [issue.to_dict() for issue in exc.errors]
+        return result
+    except graph_merge_plan.MergePlanUnstable as exc:
+        return {
+            "success": False,
+            "error_code": "import_plan_unstable",
+            "message": f"{exc}; retry the preview.",
+        }
+
+    return {"success": True, "plan": plan.report, "plan_digest": plan.digest}
 
 
 _STATUS_LABELS = None  # populated lazily to avoid importing execution eagerly
