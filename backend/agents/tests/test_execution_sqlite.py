@@ -381,12 +381,54 @@ def test_wal_switch_retries_when_the_file_is_locked(tmp_path, monkeypatch):
         store.close()
 
 
+class _VirtualClock:
+    """Stand-in for ``time`` in the store: sleeping advances a virtual clock.
+
+    Every ``monotonic`` read also ticks the clock, so a loop that never sleeps
+    still reaches its deadline instead of hanging the test.
+    """
+
+    TICK = 0.0001
+
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = []
+
+    def monotonic(self):
+        self.now += self.TICK
+        assert self.now < 60, "retry loop did not terminate"
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
 def test_wal_switch_gives_up_after_the_busy_timeout(tmp_path, monkeypatch):
     """A switch that stays locked surfaces once the busy timeout has passed."""
     _patch_connect(monkeypatch, failures=10**9)
-    monkeypatch.setattr(sqlite_store, "_BUSY_TIMEOUT_MS", 50)
+    clock = _VirtualClock()
+    monkeypatch.setattr(sqlite_store, "time", clock)
+    # Neither the old 50 ms value nor the 5 s default: only the constant can
+    # explain a give-up time near 0.3 s.
+    monkeypatch.setattr(sqlite_store, "_BUSY_TIMEOUT_MS", 300)
     with pytest.raises(sqlite3.OperationalError, match="locked"):
         SqliteExecutionStore(tmp_path / "execution.db")
+    slack = max(clock.sleeps) + 10 * _VirtualClock.TICK
+    assert 0.3 <= clock.now <= 0.3 + slack
+
+
+def test_wal_switch_backs_off_between_retries(tmp_path, monkeypatch):
+    """Retries sleep briefly: no busy spin, no sleep that eats the budget."""
+    _patch_connect(monkeypatch, failures=10**9)
+    clock = _VirtualClock()
+    monkeypatch.setattr(sqlite_store, "time", clock)
+    monkeypatch.setattr(sqlite_store, "_BUSY_TIMEOUT_MS", 300)
+    with pytest.raises(sqlite3.OperationalError, match="locked"):
+        SqliteExecutionStore(tmp_path / "execution.db")
+    # A busy spin would sleep never; a long sleep would leave only a few tries.
+    assert len(clock.sleeps) >= 10
+    assert all(0 < s <= 0.05 for s in clock.sleeps)
 
 
 def test_wal_switch_does_not_retry_other_errors(tmp_path, monkeypatch):
