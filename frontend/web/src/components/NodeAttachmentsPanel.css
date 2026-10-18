@@ -1,0 +1,99 @@
+.node-attachments-list {
+  list-style: none;
+  margin: 0 0 8px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.node-attachments-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  background: #333;
+  border: 1px solid #444;
+  border-radius: 6px;
+}
+
+.node-attachments-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.node-attachments-name {
+  color: #646cff;
+  font-size: 0.85rem;
+  text-decoration: none;
+  word-break: break-all;
+}
+
+.node-attachments-name:hover {
+  text-decoration: underline;
+}
+
+.node-attachments-muted {
+  margin: 0;
+  font-size: 0.75rem;
+  color: #888;
+}
+
+.node-attachments-error {
+  margin: 6px 0 0 0;
+  font-size: 0.8rem;
+  color: #f87171;
+}
+
+.node-attachments-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  font-size: 0.78rem;
+  color: #ddd;
+}
+
+.node-attachments-upload {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.node-attachments-file-input {
+  display: none;
+}
+
+.node-attachments button {
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 0.78rem;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.node-attachments button.secondary {
+  background: transparent;
+  color: #bbb;
+  border: 1px solid #555;
+}
+
+.node-attachments button.secondary:hover:not(:disabled) {
+  background: #3a3a3a;
+  color: #eee;
+}
+
+.node-attachments button.danger {
+  background: #dc2626;
+  color: white;
+  border: none;
+}
+
+.node-attachments button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
