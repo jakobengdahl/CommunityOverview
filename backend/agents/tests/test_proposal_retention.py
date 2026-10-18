@@ -2,6 +2,7 @@
 
 import json
 import logging
+import sqlite3
 from datetime import timedelta
 from unittest.mock import MagicMock
 
@@ -266,6 +267,7 @@ class TestAuditAndWiring:
         assert len(audit) == 1
         record = json.loads(audit[0].split(" ", 3)[3])
         assert (record["proposals_redacted"], record["proposals_purged"]) == (1, 1)
+        assert record["proposals_failed"] is False
         for leaked in (SECRET, p.id, "corr", "n1", "reviewer"):
             assert leaked not in audit[0]
 
@@ -312,6 +314,29 @@ class TestCli:
         finally:
             store.close()
 
+    def test_cli_closes_the_proposal_store_when_the_proposal_sweep_reports_failure(
+        self, tmp_path, monkeypatch
+    ):
+        db = tmp_path / "governance.db"
+        SqliteProposalStore(db).close()
+        closed = []
+        real_close = SqliteProposalStore.close
+        monkeypatch.setattr(
+            SqliteProposalStore,
+            "close",
+            lambda self: (closed.append(self), real_close(self)),
+        )
+        monkeypatch.setattr(
+            SqliteProposalStore,
+            "list_decided_older_than",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db locked")),
+        )
+        monkeypatch.delenv("AGENTS_RUN_HISTORY_DB", raising=False)
+        monkeypatch.setenv("AGENTS_GOVERNANCE_DB", str(db))
+        monkeypatch.setenv("AGENTS_RUN_HISTORY_RETENTION_DAYS", "30")
+        assert main([]) == 1
+        assert len(closed) == 1
+
     def test_missing_governance_db_exits_nonzero(self, tmp_path, monkeypatch):
         monkeypatch.delenv("AGENTS_RUN_HISTORY_DB", raising=False)
         monkeypatch.setenv("AGENTS_GOVERNANCE_DB", str(tmp_path / "absent.db"))
@@ -340,6 +365,55 @@ class TestCli:
         monkeypatch.delenv("AGENTS_GOVERNANCE_DB", raising=False)
         monkeypatch.setenv("AGENTS_RUN_HISTORY_RETENTION_DAYS", "30")
         assert main([]) == 2
+
+
+class TestSqliteWriteDurability:
+    """The SQLite store must not leave redacted or purged content on disk."""
+
+    @staticmethod
+    def _wal_bytes(db):
+        wal = db.with_name(db.name + "-wal")
+        return wal.read_bytes() if wal.exists() else b""
+
+    def test_redact_leaves_no_pre_redaction_content_in_the_wal(self, tmp_path):
+        db = tmp_path / "governance.db"
+        store = SqliteProposalStore(db)
+        try:
+            p = _proposal(store, decided_days_ago=40)
+            assert SECRET.encode() in self._wal_bytes(db)
+            assert store.redact([p.id]) == 1
+            assert SECRET.encode() not in self._wal_bytes(db)
+            assert SECRET.encode() not in db.read_bytes()
+        finally:
+            store.close()
+
+    def test_purge_leaves_no_pre_purge_content_in_the_wal(self, tmp_path):
+        db = tmp_path / "governance.db"
+        store = SqliteProposalStore(db)
+        try:
+            p = _proposal(store, decided_days_ago=40)
+            assert SECRET.encode() in self._wal_bytes(db)
+            assert store.purge([p.id]) == 1
+            assert SECRET.encode() not in self._wal_bytes(db)
+        finally:
+            store.close()
+
+    def test_failed_batch_rolls_back_and_does_not_leak_into_a_later_commit(
+        self, tmp_path
+    ):
+        store = SqliteProposalStore(tmp_path / "governance.db")
+        try:
+            kept = _proposal(store, decided_days_ago=40)
+            # The second parameter set has no bindings, so executemany raises
+            # after the first row was already deleted inside the transaction.
+            with pytest.raises(sqlite3.ProgrammingError):
+                store._write_many(
+                    "DELETE FROM proposals WHERE id = ?", [(kept.id,), ()]
+                )
+            _proposal(store, decided_days_ago=40)  # commits on the same connection
+            _assert_unredacted(store.get(kept.id))
+        finally:
+            store.close()
 
 
 class TestAlongsideRunHistory:
