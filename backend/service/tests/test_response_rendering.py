@@ -10,7 +10,6 @@ import enum
 import inspect
 import json
 import sys
-import threading
 from datetime import datetime, timezone
 
 import pytest
@@ -29,6 +28,7 @@ from backend.service.json_response import (
     _iterencode,
     install_error_handlers,
 )
+from backend.service import serializers
 from backend.service.serializers import (
     _to_json_native,
     json_key_text,
@@ -477,27 +477,28 @@ class TestSerializeToJson:
 
 
 class TestSharedAndCircularReferences:
-    @staticmethod
-    def _finishes(call) -> bool:
-        # A converter that lost its memo loops forever on a cycle; fail
-        # instead of hanging the suite.
-        done = threading.Event()
+    @pytest.fixture(autouse=True)
+    def bounded_conversion(self, monkeypatch):
+        # Every container the converter visits converts its keys, so a lost
+        # memo (which would walk a cycle forever) trips this bound and fails
+        # the test in place instead of hanging or growing without limit.
+        calls = 0
 
-        def run() -> None:
-            call()
-            done.set()
+        def bounded(key):
+            nonlocal calls
+            calls += 1
+            if calls > 1000:
+                raise AssertionError("conversion did not terminate on a cycle")
+            return json_key_text(key)
 
-        threading.Thread(target=run, daemon=True).start()
-        return done.wait(5)
+        monkeypatch.setattr(serializers, "json_key_text", bounded)
 
     def test_a_dict_that_contains_itself_converts_to_a_copy_that_does(self):
         data: dict = {"n": 1}
         data["self"] = data
-        result: list = []
 
-        assert self._finishes(lambda: result.append(_to_json_native(data)))
+        converted = _to_json_native(data)
 
-        (converted,) = result
         assert converted is not data
         assert converted["self"] is converted and converted["n"] == 1
 
@@ -505,11 +506,9 @@ class TestSharedAndCircularReferences:
         items: list = []
         data = {"items": items}
         items.append(data)
-        result: list = []
 
-        assert self._finishes(lambda: result.append(_to_json_native(data)))
+        converted = _to_json_native(data)
 
-        (converted,) = result
         assert converted["items"][0] is converted
 
     def test_shared_references_stay_shared(self):
