@@ -184,6 +184,12 @@ def event_to_history_record(event: "Event") -> Dict[str, Any]:
     }
 
 
+# Windows refuses to rename over, or delete, a file another process holds open
+# (no FILE_SHARE_DELETE), so a handle kept between appends would stall another
+# process's compaction there. The directory is still created once per open.
+_RELEASE_HANDLE_AFTER_APPEND = sys.platform == "win32"
+
+
 class GraphHistoryStore:
     """Append-only NDJSON history sidecar for graph mutations.
 
@@ -319,10 +325,11 @@ class GraphHistoryStore:
                 finally:
                     _unlock_file(f)
             except BaseException:
-                # A handle that failed mid-write may hold a buffered fragment;
-                # reopening keeps it from being flushed in front of the next record.
+                # Do not reuse a handle that failed mid-write.
                 self._close_append_handle()
                 raise
+            if _RELEASE_HANDLE_AFTER_APPEND:
+                self._close_append_handle()
 
             if self._retention_enabled:
                 self._appends_since_compaction += 1

@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from backend.core import history_store
 from backend.core.history_store import GraphHistoryStore
 
 
@@ -82,6 +83,8 @@ def test_appends_after_own_compaction_land_in_the_live_file(path):
     for i in range(10):
         store.append_record(_rec(i))
     store.compact()
+    # Released before the rename (a held handle blocks it on Windows).
+    assert store._append_handle is None
     assert _ids(path) == ["evt-7", "evt-8", "evt-9"]
     store.append_record(_rec(10))
     assert _ids(path) == ["evt-7", "evt-8", "evt-9", "evt-10"]
@@ -142,7 +145,7 @@ def test_close_is_idempotent_and_append_reopens(path):
     store.close()
 
 
-def test_failed_write_drops_handle_and_next_append_succeeds(path):
+def test_failed_write_drops_the_handle_and_next_append_succeeds(path):
     store = GraphHistoryStore(path)
     store.append_record(_rec(0))
     store._append_handle = _FlakyHandle(store._append_handle)
@@ -188,3 +191,90 @@ def test_concurrent_appenders_lose_and_duplicate_nothing(path):
         ]
         assert mine == sorted(mine)
     store.close()
+
+
+def test_handle_is_released_after_each_append_where_rename_over_open_file_fails(
+    path, monkeypatch
+):
+    monkeypatch.setattr(history_store, "_RELEASE_HANDLE_AFTER_APPEND", True)
+    store = GraphHistoryStore(path)
+    for i in range(3):
+        store.append_record(_rec(i))
+        assert store._append_handle is None
+    assert _ids(path) == ["evt-0", "evt-1", "evt-2"]
+
+
+def test_close_actually_closes_the_file_and_append_reopens(path):
+    store = GraphHistoryStore(path)
+    store.append_record(_rec(0))
+    handle = store._append_handle
+    store.close()
+    assert handle.closed
+    assert store._append_handle is None
+    store.append_record(_rec(1))
+    assert store._append_handle is not handle
+
+
+def test_handle_is_closed_by_compaction_and_by_path_change(tmp_path):
+    a = tmp_path / "a.ndjson"
+    store = GraphHistoryStore(a, max_events=2, compaction_interval=1000)
+    store.append_record(_rec(0))
+    first = store._append_handle
+    store.compact()
+    assert first.closed
+    store.append_record(_rec(1))
+    second = store._append_handle
+    store.history_path = tmp_path / "b.ndjson"
+    store.append_record(_rec(2))
+    assert second.closed
+    store.close()
+
+
+@pytest.mark.parametrize("exc", [OSError("disk full"), KeyboardInterrupt()])
+def test_failed_write_closes_the_dropped_handle(path, exc):
+    store = GraphHistoryStore(path)
+    store.append_record(_rec(0))
+    inner = store._append_handle
+
+    class Failing(_FlakyHandle):
+        def write(self, data):
+            raise exc
+
+    store._append_handle = Failing(inner)
+    with pytest.raises(type(exc)):
+        store.append_record(_rec(1))
+    assert store._append_handle is None
+    assert inner.closed
+
+
+def test_externally_closed_handle_is_reopened(path):
+    store = GraphHistoryStore(path)
+    store.append_record(_rec(0))
+    store._append_handle.close()
+    store.append_record(_rec(1))
+    assert _ids(path) == ["evt-0", "evt-1"]
+    store.close()
+
+
+def test_write_happens_between_lock_and_unlock_even_on_failure(path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        history_store, "_lock_file", lambda f, exclusive=True: calls.append("lock")
+    )
+    monkeypatch.setattr(history_store, "_unlock_file", lambda f: calls.append("unlock"))
+    store = GraphHistoryStore(path)
+    store.append_record(_rec(0))
+    assert calls == ["lock", "unlock"]
+    assert _ids(path) == ["evt-0"]
+
+    calls.clear()
+
+    class Failing(_FlakyHandle):
+        def write(self, data):
+            calls.append("write")
+            raise OSError("x")
+
+    store._append_handle = Failing(store._append_handle)
+    with pytest.raises(OSError):
+        store.append_record(_rec(1))
+    assert calls == ["lock", "write", "unlock"]
