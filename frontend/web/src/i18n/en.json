@@ -761,5 +761,30 @@
     "annotate_panel_title": "Annotate",
     "edit_panel_title": "Edit annotation",
     "chat_panel_title": "Assistant"
+  },
+  "attachments": {
+    "title": "Attachments",
+    "loading": "Loading attachments…",
+    "empty": "No files attached yet",
+    "load_error": "Could not load the attachments",
+    "upload": "Attach file",
+    "uploading": "Uploading…",
+    "limits_hint": "Up to {max} per file, {files} files or {total} per node",
+    "download": "Download",
+    "delete": "Delete",
+    "delete_named": "Delete {name}",
+    "cancel": "Cancel",
+    "confirm_delete": "Delete {name}?",
+    "errors": {
+      "attachment_too_large": "The file is larger than the {max} limit per file.",
+      "node_attachment_limit": "This node has reached its attachment limit ({files} files or {total} in total).",
+      "unsupported_attachment_type": "This file type cannot be attached.",
+      "attachments_not_allowed": "This node type does not accept attachments.",
+      "node_archived": "Files cannot be attached to an archived node.",
+      "federated_node": "Files cannot be attached to a node from another graph.",
+      "attachments_unavailable": "Attachments are not available on this server.",
+      "generic": "The request failed. Please try again.",
+      "generic_with_detail": "The request failed: {detail}"
+    }
   }
 }
