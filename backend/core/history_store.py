@@ -184,6 +184,12 @@ def event_to_history_record(event: "Event") -> Dict[str, Any]:
     }
 
 
+# Windows refuses to rename over, or delete, a file another process holds open
+# (no FILE_SHARE_DELETE), so a handle kept between appends would stall another
+# process's compaction there. The directory is still created once per open.
+_RELEASE_HANDLE_AFTER_APPEND = sys.platform == "win32"
+
+
 class GraphHistoryStore:
     """Append-only NDJSON history sidecar for graph mutations.
 
@@ -226,6 +232,54 @@ class GraphHistoryStore:
         self._records_after_last_pass: Optional[int] = None
         self._appends_since_compaction = 0
 
+        # Append handle kept open between records: a mutation that touches many
+        # entities emits one record each, under the caller's storage lock, and
+        # a mkdir plus open/close per record dominated that hold. The path the
+        # handle was opened for is remembered so a changed history_path reopens.
+        self._append_handle: Optional[Any] = None
+        self._append_handle_path: Optional[Path] = None
+
+    def close(self) -> None:
+        """Release the append handle. Safe to call repeatedly; appends reopen."""
+        with self._lock:
+            self._close_append_handle()
+
+    def __del__(self) -> None:
+        with contextlib.suppress(Exception):
+            self._close_append_handle()
+
+    def _close_append_handle(self) -> None:
+        handle, self._append_handle = self._append_handle, None
+        self._append_handle_path = None
+        if handle is not None:
+            with contextlib.suppress(OSError):
+                handle.close()
+
+    def _handle_is_current(self) -> bool:
+        """True while the open handle is still the file at ``history_path``.
+
+        Compaction (here or in another process) replaces the file by rename and
+        an operator may delete it; either leaves the handle writing to an
+        unlinked inode, so identity is checked before every append. One stat
+        is far cheaper than the open it saves.
+        """
+        if self._append_handle is None or self._append_handle_path != self.history_path:
+            return False
+        try:
+            on_disk = os.stat(self.history_path)
+            held = os.fstat(self._append_handle.fileno())
+        except (OSError, ValueError):
+            return False
+        return (on_disk.st_dev, on_disk.st_ino) == (held.st_dev, held.st_ino)
+
+    def _open_append_handle(self) -> Any:
+        if not self._handle_is_current():
+            self._close_append_handle()
+            self.history_path.parent.mkdir(parents=True, exist_ok=True)
+            self._append_handle = open(self.history_path, "a", encoding="utf-8")
+            self._append_handle_path = self.history_path
+        return self._append_handle
+
     @property
     def _compaction_interval(self) -> int:
         """Appends between compaction passes.
@@ -262,14 +316,20 @@ class GraphHistoryStore:
         """Append a single pre-built record as one NDJSON line."""
         line = json.dumps(record, ensure_ascii=False)
         with self._lock:
-            self.history_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.history_path, "a", encoding="utf-8") as f:
+            f = self._open_append_handle()
+            try:
                 _lock_file(f, exclusive=True)
                 try:
                     f.write(line + "\n")
                     f.flush()
                 finally:
                     _unlock_file(f)
+            except BaseException:
+                # Do not reuse a handle that failed mid-write.
+                self._close_append_handle()
+                raise
+            if _RELEASE_HANDLE_AFTER_APPEND:
+                self._close_append_handle()
 
             if self._retention_enabled:
                 self._appends_since_compaction += 1
@@ -358,6 +418,10 @@ class GraphHistoryStore:
         self._appends_since_compaction = 0
         if not self.history_path.exists():
             return
+
+        # The rewrite renames over the sidecar; a held handle would keep
+        # pointing at the old file (and blocks the rename on Windows).
+        self._close_append_handle()
 
         cutoff = None
         if self.max_age_days is not None:
