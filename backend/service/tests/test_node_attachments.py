@@ -1253,3 +1253,275 @@ class TestSchemaClientSurface:
 
     def test_payload_matches_the_loader_projection(self, payload):
         assert payload == config_loader.get_schema()
+
+
+# ---------------------------------------------------------------------------
+# Residue of the review loop: guards the happy-path tests do not reach
+# ---------------------------------------------------------------------------
+
+
+def _spy_store(store):
+    """A store whose every public call is recorded; behaviour is unchanged."""
+    from unittest.mock import MagicMock
+
+    return MagicMock(wraps=store, spec=FileAttachmentStore)
+
+
+class TestIdGuardsPrecedeTheStore:
+    BAD_ID = "A" * 32
+
+    def test_malformed_id_never_reaches_the_store_on_any_route(self, storage, store):
+        spy = _spy_store(store)
+        client = _client(GraphService(storage, attachment_settings=_settings(spy)))
+        url = f"/api/nodes/doc/attachments/{self.BAD_ID}"
+        assert client.get(url).status_code == 404
+        assert client.delete(url).status_code == 404
+        # The ops-level record lookup has no route of its own.
+        result = GraphService(
+            storage, attachment_settings=_settings(spy)
+        ).get_node_attachment_record("doc", self.BAD_ID)
+        assert result["error_code"] == "not_found"
+        federated = GraphService(
+            storage, attachment_settings=_settings(spy)
+        ).get_node_attachment_record(FEDERATED_ID, "0" * 32)
+        assert federated["error_code"] == "not_found"
+        assert spy.method_calls == []
+
+    def test_federated_node_never_reaches_the_store_on_read_and_delete(
+        self, storage, store
+    ):
+        spy = _spy_store(store)
+        client = _client(GraphService(storage, attachment_settings=_settings(spy)))
+        valid_id = "0" * 32
+        url = f"/api/nodes/{FEDERATED_ID}/attachments/{valid_id}"
+        assert client.get(url).status_code == 404
+        assert client.delete(url).status_code == 404
+        assert spy.method_calls == []
+
+
+class TestAllowsAttachmentsIsExactlyTrue:
+    # The schema model coerces "yes" or 1 to True before this check sees them,
+    # so the check is exercised on the schema dict it reads.
+    @pytest.mark.parametrize("flag", ["false", "yes", 1, {"on": True}, None])
+    def test_a_truthy_non_boolean_flag_does_not_enable_uploads(self, monkeypatch, flag):
+        from backend.service.attachments import type_allows_attachments
+
+        monkeypatch.setattr(
+            config_loader,
+            "get_schema",
+            lambda: {"node_types": {"Document": {"allows_attachments": flag}}},
+        )
+        assert type_allows_attachments(Node(id="d", type="Document", name="D")) is False
+
+    def test_the_boolean_true_flag_enables_uploads(self, monkeypatch):
+        from backend.service.attachments import type_allows_attachments
+
+        monkeypatch.setattr(
+            config_loader,
+            "get_schema",
+            lambda: {"node_types": {"Document": {"allows_attachments": True}}},
+        )
+        assert type_allows_attachments(Node(id="d", type="Document", name="D")) is True
+
+
+class TestDeclaredContentTypeSanitising:
+    def test_is_cut_at_255_characters_and_shorter_values_are_kept(self):
+        from backend.service.attachments import _sanitize_declared_content_type
+
+        assert _sanitize_declared_content_type("t" * 255) == "t" * 255
+        assert _sanitize_declared_content_type("t" * 300) == "t" * 255
+
+    def test_non_printable_characters_are_dropped_and_the_value_trimmed(self):
+        from backend.service.attachments import _sanitize_declared_content_type
+
+        assert _sanitize_declared_content_type(" text/\x00pl\nain\x7f​ ") == (
+            "text/plain"
+        )
+        assert _sanitize_declared_content_type(None) == ""
+        # Filtered first, then cut: control characters do not eat the budget.
+        assert _sanitize_declared_content_type("\x00" * 10 + "t" * 255) == "t" * 255
+
+    def test_the_stored_declared_type_is_the_sanitised_one(self, client, store):
+        headers = {"content-type": "text/plain; x=" + "a" * 400}
+        assert _upload(client, "doc", headers=headers).status_code == 201
+        assert len(store.list(NS, "doc")[0].declared_content_type) == 255
+
+
+class TestFilenameByteBoundary:
+    def test_255_bytes_are_kept_and_256_are_cut_to_255(self):
+        assert sanitize_filename("a" * 255) == "a" * 255
+        assert sanitize_filename("a" * 256) == "a" * 255
+
+
+class TestQueryAndDownloadHandling:
+    def test_filename_query_is_capped_at_4096_characters(self, client, store):
+        at_cap = client.post(
+            "/api/nodes/doc/attachments",
+            params={"filename": "n" * 4096},
+            content=b"x",
+        )
+        over_cap = client.post(
+            "/api/nodes/doc/attachments",
+            params={"filename": "n" * 4097},
+            content=b"x",
+        )
+        assert at_cap.status_code == 201
+        assert over_cap.status_code == 422
+        assert len(store.list(NS, "doc")) == 1
+
+    def test_download_closes_the_stored_file_handle(self, storage, store):
+        record = _seed(store, "doc", b"payload")
+        opened = []
+        real_open_read = store.open_read
+
+        def tracking(*args):
+            handle = real_open_read(*args)
+            opened.append(handle)
+            return handle
+
+        store.open_read = tracking
+        client = _client(GraphService(storage, attachment_settings=_settings(store)))
+        response = client.get(f"/api/nodes/doc/attachments/{record.id}")
+        assert response.content == b"payload"
+        assert len(opened) == 1 and opened[0].closed
+
+    def test_download_closes_the_handle_when_the_client_disconnects(
+        self, storage, store
+    ):
+        record = _seed(store, "doc", b"x" * 90)
+        opened = []
+        real_open_read = store.open_read
+
+        def tracking(*args):
+            handle = real_open_read(*args)
+            opened.append(handle)
+            return handle
+
+        store.open_read = tracking
+        app = FastAPI()
+        app.include_router(
+            create_rest_router(
+                GraphService(storage, attachment_settings=_settings(store))
+            ),
+            prefix="/api",
+        )
+
+        async def run():
+            sent_start = asyncio.Event()
+
+            async def receive():
+                await sent_start.wait()
+                return {"type": "http.disconnect"}
+
+            async def send(message):
+                if message["type"] == "http.response.start":
+                    sent_start.set()
+                    # Stall the body so the disconnect arrives mid-stream.
+                    await asyncio.sleep(0.2)
+
+            scope = {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "GET",
+                "scheme": "http",
+                "path": f"/api/nodes/doc/attachments/{record.id}",
+                "raw_path": b"",
+                "query_string": b"",
+                "root_path": "",
+                "headers": [],
+                "client": ("127.0.0.1", 1),
+                "server": ("test", 80),
+            }
+            await app(scope, receive, send)
+
+        asyncio.run(run())
+        assert len(opened) == 1 and opened[0].closed
+
+
+class TestStoreCallsRunOffTheEventLoop:
+    """Each store call must run on a worker thread, never on the loop's thread.
+
+    The loop runs on this test's own thread (asyncio.run), so a call made on
+    it would block every other request while the store reads files or waits
+    for an OS lock.
+    """
+
+    def _tracking_store(self, store, threads):
+        import threading
+
+        for name in ("list", "get_record", "open_read", "delete"):
+            real = getattr(store, name)
+
+            def wrapper(*args, _real=real, _name=name):
+                threads[_name] = threading.get_ident()
+                return _real(*args)
+
+            setattr(store, name, wrapper)
+        return store
+
+    def _run(self, storage, store, scenario):
+        import httpx
+
+        app = FastAPI()
+        app.include_router(
+            create_rest_router(
+                GraphService(storage, attachment_settings=_settings(store))
+            ),
+            prefix="/api",
+        )
+
+        async def run():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as http:
+                return await scenario(http)
+
+        return asyncio.run(run())
+
+    def test_list_download_and_delete_do_not_run_store_calls_on_the_loop(
+        self, storage, store
+    ):
+        import threading
+
+        record = _seed(store, "doc", b"payload")
+        threads = {}
+        self._tracking_store(store, threads)
+        loop_thread = threading.get_ident()
+
+        async def scenario(http):
+            assert (await http.get("/api/nodes/doc/attachments")).status_code == 200
+            url = f"/api/nodes/doc/attachments/{record.id}"
+            assert (await http.get(url)).status_code == 200
+            assert (await http.delete(url)).status_code == 200
+
+        self._run(storage, store, scenario)
+        assert set(threads) == {"list", "get_record", "open_read", "delete"}
+        assert all(ident != loop_thread for ident in threads.values()), threads
+
+    def test_type_sniffing_runs_off_the_loop(self, storage, store, monkeypatch):
+        import threading
+
+        from backend.service import attachments as attachment_ops
+
+        seen = []
+        real = attachment_ops.detect_attachment_type
+
+        def recording(source, filename):
+            seen.append(threading.get_ident())
+            return real(source, filename)
+
+        monkeypatch.setattr(attachment_ops, "detect_attachment_type", recording)
+        loop_thread = threading.get_ident()
+
+        async def scenario(http):
+            response = await http.post(
+                "/api/nodes/doc/attachments",
+                params={"filename": "a.txt"},
+                content=b"hello",
+            )
+            assert response.status_code == 201
+
+        self._run(storage, store, scenario)
+        assert len(seen) == 1 and seen[0] != loop_thread

@@ -240,3 +240,52 @@ def test_odf_mimetype_must_match_exactly(suffix):
     data = _zip({"mimetype": types.ODT + suffix, "content.xml": "<x/>"})
     with pytest.raises(UnsupportedAttachmentType):
         _detect(data, "file.odt")
+
+
+def _docx_with_directory_size(declared_size: int) -> bytes:
+    """A valid DOCX whose end record claims a different central directory size."""
+    data = bytearray(
+        _zip({"[Content_Types].xml": "<Types/>", "word/document.xml": "<x/>"})
+    )
+    position = data.rfind(b"PK\x05\x06")
+    data[position + 12 : position + 16] = declared_size.to_bytes(4, "little")
+    return bytes(data)
+
+
+def test_directory_size_is_bounded_inclusively_at_the_cap():
+    cap = types.MAX_ZIP_CENTRAL_DIRECTORY_BYTES
+    assert cap == 1024 * 1024
+    at_cap = _docx_with_directory_size(cap)
+    over_cap = _docx_with_directory_size(cap + 1)
+    assert types._central_directory_is_bounded(io.BytesIO(at_cap)) is True
+    assert types._central_directory_is_bounded(io.BytesIO(over_cap)) is False
+
+
+def test_archive_declaring_an_oversized_directory_never_reaches_zipfile(monkeypatch):
+    over_cap = _docx_with_directory_size(1024 * 1024 + 1)
+
+    def fail(*args, **kwargs):
+        raise AssertionError("zipfile must not parse an oversized directory")
+
+    monkeypatch.setattr(types.zipfile, "ZipFile", fail)
+    with pytest.raises(UnsupportedAttachmentType, match="directory too large"):
+        _detect(over_cap, "doc.docx")
+
+
+def test_end_record_decoy_inside_member_data_does_not_decide_the_bound():
+    # A stored member holds bytes shaped like an end record that declares a huge
+    # directory. The real end record, the last one, is the one that counts.
+    decoy = bytearray(b"PK\x05\x06" + b"\x00" * 18)
+    decoy[12:16] = (0x7FFFFFFF).to_bytes(4, "little")
+    data = _zip({"[Content_Types].xml": "<Types/>", "word/document.xml": bytes(decoy)})
+    assert data.find(b"PK\x05\x06") < data.rfind(b"PK\x05\x06")
+    assert _detect(data, "doc.docx") == types.DOCX
+
+
+def test_document_with_the_longest_zip_comment_is_still_detected():
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr("word/document.xml", "<x/>")
+        archive.comment = b"c" * 0xFFFF
+    assert _detect(buffer.getvalue(), "doc.docx") == types.DOCX

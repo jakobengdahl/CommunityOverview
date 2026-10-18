@@ -8,6 +8,7 @@ import time
 
 import pytest
 
+from backend.core import attachment_store
 from backend.core.attachment_store import (
     AttachmentIndexCorrupt,
     AttachmentLimitExceeded,
@@ -420,3 +421,59 @@ def test_malformed_ids_never_reach_the_index(store, bad, monkeypatch):
     assert store.get_record(NS, "n1", bad) is None
     assert store.delete(NS, "n1", bad) is False
     assert calls == []
+
+
+def test_blob_path_refuses_an_id_that_is_not_a_minted_one(store):
+    with pytest.raises(AttachmentNotFound):
+        store._blob_path(NS, "n1", "../x")
+    with pytest.raises(AttachmentNotFound):
+        store._blob_path(NS, "n1", "A" * 32)
+
+
+def test_os_lock_alone_serializes_two_store_instances(tmp_path, monkeypatch):
+    # Two instances share no thread locks, so only the OS file lock (what
+    # separates two processes on one root) can make the second commit wait.
+    import threading
+
+    root = tmp_path / "attachments"
+    holder, contender = FileAttachmentStore(root), FileAttachmentStore(root)
+    entered, release = threading.Event(), threading.Event()
+    blocking = threading.Event()
+    calls = []
+    real_lock = attachment_store._lock_file
+
+    def announcing_lock(handle, exclusive):
+        # The first call is the holder's; the second is the contender's commit.
+        calls.append(handle)
+        if len(calls) == 2:
+            blocking.set()
+        return real_lock(handle, exclusive=exclusive)
+
+    monkeypatch.setattr(attachment_store, "_lock_file", announcing_lock)
+
+    def hold():
+        with holder._node_lock(NS, "n1"):
+            entered.set()
+            release.wait(10)
+
+    thread = threading.Thread(target=hold)
+    thread.start()
+    assert entered.wait(10)
+    committed = threading.Event()
+
+    def contend():
+        _upload(contender, "n1")
+        committed.set()
+
+    contending = threading.Thread(target=contend)
+    contending.start()
+    try:
+        # Only once the contender is at the lock does waiting prove it blocks.
+        assert blocking.wait(10)
+        assert not committed.wait(0.3)
+    finally:
+        release.set()
+        thread.join(10)
+    contending.join(10)
+    assert committed.is_set()
+    assert len(holder.list(NS, "n1")) == 1
