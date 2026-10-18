@@ -318,6 +318,9 @@ def test_a_failed_reservation_undoes_the_write_and_fires_no_event(make_storage):
 def test_a_refresh_never_writes_a_reservation(make_storage):
     storage = make_storage()
     storage.add_nodes([_node("a")], [])
+    # The write is queued; a refresh that read the file before it landed would
+    # swap in the stale (empty) graph and drop "a".
+    storage.flush()
 
     def refuse(_ceiling: int) -> None:
         raise AssertionError("a refresh wrote a reservation")
