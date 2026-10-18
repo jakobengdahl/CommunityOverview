@@ -278,3 +278,30 @@ def test_write_happens_between_lock_and_unlock_even_on_failure(path, monkeypatch
     with pytest.raises(OSError):
         store.append_record(_rec(1))
     assert calls == ["lock", "write", "unlock"]
+
+
+def test_several_missing_parent_directories_are_created(tmp_path):
+    deep = tmp_path / "a" / "b" / "c" / "graph.history.ndjson"
+    store = GraphHistoryStore(deep)
+    store.append_record(_rec(0))
+    store.close()
+    assert _ids(deep) == ["evt-0"]
+
+
+def test_append_takes_an_exclusive_lock(path, monkeypatch):
+    modes = []
+    monkeypatch.setattr(
+        history_store, "_lock_file", lambda f, exclusive=True: modes.append(exclusive)
+    )
+    monkeypatch.setattr(history_store, "_unlock_file", lambda f: None)
+    store = GraphHistoryStore(path)
+    store.append_record(_rec(0))
+    store.close()
+    assert modes == [True]
+
+
+def test_non_ascii_is_stored_as_raw_utf8(path):
+    store = GraphHistoryStore(path)
+    store.append_record({**_rec(0), "name": "é"})
+    store.close()
+    assert "é".encode("utf-8") in path.read_bytes()
