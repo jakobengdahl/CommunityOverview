@@ -2,6 +2,7 @@
 
 import json
 import logging
+import sqlite3
 from datetime import timedelta
 from unittest.mock import MagicMock
 
@@ -313,7 +314,7 @@ class TestCli:
         finally:
             store.close()
 
-    def test_cli_closes_the_proposal_store_even_when_the_sweep_fails(
+    def test_cli_closes_the_proposal_store_when_the_proposal_sweep_reports_failure(
         self, tmp_path, monkeypatch
     ):
         db = tmp_path / "governance.db"
@@ -391,6 +392,7 @@ class TestSqliteWriteDurability:
         store = SqliteProposalStore(db)
         try:
             p = _proposal(store, decided_days_ago=40)
+            assert SECRET.encode() in self._wal_bytes(db)
             assert store.purge([p.id]) == 1
             assert SECRET.encode() not in self._wal_bytes(db)
         finally:
@@ -404,7 +406,7 @@ class TestSqliteWriteDurability:
             kept = _proposal(store, decided_days_ago=40)
             # The second parameter set has no bindings, so executemany raises
             # after the first row was already deleted inside the transaction.
-            with pytest.raises(Exception):
+            with pytest.raises(sqlite3.ProgrammingError):
                 store._write_many(
                     "DELETE FROM proposals WHERE id = ?", [(kept.id,), ()]
                 )
