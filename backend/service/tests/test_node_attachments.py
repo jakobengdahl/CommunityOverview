@@ -1281,6 +1281,10 @@ class TestIdGuardsPrecedeTheStore:
             storage, attachment_settings=_settings(spy)
         ).get_node_attachment_record("doc", self.BAD_ID)
         assert result["error_code"] == "not_found"
+        federated = GraphService(
+            storage, attachment_settings=_settings(spy)
+        ).get_node_attachment_record(FEDERATED_ID, "0" * 32)
+        assert federated["error_code"] == "not_found"
         assert spy.method_calls == []
 
     def test_federated_node_never_reaches_the_store_on_read_and_delete(
@@ -1334,6 +1338,8 @@ class TestDeclaredContentTypeSanitising:
             "text/plain"
         )
         assert _sanitize_declared_content_type(None) == ""
+        # Filtered first, then cut: control characters do not eat the budget.
+        assert _sanitize_declared_content_type("\x00" * 10 + "t" * 255) == "t" * 255
 
     def test_the_stored_declared_type_is_the_sanitised_one(self, client, store):
         headers = {"content-type": "text/plain; x=" + "a" * 400}
