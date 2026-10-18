@@ -371,4 +371,84 @@ describe('NodeAttachmentsPanel delete', () => {
     expect(within(secondPrompt.parentElement).getByText('attachments.delete').disabled).toBe(false);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  it('cancel closes the prompt and restores the Delete button', async () => {
+    fetchMock.mockResolvedValueOnce(listing([record('a1')]));
+    render(<NodeAttachmentsPanel nodeId="n1" typeAllowsAttachments />);
+    await screen.findByText('a1.pdf');
+    fireEvent.click(screen.getByLabelText('attachments.delete_named {"name":"a1.pdf"}'));
+    fireEvent.click(screen.getByText('attachments.cancel'));
+    expect(screen.queryByText('attachments.confirm_delete {"name":"a1.pdf"}')).toBeNull();
+    expect(screen.getByLabelText('attachments.delete_named {"name":"a1.pdf"}')).toBeTruthy();
+  });
+
+  it('a failed delete closes its prompt and re-enables the row', async () => {
+    fetchMock
+      .mockResolvedValueOnce(listing([record('a1')]))
+      .mockResolvedValueOnce(jsonResponse(500, {}));
+    render(<NodeAttachmentsPanel nodeId="n1" typeAllowsAttachments />);
+    await screen.findByText('a1.pdf');
+    fireEvent.click(screen.getByLabelText('attachments.delete_named {"name":"a1.pdf"}'));
+    fireEvent.click(screen.getByText('attachments.delete'));
+    await screen.findByRole('alert');
+    expect(screen.queryByText('attachments.confirm_delete {"name":"a1.pdf"}')).toBeNull();
+    expect(screen.getByLabelText('attachments.delete_named {"name":"a1.pdf"}').disabled).toBe(
+      false
+    );
+  });
+
+  it('two deletes in flight keep each other pending until each finishes', async () => {
+    const finish = {};
+    fetchMock
+      .mockResolvedValueOnce(listing([record('a1'), record('a2')]))
+      .mockReturnValueOnce(new Promise((r) => (finish.a1 = r)))
+      .mockReturnValueOnce(new Promise((r) => (finish.a2 = r)));
+    render(<NodeAttachmentsPanel nodeId="n1" typeAllowsAttachments />);
+    await screen.findByText('a1.pdf');
+    const confirm = (name) => {
+      fireEvent.click(screen.getByLabelText(`attachments.delete_named {"name":"${name}"}`));
+      const prompt = screen.getByText(`attachments.confirm_delete {"name":"${name}"}`);
+      fireEvent.click(within(prompt.parentElement).getByText('attachments.delete'));
+    };
+    const buttonsOf = (name) =>
+      within(
+        screen.getByText(`attachments.confirm_delete {"name":"${name}"}`).parentElement
+      ).getAllByRole('button');
+    confirm('a1.pdf');
+    confirm('a2.pdf');
+    expect(buttonsOf('a1.pdf').every((b) => b.disabled)).toBe(true);
+    expect(buttonsOf('a2.pdf').every((b) => b.disabled)).toBe(true);
+
+    finish.a1(jsonResponse(200, { success: true }));
+    await waitFor(() => expect(screen.queryByText('a1.pdf')).toBeNull());
+    expect(buttonsOf('a2.pdf').every((b) => b.disabled)).toBe(true);
+    finish.a2(jsonResponse(200, { success: true }));
+    await waitFor(() => expect(screen.queryByText('a2.pdf')).toBeNull());
+  });
+});
+
+describe('NodeAttachmentsPanel list state across uploads and node changes', () => {
+  it('an upload keeps the rows already listed', async () => {
+    fetchMock
+      .mockResolvedValueOnce(listing([record('old')]))
+      .mockResolvedValueOnce(jsonResponse(201, record('new', 1, 'new.pdf')));
+    render(<NodeAttachmentsPanel nodeId="n1" typeAllowsAttachments />);
+    await screen.findByText('old.pdf');
+    chooseFile(fileOfSize(1, 'new.pdf'));
+    await screen.findByText('new.pdf');
+    expect(screen.getByText('old.pdf')).toBeTruthy();
+  });
+
+  it('ignores a list failure that arrives after the node changed', async () => {
+    let rejectA;
+    fetchMock
+      .mockReturnValueOnce(new Promise((_, reject) => (rejectA = reject)))
+      .mockResolvedValueOnce(listing([record('b1')]));
+    const { rerender } = render(<NodeAttachmentsPanel nodeId="A" typeAllowsAttachments />);
+    rerender(<NodeAttachmentsPanel nodeId="B" typeAllowsAttachments />);
+    await screen.findByText('b1.pdf');
+    rejectA(new Error('late'));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByText('attachments.load_error')).toBeNull();
+  });
 });
