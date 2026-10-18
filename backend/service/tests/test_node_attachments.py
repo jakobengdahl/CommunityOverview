@@ -1025,6 +1025,33 @@ class TestReusedNodeId:
         assert result["success"] is False
         assert store.list(NS, "doc") == [record]
 
+    def test_leftovers_on_several_ids_are_all_quarantined(
+        self, service, store, monkeypatch
+    ):
+        orphans = {n: self._leave_orphan(service, store, monkeypatch, n) for n in "abc"}
+        nodes = [{"id": n, "type": "Document", "name": n} for n in "abc"]
+        assert service.add_nodes(nodes, [])["success"] is True
+        for node_id, orphan in orphans.items():
+            assert store.get_record(NS, node_id, orphan.id) is None
+
+    def test_first_failing_quarantine_does_not_spare_the_other_ids(
+        self, service, store, monkeypatch
+    ):
+        orphans = {n: self._leave_orphan(service, store, monkeypatch, n) for n in "abc"}
+        real_quarantine = store.quarantine
+
+        def first_fails(namespace, node_id, ids):
+            if node_id == "a":
+                raise OSError("read-only filesystem")
+            return real_quarantine(namespace, node_id, ids)
+
+        monkeypatch.setattr(store, "quarantine", first_fails)
+        nodes = [{"id": n, "type": "Document", "name": n} for n in "abc"]
+        assert service.add_nodes(nodes, [])["success"] is True
+        assert store.get_record(NS, "a", orphans["a"].id) == orphans["a"]
+        assert store.get_record(NS, "b", orphans["b"].id) is None
+        assert store.get_record(NS, "c", orphans["c"].id) is None
+
     def test_creates_without_leftovers_never_touch_the_store(
         self, service, store, monkeypatch
     ):

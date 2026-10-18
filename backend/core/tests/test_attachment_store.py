@@ -255,15 +255,14 @@ def test_quarantine_failing_midway_leaves_every_blob_named_by_an_index(
 ):
     old = _upload(store, "n1", b"old")
     real_write = store._write_index
-    writes = []
 
-    def fail(*args, **kwargs):
-        writes.append(args)
-        if len(writes) == 2:
+    def fail_live_index_rewrite(*args, **kwargs):
+        # The quarantine copy passes node_dir; the live index rewrite does not.
+        if kwargs.get("node_dir") is None:
             raise OSError("disk full")
         return real_write(*args, **kwargs)
 
-    monkeypatch.setattr(store, "_write_index", fail)
+    monkeypatch.setattr(store, "_write_index", fail_live_index_rewrite)
     with pytest.raises(OSError):
         store.quarantine(NS, "n1", {old.id})
     monkeypatch.undo()
@@ -271,6 +270,40 @@ def test_quarantine_failing_midway_leaves_every_blob_named_by_an_index(
     assert store.list(NS, "n1") == [old]
     with store.open_read(NS, "n1", old.id) as handle:
         assert handle.read() == b"old"
+    # The quarantine copy is complete too, so nothing is lost either way.
+    (target,) = (store.root / hashed_key(NS) / ".quarantine").iterdir()
+    assert (target / "blobs" / old.id).read_bytes() == b"old"
+
+
+def test_quarantine_fallback_move_leaves_no_live_blob(store, monkeypatch):
+    old = _upload(store, "n1", b"old")
+    live_blob = store.root / hashed_key(NS) / hashed_key("n1") / "blobs" / old.id
+
+    def no_links(*args, **kwargs):
+        raise PermissionError("operation not permitted")
+
+    monkeypatch.setattr(os, "link", no_links)
+    store.quarantine(NS, "n1", {old.id})
+    assert not live_blob.exists()
+
+
+def test_quarantine_survives_a_blob_vanishing_between_failed_link_and_move(
+    store, monkeypatch
+):
+    old = _upload(store, "n1", b"old")
+    live_blob = store.root / hashed_key(NS) / hashed_key("n1") / "blobs" / old.id
+
+    def link_fails_and_blob_vanishes(*args, **kwargs):
+        live_blob.unlink()
+        raise PermissionError("operation not permitted")
+
+    monkeypatch.setattr(os, "link", link_fails_and_blob_vanishes)
+    assert store.quarantine(NS, "n1", {old.id}) == 1
+    assert store.list(NS, "n1") == []
+    (target,) = (store.root / hashed_key(NS) / ".quarantine").iterdir()
+    assert [
+        r["id"] for r in json.loads((target / "index.json").read_text())["attachments"]
+    ] == [old.id]
 
 
 def test_quarantine_moves_a_record_whose_blob_is_already_gone(store):
