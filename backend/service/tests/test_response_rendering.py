@@ -17,6 +17,7 @@ from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.datastructures import Default
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.testclient import TestClient
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend.core import GraphStorage, Node, NodeType
 from backend.service import GraphService, create_rest_router
@@ -396,10 +397,34 @@ class TestErrorResponses:
         def denied():
             raise HTTPException(401, "no", headers={"WWW-Authenticate": "Bearer"})
 
-        @app.get("/empty")
-        def empty():
-            raise HTTPException(304)
+        @app.get("/not-modified")
+        def not_modified():
+            raise HTTPException(304, headers={"ETag": "v1"})
+
+        @app.get("/no-content")
+        def no_content():
+            raise HTTPException(204, headers={"X-Kept": "1"})
 
         client = TestClient(app)
         assert client.get("/denied").headers["www-authenticate"] == "Bearer"
-        assert client.get("/empty").content == b""
+        for path, status, header in (
+            ("/not-modified", 304, ("etag", "v1")),
+            ("/no-content", 204, ("x-kept", "1")),
+        ):
+            response = client.get(path)
+            assert response.status_code == status
+            assert response.content == b""
+            assert response.headers[header[0]] == header[1]
+
+    def test_starlette_level_http_exceptions_are_covered(self):
+        app = FastAPI()
+        install_error_handlers(app)
+
+        @app.get("/raw")
+        def raw():
+            raise StarletteHTTPException(409, "x" + LONE_SURROGATE)
+
+        response = TestClient(app).get("/raw")
+
+        assert response.status_code == 409
+        assert response.json() == {"detail": "x" + LONE_SURROGATE}
