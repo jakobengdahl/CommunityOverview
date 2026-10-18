@@ -322,13 +322,18 @@ def test_a_refresh_never_writes_a_reservation(make_storage):
     # swap in the stale (empty) graph and drop "a".
     storage.flush()
 
-    def refuse(_ceiling: int) -> None:
-        raise AssertionError("a refresh wrote a reservation")
+    reserved: List[int] = []
+
+    def refuse(ceiling: int) -> None:
+        # Recorded, not raised: the load path catches Exception around a
+        # reservation, so a raise here would be swallowed and the test pass.
+        reserved.append(ceiling)
 
     storage._persistence_backend.reserve_revisions = refuse  # type: ignore[method-assign]
     storage._revision_reservation = storage._next_revision  # due for a raise
     storage.load(bootstrap_if_missing=False)
     assert "a" in storage.nodes
+    assert reserved == [], "a refresh wrote a reservation"
 
 
 def test_a_shared_store_without_enforcement_never_persists_a_reservation():
