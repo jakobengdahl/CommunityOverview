@@ -283,8 +283,11 @@ def test_quarantine_fallback_move_leaves_no_live_blob(store, monkeypatch):
         raise PermissionError("operation not permitted")
 
     monkeypatch.setattr(os, "link", no_links)
-    store.quarantine(NS, "n1", {old.id})
+    assert store.quarantine(NS, "n1", {old.id}) == 1
     assert not live_blob.exists()
+    assert store.list(NS, "n1") == []
+    (target,) = (store.root / hashed_key(NS) / ".quarantine").iterdir()
+    assert (target / "blobs" / old.id).read_bytes() == b"old"
 
 
 def test_quarantine_survives_a_blob_vanishing_between_failed_link_and_move(

@@ -1039,8 +1039,10 @@ class TestReusedNodeId:
     ):
         orphans = {n: self._leave_orphan(service, store, monkeypatch, n) for n in "abc"}
         real_quarantine = store.quarantine
+        order = []
 
         def first_fails(namespace, node_id, ids):
+            order.append(node_id)
             if node_id == "a":
                 raise OSError("read-only filesystem")
             return real_quarantine(namespace, node_id, ids)
@@ -1048,6 +1050,7 @@ class TestReusedNodeId:
         monkeypatch.setattr(store, "quarantine", first_fails)
         nodes = [{"id": n, "type": "Document", "name": n} for n in "abc"]
         assert service.add_nodes(nodes, [])["success"] is True
+        assert order == ["a", "b", "c"]  # the failing one is tried first
         assert store.get_record(NS, "a", orphans["a"].id) == orphans["a"]
         assert store.get_record(NS, "b", orphans["b"].id) is None
         assert store.get_record(NS, "c", orphans["c"].id) is None
