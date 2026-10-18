@@ -65,7 +65,9 @@ function NodeAttachmentsPanel({ nodeId, typeAllowsAttachments }) {
   const [actionError, setActionError] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [confirmingId, setConfirmingId] = useState(null);
-  const [deletingId, setDeletingId] = useState(null);
+  // Ids whose DELETE is in flight; per row, so one slow delete neither
+  // re-enables nor closes another row's confirmation.
+  const [pendingDeletes, setPendingDeletes] = useState(() => new Set());
   const fileInputRef = useRef(null);
 
   useEffect(() => {
@@ -127,7 +129,7 @@ function NodeAttachmentsPanel({ nodeId, typeAllowsAttachments }) {
 
   const handleDelete = async (attachmentId) => {
     setActionError(null);
-    setDeletingId(attachmentId);
+    setPendingDeletes((prev) => new Set(prev).add(attachmentId));
     try {
       await deleteNodeAttachment(nodeId, attachmentId);
       setListing((prev) => ({
@@ -137,8 +139,12 @@ function NodeAttachmentsPanel({ nodeId, typeAllowsAttachments }) {
     } catch (err) {
       setActionError(messageFor(err.code, err.message));
     } finally {
-      setDeletingId(null);
-      setConfirmingId(null);
+      setPendingDeletes((prev) => {
+        const next = new Set(prev);
+        next.delete(attachmentId);
+        return next;
+      });
+      setConfirmingId((current) => (current === attachmentId ? null : current));
     }
   };
 
@@ -172,13 +178,13 @@ function NodeAttachmentsPanel({ nodeId, typeAllowsAttachments }) {
                   {a.uploaded_at ? new Date(a.uploaded_at).toLocaleString(language) : ''}
                 </span>
               </div>
-              {confirmingId === a.id ? (
+              {confirmingId === a.id || pendingDeletes.has(a.id) ? (
                 <div className="node-attachments-confirm">
                   <span>{t('attachments.confirm_delete', { name: a.filename })}</span>
                   <button
                     type="button"
                     className="danger"
-                    disabled={deletingId === a.id}
+                    disabled={pendingDeletes.has(a.id)}
                     onClick={() => handleDelete(a.id)}
                   >
                     {t('attachments.delete')}
@@ -186,7 +192,7 @@ function NodeAttachmentsPanel({ nodeId, typeAllowsAttachments }) {
                   <button
                     type="button"
                     className="secondary"
-                    disabled={deletingId === a.id}
+                    disabled={pendingDeletes.has(a.id)}
                     onClick={() => setConfirmingId(null)}
                   >
                     {t('attachments.cancel')}

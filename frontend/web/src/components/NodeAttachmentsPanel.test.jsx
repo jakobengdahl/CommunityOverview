@@ -90,6 +90,7 @@ describe('NodeAttachmentsPanel gating', () => {
     render(<NodeAttachmentsPanel nodeId="n1" typeAllowsAttachments />);
     expect(await screen.findByText('attachments.load_error')).toBeTruthy();
     expect(screen.queryByText('attachments.empty')).toBeNull();
+    expect(screen.queryByText('attachments.loading')).toBeNull();
   });
 });
 
@@ -172,6 +173,122 @@ describe('NodeAttachmentsPanel upload', () => {
   });
 });
 
+describe('NodeAttachmentsPanel upload failures without a usable body', () => {
+  it('shows the generic message when the error body is not JSON', async () => {
+    fetchMock.mockResolvedValueOnce(listing([])).mockResolvedValueOnce({
+      ok: false,
+      status: 413,
+      json: async () => {
+        throw new SyntaxError('not json');
+      },
+    });
+    render(<NodeAttachmentsPanel nodeId="n1" typeAllowsAttachments />);
+    await screen.findByText('attachments.empty');
+    chooseFile(fileOfSize(5));
+    expect((await screen.findByRole('alert')).textContent).toBe('attachments.errors.generic');
+  });
+
+  it('shows the generic message for a validation error whose detail is a list', async () => {
+    fetchMock
+      .mockResolvedValueOnce(listing([]))
+      .mockResolvedValueOnce(jsonResponse(422, { detail: [{ loc: ['query'], msg: 'too long' }] }));
+    render(<NodeAttachmentsPanel nodeId="n1" typeAllowsAttachments />);
+    await screen.findByText('attachments.empty');
+    chooseFile(fileOfSize(5));
+    expect((await screen.findByRole('alert')).textContent).toBe('attachments.errors.generic');
+  });
+
+  it('refuses any file once the node holds its maximum count, without sending it', async () => {
+    fetchMock.mockResolvedValueOnce(listing([record('a', 1), record('b', 1), record('c', 1)]));
+    render(<NodeAttachmentsPanel nodeId="n1" typeAllowsAttachments />);
+    await screen.findByText('a.pdf');
+    chooseFile(fileOfSize(1));
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toMatch(/^attachments\.errors\.node_attachment_limit /);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('NodeAttachmentsPanel coverage of each guarantee', () => {
+  it('encodes the file name in the upload URL', async () => {
+    fetchMock
+      .mockResolvedValueOnce(listing([]))
+      .mockResolvedValueOnce(jsonResponse(201, record('x', 1, 'a b&c#d.txt')));
+    render(<NodeAttachmentsPanel nodeId="n1" typeAllowsAttachments />);
+    await screen.findByText('attachments.empty');
+    chooseFile(fileOfSize(1, 'a b&c#d.txt'));
+    await screen.findByText('a b&c#d.txt');
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/nodes/n1/attachments?filename=a%20b%26c%23d.txt');
+  });
+
+  it.each([
+    'attachment_too_large',
+    'node_attachment_limit',
+    'unsupported_attachment_type',
+    'attachments_not_allowed',
+    'node_archived',
+    'federated_node',
+    'attachments_unavailable',
+  ])('maps server code %s to its own message key', async (code) => {
+    fetchMock
+      .mockResolvedValueOnce(listing([]))
+      .mockResolvedValueOnce(jsonResponse(409, { detail: { error: code, message: 'x' } }));
+    render(<NodeAttachmentsPanel nodeId="n1" typeAllowsAttachments />);
+    await screen.findByText('attachments.empty');
+    chooseFile(fileOfSize(1));
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent.startsWith(`attachments.errors.${code} `)).toBe(true);
+  });
+
+  it('shows the plain generic message for an unknown code with no message', async () => {
+    fetchMock
+      .mockResolvedValueOnce(listing([]))
+      .mockResolvedValueOnce(jsonResponse(500, { detail: { error: 'other', message: '' } }));
+    render(<NodeAttachmentsPanel nodeId="n1" typeAllowsAttachments />);
+    await screen.findByText('attachments.empty');
+    chooseFile(fileOfSize(1));
+    expect((await screen.findByRole('alert')).textContent).toBe('attachments.errors.generic');
+  });
+
+  it("shows each row's size and upload time", async () => {
+    const at = '2026-10-18T08:00:00Z';
+    fetchMock.mockResolvedValueOnce(listing([record('a1', 2048)]));
+    render(<NodeAttachmentsPanel nodeId="n1" typeAllowsAttachments />);
+    const row = (await screen.findByText('a1.pdf')).closest('li');
+    const size = new Intl.NumberFormat('en', {
+      style: 'unit',
+      unit: 'kilobyte',
+      unitDisplay: 'short',
+      maximumFractionDigits: 1,
+    }).format(2);
+    expect(row.textContent).toContain(size);
+    expect(row.textContent).toContain(new Date(at).toLocaleString('en'));
+  });
+
+  it('opens the confirmation on the chosen row only', async () => {
+    fetchMock.mockResolvedValueOnce(listing([record('a1'), record('a2')]));
+    render(<NodeAttachmentsPanel nodeId="n1" typeAllowsAttachments />);
+    await screen.findByText('a1.pdf');
+    fireEvent.click(screen.getByLabelText('attachments.delete_named {"name":"a1.pdf"}'));
+    expect(screen.queryByText('attachments.confirm_delete {"name":"a2.pdf"}')).toBeNull();
+    expect(screen.getByLabelText('attachments.delete_named {"name":"a2.pdf"}')).toBeTruthy();
+  });
+
+  it('ignores a list response that arrives after the node changed', async () => {
+    let resolveA;
+    fetchMock
+      .mockReturnValueOnce(new Promise((resolve) => (resolveA = resolve)))
+      .mockResolvedValueOnce(listing([record('b1')]));
+    const { rerender } = render(<NodeAttachmentsPanel nodeId="A" typeAllowsAttachments />);
+    rerender(<NodeAttachmentsPanel nodeId="B" typeAllowsAttachments />);
+    await screen.findByText('b1.pdf');
+    resolveA(listing([record('a1')]));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByText('a1.pdf')).toBeNull();
+    expect(screen.getByText('b1.pdf')).toBeTruthy();
+  });
+});
+
 describe('precheckUpload', () => {
   it('refuses by count before size once the node is full', () => {
     const full = [record('a', 1), record('b', 1), record('c', 1)];
@@ -228,5 +345,30 @@ describe('NodeAttachmentsPanel delete', () => {
     const alert = await screen.findByRole('alert');
     expect(alert.textContent).toBe('attachments.errors.generic_with_detail {"detail":"Forbidden"}');
     expect(screen.getByText('a1.pdf')).toBeTruthy();
+  });
+
+  it('a slow delete on one row neither re-enables it nor closes another row', async () => {
+    let finishFirst;
+    fetchMock.mockResolvedValueOnce(listing([record('a1'), record('a2')])).mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishFirst = () => resolve(jsonResponse(200, { success: true }));
+      })
+    );
+    render(<NodeAttachmentsPanel nodeId="n1" typeAllowsAttachments />);
+    await screen.findByText('a1.pdf');
+    fireEvent.click(screen.getByLabelText('attachments.delete_named {"name":"a1.pdf"}'));
+    const firstPrompt = screen.getByText('attachments.confirm_delete {"name":"a1.pdf"}');
+    fireEvent.click(within(firstPrompt.parentElement).getByText('attachments.delete'));
+
+    fireEvent.click(screen.getByLabelText('attachments.delete_named {"name":"a2.pdf"}'));
+    // a1's in-flight delete keeps its prompt, disabled, so it cannot be sent twice.
+    const stillPending = screen.getByText('attachments.confirm_delete {"name":"a1.pdf"}');
+    expect(within(stillPending.parentElement).getByText('attachments.delete').disabled).toBe(true);
+
+    finishFirst();
+    await waitFor(() => expect(screen.queryByText('a1.pdf')).toBeNull());
+    const secondPrompt = screen.getByText('attachments.confirm_delete {"name":"a2.pdf"}');
+    expect(within(secondPrompt.parentElement).getByText('attachments.delete').disabled).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
