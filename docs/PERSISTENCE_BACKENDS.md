@@ -624,7 +624,9 @@ save; loading replays the journal — and refuses one written against a
 different `graph.json`, which it tells by a `journal_id` the backend keeps in
 the file's metadata and stamps on every journal line. That id is the backend's
 own: it is not in the dict `load_graph_data` hands out, so `GraphStorage` and
-exports never see it. See
+exports never see it. Both files are UTF-8; a string holding a lone UTF-16
+surrogate, which UTF-8 cannot carry, makes that one write fall back to `\u`
+escapes for all non-ASCII text, which reads back unchanged. See
 [DATA_MANAGEMENT.md](DATA_MANAGEMENT.md#graph-journal) for what that means
 for backups and for replacing a graph file. The constructor's
 `checkpoint_interval` and `journal_path` are the only knobs, and nothing sets

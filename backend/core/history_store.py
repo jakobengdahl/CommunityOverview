@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, TYPE_CHECKING
 
-from .storage_backends import _lock_file, _unlock_file
+from .storage_backends import _lock_file, _unlock_file, dumps_storable
 
 if TYPE_CHECKING:
     from .events.models import Event
@@ -341,7 +341,7 @@ class GraphHistoryStore:
 
     def append_record(self, record: Dict[str, Any]) -> None:
         """Append a single pre-built record as one NDJSON line."""
-        line = json.dumps(record, ensure_ascii=False)
+        line = dumps_storable(record)
         with self._lock:
             f = self._open_append_handle()
             try:

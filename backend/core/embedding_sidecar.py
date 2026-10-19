@@ -28,6 +28,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
 
+from .storage_backends import dumps_storable
+
 logger = logging.getLogger(__name__)
 
 MAGIC = b"CKGEMB\x01"
@@ -155,9 +157,8 @@ def serialize_sidecar_bytes(vectors: Dict[str, Any]) -> bytes:
         matrix = None
         dim = 0
 
-    header = json.dumps(
-        {"dtype": "float32", "rows": len(ids), "dim": dim, "ids": ids},
-        ensure_ascii=False,
+    header = dumps_storable(
+        {"dtype": "float32", "rows": len(ids), "dim": dim, "ids": ids}
     ).encode("utf-8")
 
     body = bytearray()
