@@ -367,6 +367,9 @@ class AddNodesResult(BaseModel):
     added_edge_ids: List[str]
     success: bool
     message: str = ""
+    # On a failed call, the nodes that landed before the failure and stay
+    # (add_nodes keeps them). Internal: never part of a serialized result.
+    landed_node_ids: List[str] = Field(default_factory=list, exclude=True)
 
 
 class DeleteNodesResult(BaseModel):

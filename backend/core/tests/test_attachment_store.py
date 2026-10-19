@@ -8,6 +8,7 @@ import time
 
 import pytest
 
+from backend.core import attachment_store
 from backend.core.attachment_store import (
     AttachmentIndexCorrupt,
     AttachmentLimitExceeded,
@@ -197,6 +198,142 @@ def test_delete_node_removes_every_file_of_that_node_only(store):
     assert store.delete_node(NS, "n1") == 0
 
 
+def test_quarantine_moves_only_the_named_records_and_keeps_their_bytes(store):
+    old = _upload(store, "n1", b"old")
+    new = _upload(store, "n1", b"new")
+    assert store.quarantine(NS, "n1", {old.id}) == 1
+    assert store.list(NS, "n1") == [new]
+    assert store.get_record(NS, "n1", old.id) is None
+    (target,) = (store.root / hashed_key(NS) / ".quarantine").iterdir()
+    index = json.loads((target / "index.json").read_text(encoding="utf-8"))
+    assert index["node_id"] == "n1"
+    assert [r["id"] for r in index["attachments"]] == [old.id]
+    assert (target / "blobs" / old.id).read_bytes() == b"old"
+    assert not (
+        store.root / hashed_key(NS) / hashed_key("n1") / "blobs" / old.id
+    ).exists()
+
+
+def test_quarantined_files_are_not_reported_as_a_node(store):
+    old = _upload(store, "n1")
+    store.quarantine(NS, "n1", {old.id})
+    assert store.quarantine(NS, "n1", {old.id}) == 0
+    assert list(store.iter_nodes(NS)) == ["n1"]
+    assert len(list((store.root / hashed_key(NS) / ".quarantine").iterdir())) == 1
+
+
+def test_two_quarantines_of_one_node_keep_both_sets(store):
+    first = _upload(store, "n1", b"first")
+    store.quarantine(NS, "n1", {first.id})
+    second = _upload(store, "n1", b"second")
+    store.quarantine(NS, "n1", {second.id})
+    targets = list((store.root / hashed_key(NS) / ".quarantine").iterdir())
+    kept = {
+        blob.name: blob.read_bytes()
+        for target in targets
+        for blob in (target / "blobs").iterdir()
+    }
+    assert len(targets) == 2
+    assert kept == {first.id: b"first", second.id: b"second"}
+
+
+def test_quarantine_moves_blobs_where_hard_links_are_unsupported(store, monkeypatch):
+    old = _upload(store, "n1", b"old")
+
+    def no_links(*args, **kwargs):
+        raise PermissionError("operation not permitted")
+
+    monkeypatch.setattr(os, "link", no_links)
+    assert store.quarantine(NS, "n1", {old.id}) == 1
+    assert store.list(NS, "n1") == []
+    (target,) = (store.root / hashed_key(NS) / ".quarantine").iterdir()
+    assert (target / "blobs" / old.id).read_bytes() == b"old"
+
+
+def test_quarantine_failing_midway_leaves_every_blob_named_by_an_index(
+    store, monkeypatch
+):
+    old = _upload(store, "n1", b"old")
+    real_write = store._write_index
+
+    def fail_live_index_rewrite(*args, **kwargs):
+        # The quarantine copy passes node_dir; the live index rewrite does not.
+        if kwargs.get("node_dir") is None:
+            raise OSError("disk full")
+        return real_write(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_write_index", fail_live_index_rewrite)
+    with pytest.raises(OSError):
+        store.quarantine(NS, "n1", {old.id})
+    monkeypatch.undo()
+    # The live index still names the blob, and it is still where it says.
+    assert store.list(NS, "n1") == [old]
+    with store.open_read(NS, "n1", old.id) as handle:
+        assert handle.read() == b"old"
+    # The quarantine copy is complete too, so nothing is lost either way.
+    (target,) = (store.root / hashed_key(NS) / ".quarantine").iterdir()
+    assert (target / "blobs" / old.id).read_bytes() == b"old"
+
+
+def test_quarantine_fallback_move_leaves_no_live_blob(store, monkeypatch):
+    old = _upload(store, "n1", b"old")
+    live_blob = store.root / hashed_key(NS) / hashed_key("n1") / "blobs" / old.id
+
+    def no_links(*args, **kwargs):
+        raise PermissionError("operation not permitted")
+
+    monkeypatch.setattr(os, "link", no_links)
+    assert store.quarantine(NS, "n1", {old.id}) == 1
+    assert not live_blob.exists()
+    assert store.list(NS, "n1") == []
+    (target,) = (store.root / hashed_key(NS) / ".quarantine").iterdir()
+    assert (target / "blobs" / old.id).read_bytes() == b"old"
+
+
+def test_quarantine_survives_a_blob_vanishing_between_failed_link_and_move(
+    store, monkeypatch
+):
+    old = _upload(store, "n1", b"old")
+    live_blob = store.root / hashed_key(NS) / hashed_key("n1") / "blobs" / old.id
+
+    def link_fails_and_blob_vanishes(*args, **kwargs):
+        live_blob.unlink()
+        raise PermissionError("operation not permitted")
+
+    monkeypatch.setattr(os, "link", link_fails_and_blob_vanishes)
+    assert store.quarantine(NS, "n1", {old.id}) == 1
+    assert store.list(NS, "n1") == []
+    (target,) = (store.root / hashed_key(NS) / ".quarantine").iterdir()
+    assert [
+        r["id"] for r in json.loads((target / "index.json").read_text())["attachments"]
+    ] == [old.id]
+
+
+def test_quarantine_moves_a_record_whose_blob_is_already_gone(store):
+    old = _upload(store, "n1")
+    (store.root / hashed_key(NS) / hashed_key("n1") / "blobs" / old.id).unlink()
+    assert store.quarantine(NS, "n1", {old.id}) == 1
+    assert store.list(NS, "n1") == []
+
+
+def test_quarantines_in_the_same_instant_do_not_collide(store, monkeypatch):
+    import backend.core.attachment_store as module
+
+    fixed = module.datetime(2026, 1, 1, tzinfo=module.timezone.utc)
+
+    class FrozenDatetime(module.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed
+
+    first = _upload(store, "n1", b"first")
+    second = _upload(store, "n1", b"second")
+    monkeypatch.setattr(module, "datetime", FrozenDatetime)
+    store.quarantine(NS, "n1", {first.id})
+    store.quarantine(NS, "n1", {second.id})
+    assert len(list((store.root / hashed_key(NS) / ".quarantine").iterdir())) == 2
+
+
 def test_iter_nodes_reports_node_ids_from_the_index(store):
     _upload(store, "n1")
     _upload(store, "federated::g::x")
@@ -320,3 +457,59 @@ def test_malformed_ids_never_reach_the_index(store, bad, monkeypatch):
     assert store.get_record(NS, "n1", bad) is None
     assert store.delete(NS, "n1", bad) is False
     assert calls == []
+
+
+def test_blob_path_refuses_an_id_that_is_not_a_minted_one(store):
+    with pytest.raises(AttachmentNotFound):
+        store._blob_path(NS, "n1", "../x")
+    with pytest.raises(AttachmentNotFound):
+        store._blob_path(NS, "n1", "A" * 32)
+
+
+def test_os_lock_alone_serializes_two_store_instances(tmp_path, monkeypatch):
+    # Two instances share no thread locks, so only the OS file lock (what
+    # separates two processes on one root) can make the second commit wait.
+    import threading
+
+    root = tmp_path / "attachments"
+    holder, contender = FileAttachmentStore(root), FileAttachmentStore(root)
+    entered, release = threading.Event(), threading.Event()
+    blocking = threading.Event()
+    calls = []
+    real_lock = attachment_store._lock_file
+
+    def announcing_lock(handle, exclusive):
+        # The first call is the holder's; the second is the contender's commit.
+        calls.append(handle)
+        if len(calls) == 2:
+            blocking.set()
+        return real_lock(handle, exclusive=exclusive)
+
+    monkeypatch.setattr(attachment_store, "_lock_file", announcing_lock)
+
+    def hold():
+        with holder._node_lock(NS, "n1"):
+            entered.set()
+            release.wait(10)
+
+    thread = threading.Thread(target=hold)
+    thread.start()
+    assert entered.wait(10)
+    committed = threading.Event()
+
+    def contend():
+        _upload(contender, "n1")
+        committed.set()
+
+    contending = threading.Thread(target=contend)
+    contending.start()
+    try:
+        # Only once the contender is at the lock does waiting prove it blocks.
+        assert blocking.wait(10)
+        assert not committed.wait(0.3)
+    finally:
+        release.set()
+        thread.join(10)
+    contending.join(10)
+    assert committed.is_set()
+    assert len(holder.list(NS, "n1")) == 1

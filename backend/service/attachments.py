@@ -25,6 +25,7 @@ from typing import (
     Callable,
     Dict,
     FrozenSet,
+    Iterable,
     Optional,
     Union,
 )
@@ -518,7 +519,7 @@ async def add_node_attachment(
     store = settings.store
     namespace = settings.namespace
     try:
-        records = store.list(namespace, node.id)
+        records = await asyncio.to_thread(store.list, namespace, node.id)
     except AttachmentIndexCorrupt:
         logger.exception("Attachment index unreadable for a node")
         return _index_corrupt()
@@ -617,6 +618,64 @@ def _node_still_accepts_uploads(
             raise AttachmentNodeArchived(node_id)
 
     return precondition
+
+
+def leftover_attachments_of_absent_nodes(
+    storage: "GraphStorage",
+    settings: Optional[AttachmentSettings],
+    node_ids: Iterable[str],
+) -> Dict[str, FrozenSet[str]]:
+    """Attachment ids already stored under node ids the graph does not hold.
+
+    Taken just before those ids are created (ADR 0008 sec 8). Whatever is
+    recorded under an id that has no node belongs to an earlier node with the
+    same id, and must not surface as the new node's files.
+    """
+    leftovers: Dict[str, FrozenSet[str]] = {}
+    if settings is None:
+        return leftovers
+    for node_id in node_ids:
+        if storage.get_node(node_id) is not None:
+            continue
+        try:
+            ids = frozenset(
+                r.id for r in settings.store.list(settings.namespace, node_id)
+            )
+        except Exception:
+            logger.exception("Reading a reused node id's leftover attachments failed")
+            continue
+        if ids:
+            leftovers[node_id] = ids
+    return leftovers
+
+
+def quarantine_leftover_attachments(
+    settings: Optional[AttachmentSettings],
+    leftovers: Dict[str, FrozenSet[str]],
+    created_node_ids: Iterable[str],
+) -> None:
+    """Move the leftovers of node ids that were just created into quarantine.
+
+    Only after the create succeeded: a refused create means the id was taken
+    (possibly by a node this instance has not seen yet), and its files stay.
+    Only the snapshot's ids: a file uploaded to the new node in between is
+    the new node's own. A failure is logged and never fails the create.
+    """
+    if settings is None:
+        return
+    for node_id in created_node_ids:
+        ids = leftovers.get(node_id)
+        if not ids:
+            continue
+        try:
+            moved = settings.store.quarantine(settings.namespace, node_id, ids)
+        except Exception:
+            logger.exception("Quarantining a reused node id's attachments failed")
+            continue
+        if moved:
+            logger.warning(
+                "Quarantined %d attachment(s) left under a reused node id", moved
+            )
 
 
 def delete_attachments_of_nodes(

@@ -2927,6 +2927,11 @@ class GraphStorage:
             nodes_to_embed: List[Node] = []
             generation_attempted = False
 
+            def still_landed() -> List[str]:
+                # After persist_landed: a store that refused it has undone
+                # the nodes (or re-read the graph), and those did not stay.
+                return [n.id for n in nodes_to_embed if self.nodes.get(n.id) is n]
+
             def generate_landed_vectors() -> None:
                 # Once per call: an exit after the attempt - a rejected edge -
                 # must not encode the batch a second time.
@@ -2970,6 +2975,7 @@ class GraphStorage:
                             added_edge_ids=[],
                             success=False,
                             message=f"Node with ID {node.id} already exists",
+                            landed_node_ids=still_landed(),
                         )
 
                     # Index before `nodes` - see _external_upsert_node for why.
@@ -3035,6 +3041,7 @@ class GraphStorage:
                             added_edge_ids=[],
                             success=False,
                             message=f"Edge with ID {edge.id} already exists",
+                            landed_node_ids=still_landed(),
                         )
 
                     self._validate_edge_applicability(edge)
@@ -3115,6 +3122,7 @@ class GraphStorage:
                     added_edge_ids=[],
                     success=False,
                     message=f"Error during add: {str(e)}",
+                    landed_node_ids=still_landed(),
                 )
 
     @property

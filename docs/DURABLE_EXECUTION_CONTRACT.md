@@ -297,6 +297,25 @@ its redacted and purged counts include the runs it would abandon.
 `GET /agents/runs/retention-policy` returns the effective policy and the last
 sweep's record.
 
+The same sweep applies these windows to agent governance proposals (the
+`AGENTS_GOVERNANCE_DB` store, or the in-memory one). Only decided proposals
+(approved, rejected, applied or apply-failed) are touched, aged by when they
+were decided: older than the redact window, their `input_args`, `apply_result`
+and `apply_error` are stripped (agent, tool, status, decider and timestamps
+stay); older than the retention, they are purged. A pending proposal is never
+redacted or purged, whatever its age. The floor, clamps and idempotence above
+hold for proposals too, and the audit record adds `proposals_redacted` and
+`proposals_purged` counts. Each store is swept as its own phase: a failing store is logged and flagged
+in the audit record (`run_history_failed` for the run-history store,
+`proposals_failed` for the proposal store) without undoing, hiding or
+preventing the other phase. The CLI sweeps `AGENTS_GOVERNANCE_DB` as well when
+it is set, needs at least one of the two databases, and exits 1 when either
+part failed. With `--dry-run` it opens both databases read-only, so it neither
+switches a file's journal mode nor creates or migrates a schema; a database
+the current version has not yet migrated therefore cannot be previewed and is
+reported as a failed phase. Opening a WAL database read-only may leave empty
+`-wal`/`-shm` sidecar files, so run it as the database's owner.
+
 ## 9. Public/private boundary
 
 This contract covers only generic core reliability. It deliberately excludes:
