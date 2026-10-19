@@ -23,6 +23,7 @@ import os
 import sys
 import tempfile
 import threading
+import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, TYPE_CHECKING
@@ -234,9 +235,9 @@ class GraphHistoryStore:
 
         # Append handle kept open between records: a mutation that touches many
         # entities emits one record each, under the caller's storage lock, and
-        # a mkdir plus open/close per record dominated that hold. The path the
-        # handle is checked against the file at history_path before every append
-        # (see _handle_is_current), which also covers a changed history_path.
+        # a mkdir plus open/close per record dominated that hold. The handle
+        # is checked against the file at history_path before every append (see
+        # _handle_is_current), which also covers a changed history_path.
         self._append_handle: Optional[Any] = None
         # Size the file had when our last write finished, None on a fresh
         # handle. Any other size under the lock means someone else wrote (a
@@ -345,6 +346,7 @@ class GraphHistoryStore:
             f = self._open_append_handle()
             try:
                 _lock_file(f, exclusive=True)
+                guard = None
                 try:
                     # Checked under the OS lock so another process cannot
                     # append between the check and the write.
@@ -357,11 +359,20 @@ class GraphHistoryStore:
                     # Close while still locked: close() flushes whatever the
                     # failed write left in the buffer, and that late flush
                     # must not land after another writer has taken the lock.
+                    # A dup keeps the lock held across the close and lets it
+                    # be released explicitly: closing alone would not release
+                    # it while a forked child shares the open file description.
+                    with contextlib.suppress(OSError, ValueError):
+                        guard = os.dup(f.fileno())
                     self._close_append_handle()
                     raise
                 finally:
-                    # No-op on the handle just closed; closing released it.
-                    with contextlib.suppress(OSError, ValueError):
+                    if guard is not None:
+                        with contextlib.suppress(OSError, ValueError):
+                            _unlock_file(types.SimpleNamespace(fileno=lambda: guard))
+                        with contextlib.suppress(OSError):
+                            os.close(guard)
+                    elif not f.closed:
                         _unlock_file(f)
             except BaseException:
                 # Do not reuse a handle that failed mid-write.

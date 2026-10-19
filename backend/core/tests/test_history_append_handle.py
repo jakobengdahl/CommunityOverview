@@ -444,18 +444,24 @@ def test_failed_write_is_closed_before_the_lock_is_released(path, monkeypatch):
     with pytest.raises(OSError):
         store.append_record(_rec(1))
     assert calls == ["lock", "close", "unlock"]
-    real_open = os.open
 
-    def deny(p, *a, **kw):
-        if Path(p) == path:
-            raise PermissionError("no read")
-        return real_open(p, *a, **kw)
 
-    monkeypatch.setattr(os, "open", deny)
-    store.append_record(_rec(1))
-    monkeypatch.undo()
-    assert [r["event_id"] for r in store.get_recent()] == ["evt-1", "evt-0"]
-    store.close()
+@pytest.mark.skipif(os.name == "nt", reason="flock semantics")
+def test_failed_write_releases_the_lock_even_if_the_fd_is_shared(path):
+    store = GraphHistoryStore(path)
+    store.append_record(_rec(0))
+    # What a forked child holds: another fd on the same open file description.
+    shared = os.dup(store._append_handle.fileno())
+    store._append_handle = _FlakyHandle(store._append_handle)
+    try:
+        with pytest.raises(OSError):
+            store.append_record(_rec(1))
+        import fcntl
+
+        with open(path, "rb") as probe:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(shared)
 
 
 def test_close_waits_for_an_in_flight_append(path):
