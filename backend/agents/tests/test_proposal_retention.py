@@ -529,6 +529,64 @@ class TestPhaseIsolation:
         finally:
             store.close()
 
+    def test_partial_run_history_counts_survive_a_later_failure(self):
+        runs = InMemoryExecutionStore(retry_policy=RetryPolicy(max_attempts=1))
+        runs.enqueue(
+            ExecutionJob(
+                agent_id="a1",
+                kind=ExecutionKind.EVENT,
+                idempotency_key="stuck",
+                payload={},
+                state=ExecutionState.RUNNING,
+                created_at=T0 - timedelta(days=41),
+                updated_at=T0 - timedelta(days=41),
+            )
+        )
+
+        def broken(*args, **kwargs):
+            raise RuntimeError("runs locked")
+
+        runs.list_terminal_older_than = broken
+        report = sweep(runs, POLICY, now=T0)
+        assert (report.abandoned, report.run_history_failed) == (1, True)
+
+    def test_partial_proposal_counts_survive_a_later_failure(self):
+        store = MagicMock()
+        store.list_decided_older_than.side_effect = [[MagicMock(id="p1")], RuntimeError]
+        store.redact.return_value = 1
+        report = sweep(None, POLICY, now=T0, proposal_store=store)
+        assert (report.proposals_redacted, report.proposals_failed) == (1, True)
+
+    def test_run_history_only_sweep_with_redaction_does_not_flag_proposals(self):
+        runs = InMemoryExecutionStore(retry_policy=RetryPolicy(max_attempts=1))
+        report = sweep(runs, POLICY, now=T0, proposal_store=None)
+        assert (report.proposals_failed, report.run_history_failed) == (False, False)
+
+    def test_cli_closes_the_run_store_when_opening_the_proposal_store_raises(
+        self, tmp_path, monkeypatch
+    ):
+        gov, runs_db = tmp_path / "governance.db", tmp_path / "runs.db"
+        SqliteProposalStore(gov).close()
+        SqliteExecutionStore(runs_db).close()
+        closed = []
+        real = SqliteExecutionStore.close
+        monkeypatch.setattr(
+            SqliteExecutionStore,
+            "close",
+            lambda self: (closed.append(self), real(self)),
+        )
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("cannot open")
+
+        monkeypatch.setattr(SqliteProposalStore, "__init__", boom)
+        monkeypatch.setenv("AGENTS_RUN_HISTORY_DB", str(runs_db))
+        monkeypatch.setenv("AGENTS_GOVERNANCE_DB", str(gov))
+        monkeypatch.setenv("AGENTS_RUN_HISTORY_RETENTION_DAYS", "30")
+        with pytest.raises(RuntimeError, match="cannot open"):
+            main([])
+        assert len(closed) == 1
+
     def test_cli_closes_both_stores_when_an_exception_escapes_sweep(
         self, tmp_path, monkeypatch
     ):
@@ -573,8 +631,11 @@ class TestDryRunIsReadOnly:
         monkeypatch.setenv("AGENTS_RUN_HISTORY_DB", str(runs))
         monkeypatch.setenv("AGENTS_GOVERNANCE_DB", str(gov))
         monkeypatch.setenv("AGENTS_RUN_HISTORY_RETENTION_DAYS", "30")
-        main(["--dry-run"])
-        capsys.readouterr()
+        # Neither file has a schema, so both phases report failure: the dry run
+        # must say so rather than create the tables.
+        assert main(["--dry-run"]) == 1
+        out = json.loads(capsys.readouterr().out)
+        assert (out["run_history_failed"], out["proposals_failed"]) == (True, True)
         for p in (gov, runs):
             assert p.read_bytes() == before[p]
             assert not p.with_name(p.name + "-wal").exists()
@@ -595,5 +656,15 @@ class TestDryRunIsReadOnly:
             assert ro.get(p.id) is not None
             with pytest.raises(sqlite3.OperationalError):
                 ro.purge([p.id])
+        finally:
+            ro.close()
+
+    def test_read_only_run_history_store_refuses_writes(self, tmp_path):
+        db = tmp_path / "runs.db"
+        SqliteExecutionStore(db).close()
+        ro = SqliteExecutionStore(db, read_only=True)
+        try:
+            with pytest.raises(sqlite3.OperationalError):
+                ro._conn.execute("DELETE FROM execution_jobs")
         finally:
             ro.close()

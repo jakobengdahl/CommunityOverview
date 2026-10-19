@@ -433,7 +433,7 @@ def main(argv: Optional[list] = None) -> int:
     from .execution import SqliteExecutionStore
     from .governance.store import SqliteProposalStore
 
-    # A dry run opens read-only so it creates no WAL file and no schema.
+    # A dry run opens read-only: no journal-mode switch, no schema creation.
     store = proposal_store = None
     try:
         if db_path:

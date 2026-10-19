@@ -311,7 +311,10 @@ in the audit record (`run_history_failed` for the run-history store,
 preventing the other phase. The CLI sweeps `AGENTS_GOVERNANCE_DB` as well when
 it is set, needs at least one of the two databases, and exits 1 when either
 part failed. With `--dry-run` it opens both databases read-only, so it neither
-switches a file to WAL nor creates a schema.
+switches a file's journal mode nor creates or migrates a schema; a database
+the current version has not yet migrated therefore cannot be previewed and is
+reported as a failed phase. Opening a WAL database read-only may leave empty
+`-wal`/`-shm` sidecar files, so run it as the database's owner.
 
 ## 9. Public/private boundary
 
