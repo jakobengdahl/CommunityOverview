@@ -9,6 +9,10 @@ G3 compaction (own or another process's rename) never strands later appends
 G4 a deleted file or changed history_path is recreated/followed, not lost
 G5 concurrent appenders neither lose nor duplicate nor tear records
 G6 the file is opened once for N appends (the cost this change removes)
+G7 a torn tail (partial write, crash) is never glued onto by the next record:
+   the next record and get_recent stay readable
+G8 close() waits for an in-flight append; a failing handle.close() and a failing
+   compaction never fail the caller
 """
 
 import builtins
@@ -305,3 +309,105 @@ def test_non_ascii_is_stored_as_raw_utf8(path):
     store.append_record({**_rec(0), "name": "é"})
     store.close()
     assert "é".encode("utf-8") in path.read_bytes()
+
+
+def test_partial_write_does_not_glue_onto_the_next_record(path):
+    store = GraphHistoryStore(path)
+    store.append_record(_rec(0))
+
+    class Torn(_FlakyHandle):
+        def write(self, data):
+            # What ENOSPC/EFBIG leaves: part of the line reaches the file.
+            self._inner.write(data[: len(data) // 2])
+            self._inner.flush()
+            raise OSError("disk full")
+
+    store._append_handle = Torn(store._append_handle)
+    with pytest.raises(OSError):
+        store.append_record(_rec(1))
+    assert not path.read_bytes().endswith(b"\n")
+
+    store.append_record(_rec(2))
+    assert [r["event_id"] for r in store.get_recent()] == ["evt-2", "evt-0"]
+    store.close()
+
+
+def test_torn_tail_from_a_previous_process_is_not_glued_onto(path):
+    path.parent.mkdir(parents=True)
+    path.write_bytes(json.dumps(_rec(0)).encode() + b'\n{"event_id": "evt-')
+    store = GraphHistoryStore(path)
+    store.append_record(_rec(1))
+    store.append_record(_rec(2))
+    assert [r["event_id"] for r in store.get_recent()] == ["evt-2", "evt-1", "evt-0"]
+    store.close()
+
+
+def test_clean_file_gets_no_spurious_blank_line(path):
+    store = GraphHistoryStore(path)
+    for i in range(3):
+        store.append_record(_rec(i))
+    store.close()
+    GraphHistoryStore(path).append_record(_rec(3))
+    assert b"\n\n" not in path.read_bytes()
+    assert _ids(path) == [f"evt-{i}" for i in range(4)]
+
+
+def test_close_waits_for_an_in_flight_append(path):
+    store = GraphHistoryStore(path)
+    store.append_record(_rec(0))
+    inner = store._append_handle
+    in_write, release = threading.Event(), threading.Event()
+    closed_while_writing = []
+
+    class Slow(_FlakyHandle):
+        def write(self, data):
+            in_write.set()
+            assert release.wait(5)
+            closed_while_writing.append(self._inner.closed)
+            return self._inner.write(data)
+
+    store._append_handle = Slow(inner)
+    appender = threading.Thread(target=store.append_record, args=(_rec(1),))
+    appender.start()
+    assert in_write.wait(5)
+    closer = threading.Thread(target=store.close)
+    closer.start()
+    closer.join(0.2)
+    assert closer.is_alive(), "close() must wait for the append's lock"
+    release.set()
+    appender.join(5)
+    closer.join(5)
+    assert closed_while_writing == [False]
+    assert inner.closed
+    assert _ids(path) == ["evt-0", "evt-1"]
+
+
+def test_close_swallows_an_oserror_from_handle_close(path):
+    store = GraphHistoryStore(path)
+    store.append_record(_rec(0))
+    inner = store._append_handle
+
+    class BadClose(_FlakyHandle):
+        def close(self):
+            self._inner.close()
+            raise OSError("flush on close failed")
+
+    store._append_handle = BadClose(inner)
+    store.close()
+    assert store._append_handle is None
+    store.append_record(_rec(1))
+    assert _ids(path) == ["evt-0", "evt-1"]
+    store.close()
+
+
+def test_compaction_failure_does_not_fail_the_append(path, monkeypatch):
+    store = GraphHistoryStore(path, max_events=5, compaction_interval=1)
+
+    def boom():
+        raise OSError("rename failed")
+
+    monkeypatch.setattr(store, "_compact_locked", boom)
+    store.append_record(_rec(0))
+    store.append_record(_rec(1))
+    assert _ids(path) == ["evt-0", "evt-1"]
+    store.close()

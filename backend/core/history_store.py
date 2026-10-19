@@ -235,9 +235,12 @@ class GraphHistoryStore:
         # Append handle kept open between records: a mutation that touches many
         # entities emits one record each, under the caller's storage lock, and
         # a mkdir plus open/close per record dominated that hold. The path the
-        # handle was opened for is remembered so a changed history_path reopens.
+        # handle is checked against the file at history_path before every append
+        # (see _handle_is_current), which also covers a changed history_path.
         self._append_handle: Optional[Any] = None
-        self._append_handle_path: Optional[Path] = None
+        # Set whenever a handle is opened fresh: the first write on it checks
+        # that the file ends on a newline (see _tail_is_torn).
+        self._verify_tail = False
 
     def close(self) -> None:
         """Release the append handle. Safe to call repeatedly; appends reopen."""
@@ -250,7 +253,6 @@ class GraphHistoryStore:
 
     def _close_append_handle(self) -> None:
         handle, self._append_handle = self._append_handle, None
-        self._append_handle_path = None
         if handle is not None:
             with contextlib.suppress(OSError):
                 handle.close()
@@ -263,7 +265,7 @@ class GraphHistoryStore:
         unlinked inode, so identity is checked before every append. One stat
         is far cheaper than the open it saves.
         """
-        if self._append_handle is None or self._append_handle_path != self.history_path:
+        if self._append_handle is None:
             return False
         try:
             on_disk = os.stat(self.history_path)
@@ -277,8 +279,30 @@ class GraphHistoryStore:
             self._close_append_handle()
             self.history_path.parent.mkdir(parents=True, exist_ok=True)
             self._append_handle = open(self.history_path, "a", encoding="utf-8")
-            self._append_handle_path = self.history_path
+            self._verify_tail = True
         return self._append_handle
+
+    def _tail_is_torn(self) -> bool:
+        """True when the sidecar is non-empty and does not end on a newline.
+
+        That is what a write that failed partway (ENOSPC, EFBIG) or a crash
+        mid-append leaves behind. Appending straight after it would glue the
+        next record onto the fragment and lose both. Unreadable counts as torn:
+        a spare newline is harmless, readers skip blank lines. Read through
+        os.open rather than open() so it is not mistaken for an append handle.
+        """
+        try:
+            fd = os.open(self.history_path, os.O_RDONLY)
+            try:
+                size = os.fstat(fd).st_size
+                if size == 0:
+                    return False
+                os.lseek(fd, size - 1, os.SEEK_SET)
+                return os.read(fd, 1) != b"\n"
+            finally:
+                os.close(fd)
+        except OSError:
+            return True
 
     @property
     def _compaction_interval(self) -> int:
@@ -320,8 +344,12 @@ class GraphHistoryStore:
             try:
                 _lock_file(f, exclusive=True)
                 try:
-                    f.write(line + "\n")
+                    # Checked under the OS lock so another process cannot
+                    # append between the check and the write.
+                    prefix = "\n" if self._verify_tail and self._tail_is_torn() else ""
+                    f.write(prefix + line + "\n")
                     f.flush()
+                    self._verify_tail = False
                 finally:
                     _unlock_file(f)
             except BaseException:
