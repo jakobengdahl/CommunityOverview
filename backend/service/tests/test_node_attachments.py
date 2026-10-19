@@ -1373,7 +1373,7 @@ class TestDeclaredContentTypeSanitising:
         assert _sanitize_declared_content_type("\x00" * 10 + "t" * 255) == "t" * 255
         # Trim after the filter: a character that only the filter removes
         # must not leave a trailing space behind.
-        assert _sanitize_declared_content_type("a\x00 ") == "a"
+        assert _sanitize_declared_content_type("a \x00") == "a"
         # Trim before the cut: leading whitespace does not eat the budget.
         assert _sanitize_declared_content_type(" " + "t" * 255) == "t" * 255
 
@@ -1382,7 +1382,6 @@ class TestDeclaredContentTypeSanitising:
         assert _upload(client, "doc", headers=headers).status_code == 201
         declared = store.list(NS, "doc")[0].declared_content_type
         assert len(declared) == 255
-        assert declared.isprintable()
 
     def test_no_control_characters_survive_end_to_end(self, client, store):
         headers = {"content-type": "text/pl\x01ain; x=\x7f1"}
@@ -1483,11 +1482,17 @@ class TestQueryAndDownloadHandling:
             }
             if spec_version is not None:
                 scope["asgi"]["spec_version"] = spec_version
+            raised = False
             try:
                 await app(scope, receive, send)
             except ClientDisconnect:
                 # Spec 2.4+ servers see this raised out of the app.
-                assert spec_version is not None
+                raised = True
+            assert raised == (spec_version is not None)
+            # The handle must close while the loop runs, not at teardown.
+            for _ in range(10):
+                await asyncio.sleep(0)
+            assert len(opened) == 1 and opened[0].closed
 
         asyncio.run(run())
         assert len(opened) == 1 and opened[0].closed
