@@ -22,7 +22,6 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Protocol, Tuple
 
-from pydantic import ValidationError as PydanticValidationError
 
 from backend.config import config_loader
 from backend.core.models import (
@@ -41,6 +40,7 @@ from backend.core.session_annotations import (
 from .graph_import import (
     ImportIssue,
     describe_invalid,
+    build_document_edge,
     build_document_nodes,
     check_document_edge_shape,
     read_document_lists,
@@ -769,12 +769,8 @@ class _Planner:
                 raw_edge, location, index, seen_edge_ids, self.rejected
             ):
                 continue
-            try:
-                edge = Edge.from_dict(dict(raw_edge))
-            except (PydanticValidationError, ValueError, TypeError) as exc:
-                self.rejected.append(
-                    ImportIssue(location, f"invalid edge: {describe_invalid(exc)}")
-                )
+            edge = build_document_edge(raw_edge, location, self.rejected)
+            if edge is None:
                 continue
             if self.rejected.total != errors_before:
                 continue

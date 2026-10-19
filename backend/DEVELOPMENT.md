@@ -781,6 +781,19 @@ Example — set one metadata key and remove another, only if the node is unchang
 }
 ```
 
+### Metadata nesting limit
+
+A node's or edge's `metadata` may nest at most 256 levels deep, counting the
+metadata object itself (`MAX_METADATA_DEPTH` in `backend/core/models.py`):
+deeper data could not be written to `graph.json` or read back from it. A write
+past it is refused and changes nothing — `POST /api/nodes` answers `400`,
+`PATCH /api/nodes/{id}` and `PATCH /api/edges/{id}` `404` (how they report
+every validation error), `POST /api/import` and `/api/import/archive` `422
+validation_failed` naming the entity, and a merge import lists the entity
+under the plan's `rejected`. A graph that already holds deeper metadata still
+loads and exports, and its nodes still take updates that leave `metadata`
+alone.
+
 ### Entity revisions
 
 Every node and edge a read returns carries `revision`: a server-owned stamp

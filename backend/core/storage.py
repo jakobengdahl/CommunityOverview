@@ -39,6 +39,7 @@ from .models import (
     DeleteNodesResult,
     DeleteEdgesResult,
     _parse_datetime,
+    metadata_depth_error,
 )
 from .embedding_sidecar import EmbeddingSidecarError, FileEmbeddingSidecar
 from .storage_backends import (
@@ -3669,6 +3670,12 @@ class GraphStorage:
                 validated = Node.from_dict(candidate)
             except Exception as exc:
                 raise ValueError(f"Invalid node update: {exc}") from exc
+            # Only when metadata is written: a node that already holds deeper
+            # metadata keeps taking updates to its other fields.
+            if "metadata" in updates or extra:
+                depth_error = metadata_depth_error(validated.metadata)
+                if depth_error:
+                    raise ValueError(f"Invalid node update: {depth_error}")
 
             undo = self._capture(node_ids=[node_id])
 
@@ -4080,6 +4087,10 @@ class GraphStorage:
                     candidate[key] = value
 
             validated_edge = Edge.from_dict(candidate)
+            if "metadata" in updates:
+                depth_error = metadata_depth_error(validated_edge.metadata)
+                if depth_error:
+                    raise ValueError(f"Invalid edge update: {depth_error}")
             self._validate_edge_applicability(validated_edge)
 
             undo = self._capture(edge_ids=[edge_id])
