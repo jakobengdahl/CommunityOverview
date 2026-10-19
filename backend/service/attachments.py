@@ -519,7 +519,7 @@ async def add_node_attachment(
     store = settings.store
     namespace = settings.namespace
     try:
-        records = store.list(namespace, node.id)
+        records = await asyncio.to_thread(store.list, namespace, node.id)
     except AttachmentIndexCorrupt:
         logger.exception("Attachment index unreadable for a node")
         return _index_corrupt()
