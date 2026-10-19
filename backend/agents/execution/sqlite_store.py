@@ -116,6 +116,7 @@ class SqliteExecutionStore:
         db_path: Union[str, Path],
         *,
         retry_policy: Optional[RetryPolicy] = None,
+        read_only: bool = False,
     ) -> None:
         self._retry = retry_policy or RetryPolicy()
         self.db_path = str(db_path)
@@ -123,6 +124,17 @@ class SqliteExecutionStore:
         # target is one process with worker threads (ADR 0001). check_same_thread
         # is disabled because worker threads share this connection under the lock.
         self._lock = threading.RLock()
+        if read_only:
+            # For a dry-run report: no WAL switch, no schema creation or
+            # migration, and any write statement is refused by SQLite.
+            self._conn = sqlite3.connect(
+                f"{Path(self.db_path).resolve().as_uri()}?mode=ro",
+                uri=True,
+                check_same_thread=False,
+            )
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+            return
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         # busy_timeout first so every later statement, including the migration's
