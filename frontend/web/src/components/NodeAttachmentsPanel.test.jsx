@@ -130,6 +130,17 @@ describe('NodeAttachmentsPanel unavailable storage', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it('remembers the signal when the answer arrives after the panel unmounted', async () => {
+    let answer;
+    fetchMock.mockReturnValueOnce(new Promise((resolve) => (answer = resolve)));
+    render(<NodeAttachmentsPanel nodeId="n1" typeAllowsAttachments />).unmount();
+    answer(unavailable());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    render(<NodeAttachmentsPanel nodeId="n2" typeAllowsAttachments />);
+    expect(screen.getByText(/^attachments\.errors\.attachments_unavailable/)).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('renders nothing for a type without the flag on a server without storage', async () => {
     fetchMock.mockResolvedValueOnce(unavailable());
     const { container } = render(
