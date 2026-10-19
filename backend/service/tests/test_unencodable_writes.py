@@ -8,9 +8,9 @@ to persist in the background, and was lost at the next restart together with
 every later write while the node existed. It is now written as a \\u escape,
 which reads back as the same string.
 
-Metadata nested past what json's encoder and decoder recurse through cannot
-be stored or read back at all, so it is refused where a write enters, far
-above realistic depths (MAX_METADATA_DEPTH).
+Metadata nested close to where json's encoder and decoder stop recursing
+cannot reliably be stored and read back, so it is refused where a write
+enters, far above realistic depths (MAX_METADATA_DEPTH).
 
 "Restart" below means a second storage opened over the same files after the
 write queue drained, without a flush: what a crash right after the response
@@ -28,7 +28,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from backend.agents.execution import InMemoryExecutionStore
-from backend.core import GraphStorage, Node, NodeType
+from backend.core import Edge, GraphStorage, Node, NodeType
 from backend.core.embedding_sidecar import parse_sidecar_bytes, serialize_sidecar_bytes
 from backend.core.models import MAX_METADATA_DEPTH
 from backend.service import GraphService, create_rest_router, import_service
@@ -38,13 +38,37 @@ SURROGATE_ID = f"x{SURROGATE}"
 
 
 def _nested(levels: int) -> dict:
-    """Metadata `levels` objects deep, counting the outermost."""
+    """Metadata nesting `levels` objects below itself."""
     root: dict = {}
     current = root
-    for _ in range(levels - 1):
+    for _ in range(levels):
         current["a"] = {}
         current = current["a"]
     return root
+
+
+def _nested_lists(levels: int) -> list:
+    root: list = []
+    current = root
+    for _ in range(levels - 1):
+        current.append([])
+        current = current[0]
+    return root
+
+
+def _archive(document: Dict[str, Any]) -> bytes:
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("graph.json", json.dumps(document))
+    return archive.getvalue()
+
+
+def _merge(client, document: Dict[str, Any]):
+    body = {"document": document, "policy": {"default": "overwrite"}}
+    preview = _send(client, "POST", "/api/import/merge/preview", body)
+    assert preview.status_code == 200, preview.text
+    digest = preview.json()["plan_digest"]
+    return _send(client, "POST", "/api/import/merge", {**body, "plan_digest": digest})
 
 
 @pytest.fixture(autouse=True)
@@ -119,9 +143,7 @@ class TestLoneSurrogatesAreDurable:
 
         assert _restarted(storage, path).nodes["m"].metadata == metadata
 
-    def test_writes_after_a_surrogate_node_are_durable_too(
-        self, client, storage, path
-    ):
+    def test_writes_after_a_surrogate_node_are_durable_too(self, client, storage, path):
         assert _add(client, _actor(SURROGATE_ID)).status_code == 200
         assert _add(client, _actor("later")).status_code == 200
         response = _send(
@@ -165,15 +187,24 @@ class TestLoneSurrogatesAreDurable:
         restarted = _restarted(storage, path)
         assert restarted.nodes[SURROGATE_ID].metadata == {"n": SURROGATE}
 
+    def test_a_large_graph_whose_surrogate_comes_last_is_saved_whole(
+        self, client, storage, path
+    ):
+        # The snapshot falls back after earlier nodes are already on disk.
+        nodes = [_actor(f"n{i}", description="x" * 500) for i in range(100)]
+        document = {"nodes": [*nodes, _actor(SURROGATE_ID)]}
+        response = _send(client, "POST", "/api/import", document)
+        assert response.status_code == 200, response.text
+
+        assert len(GraphStorage(json_path=str(path)).nodes) == 101
+
     def test_an_archive_import_with_a_surrogate_survives_a_restart(
         self, client, storage, path
     ):
-        archive = io.BytesIO()
-        with zipfile.ZipFile(archive, "w") as zf:
-            zf.writestr("graph.json", json.dumps({"nodes": [_actor(SURROGATE_ID)]}))
+        archive = _archive({"nodes": [_actor(SURROGATE_ID)]})
         response = client.post(
             "/api/import/archive",
-            files={"file": ("g.zip", archive.getvalue(), "application/zip")},
+            files={"file": ("g.zip", archive, "application/zip")},
         )
         assert response.status_code == 200, response.text
 
@@ -182,16 +213,8 @@ class TestLoneSurrogatesAreDurable:
     def test_a_merge_import_with_a_surrogate_survives_a_restart(
         self, client, storage, path
     ):
-        body = {
-            "document": {"nodes": [_actor(SURROGATE_ID, metadata={"n": SURROGATE})]},
-            "policy": {"default": "overwrite"},
-        }
-        preview = _send(client, "POST", "/api/import/merge/preview", body)
-        assert preview.status_code == 200, preview.text
-        digest = preview.json()["plan_digest"]
-        response = _send(
-            client, "POST", "/api/import/merge", {**body, "plan_digest": digest}
-        )
+        document = {"nodes": [_actor(SURROGATE_ID, metadata={"n": SURROGATE})]}
+        response = _merge(client, document)
         assert response.status_code == 200, response.text
 
         restarted = _restarted(storage, path)
@@ -238,9 +261,13 @@ class TestStoredSurrogatesStayUsable:
 
 def test_ordinary_text_is_still_written_as_utf8(client, storage, path):
     assert _add(client, _actor("se", metadata={"ort": "Malmö"})).status_code == 200
+    storage._io_executor.submit(lambda: None).result()
+    journal = storage._persistence_backend.journal_path.read_bytes()
+    history = path.with_name("graph.history.ndjson").read_bytes()
     storage.flush()
 
-    assert "Malmö" in path.read_text(encoding="utf-8")
+    for written in (journal, history, path.read_bytes()):
+        assert "Malmö".encode("utf-8") in written
 
 
 def test_the_embedding_sidecar_round_trips_a_surrogate_id():
@@ -307,6 +334,25 @@ class TestDeepMetadata:
         assert "nests deeper" in response.json()["detail"]
         assert _restarted(storage, path).nodes["u"].metadata == {"keep": 1}
 
+    def test_an_update_through_a_folded_extra_field_is_refused(self, client, storage):
+        assert _add(client, _actor("u")).status_code == 200
+        response = _send(
+            client,
+            "PATCH",
+            "/api/nodes/u",
+            {"updates": {"extra": _nested(MAX_METADATA_DEPTH)}},
+        )
+
+        assert response.status_code == 404
+        assert storage.nodes["u"].metadata == {}
+
+    def test_nesting_through_lists_counts_too(self, client, storage):
+        at_cap = _actor("ok", metadata={"l": _nested_lists(MAX_METADATA_DEPTH)})
+        past = _actor("no", metadata={"l": _nested_lists(MAX_METADATA_DEPTH + 1)})
+
+        assert _add(client, at_cap).status_code == 200
+        assert _add(client, past).status_code == 400
+
     def test_an_edge_update_past_the_cap_is_refused(self, client, storage):
         edge = {"id": "e", "source": "a", "target": "b"}
         assert _add(client, _actor("a"), _actor("b"), edges=[edge]).status_code == 200
@@ -349,21 +395,42 @@ class TestDeepMetadata:
         assert response.json()["detail"]["errors"][0]["location"] == "edges[0]"
         assert not storage.nodes
 
-    def test_a_merge_import_past_the_cap_is_rejected_by_the_plan(
+    def test_an_archive_import_past_the_cap_is_refused(self, client, storage):
+        archive = _archive(
+            {"nodes": [_actor("d", metadata=_nested(MAX_METADATA_DEPTH + 1))]}
+        )
+        response = client.post(
+            "/api/import/archive",
+            files={"file": ("g.zip", archive, "application/zip")},
+        )
+
+        assert response.status_code == 422
+        assert response.json()["detail"]["error_code"] == "validation_failed"
+        assert not storage.nodes
+
+    def test_a_merge_import_with_a_deep_edge_is_rejected_by_the_plan(
         self, client, storage
     ):
-        body = {
-            "document": {
-                "nodes": [_actor("d", metadata=_nested(MAX_METADATA_DEPTH + 1))]
-            },
-            "policy": {"default": "overwrite"},
+        document = {
+            "nodes": [_actor("a"), _actor("b")],
+            "edges": [
+                {
+                    "id": "e",
+                    "source": "a",
+                    "target": "b",
+                    "metadata": _nested(MAX_METADATA_DEPTH + 1),
+                }
+            ],
         }
-        preview = _send(client, "POST", "/api/import/merge/preview", body)
-        assert preview.status_code == 200, preview.text
-        digest = preview.json()["plan_digest"]
-        response = _send(
-            client, "POST", "/api/import/merge", {**body, "plan_digest": digest}
-        )
+        response = _merge(client, document)
+
+        assert response.status_code == 422
+        assert response.json()["detail"]["error_code"] == "import_merge_blocked"
+        assert not storage.nodes and not storage.edges
+
+    def test_a_merge_import_past_the_cap_is_rejected_by_the_plan(self, client, storage):
+        document = {"nodes": [_actor("d", metadata=_nested(MAX_METADATA_DEPTH + 1))]}
+        response = _merge(client, document)
 
         assert response.status_code == 422
         assert response.json()["detail"]["error_code"] == "import_merge_blocked"
@@ -376,9 +443,19 @@ class TestStoredDeepMetadataStaysUsable:
     @pytest.fixture
     def path(self, tmp_path) -> Path:
         path = tmp_path / "graph.json"
+        deep = _nested(MAX_METADATA_DEPTH + 10)
         node = Node(id="deep", type=NodeType.ACTOR, name="Deep")
-        node.metadata = _nested(MAX_METADATA_DEPTH + 10)
-        path.write_text(json.dumps({"nodes": [node.to_dict()], "edges": []}))
+        node.metadata = deep
+        other = Node(id="other", type=NodeType.ACTOR, name="Other")
+        edge = Edge(id="e", source="deep", target="other", metadata=deep)
+        path.write_text(
+            json.dumps(
+                {
+                    "nodes": [node.to_dict(), other.to_dict()],
+                    "edges": [edge.to_dict()],
+                }
+            )
+        )
         return path
 
     def test_it_loads_exports_and_takes_a_rename(self, client, storage, path):
@@ -391,3 +468,11 @@ class TestStoredDeepMetadataStaysUsable:
         restarted = _restarted(storage, path)
         assert restarted.nodes["deep"].name == "Renamed"
         assert restarted.nodes["deep"].metadata == _nested(MAX_METADATA_DEPTH + 10)
+
+    def test_its_edge_takes_a_label_change(self, client, storage, path):
+        response = _send(
+            client, "PATCH", "/api/edges/e", {"updates": {"label": "Relabelled"}}
+        )
+        assert response.status_code == 200
+
+        assert _restarted(storage, path).edges["e"].label == "Relabelled"

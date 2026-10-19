@@ -173,19 +173,21 @@ FIELD_LIMITS = {"name": 200, "description": 2000, "summary": 300}
 LIST_FIELD_TOTAL_LIMIT = 2000  # total characters across all tags / all aliases
 LIST_FIELD_ITEM_LIMIT = 200  # per individual tag / alias
 
-# How deeply metadata may nest, counting the metadata object itself. json's C
-# encoder and decoder recurse per level and give up near the interpreter's
-# recursion limit (about a thousand levels on Python 3.11), and graph.json,
-# a journal line and a history record each wrap an entity a few levels deeper
-# than the request that carried it. Far above realistic metadata, far below
-# that limit. Enforced where a write enters (the mutation layer, imports),
-# not on the model, so a graph that already holds deeper data still loads.
-MAX_METADATA_DEPTH = 256
+# How many levels metadata may nest below the metadata object itself. json's
+# C encoder and decoder recurse per level and give up near the interpreter's
+# recursion limit (1000 on Python 3.11, shared with the caller's own stack),
+# and graph.json, a journal line and a history record each wrap an entity a
+# few levels deeper than the request that carried it, so deeper data could be
+# acknowledged and then not written, or written and then not read back at the
+# next start. 800 is the deepest a REST write was already promised to take.
+# Enforced where a write enters (the mutation layer, imports), not on the
+# model, so a graph that already holds deeper data still loads.
+MAX_METADATA_DEPTH = 800
 
 
 def metadata_depth_error(metadata: Any) -> Optional[str]:
     """Why ``metadata`` is too deeply nested to store, or None if it is not."""
-    stack = [(metadata, 1)]
+    stack = [(metadata, 0)]
     while stack:
         value, depth = stack.pop()
         if isinstance(value, dict):
