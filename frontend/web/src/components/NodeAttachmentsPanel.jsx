@@ -22,6 +22,17 @@ const KNOWN_ERRORS = new Set([
 
 const FEDERATED_PREFIX = 'federated::';
 
+// Set once a list request is answered 503 attachments_unavailable, so later
+// dialogs on the same server skip the request (and its console error). Nothing
+// can be stored there, so the "already has files" gate of ADR 0008 sec 12 has
+// nothing to find; a server that gains storage is picked up on page reload.
+let attachmentsKnownUnavailable = false;
+
+/** Forget the known-unavailable signal (tests). */
+export function resetAttachmentsAvailability() {
+  attachmentsKnownUnavailable = false;
+}
+
 function formatBytes(bytes, language) {
   const steps = [
     ['byte', 1],
@@ -61,7 +72,10 @@ function NodeAttachmentsPanel({ nodeId, typeAllowsAttachments }) {
   const { t, language } = useI18n();
   const federated = typeof nodeId === 'string' && nodeId.startsWith(FEDERATED_PREFIX);
   const [listing, setListing] = useState(null);
-  const [loadFailed, setLoadFailed] = useState(false);
+  // Error code of a failed list ('' when the server gave none), else null.
+  const [loadError, setLoadError] = useState(() =>
+    attachmentsKnownUnavailable ? 'attachments_unavailable' : null
+  );
   const [actionError, setActionError] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [confirmingId, setConfirmingId] = useState(null);
@@ -69,17 +83,25 @@ function NodeAttachmentsPanel({ nodeId, typeAllowsAttachments }) {
   // re-enables nor closes another row's confirmation.
   const [pendingDeletes, setPendingDeletes] = useState(() => new Set());
   const fileInputRef = useRef(null);
+  const confirmCancelRef = useRef(null);
 
   useEffect(() => {
-    if (federated || !nodeId) return undefined;
+    // The Delete button unmounts when the prompt opens, which would drop
+    // keyboard focus to the page body; Cancel is the safe default.
+    if (confirmingId) confirmCancelRef.current?.focus();
+  }, [confirmingId]);
+
+  useEffect(() => {
+    if (federated || !nodeId || attachmentsKnownUnavailable) return undefined;
     // The dialog keys this panel by node id, so state starts fresh per node.
     let active = true;
     listNodeAttachments(nodeId)
       .then((result) => {
         if (active) setListing(result);
       })
-      .catch(() => {
-        if (active) setLoadFailed(true);
+      .catch((err) => {
+        if (err?.code === 'attachments_unavailable') attachmentsKnownUnavailable = true;
+        if (active) setLoadError(err?.code || '');
       });
     return () => {
       active = false;
@@ -152,8 +174,14 @@ function NodeAttachmentsPanel({ nodeId, typeAllowsAttachments }) {
     <div className="node-detail-section node-attachments" data-testid="node-attachments">
       <label>{t('attachments.title')}</label>
 
-      {loadFailed && <p className="node-attachments-error">{t('attachments.load_error')}</p>}
-      {!listing && !loadFailed && (
+      {loadError !== null && (
+        <p className="node-attachments-error">
+          {loadError === 'attachments_unavailable'
+            ? messageFor(loadError)
+            : t('attachments.load_error')}
+        </p>
+      )}
+      {!listing && loadError === null && (
         <p className="node-attachments-muted">{t('attachments.loading')}</p>
       )}
       {listing && attachments.length === 0 && (
@@ -192,6 +220,7 @@ function NodeAttachmentsPanel({ nodeId, typeAllowsAttachments }) {
                   <button
                     type="button"
                     className="secondary"
+                    ref={confirmingId === a.id ? confirmCancelRef : null}
                     disabled={pendingDeletes.has(a.id)}
                     onClick={() => setConfirmingId(null)}
                   >
