@@ -334,6 +334,10 @@ def test_abandon_survives_restart(tmp_path):
 class _LockedOnWalSwitch:
     """Connection proxy whose first WAL switches fail as a contended one does."""
 
+    # A loop that never reads the clock would otherwise spin until the pytest
+    # timeout; the tests using this proxy need about 60 attempts at most.
+    MAX_ATTEMPTS = 100_000
+
     def __init__(self, conn, failures):
         self._conn = conn
         self.failures = failures
@@ -342,6 +346,9 @@ class _LockedOnWalSwitch:
     def execute(self, sql, *args):
         if sql == "PRAGMA journal_mode=WAL":
             self.attempts += 1
+            assert self.attempts <= self.MAX_ATTEMPTS, (
+                "WAL switch retry loop did not give up"
+            )
             if self.attempts <= self.failures:
                 raise sqlite3.OperationalError("database is locked")
         return self._conn.execute(sql, *args)
@@ -414,8 +421,11 @@ def test_wal_switch_gives_up_after_the_busy_timeout(tmp_path, monkeypatch):
     monkeypatch.setattr(sqlite_store, "_BUSY_TIMEOUT_MS", 300)
     with pytest.raises(sqlite3.OperationalError, match="locked"):
         SqliteExecutionStore(tmp_path / "execution.db")
-    slack = max(clock.sleeps) + 10 * _VirtualClock.TICK
-    assert 0.3 <= clock.now <= 0.3 + slack
+    slack = max(clock.sleeps, default=0) + 10 * _VirtualClock.TICK
+    assert 0.3 <= clock.now <= 0.3 + slack, (
+        f"gave up at {clock.now:.4f}s virtual time, expected 0.3s plus one "
+        f"sleep ({len(clock.sleeps)} sleeps)"
+    )
 
 
 def test_wal_switch_backs_off_between_retries(tmp_path, monkeypatch):
