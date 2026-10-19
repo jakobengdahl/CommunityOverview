@@ -10,6 +10,7 @@ import json
 import os
 
 import pytest
+from starlette.requests import ClientDisconnect
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -1370,11 +1371,23 @@ class TestDeclaredContentTypeSanitising:
         assert _sanitize_declared_content_type(None) == ""
         # Filtered first, then cut: control characters do not eat the budget.
         assert _sanitize_declared_content_type("\x00" * 10 + "t" * 255) == "t" * 255
+        # Trim after the filter: a character that only the filter removes
+        # must not leave a trailing space behind.
+        assert _sanitize_declared_content_type("a \x00") == "a"
+        # Trim before the cut: leading whitespace does not eat the budget.
+        assert _sanitize_declared_content_type(" " + "t" * 255) == "t" * 255
 
     def test_the_stored_declared_type_is_the_sanitised_one(self, client, store):
         headers = {"content-type": "text/plain; x=" + "a" * 400}
         assert _upload(client, "doc", headers=headers).status_code == 201
-        assert len(store.list(NS, "doc")[0].declared_content_type) == 255
+        declared = store.list(NS, "doc")[0].declared_content_type
+        assert len(declared) == 255
+
+    def test_no_control_characters_survive_end_to_end(self, client, store):
+        headers = {"content-type": "text/pl\x01ain; x=\x7f1"}
+        assert _upload(client, "doc", headers=headers).status_code == 201
+        declared = store.list(NS, "doc")[0].declared_content_type
+        assert declared and declared.isprintable()
 
 
 class TestFilenameByteBoundary:
@@ -1415,8 +1428,9 @@ class TestQueryAndDownloadHandling:
         assert response.content == b"payload"
         assert len(opened) == 1 and opened[0].closed
 
+    @pytest.mark.parametrize("spec_version", [None, "2.4"])
     def test_download_closes_the_handle_when_the_client_disconnects(
-        self, storage, store
+        self, storage, store, spec_version
     ):
         record = _seed(store, "doc", b"x" * 90)
         opened = []
@@ -1448,6 +1462,9 @@ class TestQueryAndDownloadHandling:
                     sent_start.set()
                     # Stall the body so the disconnect arrives mid-stream.
                     await asyncio.sleep(0.2)
+                elif spec_version is not None:
+                    # ASGI spec 2.4+: a send to a gone client raises.
+                    raise OSError("client disconnected")
 
             scope = {
                 "type": "http",
@@ -1463,7 +1480,19 @@ class TestQueryAndDownloadHandling:
                 "client": ("127.0.0.1", 1),
                 "server": ("test", 80),
             }
-            await app(scope, receive, send)
+            if spec_version is not None:
+                scope["asgi"]["spec_version"] = spec_version
+            raised = False
+            try:
+                await app(scope, receive, send)
+            except ClientDisconnect:
+                # Spec 2.4+ servers see this raised out of the app.
+                raised = True
+            assert raised == (spec_version is not None)
+            # The handle must close while the loop runs, not at teardown.
+            for _ in range(10):
+                await asyncio.sleep(0)
+            assert len(opened) == 1 and opened[0].closed
 
         asyncio.run(run())
         assert len(opened) == 1 and opened[0].closed
@@ -1529,6 +1558,47 @@ class TestStoreCallsRunOffTheEventLoop:
         self._run(storage, store, scenario)
         assert set(threads) == {"list", "get_record", "open_read", "delete"}
         assert all(ident != loop_thread for ident in threads.values()), threads
+
+    def test_upload_does_not_run_the_index_read_on_the_loop(self, storage, store):
+        import threading
+
+        threads = {}
+        self._tracking_store(store, threads)
+        loop_thread = threading.get_ident()
+
+        async def scenario(http):
+            response = await http.post(
+                "/api/nodes/doc/attachments",
+                params={"filename": "a.txt"},
+                content=b"hello",
+            )
+            assert response.status_code == 201
+
+        self._run(storage, store, scenario)
+        assert threads["list"] != loop_thread, threads
+
+    def test_upload_over_an_unreadable_index_is_refused_and_stages_nothing(
+        self, storage, store
+    ):
+        from backend.core.attachment_store import AttachmentIndexCorrupt
+
+        def corrupt(*args):
+            raise AttachmentIndexCorrupt("unreadable")
+
+        store.list = corrupt
+        staged = []
+        real_stage = store.stage
+
+        async def tracking_stage(*args):
+            staged.append(args)
+            return await real_stage(*args)
+
+        store.stage = tracking_stage
+        client = _client(GraphService(storage, attachment_settings=_settings(store)))
+        response = _upload(client, "doc")
+        assert "attachment_index_corrupt" in response.text
+        assert response.status_code != 201
+        assert staged == []
 
     def test_type_sniffing_runs_off_the_loop(self, storage, store, monkeypatch):
         import threading
