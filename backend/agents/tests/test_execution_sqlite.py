@@ -335,7 +335,7 @@ class _LockedOnWalSwitch:
     """Connection proxy whose first WAL switches fail as a contended one does."""
 
     # A loop that never reads the clock would otherwise spin until the pytest
-    # timeout; real runs need a few dozen attempts at most.
+    # timeout; the tests using this proxy need about 60 attempts at most.
     MAX_ATTEMPTS = 100_000
 
     def __init__(self, conn, failures):
