@@ -23,11 +23,12 @@ import os
 import sys
 import tempfile
 import threading
+import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, TYPE_CHECKING
 
-from .storage_backends import _lock_file, _unlock_file
+from .storage_backends import _lock_file, _unlock_file, dumps_storable
 
 if TYPE_CHECKING:
     from .events.models import Event
@@ -184,6 +185,12 @@ def event_to_history_record(event: "Event") -> Dict[str, Any]:
     }
 
 
+# Windows refuses to rename over, or delete, a file another process holds open
+# (no FILE_SHARE_DELETE), so a handle kept between appends would stall another
+# process's compaction there. The directory is still created once per open.
+_RELEASE_HANDLE_AFTER_APPEND = sys.platform == "win32"
+
+
 class GraphHistoryStore:
     """Append-only NDJSON history sidecar for graph mutations.
 
@@ -226,6 +233,80 @@ class GraphHistoryStore:
         self._records_after_last_pass: Optional[int] = None
         self._appends_since_compaction = 0
 
+        # Append handle kept open between records: a mutation that touches many
+        # entities emits one record each, under the caller's storage lock, and
+        # a mkdir plus open/close per record dominated that hold. The handle
+        # is checked against the file at history_path before every append (see
+        # _handle_is_current), which also covers a changed history_path.
+        self._append_handle: Optional[Any] = None
+        # Size the file had when our last write finished, None on a fresh
+        # handle. Any other size under the lock means someone else wrote (a
+        # second process, or a failed write of ours), so the tail is checked
+        # for a torn line before appending (see _tail_is_torn).
+        self._size_after_append: Optional[int] = None
+
+    def close(self) -> None:
+        """Release the append handle. Safe to call repeatedly; appends reopen."""
+        with self._lock:
+            self._close_append_handle()
+
+    def __del__(self) -> None:
+        with contextlib.suppress(Exception):
+            self._close_append_handle()
+
+    def _close_append_handle(self) -> None:
+        handle, self._append_handle = self._append_handle, None
+        if handle is not None:
+            with contextlib.suppress(OSError):
+                handle.close()
+
+    def _handle_is_current(self) -> bool:
+        """True while the open handle is still the file at ``history_path``.
+
+        Compaction (here or in another process) replaces the file by rename and
+        an operator may delete it; either leaves the handle writing to an
+        unlinked inode, so identity is checked before every append. One stat
+        is far cheaper than the open it saves.
+        """
+        if self._append_handle is None:
+            return False
+        try:
+            on_disk = os.stat(self.history_path)
+            held = os.fstat(self._append_handle.fileno())
+        except (OSError, ValueError):
+            return False
+        return (on_disk.st_dev, on_disk.st_ino) == (held.st_dev, held.st_ino)
+
+    def _open_append_handle(self) -> Any:
+        if not self._handle_is_current():
+            self._close_append_handle()
+            self.history_path.parent.mkdir(parents=True, exist_ok=True)
+            self._append_handle = open(self.history_path, "a", encoding="utf-8")
+            self._size_after_append = None
+        return self._append_handle
+
+    def _tail_is_torn(self) -> bool:
+        """True when the sidecar is non-empty and does not end on a newline.
+
+        That is what a write that failed partway (ENOSPC, EFBIG) or a crash
+        mid-append leaves behind. Appending straight after it would glue the
+        next record onto the fragment and lose both. Unreadable counts as torn:
+        a spare newline is harmless, readers skip blank lines. Read through
+        os.open rather than open() so it is not mistaken for an append handle.
+        """
+        try:
+            fd = os.open(self.history_path, os.O_RDONLY)
+            try:
+                size = os.fstat(fd).st_size
+                if size == 0:
+                    return False
+                os.lseek(fd, size - 1, os.SEEK_SET)
+                return os.read(fd, 1) != b"\n"
+            finally:
+                os.close(fd)
+        except OSError:
+            return True
+
     @property
     def _compaction_interval(self) -> int:
         """Appends between compaction passes.
@@ -260,16 +341,45 @@ class GraphHistoryStore:
 
     def append_record(self, record: Dict[str, Any]) -> None:
         """Append a single pre-built record as one NDJSON line."""
-        line = json.dumps(record, ensure_ascii=False)
+        line = dumps_storable(record)
         with self._lock:
-            self.history_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.history_path, "a", encoding="utf-8") as f:
+            f = self._open_append_handle()
+            try:
                 _lock_file(f, exclusive=True)
+                guard = None
                 try:
-                    f.write(line + "\n")
+                    # Checked under the OS lock so another process cannot
+                    # append between the check and the write.
+                    unchanged = os.fstat(f.fileno()).st_size == self._size_after_append
+                    prefix = "\n" if not unchanged and self._tail_is_torn() else ""
+                    f.write(prefix + line + "\n")
                     f.flush()
+                    self._size_after_append = os.fstat(f.fileno()).st_size
+                except BaseException:
+                    # Close while still locked: close() flushes whatever the
+                    # failed write left in the buffer, and that late flush
+                    # must not land after another writer has taken the lock.
+                    # A dup keeps the lock held across the close and lets it
+                    # be released explicitly: closing alone would not release
+                    # it while a forked child shares the open file description.
+                    with contextlib.suppress(OSError, ValueError):
+                        guard = os.dup(f.fileno())
+                    self._close_append_handle()
+                    raise
                 finally:
-                    _unlock_file(f)
+                    if guard is not None:
+                        with contextlib.suppress(OSError, ValueError):
+                            _unlock_file(types.SimpleNamespace(fileno=lambda: guard))
+                        with contextlib.suppress(OSError):
+                            os.close(guard)
+                    elif not f.closed:
+                        _unlock_file(f)
+            except BaseException:
+                # Do not reuse a handle that failed mid-write.
+                self._close_append_handle()
+                raise
+            if _RELEASE_HANDLE_AFTER_APPEND:
+                self._close_append_handle()
 
             if self._retention_enabled:
                 self._appends_since_compaction += 1
@@ -358,6 +468,10 @@ class GraphHistoryStore:
         self._appends_since_compaction = 0
         if not self.history_path.exists():
             return
+
+        # The rewrite renames over the sidecar; a held handle would keep
+        # pointing at the old file (and blocks the rename on Windows).
+        self._close_append_handle()
 
         cutoff = None
         if self.max_age_days is not None:

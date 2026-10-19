@@ -8,6 +8,7 @@ one property the in-memory adapter cannot: state survives a process restart
 (reopening the same database file recovers every job and its state).
 """
 
+import sqlite3
 from datetime import timedelta
 
 import pytest
@@ -19,6 +20,7 @@ from backend.agents.execution.models import (
     ExecutionState,
     RetryPolicy,
 )
+from backend.agents.execution import sqlite_store
 from backend.agents.execution.sqlite_store import SqliteExecutionStore, _to_epoch
 from backend.agents.execution.store import ExecutionStore
 from backend.agents.tests._sql_recording import RecordingConn, only_statement
@@ -327,3 +329,250 @@ def test_abandon_survives_restart(tmp_path):
         assert out.dead_letter_reason == ABANDONED_REASON
     finally:
         reopened.close()
+
+
+class _LockedOnWalSwitch:
+    """Connection proxy whose first WAL switches fail as a contended one does."""
+
+    # A loop that never reads the clock would otherwise spin until the pytest
+    # timeout; the tests using this proxy need about 60 attempts at most.
+    MAX_ATTEMPTS = 100_000
+
+    def __init__(self, conn, failures):
+        self._conn = conn
+        self.failures = failures
+        self.attempts = 0
+
+    def execute(self, sql, *args):
+        if sql == "PRAGMA journal_mode=WAL":
+            self.attempts += 1
+            assert self.attempts <= self.MAX_ATTEMPTS, (
+                "WAL switch retry loop did not give up"
+            )
+            if self.attempts <= self.failures:
+                raise sqlite3.OperationalError("database is locked")
+        return self._conn.execute(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def __setattr__(self, name, value):
+        if name in ("_conn", "failures", "attempts"):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._conn, name, value)
+
+
+def _patch_connect(monkeypatch, failures):
+    proxies = []
+    real_connect = sqlite3.connect
+
+    def connect(*args, **kwargs):
+        proxy = _LockedOnWalSwitch(real_connect(*args, **kwargs), failures)
+        proxies.append(proxy)
+        return proxy
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    return proxies
+
+
+def test_wal_switch_retries_when_the_file_is_locked(tmp_path, monkeypatch):
+    """A locked WAL switch on a fresh file is retried, not raised."""
+    proxies = _patch_connect(monkeypatch, failures=3)
+    store = SqliteExecutionStore(tmp_path / "execution.db")
+    try:
+        assert proxies[0].attempts == 4
+        mode = store._conn.execute("PRAGMA journal_mode").fetchone()[0]
+        assert mode == "wal"
+    finally:
+        store.close()
+
+
+class _VirtualClock:
+    """Stand-in for ``time`` in the store: sleeping advances a virtual clock.
+
+    Every ``monotonic`` read also ticks the clock, so a loop that never sleeps
+    still reaches its deadline instead of hanging the test.
+    """
+
+    TICK = 0.0001
+
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = []
+
+    def monotonic(self):
+        self.now += self.TICK
+        assert self.now < 60, "retry loop did not terminate"
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def test_wal_switch_gives_up_after_the_busy_timeout(tmp_path, monkeypatch):
+    """A switch that stays locked surfaces once the busy timeout has passed."""
+    _patch_connect(monkeypatch, failures=10**9)
+    clock = _VirtualClock()
+    monkeypatch.setattr(sqlite_store, "time", clock)
+    # Neither the old 50 ms value nor the 5 s default: only the constant can
+    # explain a give-up time near 0.3 s.
+    monkeypatch.setattr(sqlite_store, "_BUSY_TIMEOUT_MS", 300)
+    with pytest.raises(sqlite3.OperationalError, match="locked"):
+        SqliteExecutionStore(tmp_path / "execution.db")
+    slack = max(clock.sleeps, default=0) + 10 * _VirtualClock.TICK
+    assert 0.3 <= clock.now <= 0.3 + slack, (
+        f"gave up at {clock.now:.4f}s virtual time, expected 0.3s plus one "
+        f"sleep ({len(clock.sleeps)} sleeps)"
+    )
+
+
+def test_wal_switch_backs_off_between_retries(tmp_path, monkeypatch):
+    """Retries sleep briefly: no busy spin, no sleep that eats the budget."""
+    _patch_connect(monkeypatch, failures=10**9)
+    clock = _VirtualClock()
+    monkeypatch.setattr(sqlite_store, "time", clock)
+    monkeypatch.setattr(sqlite_store, "_BUSY_TIMEOUT_MS", 300)
+    with pytest.raises(sqlite3.OperationalError, match="locked"):
+        SqliteExecutionStore(tmp_path / "execution.db")
+    # A busy spin would sleep never; a long sleep would leave only a few tries.
+    assert len(clock.sleeps) >= 10
+    assert all(0 < s <= 0.05 for s in clock.sleeps)
+
+
+def test_wal_switch_does_not_retry_other_errors(tmp_path, monkeypatch):
+    """Only lock contention is retried; any other failure surfaces at once."""
+    attempts = []
+    real_connect = sqlite3.connect
+
+    class Failing(_LockedOnWalSwitch):
+        def execute(self, sql, *args):
+            if sql == "PRAGMA journal_mode=WAL":
+                attempts.append(sql)
+                raise sqlite3.OperationalError("disk I/O error")
+            return self._conn.execute(sql, *args)
+
+    monkeypatch.setattr(
+        sqlite3, "connect", lambda *a, **k: Failing(real_connect(*a, **k), 0)
+    )
+    with pytest.raises(sqlite3.OperationalError, match="disk I/O"):
+        SqliteExecutionStore(tmp_path / "execution.db")
+    assert len(attempts) == 1
+
+
+def test_concurrent_first_opens_of_a_fresh_file_all_succeed(tmp_path):
+    """Several stores opening one brand-new (non-WAL) file at once all succeed."""
+    import threading
+
+    errors, stores = [], []
+    for round_no in range(10):
+        db = tmp_path / f"fresh-{round_no}.db"
+        barrier = threading.Barrier(8)
+
+        def open_store():
+            barrier.wait()
+            try:
+                stores.append(SqliteExecutionStore(db))
+            except Exception as exc:  # pragma: no cover - the failure being tested
+                errors.append(exc)
+
+        threads = [threading.Thread(target=open_store) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    for s in stores:
+        s.close()
+    assert errors == []
+    assert len(stores) == 80
+
+
+def test_busy_timeout_is_set_before_the_wal_switch_and_the_migration(
+    tmp_path, monkeypatch
+):
+    """The wait budget must apply to every statement a concurrent opener can block."""
+    statements = []
+    real_connect = sqlite3.connect
+
+    class Recording(RecordingConn):
+        def __init__(self, conn):
+            super().__init__(conn)
+            self.statements = statements
+
+        def __setattr__(self, name, value):
+            if name in ("_conn", "statements"):
+                object.__setattr__(self, name, value)
+            else:
+                setattr(self._conn, name, value)
+
+    monkeypatch.setattr(
+        sqlite3, "connect", lambda *a, **k: Recording(real_connect(*a, **k))
+    )
+    SqliteExecutionStore(tmp_path / "execution.db").close()
+    sql = [s.strip() for s, _ in statements]
+    busy = sql.index(f"PRAGMA busy_timeout={sqlite_store._BUSY_TIMEOUT_MS}")
+    assert busy < sql.index("PRAGMA journal_mode=WAL")
+    assert busy < sql.index("BEGIN IMMEDIATE")
+
+
+def test_failed_migration_rolls_back_and_the_next_open_succeeds(tmp_path, monkeypatch):
+    db = tmp_path / "execution.db"
+    _v1_file(db)
+    monkeypatch.setattr(sqlite_store, "_MIGRATE_V2", "ALTER TABLE no_such ADD x REAL")
+    with pytest.raises(sqlite3.OperationalError, match="no_such"):
+        SqliteExecutionStore(db)
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(execution_jobs)")]
+        assert "redacted_at" not in cols
+    finally:
+        conn.close()
+
+    monkeypatch.undo()
+    store = SqliteExecutionStore(db)
+    try:
+        assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert "redacted_at" in store._columns()
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("concurrent_change", ["running", "redacted"])
+def test_redact_leaves_a_row_changed_after_the_read_alone(
+    tmp_path, monkeypatch, concurrent_change
+):
+    """The SQL guard, not the Python one, protects against another process."""
+    store = SqliteExecutionStore(tmp_path / "execution.db")
+    try:
+        job = store.enqueue(_job(idempotency_key="r", payload={"secret": "keep"}))
+        store.complete(job.id, result={"r": 1}, now=T0)
+        real_get = store._get_by_id
+
+        def get_then_change(job_id):
+            row = real_get(job_id)  # read as terminal and unredacted
+            if concurrent_change == "running":
+                store._conn.execute(
+                    "UPDATE execution_jobs SET state = ? WHERE id = ?",
+                    (ExecutionState.RUNNING.value, job_id),
+                )
+            else:
+                store._conn.execute(
+                    "UPDATE execution_jobs SET redacted_at = 1.0 WHERE id = ?",
+                    (job_id,),
+                )
+            store._conn.commit()
+            return row
+
+        monkeypatch.setattr(store, "_get_by_id", get_then_change)
+        assert store.redact([job.id], now=T0) == 0
+        monkeypatch.undo()
+        row = store._conn.execute(
+            "SELECT payload, redacted_at FROM execution_jobs WHERE id = ?",
+            (job.id,),
+        ).fetchone()
+        assert "keep" in row["payload"]
+        assert row["redacted_at"] == (1.0 if concurrent_change == "redacted" else None)
+    finally:
+        store.close()

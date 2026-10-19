@@ -761,5 +761,30 @@
     "annotate_panel_title": "Kommentera",
     "edit_panel_title": "Redigera annotering",
     "chat_panel_title": "Assistent"
+  },
+  "attachments": {
+    "title": "Bilagor",
+    "loading": "Hämtar bilagor…",
+    "empty": "Inga filer bifogade ännu",
+    "load_error": "Det gick inte att hämta bilagorna",
+    "upload": "Bifoga fil",
+    "uploading": "Laddar upp…",
+    "limits_hint": "Högst {max} per fil, {files} filer eller {total} per nod",
+    "download": "Ladda ner",
+    "delete": "Ta bort",
+    "delete_named": "Ta bort {name}",
+    "cancel": "Avbryt",
+    "confirm_delete": "Ta bort {name}?",
+    "errors": {
+      "attachment_too_large": "Filen är större än gränsen på {max} per fil.",
+      "node_attachment_limit": "Noden har nått sin gräns för bilagor ({files} filer eller {total} totalt).",
+      "unsupported_attachment_type": "Den här filtypen kan inte bifogas.",
+      "attachments_not_allowed": "Den här nodtypen tar inte emot bilagor.",
+      "node_archived": "Filer kan inte bifogas till en arkiverad nod.",
+      "federated_node": "Filer kan inte bifogas till en nod från en annan graf.",
+      "attachments_unavailable": "Bilagor är inte tillgängliga på den här servern.",
+      "generic": "Begäran misslyckades. Försök igen.",
+      "generic_with_detail": "Begäran misslyckades: {detail}"
+    }
   }
 }

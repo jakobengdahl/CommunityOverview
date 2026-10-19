@@ -10,12 +10,17 @@ import json
 import os
 
 import pytest
+from starlette.requests import ClientDisconnect
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from backend.config import config_loader
 from backend.core import GraphStorage, Node
-from backend.core.attachment_store import AttachmentLimits, FileAttachmentStore
+from backend.core.attachment_store import (
+    AttachmentLimits,
+    FileAttachmentStore,
+    hashed_key,
+)
 from backend.core.attachment_types import PDF, TEXT
 from backend.runtime.authorization import (
     GRAPH_ACTION_READ,
@@ -850,6 +855,220 @@ class TestNodeDeleteIsolation:
         assert service.storage.get_node("doc") is None
 
 
+class TestReusedNodeId:
+    """A node id created again never inherits the files of the node it had."""
+
+    def _leave_orphan(self, service, store, monkeypatch, node_id="doc"):
+        record = _seed(store, node_id)
+        # The graph delete succeeds but the attachment cleanup does not.
+        monkeypatch.setattr(store, "delete_node", lambda *a, **k: 0)
+        service.delete_nodes([node_id], confirmed=True)
+        monkeypatch.undo()
+        assert store.list(NS, node_id) == [record]
+        return record
+
+    def test_recreated_id_lists_none_of_the_deleted_nodes_files(
+        self, service, client, store, monkeypatch
+    ):
+        orphan = self._leave_orphan(service, store, monkeypatch)
+        result = service.add_nodes(
+            [{"id": "doc", "type": "Document", "name": "New"}], []
+        )
+        assert result["success"] is True
+        response = client.get("/api/nodes/doc/attachments")
+        assert response.json()["attachments"] == []
+        assert client.get(f"/api/nodes/doc/attachments/{orphan.id}").status_code == 404
+        # Quarantined, not destroyed.
+        quarantine = store.root / hashed_key(NS) / ".quarantine"
+        (target,) = quarantine.iterdir()
+        assert (target / "blobs" / orphan.id).read_bytes() == b"seeded"
+
+    def test_new_nodes_own_uploads_are_kept(self, service, client, store, monkeypatch):
+        self._leave_orphan(service, store, monkeypatch)
+        service.add_nodes([{"id": "doc", "type": "Document", "name": "New"}], [])
+        uploaded = _upload(client, "doc").json()
+        listed = client.get("/api/nodes/doc/attachments").json()["attachments"]
+        assert [r["id"] for r in listed] == [uploaded["id"]]
+
+    def test_upload_landing_between_create_and_quarantine_is_kept(
+        self, service, store, monkeypatch
+    ):
+        orphan = self._leave_orphan(service, store, monkeypatch)
+        real_add = service.storage.add_nodes
+        landed = []
+
+        def add_then_upload(*args, **kwargs):
+            result = real_add(*args, **kwargs)
+            landed.append(_seed(store, "doc", b"fresh"))
+            return result
+
+        monkeypatch.setattr(service.storage, "add_nodes", add_then_upload)
+        service.add_nodes([{"id": "doc", "type": "Document", "name": "New"}], [])
+        assert store.list(NS, "doc") == landed
+        assert store.get_record(NS, "doc", orphan.id) is None
+
+    def test_refused_create_leaves_a_live_nodes_files_alone(self, service, store):
+        record = _seed(store, "doc")
+        result = service.add_nodes(
+            [{"id": "doc", "type": "Document", "name": "Dup"}], []
+        )
+        assert result["success"] is False
+        assert store.list(NS, "doc") == [record]
+
+    def test_failing_quarantine_never_fails_the_create(
+        self, service, store, monkeypatch
+    ):
+        self._leave_orphan(service, store, monkeypatch)
+
+        def broken(*args, **kwargs):
+            raise OSError("read-only filesystem")
+
+        monkeypatch.setattr(store, "quarantine", broken)
+        result = service.add_nodes(
+            [{"id": "doc", "type": "Document", "name": "New"}], []
+        )
+        assert result["success"] is True
+        assert service.storage.get_node("doc") is not None
+
+    def test_failing_snapshot_never_fails_the_create(self, service, store, monkeypatch):
+        self._leave_orphan(service, store, monkeypatch)
+
+        def broken(*args, **kwargs):
+            raise OSError("unreadable")
+
+        monkeypatch.setattr(store, "list", broken)
+        result = service.add_nodes(
+            [{"id": "doc", "type": "Document", "name": "New"}], []
+        )
+        assert result["success"] is True
+
+    @pytest.mark.parametrize(
+        "extra_nodes, edges",
+        [
+            ([], [{"source": "doc", "target": "no-such-node", "type": "RELATES_TO"}]),
+            ([{"id": "actor", "type": "Actor", "name": "Dup"}], []),
+            (
+                [],
+                [
+                    {"id": "e1", "source": "doc", "target": "actor"},
+                    {"id": "e1", "source": "doc", "target": "actor"},
+                ],
+            ),
+        ],
+        ids=["bad-edge", "duplicate-later-in-batch", "duplicate-edge-id"],
+    )
+    def test_node_kept_by_a_failed_call_loses_the_leftovers_too(
+        self, service, store, monkeypatch, extra_nodes, edges
+    ):
+        orphan = self._leave_orphan(service, store, monkeypatch)
+        nodes = [{"id": "doc", "type": "Document", "name": "New"}, *extra_nodes]
+        result = service.add_nodes(nodes, edges)
+        assert result["success"] is False
+        assert "landed_node_ids" not in result
+        assert service.storage.get_node("doc") is not None
+        assert store.get_record(NS, "doc", orphan.id) is None
+
+    def test_create_refused_by_the_store_moves_nothing(
+        self, service, store, monkeypatch
+    ):
+        # The id is absent from this instance's view but taken in the store,
+        # e.g. by a node another instance created: its files are not leftovers.
+        record = self._leave_orphan(service, store, monkeypatch)
+        from backend.core.storage_backends import EntityRevisionConflict
+
+        def refused(*args, **kwargs):
+            raise EntityRevisionConflict("node", "doc", None, 3)
+
+        monkeypatch.setattr(service.storage, "add_nodes", refused)
+        result = service.add_nodes(
+            [{"id": "doc", "type": "Document", "name": "New"}], []
+        )
+        assert result["success"] is False
+        assert store.list(NS, "doc") == [record]
+
+    @pytest.mark.parametrize(
+        "extra_nodes, edges",
+        [
+            ([], [{"source": "doc", "target": "no-such-node"}]),
+            ([{"id": "actor", "type": "Actor", "name": "Dup"}], []),
+            (
+                [],
+                [
+                    {"id": "e1", "source": "doc", "target": "actor"},
+                    {"id": "e1", "source": "doc", "target": "actor"},
+                ],
+            ),
+        ],
+        ids=["bad-edge", "duplicate-later-in-batch", "duplicate-edge-id"],
+    )
+    @pytest.mark.parametrize("store_reread", [False, True], ids=["undo", "re-read"])
+    def test_node_the_store_refuses_on_a_failed_call_moves_nothing(
+        self, service, store, monkeypatch, extra_nodes, edges, store_reread
+    ):
+        # The call fails part-way; persisting the node that landed is then
+        # refused by the store, which undoes it - or re-reads a graph where
+        # another writer's node holds the id. Ours never stayed.
+        record = self._leave_orphan(service, store, monkeypatch)
+        from backend.core.storage_backends import EntityRevisionConflict
+
+        storage = service.storage
+
+        def refused(changes, undo, *args, **kwargs):
+            storage._undo(undo)
+            if store_reread:
+                theirs = Node(id="doc", type="Document", name="Theirs")
+                storage.nodes["doc"] = theirs
+            raise EntityRevisionConflict("node", "doc", None, 3)
+
+        monkeypatch.setattr(storage, "_commit", refused)
+        nodes = [{"id": "doc", "type": "Document", "name": "New"}, *extra_nodes]
+        result = service.add_nodes(nodes, edges)
+        assert result["success"] is False
+        assert store.list(NS, "doc") == [record]
+
+    def test_leftovers_on_several_ids_are_all_quarantined(
+        self, service, store, monkeypatch
+    ):
+        orphans = {n: self._leave_orphan(service, store, monkeypatch, n) for n in "abc"}
+        nodes = [{"id": n, "type": "Document", "name": n} for n in "abc"]
+        assert service.add_nodes(nodes, [])["success"] is True
+        for node_id, orphan in orphans.items():
+            assert store.get_record(NS, node_id, orphan.id) is None
+
+    def test_first_failing_quarantine_does_not_spare_the_other_ids(
+        self, service, store, monkeypatch
+    ):
+        orphans = {n: self._leave_orphan(service, store, monkeypatch, n) for n in "abc"}
+        real_quarantine = store.quarantine
+        order = []
+
+        def first_fails(namespace, node_id, ids):
+            order.append(node_id)
+            if node_id == "a":
+                raise OSError("read-only filesystem")
+            return real_quarantine(namespace, node_id, ids)
+
+        monkeypatch.setattr(store, "quarantine", first_fails)
+        nodes = [{"id": n, "type": "Document", "name": n} for n in "abc"]
+        assert service.add_nodes(nodes, [])["success"] is True
+        assert order == ["a", "b", "c"]  # the failing one is tried first
+        assert store.get_record(NS, "a", orphans["a"].id) == orphans["a"]
+        assert store.get_record(NS, "b", orphans["b"].id) is None
+        assert store.get_record(NS, "c", orphans["c"].id) is None
+
+    def test_creates_without_leftovers_never_touch_the_store(
+        self, service, store, monkeypatch
+    ):
+        calls = []
+        monkeypatch.setattr(store, "quarantine", lambda *a: calls.append(a) or 0)
+        _seed(store, "doc")
+        service.add_nodes([{"type": "Document", "name": "No id"}], [])
+        service.add_nodes([{"id": "fresh", "type": "Document", "name": "F"}], [])
+        service.add_nodes([{"id": "doc", "type": "Document", "name": "Live"}], [])
+        assert calls == []
+        assert not (store.root / hashed_key(NS) / ".quarantine").exists()
+
+
 class TestStreamCapUsesNodeBudget:
     def test_stream_without_length_stops_at_the_remaining_budget(self, service, store):
         _seed(store, "doc", b"x" * 200)  # 50 bytes of node budget left
@@ -1030,3 +1249,379 @@ class TestAlignExtensionUnit:
         assert result.endswith(".pdf")
         assert len(result.encode("utf-8")) <= 255
         assert "�" not in result
+
+
+class TestSchemaClientSurface:
+    """Clients read ``allows_attachments`` unconditionally from both surfaces."""
+
+    @staticmethod
+    def _mcp_get_schema(service):
+        from unittest.mock import MagicMock, Mock
+
+        from backend.service import register_mcp_tools
+
+        mock_mcp = Mock()
+        mock_mcp.tool = MagicMock(return_value=lambda f: f)
+        return register_mcp_tools(mock_mcp, service)["get_schema"]()
+
+    @pytest.fixture(params=["rest", "mcp"])
+    def payload(self, request, service, client):
+        if request.param == "rest":
+            response = client.get("/api/schema")
+            assert response.status_code == 200
+            return response.json()
+        return self._mcp_get_schema(service)
+
+    def test_every_node_type_carries_a_bool_flag(self, payload):
+        node_types = payload["node_types"]
+        assert {"Document", "Actor"} <= set(node_types)
+        for name, cfg in node_types.items():
+            assert isinstance(cfg["allows_attachments"], bool), name
+
+    def test_flag_reflects_the_declared_schema(self, payload):
+        assert payload["node_types"]["Document"]["allows_attachments"] is True
+        assert payload["node_types"]["Actor"]["allows_attachments"] is False
+
+    def test_payload_matches_the_loader_projection(self, payload):
+        assert payload == config_loader.get_schema()
+
+
+# ---------------------------------------------------------------------------
+# Residue of the review loop: guards the happy-path tests do not reach
+# ---------------------------------------------------------------------------
+
+
+def _spy_store(store):
+    """A store whose every public call is recorded; behaviour is unchanged."""
+    from unittest.mock import MagicMock
+
+    return MagicMock(wraps=store, spec=FileAttachmentStore)
+
+
+class TestIdGuardsPrecedeTheStore:
+    BAD_ID = "A" * 32
+
+    def test_malformed_id_never_reaches_the_store_on_any_route(self, storage, store):
+        spy = _spy_store(store)
+        client = _client(GraphService(storage, attachment_settings=_settings(spy)))
+        url = f"/api/nodes/doc/attachments/{self.BAD_ID}"
+        assert client.get(url).status_code == 404
+        assert client.delete(url).status_code == 404
+        # The ops-level record lookup has no route of its own.
+        result = GraphService(
+            storage, attachment_settings=_settings(spy)
+        ).get_node_attachment_record("doc", self.BAD_ID)
+        assert result["error_code"] == "not_found"
+        federated = GraphService(
+            storage, attachment_settings=_settings(spy)
+        ).get_node_attachment_record(FEDERATED_ID, "0" * 32)
+        assert federated["error_code"] == "not_found"
+        assert spy.method_calls == []
+
+    def test_federated_node_never_reaches_the_store_on_read_and_delete(
+        self, storage, store
+    ):
+        spy = _spy_store(store)
+        client = _client(GraphService(storage, attachment_settings=_settings(spy)))
+        valid_id = "0" * 32
+        url = f"/api/nodes/{FEDERATED_ID}/attachments/{valid_id}"
+        assert client.get(url).status_code == 404
+        assert client.delete(url).status_code == 404
+        assert spy.method_calls == []
+
+
+class TestAllowsAttachmentsIsExactlyTrue:
+    # The schema model coerces "yes" or 1 to True before this check sees them,
+    # so the check is exercised on the schema dict it reads.
+    @pytest.mark.parametrize("flag", ["false", "yes", 1, {"on": True}, None])
+    def test_a_truthy_non_boolean_flag_does_not_enable_uploads(self, monkeypatch, flag):
+        from backend.service.attachments import type_allows_attachments
+
+        monkeypatch.setattr(
+            config_loader,
+            "get_schema",
+            lambda: {"node_types": {"Document": {"allows_attachments": flag}}},
+        )
+        assert type_allows_attachments(Node(id="d", type="Document", name="D")) is False
+
+    def test_the_boolean_true_flag_enables_uploads(self, monkeypatch):
+        from backend.service.attachments import type_allows_attachments
+
+        monkeypatch.setattr(
+            config_loader,
+            "get_schema",
+            lambda: {"node_types": {"Document": {"allows_attachments": True}}},
+        )
+        assert type_allows_attachments(Node(id="d", type="Document", name="D")) is True
+
+
+class TestDeclaredContentTypeSanitising:
+    def test_is_cut_at_255_characters_and_shorter_values_are_kept(self):
+        from backend.service.attachments import _sanitize_declared_content_type
+
+        assert _sanitize_declared_content_type("t" * 255) == "t" * 255
+        assert _sanitize_declared_content_type("t" * 300) == "t" * 255
+
+    def test_non_printable_characters_are_dropped_and_the_value_trimmed(self):
+        from backend.service.attachments import _sanitize_declared_content_type
+
+        assert _sanitize_declared_content_type(" text/\x00pl\nain\x7f​ ") == (
+            "text/plain"
+        )
+        assert _sanitize_declared_content_type(None) == ""
+        # Filtered first, then cut: control characters do not eat the budget.
+        assert _sanitize_declared_content_type("\x00" * 10 + "t" * 255) == "t" * 255
+        # Trim after the filter: a character that only the filter removes
+        # must not leave a trailing space behind.
+        assert _sanitize_declared_content_type("a \x00") == "a"
+        # Trim before the cut: leading whitespace does not eat the budget.
+        assert _sanitize_declared_content_type(" " + "t" * 255) == "t" * 255
+
+    def test_the_stored_declared_type_is_the_sanitised_one(self, client, store):
+        headers = {"content-type": "text/plain; x=" + "a" * 400}
+        assert _upload(client, "doc", headers=headers).status_code == 201
+        declared = store.list(NS, "doc")[0].declared_content_type
+        assert len(declared) == 255
+
+    def test_no_control_characters_survive_end_to_end(self, client, store):
+        headers = {"content-type": "text/pl\x01ain; x=\x7f1"}
+        assert _upload(client, "doc", headers=headers).status_code == 201
+        declared = store.list(NS, "doc")[0].declared_content_type
+        assert declared and declared.isprintable()
+
+
+class TestFilenameByteBoundary:
+    def test_255_bytes_are_kept_and_256_are_cut_to_255(self):
+        assert sanitize_filename("a" * 255) == "a" * 255
+        assert sanitize_filename("a" * 256) == "a" * 255
+
+
+class TestQueryAndDownloadHandling:
+    def test_filename_query_is_capped_at_4096_characters(self, client, store):
+        at_cap = client.post(
+            "/api/nodes/doc/attachments",
+            params={"filename": "n" * 4096},
+            content=b"x",
+        )
+        over_cap = client.post(
+            "/api/nodes/doc/attachments",
+            params={"filename": "n" * 4097},
+            content=b"x",
+        )
+        assert at_cap.status_code == 201
+        assert over_cap.status_code == 422
+        assert len(store.list(NS, "doc")) == 1
+
+    def test_download_closes_the_stored_file_handle(self, storage, store):
+        record = _seed(store, "doc", b"payload")
+        opened = []
+        real_open_read = store.open_read
+
+        def tracking(*args):
+            handle = real_open_read(*args)
+            opened.append(handle)
+            return handle
+
+        store.open_read = tracking
+        client = _client(GraphService(storage, attachment_settings=_settings(store)))
+        response = client.get(f"/api/nodes/doc/attachments/{record.id}")
+        assert response.content == b"payload"
+        assert len(opened) == 1 and opened[0].closed
+
+    @pytest.mark.parametrize("spec_version", [None, "2.4"])
+    def test_download_closes_the_handle_when_the_client_disconnects(
+        self, storage, store, spec_version
+    ):
+        record = _seed(store, "doc", b"x" * 90)
+        opened = []
+        real_open_read = store.open_read
+
+        def tracking(*args):
+            handle = real_open_read(*args)
+            opened.append(handle)
+            return handle
+
+        store.open_read = tracking
+        app = FastAPI()
+        app.include_router(
+            create_rest_router(
+                GraphService(storage, attachment_settings=_settings(store))
+            ),
+            prefix="/api",
+        )
+
+        async def run():
+            sent_start = asyncio.Event()
+
+            async def receive():
+                await sent_start.wait()
+                return {"type": "http.disconnect"}
+
+            async def send(message):
+                if message["type"] == "http.response.start":
+                    sent_start.set()
+                    # Stall the body so the disconnect arrives mid-stream.
+                    await asyncio.sleep(0.2)
+                elif spec_version is not None:
+                    # ASGI spec 2.4+: a send to a gone client raises.
+                    raise OSError("client disconnected")
+
+            scope = {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "GET",
+                "scheme": "http",
+                "path": f"/api/nodes/doc/attachments/{record.id}",
+                "raw_path": b"",
+                "query_string": b"",
+                "root_path": "",
+                "headers": [],
+                "client": ("127.0.0.1", 1),
+                "server": ("test", 80),
+            }
+            if spec_version is not None:
+                scope["asgi"]["spec_version"] = spec_version
+            raised = False
+            try:
+                await app(scope, receive, send)
+            except ClientDisconnect:
+                # Spec 2.4+ servers see this raised out of the app.
+                raised = True
+            assert raised == (spec_version is not None)
+            # The handle must close while the loop runs, not at teardown.
+            for _ in range(10):
+                await asyncio.sleep(0)
+            assert len(opened) == 1 and opened[0].closed
+
+        asyncio.run(run())
+        assert len(opened) == 1 and opened[0].closed
+
+
+class TestStoreCallsRunOffTheEventLoop:
+    """Each store call must run on a worker thread, never on the loop's thread.
+
+    The loop runs on this test's own thread (asyncio.run), so a call made on
+    it would block every other request while the store reads files or waits
+    for an OS lock.
+    """
+
+    def _tracking_store(self, store, threads):
+        import threading
+
+        for name in ("list", "get_record", "open_read", "delete"):
+            real = getattr(store, name)
+
+            def wrapper(*args, _real=real, _name=name):
+                threads[_name] = threading.get_ident()
+                return _real(*args)
+
+            setattr(store, name, wrapper)
+        return store
+
+    def _run(self, storage, store, scenario):
+        import httpx
+
+        app = FastAPI()
+        app.include_router(
+            create_rest_router(
+                GraphService(storage, attachment_settings=_settings(store))
+            ),
+            prefix="/api",
+        )
+
+        async def run():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as http:
+                return await scenario(http)
+
+        return asyncio.run(run())
+
+    def test_list_download_and_delete_do_not_run_store_calls_on_the_loop(
+        self, storage, store
+    ):
+        import threading
+
+        record = _seed(store, "doc", b"payload")
+        threads = {}
+        self._tracking_store(store, threads)
+        loop_thread = threading.get_ident()
+
+        async def scenario(http):
+            assert (await http.get("/api/nodes/doc/attachments")).status_code == 200
+            url = f"/api/nodes/doc/attachments/{record.id}"
+            assert (await http.get(url)).status_code == 200
+            assert (await http.delete(url)).status_code == 200
+
+        self._run(storage, store, scenario)
+        assert set(threads) == {"list", "get_record", "open_read", "delete"}
+        assert all(ident != loop_thread for ident in threads.values()), threads
+
+    def test_upload_does_not_run_the_index_read_on_the_loop(self, storage, store):
+        import threading
+
+        threads = {}
+        self._tracking_store(store, threads)
+        loop_thread = threading.get_ident()
+
+        async def scenario(http):
+            response = await http.post(
+                "/api/nodes/doc/attachments",
+                params={"filename": "a.txt"},
+                content=b"hello",
+            )
+            assert response.status_code == 201
+
+        self._run(storage, store, scenario)
+        assert threads["list"] != loop_thread, threads
+
+    def test_upload_over_an_unreadable_index_is_refused_and_stages_nothing(
+        self, storage, store
+    ):
+        from backend.core.attachment_store import AttachmentIndexCorrupt
+
+        def corrupt(*args):
+            raise AttachmentIndexCorrupt("unreadable")
+
+        store.list = corrupt
+        staged = []
+        real_stage = store.stage
+
+        async def tracking_stage(*args):
+            staged.append(args)
+            return await real_stage(*args)
+
+        store.stage = tracking_stage
+        client = _client(GraphService(storage, attachment_settings=_settings(store)))
+        response = _upload(client, "doc")
+        assert "attachment_index_corrupt" in response.text
+        assert response.status_code != 201
+        assert staged == []
+
+    def test_type_sniffing_runs_off_the_loop(self, storage, store, monkeypatch):
+        import threading
+
+        from backend.service import attachments as attachment_ops
+
+        seen = []
+        real = attachment_ops.detect_attachment_type
+
+        def recording(source, filename):
+            seen.append(threading.get_ident())
+            return real(source, filename)
+
+        monkeypatch.setattr(attachment_ops, "detect_attachment_type", recording)
+        loop_thread = threading.get_ident()
+
+        async def scenario(http):
+            response = await http.post(
+                "/api/nodes/doc/attachments",
+                params={"filename": "a.txt"},
+                content=b"hello",
+            )
+            assert response.status_code == 201
+
+        self._run(storage, store, scenario)
+        assert len(seen) == 1 and seen[0] != loop_thread

@@ -423,6 +423,36 @@ class TestAbandonOrphanedRuns:
         assert run["error"] == ABANDONED_REASON
         assert run["finished_at"] == "2025-11-22T12:00:00Z"
 
+    def test_sweep_rechecks_age_at_write_time_against_the_purge_cutoff(self, store):
+        """A run that shows life after it was listed is not abandoned."""
+        policy = RetentionPolicy.from_values(retention_days=30)
+        job = store.enqueue(
+            ExecutionJob(
+                agent_id="a1",
+                kind=ExecutionKind.EVENT,
+                idempotency_key="revived",
+                run_at=T0 - timedelta(days=60),
+                created_at=T0 - timedelta(days=60),
+            )
+        )
+        store.claim_next("w", now=T0 - timedelta(days=60))
+
+        class RenewsAfterListing:
+            """Delegates to the store, renewing the lease once listing is done."""
+
+            def __getattr__(self, name):
+                return getattr(store, name)
+
+            def list_running_older_than(self, cutoff):
+                listed = store.list_running_older_than(cutoff)
+                assert [j.id for j in listed] == [job.id]
+                assert store.renew_lease(job.id, "w", now=T0 - timedelta(days=1))
+                return listed
+
+        report = sweep(RenewsAfterListing(), policy, now=T0)
+        assert (report.abandoned, report.redacted, report.purged) == (0, 0, 0)
+        assert store.get(job.id).state == ExecutionState.RUNNING
+
     def test_crashed_recorder_run_ages_out(self, store):
         """The motivating case: a run recorded at start, never finalized."""
         recorder = AgentRunRecorder(store)
@@ -520,16 +550,17 @@ class TestRedactJob:
 
 
 class TestRetentionSweeper:
-    def test_failing_store_is_logged_not_raised(self, caplog):
+    def test_failing_store_is_logged_and_flagged_not_raised(self, caplog):
         broken = MagicMock()
-        broken.list_terminal_older_than.side_effect = RuntimeError("db gone")
+        broken.list_running_older_than.side_effect = RuntimeError("db gone")
         sweeper = RetentionSweeper(
             broken, RetentionPolicy.from_values(retention_days=30), clock=lambda: T0
         )
         with caplog.at_level(logging.ERROR):
-            assert sweeper.run_once() is None
+            report = sweeper.run_once()
         assert "retention sweep failed" in caplog.text
-        assert sweeper.last_report is None
+        assert report is not None and report.run_history_failed is True
+        assert sweeper.last_report is report
 
     def test_start_sweeps_immediately_and_stop_joins(self):
         store = _store()

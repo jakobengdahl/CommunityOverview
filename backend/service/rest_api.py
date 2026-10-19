@@ -35,6 +35,7 @@ from fastapi import (
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import Response, StreamingResponse
 from starlette.background import BackgroundTask
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, field_validator
 from pydantic import ValidationError as PydanticValidationError
 
@@ -65,6 +66,7 @@ from backend.core.storage_search import MATCH_MODE_SUBSTRING, validate_match_mod
 from backend.runtime.authorization import use_request_authorization
 
 from . import attachments as attachment_ops
+from .json_response import GraphJSONRoute
 from .service import GraphService
 
 if TYPE_CHECKING:
@@ -1578,6 +1580,17 @@ _IMPORT_ERROR_STATUS = {
     "backup_failed": 503,
     "replace_failed": 502,
     "archive_integrity_failed": 422,
+    "invalid_parameters": 422,
+    "provenance_not_supported": 422,
+    "import_plan_unstable": 503,
+    "import_preview_busy": 503,
+    "plan_digest_required": 422,
+    "import_merge_blocked": 422,
+    "import_plan_stale": 409,
+    "import_merge_busy": 503,
+    "import_merge_not_supported": 501,
+    "write_failed": 502,
+    "write_outcome_unknown": 503,
 }
 
 # A generous cap on the whole multipart upload for POST /import/archive: a
@@ -1668,6 +1681,53 @@ def _register_import_endpoints(
         with use_request_authorization(headers=request.headers):
             result = service.import_graph_archive(
                 archive_bytes,
+                import_job_store,
+                event_origin=request.headers.get("x-event-origin"),
+                event_correlation_id=request.headers.get("x-correlation-id"),
+            )
+        _raise_for_access_denied(result)
+        if not result.get("success", True):
+            status_code = _IMPORT_ERROR_STATUS.get(result.get("error_code"), 400)
+            raise HTTPException(status_code=status_code, detail=result)
+        return result
+
+    @router.post("/import/merge/preview")
+    async def preview_merge_import(
+        request: Request, body: Dict[str, Any] = Body(...)
+    ) -> Dict[str, Any]:
+        """
+        Plan merging ``body.document`` into the live graph without writing
+        anything (ADR 0013, slice 1). Returns the per-entity plan and a
+        ``plan_digest`` a later merge commit will be bound to. Requires graph
+        mutation and read access, both with full graph scope.
+        """
+        # Planning is CPU-bound and linear in the document (up to the v1
+        # caps), so it runs in a worker thread rather than on the event loop.
+        with use_request_authorization(headers=request.headers):
+            result = await run_in_threadpool(service.preview_merge_import, body)
+        _raise_for_access_denied(result)
+        if not result.get("success", True):
+            status_code = _IMPORT_ERROR_STATUS.get(result.get("error_code"), 400)
+            raise HTTPException(status_code=status_code, detail=result)
+        return result
+
+    @router.post("/import/merge")
+    async def commit_merge_import(
+        request: Request, body: Dict[str, Any] = Body(...)
+    ) -> Dict[str, Any]:
+        """
+        Merge ``body.document`` into the live graph (ADR 0013, slice 2):
+        the request of a preview plus its ``plan_digest``. The plan is
+        recomputed and must still have that digest (409
+        ``import_plan_stale`` with the current plan otherwise); the whole
+        graph is backed up first; the merge then applies all-or-nothing.
+        Same access as the preview.
+        """
+        # Plans twice and writes a whole-graph backup: off the event loop.
+        with use_request_authorization(headers=request.headers):
+            result = await run_in_threadpool(
+                service.commit_merge_import,
+                body,
                 import_job_store,
                 event_origin=request.headers.get("x-event-origin"),
                 event_correlation_id=request.headers.get("x-correlation-id"),
@@ -1955,7 +2015,11 @@ def create_rest_router(
     Returns:
         Configured APIRouter
     """
-    router = APIRouter(prefix=prefix, tags=["graph"])
+    router = APIRouter(
+        prefix=prefix,
+        tags=["graph"],
+        route_class=GraphJSONRoute,
+    )
 
     if import_job_store is None:
         from backend.agents.execution import InMemoryExecutionStore

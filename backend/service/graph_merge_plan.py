@@ -1,0 +1,1362 @@
+"""
+Merge import, slice 1: the read-only planner and its plan digest.
+
+Implements the plan half of docs/adr/0013-graph-import-merge-mode.md: given an
+uploaded graph.json document, the merge parameters and a read view of the live
+graph, compute what a merge commit would do to every entity (§1, §2, §5) and a
+stateless digest that binds a later commit to exactly that plan (§3 (c)).
+
+Nothing here writes. The planner reads the live graph one entity at a time
+through ``LiveGraphView`` without holding the storage lock (ADR §4,
+"Concurrency with live writes"); the digest records the revision of every
+live entity whose presence or revision decided an outcome, and the graph's
+``generation``, sampled before the first read and re-checked after the last,
+so a commit can tell the plan it was shown from the plan it would now get.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import uuid
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Protocol, Tuple
+
+
+from backend.config import config_loader
+from backend.core.models import (
+    Edge,
+    Node,
+    is_valid_node_type,
+    is_valid_relationship_type,
+)
+
+from backend.core.storage_merge import EdgeOverwrite, MergeWrites, NodeOverwrite
+from backend.core.session_annotations import (
+    sanitize_saved_view_metadata,
+    saved_view_annotation_error,
+)
+
+from .graph_import import (
+    ImportIssue,
+    describe_invalid,
+    build_document_edge,
+    build_document_nodes,
+    check_document_edge_shape,
+    read_document_lists,
+)
+from .serializers import _SAVED_VIEW_NODE_TYPES
+
+if TYPE_CHECKING:
+    from backend.core import GraphStorage
+
+    from .attachments import AttachmentSettings
+
+POLICIES = ("fail", "skip", "overwrite", "rename")
+DEFAULT_POLICY = "fail"
+
+# The caller-writable fields an overwrite takes from the document — the ones
+# ``update_node`` / ``update_edge`` accept. Server-owned fields (``revision``,
+# timestamps) and ``archived`` (its own write path) never come from it.
+NODE_OVERWRITE_FIELDS = (
+    "name",
+    "description",
+    "summary",
+    "tags",
+    "subtypes",
+    "aliases",
+    "metadata",
+)
+EDGE_OVERWRITE_FIELDS = ("type", "label", "metadata")
+# The fields whose change makes ``update_node`` re-embed a node (ADR §6).
+EMBEDDING_FIELDS = ("name", "description", "summary", "tags", "aliases")
+
+# Ids listed per plan category; counts are always exact (ADR §3).
+PLAN_LIST_CAP = 1_000
+# The MCP tool runs on the server's event loop, so it plans only the small
+# documents an assistant assembles (ADR §9); REST plans run in a worker thread
+# and take the v1 caps.
+MCP_PREVIEW_MAX_NODES = 10_000
+MCP_PREVIEW_MAX_EDGES = 20_000
+# A replace landing mid-plan restarts it; this bounds the restarts.
+MAX_PLAN_ATTEMPTS = 3
+DIGEST_VERSION = 1
+# CPython's messages for a dict or set changed under an iterator.
+_ITERATION_RACES = ("changed size during iteration", "changed during iteration")
+
+_ALLOWED_PARAMETER_KEYS = {
+    "document",
+    "policy",
+    "include_system_types",
+    "stamp_provenance",
+}
+
+
+class MergeRequestError(Exception):
+    """A request the planner refuses before planning; nothing was read."""
+
+    def __init__(
+        self,
+        error_code: str,
+        message: str,
+        errors: Optional[List[ImportIssue]] = None,
+    ):
+        super().__init__(message)
+        self.error_code = error_code
+        self.message = message
+        self.errors = errors or []
+
+
+class MergePlanUnstable(Exception):
+    """The graph changed under every planning attempt."""
+
+
+class LiveGraphMoved(Exception):
+    """A live read in this attempt disagrees with an earlier one; restart."""
+
+
+@dataclass(frozen=True)
+class MergePolicy:
+    default: str = DEFAULT_POLICY
+    by_type: Tuple[Tuple[str, str], ...] = ()
+
+    def for_type(self, type_name: str) -> str:
+        for name, policy in self.by_type:
+            if name == type_name:
+                return policy
+        return self.default
+
+    def canonical(self) -> Dict[str, Any]:
+        return {"default": self.default, "by_type": dict(sorted(self.by_type))}
+
+
+@dataclass(frozen=True)
+class MergeParameters:
+    policy: MergePolicy = MergePolicy()
+    include_system_types: bool = False
+    stamp_provenance: bool = False
+
+    @property
+    def digest_optional(self) -> bool:
+        """ADR §3: a commit may omit the digest only when it can change no
+        live entity, create no configuration-bearing node unseen, and be
+        retried blindly — every policy ``fail`` or ``skip``, system types
+        excluded. A blind ``rename`` retry would duplicate the document."""
+        policies = {self.policy.default, *(p for _, p in self.policy.by_type)}
+        return policies <= {"fail", "skip"} and not self.include_system_types
+
+    def canonical(self) -> Dict[str, Any]:
+        return {
+            "policy": self.policy.canonical(),
+            "include_system_types": self.include_system_types,
+            "stamp_provenance": self.stamp_provenance,
+        }
+
+
+def _invalid(message: str) -> MergeRequestError:
+    return MergeRequestError("invalid_parameters", message)
+
+
+def parse_merge_request(body: Any) -> Tuple[Any, MergeParameters]:
+    """Split a preview request body into ``(document, parameters)``.
+
+    Unknown keys are refused rather than ignored, so a misspelt parameter
+    cannot silently fall back to a default. ``stamp_provenance: true`` is
+    refused until stamping ships (ADR slice 1).
+    """
+    if not isinstance(body, dict):
+        raise _invalid("the request body must be a JSON object")
+    unknown = sorted(set(body) - _ALLOWED_PARAMETER_KEYS)
+    if unknown:
+        raise _invalid(f"unknown request field(s): {', '.join(unknown)}")
+    if "document" not in body:
+        raise _invalid('the request has no "document"')
+
+    include_system_types = body.get("include_system_types", False)
+    if not isinstance(include_system_types, bool):
+        raise _invalid('"include_system_types" must be a boolean')
+    stamp_provenance = body.get("stamp_provenance", False)
+    if not isinstance(stamp_provenance, bool):
+        raise _invalid('"stamp_provenance" must be a boolean')
+    if stamp_provenance:
+        raise MergeRequestError(
+            "provenance_not_supported",
+            "stamp_provenance is not supported yet; send false or omit it.",
+        )
+
+    return body["document"], MergeParameters(
+        policy=_parse_policy(body.get("policy")),
+        include_system_types=include_system_types,
+        stamp_provenance=False,
+    )
+
+
+_MAX_DIGEST_CHARS = 128
+
+
+def parse_merge_commit_request(
+    body: Any,
+) -> Tuple[Any, MergeParameters, Optional[str]]:
+    """Split a commit request body into ``(document, parameters, digest)``:
+    the preview's fields plus an optional ``plan_digest``."""
+    if not isinstance(body, dict):
+        raise _invalid("the request body must be a JSON object")
+    digest = body.get("plan_digest")
+    if digest is not None and (
+        not isinstance(digest, str) or len(digest) > _MAX_DIGEST_CHARS
+    ):
+        raise _invalid('"plan_digest" must be the string a preview returned')
+    document, parameters = parse_merge_request(
+        {key: value for key, value in body.items() if key != "plan_digest"}
+    )
+    return document, parameters, digest
+
+
+def _parse_policy(raw: Any) -> MergePolicy:
+    if raw is None:
+        return MergePolicy()
+    if not isinstance(raw, dict):
+        raise _invalid('"policy" must be an object')
+    unknown = sorted(set(raw) - {"default", "by_type"})
+    if unknown:
+        raise _invalid(f"unknown policy field(s): {', '.join(unknown)}")
+    default = raw.get("default", DEFAULT_POLICY)
+    if default not in POLICIES:
+        raise _invalid(f'policy "default" must be one of {", ".join(POLICIES)}')
+    by_type_raw = raw.get("by_type")
+    if by_type_raw is None:
+        by_type_raw = {}
+    if not isinstance(by_type_raw, dict):
+        raise _invalid('policy "by_type" must be an object')
+    by_type: List[Tuple[str, str]] = []
+    for type_name, policy in by_type_raw.items():
+        if not (is_valid_node_type(type_name) or is_valid_relationship_type(type_name)):
+            raise _invalid(
+                f"policy by_type key '{type_name}' is neither a configured node "
+                "type nor a configured relationship type"
+            )
+        if policy not in POLICIES:
+            raise _invalid(
+                f"policy for '{type_name}' must be one of {', '.join(POLICIES)}"
+            )
+        by_type.append((type_name, policy))
+    return MergePolicy(default=default, by_type=tuple(sorted(by_type)))
+
+
+class LiveGraphView(Protocol):
+    """The reads the planner makes of the live graph, one entity at a time."""
+
+    @property
+    def generation(self) -> int: ...
+
+    def get_node(self, node_id: str) -> Optional[Node]: ...
+
+    def get_edge(self, edge_id: str) -> Optional[Edge]: ...
+
+    def edges_from_to(self, source: str, target: str) -> List[Edge]: ...
+
+    def incident_edges(self, node_id: str) -> List[Edge]: ...
+
+    def attachments_configured(self) -> bool: ...
+
+    def has_attachments(self, node_id: str) -> bool: ...
+
+    def nodes_without_vector(self) -> int: ...
+
+
+class StorageGraphView:
+    """``LiveGraphView`` over a ``GraphStorage`` and its attachment store."""
+
+    def __init__(
+        self,
+        storage: "GraphStorage",
+        attachment_settings: Optional["AttachmentSettings"] = None,
+    ):
+        self._storage = storage
+        self._attachments = attachment_settings
+
+    @property
+    def generation(self) -> int:
+        return self._storage.generation
+
+    def get_node(self, node_id: str) -> Optional[Node]:
+        return self._storage.get_node(node_id)
+
+    def get_edge(self, edge_id: str) -> Optional[Edge]:
+        return self._storage.edges.get(edge_id)
+
+    def edges_from_to(self, source: str, target: str) -> List[Edge]:
+        return self._storage.get_edges_from_to(source, target)
+
+    def incident_edges(self, node_id: str) -> List[Edge]:
+        try:
+            return self._storage.get_edges_for_node(node_id)
+        except KeyError as exc:
+            # The node was removed between the walk's lookup and its iteration.
+            raise LiveGraphMoved(f"node '{node_id}' removed during planning") from exc
+
+    def attachments_configured(self) -> bool:
+        return self._attachments is not None
+
+    def has_attachments(self, node_id: str) -> bool:
+        if self._attachments is None:
+            return False
+        from backend.core.attachment_store import AttachmentStoreError
+
+        try:
+            return bool(
+                self._attachments.store.list(self._attachments.namespace, node_id)
+            )
+        except (AttachmentStoreError, OSError, ValueError, RecursionError):
+            # An index that cannot be read still means files may sit under
+            # that id; flag it rather than fail the whole preview.
+            return True
+
+    def nodes_without_vector(self) -> int:
+        vector_store = self._storage.vector_store
+        return sum(
+            1
+            for node in self._storage.get_all_nodes()
+            if not vector_store.has_embedding(node.id)
+        )
+
+
+@dataclass
+class PlannedWrites:
+    """The writes a committable plan makes, before rename ids are minted.
+
+    Document entities as planned; ``renamed_nodes`` and ``renamed_edges`` keep
+    their document ids, and every edge here still names a renamed node by its
+    document id. ``mint_writes`` turns this into the storage layer's shape.
+    """
+
+    node_creates: List[Node] = field(default_factory=list)
+    node_renames: List[Node] = field(default_factory=list)
+    # (document node, live revision read, embedding text changed)
+    node_overwrites: List[Tuple[Node, int, bool]] = field(default_factory=list)
+    edge_creates: List[Edge] = field(default_factory=list)
+    edge_renames: List[Edge] = field(default_factory=list)
+    # (document edge, live revision read)
+    edge_overwrites: List[Tuple[Edge, int]] = field(default_factory=list)
+
+    @property
+    def nodes_to_embed(self) -> int:
+        return (
+            len(self.node_creates)
+            + len(self.node_renames)
+            + sum(1 for _, _, text_changed in self.node_overwrites if text_changed)
+        )
+
+
+@dataclass
+class MintedWrites:
+    writes: MergeWrites
+    # document id -> id minted at commit
+    renamed_nodes: Dict[str, str]
+    renamed_edges: Dict[str, str]
+
+
+def mint_writes(planned: PlannedWrites) -> MintedWrites:
+    """Mint a fresh id per rename, as an ordinary create does, and point the
+    document's own edges at the renamed nodes (ADR §1). Never derived from
+    the old id."""
+    renamed_nodes = {node.id: str(uuid.uuid4()) for node in planned.node_renames}
+    renamed_edges = {edge.id: str(uuid.uuid4()) for edge in planned.edge_renames}
+
+    def placed_edge(edge: Edge, edge_id: str) -> Edge:
+        return edge.model_copy(
+            update={
+                "id": edge_id,
+                "source": renamed_nodes.get(edge.source, edge.source),
+                "target": renamed_nodes.get(edge.target, edge.target),
+            }
+        )
+
+    writes = MergeWrites(
+        node_creates=list(planned.node_creates)
+        + [
+            node.model_copy(update={"id": renamed_nodes[node.id]})
+            for node in planned.node_renames
+        ],
+        node_overwrites=[
+            NodeOverwrite(
+                node_id=node.id,
+                expected_revision=revision,
+                fields={name: getattr(node, name) for name in NODE_OVERWRITE_FIELDS},
+                drop_vector=text_changed,
+            )
+            for node, revision, text_changed in planned.node_overwrites
+        ],
+        edge_creates=[placed_edge(edge, edge.id) for edge in planned.edge_creates]
+        + [placed_edge(edge, renamed_edges[edge.id]) for edge in planned.edge_renames],
+        edge_overwrites=[
+            EdgeOverwrite(
+                edge_id=edge.id,
+                expected_revision=revision,
+                fields={name: getattr(edge, name) for name in EDGE_OVERWRITE_FIELDS},
+            )
+            for edge, revision in planned.edge_overwrites
+        ],
+    )
+    return MintedWrites(writes, renamed_nodes, renamed_edges)
+
+
+@dataclass
+class MergePlan:
+    report: Dict[str, Any]
+    digest: str
+    committable: bool
+    # Set only when planned for a commit, and only for a committable plan.
+    writes: Optional[PlannedWrites] = None
+
+
+# --- planning ---------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _Listed:
+    """An edge as a listing returned it, copied before anything else runs."""
+
+    id: str
+    revision: int
+    type_str: str
+    source: str
+    target: str
+
+
+class _IssueList(list):
+    """Rejected issues: every one counted, only the first ``PLAN_LIST_CAP``
+    kept. Any one blocks the commit and the response lists no more, so a
+    document of millions of invalid entries holds no more than that."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.total = 0
+
+    def append(self, issue: ImportIssue) -> None:  # type: ignore[override]
+        self.total += 1
+        if len(self) < PLAN_LIST_CAP:
+            super().append(issue)
+
+
+def _applicability_names() -> frozenset:
+    """Every node type or subtype name some relationship rule mentions."""
+    names = set()
+    for rule in config_loader.get_schema()["relationship_types"].values():
+        names.update(rule.get("source_types") or ())
+        names.update(rule.get("target_types") or ())
+    return frozenset(names)
+
+
+def _snapshot(edges: List[Edge]) -> List[_Listed]:
+    return [_Listed(e.id, e.revision, e.type_str, e.source, e.target) for e in edges]
+
+
+@dataclass(slots=True)
+class _NodeDecision:
+    index: int
+    node: Node
+    outcome: str  # create | overwrite | unchanged | skip | rename | excluded | conflict | invalid
+    reason: str = ""
+    live: Optional[Node] = None
+    changes: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class _Endpoint:
+    node_id: str
+    kind: str  # document | renamed | live | excluded | conflict | dangling
+    type_name: str = ""
+    subtypes: Tuple[str, ...] = ()
+    archived: bool = False
+    has_live_edges: bool = False  # the id exists live, so live edges may join it
+
+
+@dataclass(slots=True)
+class _EdgeDecision:
+    index: int
+    edge: Edge
+    outcome: str  # create | overwrite | unchanged | skip | rename | excluded | conflict | rejected
+    reason: str = ""
+    source: Optional[_Endpoint] = None
+    target: Optional[_Endpoint] = None
+    changes: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    duplicate_of: Optional[str] = None
+
+
+_WRITTEN = ("create", "overwrite", "rename")
+
+
+def compute_merge_plan(
+    document: Any,
+    parameters: MergeParameters,
+    view: LiveGraphView,
+    *,
+    max_nodes: Optional[int] = None,
+    max_edges: Optional[int] = None,
+    for_commit: bool = False,
+) -> MergePlan:
+    """Plan merging ``document`` into the live graph ``view`` reads; write nothing.
+
+    ``for_commit`` plans for the commit's locked unit: the plan carries its
+    ``writes`` and no report, since the report's attachment and vector
+    counts read beyond the document and the commit answers with the report
+    of the plan it checked before taking the lock.
+
+    Raises ``MergeRequestError`` (``validation_failed``) when the document's
+    shape or size cannot be judged entity by entity, and ``MergePlanUnstable``
+    when a whole-graph replace moved ``generation`` during every attempt.
+    """
+    raw_nodes, raw_edges, shape_errors = read_document_lists(
+        document, max_nodes=max_nodes, max_edges=max_edges
+    )
+    if shape_errors:
+        raise MergeRequestError(
+            "validation_failed",
+            "the import document cannot be planned",
+            shape_errors,
+        )
+    for _attempt in range(MAX_PLAN_ATTEMPTS):
+        generation = view.generation
+        try:
+            plan = _Planner(raw_nodes, raw_edges, parameters, view, generation).run(
+                for_commit
+            )
+        except LiveGraphMoved:
+            continue
+        except RecursionError as exc:
+            raise MergeRequestError(
+                "validation_failed",
+                "the import document is nested too deeply to plan",
+            ) from exc
+        except RuntimeError as exc:
+            # The planner reads without the storage lock; a live write that
+            # changes an adjacency map mid-iteration ("dictionary changed size
+            # during iteration", "... keys changed during iteration") is
+            # retried like a replace.
+            if not any(race in str(exc) for race in _ITERATION_RACES):
+                raise
+            continue
+        if view.generation == generation:
+            return plan
+    raise MergePlanUnstable("the graph changed while the merge plan was being computed")
+
+
+class _Planner:
+    def __init__(
+        self,
+        raw_nodes: List[Any],
+        raw_edges: List[Any],
+        parameters: MergeParameters,
+        view: LiveGraphView,
+        generation: int,
+    ):
+        self.raw_nodes = raw_nodes
+        self.raw_edges = raw_edges
+        self.params = parameters
+        self.view = view
+        self.generation = generation
+        self.rejected = _IssueList()
+        self.conflicts: List[Dict[str, str]] = []
+        # (kind, id) -> live revision, or None when the plan relied on absence.
+        self.reads: Dict[Tuple[str, str], Optional[int]] = {}
+        self.nodes: Dict[str, _NodeDecision] = {}
+        self.edges: List[_EdgeDecision] = []
+        self.archived_attach_edges: List[str] = []
+        # Edges attached to the live node a skip collision kept (ADR §2 (a)).
+        self.skipped_attach_edges: List[str] = []
+        self.pair_listings: Dict[Tuple[str, str], Dict[str, List[_Listed]]] = {}
+        self.endpoints: Dict[str, _Endpoint] = {}
+        self.resulting_states: Dict[str, Optional[Tuple[str, Tuple[str, ...]]]] = {}
+        self.rule_names = _applicability_names()
+        # (source, target, type) -> first live edge outside the retyped set
+        self.first_unexcluded: Dict[Tuple[str, str, str], Optional[_Listed]] = {}
+        # (decision, location, outcome it had before the duplicate check)
+        self.pending_duplicates: List[Tuple[_EdgeDecision, str, str]] = []
+
+    # -- live reads, each recorded for the digest ---------------------------
+
+    def _read_node(self, node_id: str) -> Optional[Node]:
+        node = self.view.get_node(node_id)
+        self._record(("node", node_id), node.revision if node is not None else None)
+        return node
+
+    def _read_edge(self, edge_id: str) -> Optional[Edge]:
+        edge = self.view.get_edge(edge_id)
+        self._record(("edge", edge_id), edge.revision if edge is not None else None)
+        return edge
+
+    def _record(self, key: Tuple[str, str], revision: Optional[int]) -> None:
+        # Decisions taken on an earlier read of the same entity must match
+        # what the digest records, so a write landing between two reads
+        # restarts the plan instead of mixing both states into it.
+        if key in self.reads and self.reads[key] != revision:
+            raise LiveGraphMoved(f"{key[0]} '{key[1]}' changed during planning")
+        self.reads[key] = revision
+
+    def _is_excluded_type(self, type_name: str) -> bool:
+        return (
+            not self.params.include_system_types
+            and type_name in config_loader.SYSTEM_NODE_TYPES
+        )
+
+    def _conflict(
+        self, kind: str, entity_id: str, location: str, reason: str, message: str
+    ):
+        self.conflicts.append(
+            {
+                "kind": kind,
+                "id": entity_id,
+                "location": location,
+                "reason": reason,
+                "message": message,
+            }
+        )
+
+    # -- nodes ----------------------------------------------------------------
+
+    def _plan_nodes(self) -> None:
+        for index, node in build_document_nodes(self.raw_nodes, self.rejected):
+            location = f"nodes[{index}]"
+            if not is_valid_node_type(node.type_str):
+                # Already rejected; its type string is the caller's, of any
+                # length, so it must not be judged (and quoted) once per edge.
+                self.nodes[node.id] = _NodeDecision(index, node, "invalid")
+                continue
+            if not self._is_excluded_type(node.type_str) and (
+                node.type_str in _SAVED_VIEW_NODE_TYPES
+            ):
+                # The write path refuses these annotations; so must a plan.
+                try:
+                    annotation_error = saved_view_annotation_error(node.metadata)
+                except (TypeError, AttributeError, ValueError):
+                    annotation_error = "saved-view annotations are malformed"
+                if annotation_error:
+                    self.rejected.append(ImportIssue(location, annotation_error))
+            if self._is_excluded_type(node.type_str):
+                self.nodes[node.id] = _NodeDecision(
+                    index, node, "excluded", "system_type_excluded"
+                )
+                continue
+            live = self._read_node(node.id)
+            if live is None:
+                self.nodes[node.id] = _NodeDecision(index, node, "create")
+                continue
+
+            policy = self.params.policy.for_type(node.type_str)
+            if live.type_str != node.type_str:
+                if policy == "rename":
+                    self.nodes[node.id] = _NodeDecision(
+                        index, node, "rename", live=live
+                    )
+                    continue
+                self.nodes[node.id] = _NodeDecision(
+                    index, node, "conflict", "type_mismatch", live=live
+                )
+                self._conflict(
+                    "node",
+                    node.id,
+                    location,
+                    "type_mismatch",
+                    f"the document says '{node.type_str}' but the live node is "
+                    f"'{live.type_str}'; only the rename policy can resolve it",
+                )
+            elif policy == "fail":
+                self.nodes[node.id] = _NodeDecision(
+                    index, node, "conflict", "id_collision", live=live
+                )
+                self._conflict(
+                    "node",
+                    node.id,
+                    location,
+                    "id_collision",
+                    f"node id '{node.id}' already exists and the policy for "
+                    f"'{node.type_str}' is fail",
+                )
+            elif policy == "skip":
+                self.nodes[node.id] = _NodeDecision(
+                    index, node, "skip", "collision_kept_live", live=live
+                )
+            elif policy == "rename":
+                self.nodes[node.id] = _NodeDecision(index, node, "rename", live=live)
+            else:
+                changes = _field_changes(live, node, NODE_OVERWRITE_FIELDS)
+                if "metadata" in changes and node.type_str in _SAVED_VIEW_NODE_TYPES:
+                    # Every read path strips unsafe view annotations; so does this.
+                    for side in ("main", "incoming"):
+                        changes["metadata"][side] = sanitize_saved_view_metadata(
+                            changes["metadata"][side]
+                        )
+                outcome = "overwrite" if changes else "unchanged"
+                self.nodes[node.id] = _NodeDecision(
+                    index,
+                    node,
+                    outcome,
+                    "" if changes else "unchanged",
+                    live=live,
+                    changes=changes,
+                )
+
+    # -- edges ----------------------------------------------------------------
+
+    def _resolve(self, node_id: str) -> _Endpoint:
+        # One endpoint per node per attempt, shared by every edge that
+        # names it: an endpoint's cost must not repeat per edge.
+        endpoint = self.endpoints.get(node_id)
+        if endpoint is None:
+            endpoint = self.endpoints[node_id] = self._resolve_once(node_id)
+        return endpoint
+
+    def _relevant(self, subtypes: List[str]) -> Tuple[str, ...]:
+        """The subtypes applicability can depend on: those a relationship
+        rule names. ``subtypes`` has no size limit, so an endpoint keeps
+        only these, keeping per-edge work independent of its length."""
+        return tuple(sorted(name for name in set(subtypes) if name in self.rule_names))
+
+    def _resolve_once(self, node_id: str) -> _Endpoint:
+        decision = self.nodes.get(node_id)
+        if decision is not None:
+            node = decision.node
+            if decision.outcome == "excluded":
+                return _Endpoint(node_id, "excluded")
+            if decision.outcome == "invalid":
+                return _Endpoint(node_id, "invalid")
+            if decision.outcome == "conflict":
+                return _Endpoint(node_id, "conflict")
+            if decision.outcome == "rename":
+                return _Endpoint(
+                    node_id, "renamed", node.type_str, self._relevant(node.subtypes)
+                )
+            if decision.outcome == "skip":
+                live = decision.live
+                assert live is not None
+                return _Endpoint(
+                    node_id,
+                    "live",
+                    live.type_str,
+                    self._relevant(live.subtypes),
+                    live.archived,
+                    True,
+                )
+            return _Endpoint(
+                node_id,
+                "document",
+                node.type_str,
+                self._relevant(node.subtypes),
+                node.archived if decision.live is None else decision.live.archived,
+                decision.live is not None,
+            )
+        live = self._read_node(node_id)
+        if live is None:
+            return _Endpoint(node_id, "dangling")
+        if self._is_excluded_type(live.type_str):
+            return _Endpoint(node_id, "excluded")
+        return _Endpoint(
+            node_id,
+            "live",
+            live.type_str,
+            self._relevant(live.subtypes),
+            live.archived,
+            True,
+        )
+
+    def _plan_edges(self) -> None:
+        seen_edge_ids: Dict[str, int] = {}
+        for index, raw_edge in enumerate(self.raw_edges):
+            location = f"edges[{index}]"
+            errors_before = self.rejected.total
+            if not check_document_edge_shape(
+                raw_edge, location, index, seen_edge_ids, self.rejected
+            ):
+                continue
+            edge = build_document_edge(raw_edge, location, self.rejected)
+            if edge is None:
+                continue
+            if self.rejected.total != errors_before:
+                continue
+            self.edges.append(self._plan_edge(index, location, edge))
+
+    def _plan_edge(self, index: int, location: str, edge: Edge) -> _EdgeDecision:
+        source = self._resolve(edge.source)
+        target = self._resolve(edge.target)
+        decision = _EdgeDecision(index, edge, "create", source=source, target=target)
+
+        if "excluded" in (source.kind, target.kind):
+            decision.outcome, decision.reason = "excluded", "system_type_excluded"
+            return decision
+        if "invalid" in (source.kind, target.kind):
+            # The endpoint node is rejected, which already blocks the commit.
+            decision.outcome = "rejected"
+            return decision
+        dangling = [
+            (role, end)
+            for role, end in (("source", source), ("target", target))
+            if end.kind == "dangling"
+        ]
+        if dangling:
+            for role, end in dangling:
+                self.rejected.append(
+                    ImportIssue(
+                        location,
+                        f"{role} '{end.node_id}' is neither a node in this document "
+                        "nor a live node (dangling)",
+                    )
+                )
+            decision.outcome = "rejected"
+            return decision
+        if "conflict" in (source.kind, target.kind):
+            decision.outcome, decision.reason = "conflict", "endpoint_in_conflict"
+            self._conflict(
+                "edge",
+                edge.id,
+                location,
+                "endpoint_in_conflict",
+                "an endpoint of this edge is itself in conflict",
+            )
+            return decision
+
+        live_edge = self._read_edge(edge.id)
+        if live_edge is not None:
+            policy = self.params.policy.for_type(edge.type_str)
+            same_endpoints = (
+                "renamed" not in (source.kind, target.kind)
+                and live_edge.source == edge.source
+                and live_edge.target == edge.target
+            )
+            if not same_endpoints:
+                if policy != "rename":
+                    decision.outcome, decision.reason = "conflict", "endpoint_mismatch"
+                    self._conflict(
+                        "edge",
+                        edge.id,
+                        location,
+                        "endpoint_mismatch",
+                        f"edge id '{edge.id}' exists with different endpoints; "
+                        "only the rename policy can resolve it",
+                    )
+                    return decision
+                decision.outcome = "rename"
+            elif policy == "fail":
+                decision.outcome, decision.reason = "conflict", "id_collision"
+                self._conflict(
+                    "edge",
+                    edge.id,
+                    location,
+                    "id_collision",
+                    f"edge id '{edge.id}' already exists and the policy for "
+                    f"'{edge.type_str}' is fail",
+                )
+                return decision
+            elif policy == "skip":
+                decision.outcome, decision.reason = "skip", "collision_kept_live"
+                return decision
+            elif policy == "rename":
+                decision.outcome = "rename"
+            else:
+                decision.changes = _field_changes(
+                    live_edge, edge, EDGE_OVERWRITE_FIELDS
+                )
+                if not decision.changes:
+                    decision.outcome, decision.reason = "unchanged", "unchanged"
+                    return decision
+                decision.outcome = "overwrite"
+
+        if decision.outcome in ("create", "rename"):
+            duplicate = self._live_duplicate(edge, source, target)
+            if duplicate is not None:
+                # Provisional: a later document edge may retype that live edge
+                # (see _settle_duplicates).
+                self.pending_duplicates.append((decision, location, decision.outcome))
+                decision.outcome, decision.reason = "skip", "duplicate_edge"
+                decision.duplicate_of = duplicate
+                return decision
+
+        return self._finish_edge(decision, location)
+
+    def _finish_edge(self, decision: _EdgeDecision, location: str) -> _EdgeDecision:
+        edge, source, target = decision.edge, decision.source, decision.target
+        assert source is not None and target is not None
+        verdict = config_loader.relationship_type_allows_node_types(
+            edge.type_str,
+            source.type_name,
+            target.type_name,
+            list(source.subtypes),
+            list(target.subtypes),
+        )
+        if not verdict.get("allowed"):
+            message = describe_invalid(
+                ValueError(
+                    verdict.get("message")
+                    or f"relationship type '{edge.type_str}' is not allowed between "
+                    f"'{source.type_name}' and '{target.type_name}'"
+                )
+            )
+            if "live" in (source.kind, target.kind):
+                decision.outcome, decision.reason = "conflict", "inapplicable"
+                self._conflict("edge", edge.id, location, "inapplicable", message)
+            else:
+                self.rejected.append(ImportIssue(location, message))
+                decision.outcome = "rejected"
+            return decision
+
+        # An overwrite never takes ``archived`` from the document, so any
+        # endpoint with a live node behind it keeps the live flag.
+        if any(end.archived and end.has_live_edges for end in (source, target)):
+            self.archived_attach_edges.append(edge.id)
+        if any(
+            end.kind == "live" and end.node_id in self.nodes for end in (source, target)
+        ):
+            self.skipped_attach_edges.append(edge.id)
+        return decision
+
+    def _live_duplicate(
+        self,
+        edge: Edge,
+        source: _Endpoint,
+        target: _Endpoint,
+        exclude: frozenset = frozenset(),
+    ) -> Optional[str]:
+        if not (source.has_live_edges and target.has_live_edges):
+            return None
+        # The live edge with the document edge's own id counts too: renamed,
+        # the document edge would sit beside it as a second identical triple.
+        key = (source.node_id, target.node_id, edge.type_str)
+        if exclude and key in self.first_unexcluded:
+            # Settling re-asks the same question for every pending duplicate
+            # of one pair and type; answer it once, not once per edge.
+            match = self.first_unexcluded[key]
+        else:
+            same_type = self._pair_index(source.node_id, target.node_id).get(
+                edge.type_str, ()
+            )
+            match = next((live for live in same_type if live.id not in exclude), None)
+            if exclude:
+                self.first_unexcluded[key] = match
+        if match is None:
+            return None
+        self._confirm_listed_edge(match)
+        return match.id
+
+    def _pair_index(self, source: str, target: str) -> Dict[str, List["_Listed"]]:
+        """The live edges from ``source`` to ``target`` by type, sorted by id:
+        listed once per attempt, so many document edges between one heavily
+        connected pair cost one scan of its live edges, not one each."""
+        key = (source, target)
+        index = self.pair_listings.get(key)
+        if index is None:
+            index = {}
+            for live in sorted(
+                _snapshot(self.view.edges_from_to(source, target)),
+                key=lambda e: e.id,
+            ):
+                index.setdefault(live.type_str, []).append(live)
+            self.pair_listings[key] = index
+        return index
+
+    def _confirm_listed_edge(self, listed: "_Listed") -> None:
+        # A listing and a by-id read are two reads; an edge deleted or
+        # rewritten between them must restart the plan, not be recorded as
+        # absent while a decision relied on it. Edges are updated in place,
+        # so ``listed`` is a snapshot taken at listing time, never the live
+        # object itself.
+        by_id = self._read_edge(listed.id)
+        if (
+            by_id is None
+            or by_id.revision != listed.revision
+            or by_id.type_str != listed.type_str
+        ):
+            raise LiveGraphMoved(f"edge '{listed.id}' changed during planning")
+
+    def _settle_duplicates(self) -> None:
+        """A live edge this plan retypes is no longer the triple it was, so it
+        cannot be what a document edge duplicates."""
+        retyped = frozenset(
+            d.edge.id
+            for d in self.edges
+            if d.outcome == "overwrite" and "type" in d.changes
+        )
+        if not retyped:
+            return
+        for decision, location, outcome in self.pending_duplicates:
+            if decision.duplicate_of not in retyped:
+                continue
+            assert decision.source is not None and decision.target is not None
+            other = self._live_duplicate(
+                decision.edge, decision.source, decision.target, exclude=retyped
+            )
+            if other is not None:
+                decision.duplicate_of = other
+                continue
+            decision.outcome, decision.reason, decision.duplicate_of = outcome, "", None
+            self._finish_edge(decision, location)
+
+    # -- §1: live incident edges of a node whose subtypes change -----------
+
+    def _rejudge_incident_edges(self) -> None:
+        overwritten_edge_ids = {
+            d.edge.id for d in self.edges if d.outcome == "overwrite"
+        }
+        judged: set = set()  # an edge between two overwritten nodes, once
+        for decision in sorted(self.nodes.values(), key=lambda d: d.node.id):
+            if decision.outcome != "overwrite" or "subtypes" not in decision.changes:
+                continue
+            node_id = decision.node.id
+            incident = _snapshot(self.view.incident_edges(node_id))
+            # The walk must have seen this node as the plan read it: a node
+            # deleted or changed around the walk, or edges not incident to it,
+            # mean the graph moved under the read.
+            if any(node_id not in (e.source, e.target) for e in incident):
+                raise LiveGraphMoved(f"node '{node_id}' changed during planning")
+            self._read_node(node_id)
+            for live_edge in sorted(incident, key=lambda e: e.id):
+                if live_edge.id in overwritten_edge_ids or live_edge.id in judged:
+                    continue
+                judged.add(live_edge.id)
+                self._confirm_listed_edge(live_edge)
+                ends = [
+                    self._resulting_state(live_edge.source),
+                    self._resulting_state(live_edge.target),
+                ]
+                if None in ends:
+                    continue
+                (source_type, source_sub), (target_type, target_sub) = ends
+                verdict = config_loader.relationship_type_allows_node_types(
+                    live_edge.type_str,
+                    source_type,
+                    target_type,
+                    list(source_sub),
+                    list(target_sub),
+                )
+                if not verdict.get("allowed"):
+                    self._conflict(
+                        "edge",
+                        live_edge.id,
+                        f"nodes[{decision.index}]",
+                        "incident_edge_inapplicable",
+                        "overwriting this node's subtypes would leave the live "
+                        "edge inapplicable: " + (verdict.get("message") or ""),
+                    )
+
+    def _resulting_state(self, node_id: str) -> Optional[Tuple[str, Tuple[str, ...]]]:
+        if node_id not in self.resulting_states:
+            self.resulting_states[node_id] = self._resulting_state_once(node_id)
+        return self.resulting_states[node_id]
+
+    def _resulting_state_once(
+        self, node_id: str
+    ) -> Optional[Tuple[str, Tuple[str, ...]]]:
+        decision = self.nodes.get(node_id)
+        if decision is not None and decision.outcome in ("overwrite", "unchanged"):
+            return decision.node.type_str, self._relevant(decision.node.subtypes)
+        live = self._read_node(node_id)
+        if live is None:
+            return None
+        return live.type_str, self._relevant(live.subtypes)
+
+    # -- assembly -------------------------------------------------------------
+
+    def run(self, for_commit: bool = False) -> MergePlan:
+        self._plan_nodes()
+        self._plan_edges()
+        self._settle_duplicates()
+        self._rejudge_incident_edges()
+        digest = self._digest()
+        committable = not self.rejected.total and not self.conflicts
+        if for_commit:
+            return MergePlan(
+                report={},
+                digest=digest,
+                committable=committable,
+                writes=self._writes() if committable else None,
+            )
+        live_without_vector = self.view.nodes_without_vector()
+        report = self._report(live_without_vector)
+        report["committable"] = committable
+        return MergePlan(report=report, digest=digest, committable=committable)
+
+    def _writes(self) -> PlannedWrites:
+        writes = PlannedWrites()
+        for d in sorted(self.nodes.values(), key=lambda d: d.node.id):
+            if d.outcome == "create":
+                writes.node_creates.append(d.node)
+            elif d.outcome == "rename":
+                writes.node_renames.append(d.node)
+            elif d.outcome == "overwrite":
+                revision = self.reads[("node", d.node.id)]
+                assert revision is not None
+                writes.node_overwrites.append(
+                    (
+                        d.node,
+                        revision,
+                        any(name in d.changes for name in EMBEDDING_FIELDS),
+                    )
+                )
+        for e in sorted(self.edges, key=lambda e: e.edge.id):
+            if e.outcome == "create":
+                writes.edge_creates.append(e.edge)
+            elif e.outcome == "rename":
+                writes.edge_renames.append(e.edge)
+            elif e.outcome == "overwrite":
+                revision = self.reads[("edge", e.edge.id)]
+                assert revision is not None
+                writes.edge_overwrites.append((e.edge, revision))
+        return writes
+
+    def _renamed_edge_rewrites(self) -> Dict[str, List[str]]:
+        rewrites: Dict[str, List[str]] = {}
+        for d in self.edges:
+            if d.outcome not in _WRITTEN:
+                continue
+            for end in (d.source, d.target):
+                if end is not None and end.kind == "renamed":
+                    rewrites.setdefault(end.node_id, []).append(d.edge.id)
+        return {k: sorted(set(v)) for k, v in rewrites.items()}
+
+    def _report(self, live_without_vector: int) -> Dict[str, Any]:
+        nodes = sorted(self.nodes.values(), key=lambda d: d.node.id)
+        edges = sorted(self.edges, key=lambda d: d.edge.id)
+
+        def by(outcome, items):
+            return [d for d in items if d.outcome == outcome]
+
+        node_creates, edge_creates = by("create", nodes), by("create", edges)
+        node_overwrites, edge_overwrites = (
+            by("overwrite", nodes),
+            by("overwrite", edges),
+        )
+        node_renames, edge_renames = by("rename", nodes), by("rename", edges)
+        rewrites = self._renamed_edge_rewrites()
+
+        skips: List[Dict[str, Any]] = []
+        for kind, items in (("node", nodes), ("edge", edges)):
+            for d in items:
+                if d.outcome in ("skip", "unchanged", "excluded"):
+                    entry: Dict[str, Any] = {
+                        "kind": kind,
+                        "id": (d.node.id if kind == "node" else d.edge.id),
+                        "reason": d.reason,
+                    }
+                    if kind == "edge" and d.duplicate_of:
+                        entry["live_edge_id"] = _shown(d.duplicate_of)
+                    skips.append(entry)
+
+        overwritten_with_attachments: List[str] = []
+        created_over_orphans: List[str] = []
+        attachments_checked = self.view.attachments_configured()
+        for d in node_overwrites + node_creates if attachments_checked else []:
+            if self.view.has_attachments(d.node.id):
+                (
+                    overwritten_with_attachments
+                    if d.outcome == "overwrite"
+                    else created_over_orphans
+                ).append(d.node.id)
+
+        to_embed = (
+            len(node_creates)
+            + len(node_renames)
+            + sum(
+                1
+                for d in node_overwrites
+                if any(name in d.changes for name in EMBEDDING_FIELDS)
+            )
+        )
+        events = sum(
+            len(group)
+            for group in (
+                node_creates,
+                node_overwrites,
+                node_renames,
+                edge_creates,
+                edge_overwrites,
+                edge_renames,
+            )
+        )
+
+        return {
+            "adds": {
+                "nodes": _capped_ids([d.node.id for d in node_creates]),
+                "edges": _capped_ids([d.edge.id for d in edge_creates]),
+            },
+            "overwrites": {
+                "nodes": _capped_items(
+                    [{"id": d.node.id, "changes": d.changes} for d in node_overwrites]
+                ),
+                "edges": _capped_items(
+                    [{"id": d.edge.id, "changes": d.changes} for d in edge_overwrites]
+                ),
+            },
+            "renames": {
+                "nodes": _capped_items(
+                    [
+                        {
+                            "id": d.node.id,
+                            "edges_rewritten": _capped_ids(rewrites.get(d.node.id, [])),
+                        }
+                        for d in node_renames
+                    ]
+                ),
+                "edges": _capped_ids([d.edge.id for d in edge_renames]),
+            },
+            "skips": _capped_items(skips),
+            "conflicts": _capped_items(
+                sorted(self.conflicts, key=lambda c: (c["kind"], c["id"], c["reason"]))
+            ),
+            "rejected": {
+                "count": self.rejected.total,
+                "items": [issue.to_dict() for issue in self.rejected],
+            },
+            "attachments": {
+                "checked": attachments_checked,
+                "overwritten_with_attachments": _capped_ids(
+                    overwritten_with_attachments
+                ),
+                "created_over_orphan_attachments": _capped_ids(created_over_orphans),
+            },
+            "edges_to_archived_nodes": _capped_ids(sorted(self.archived_attach_edges)),
+            "edges_to_skipped_nodes": _capped_ids(sorted(self.skipped_attach_edges)),
+            "embeddings": {
+                "nodes_to_embed": to_embed,
+                "live_nodes_without_vector": live_without_vector,
+            },
+            "events": {"count": events},
+        }
+
+    def _digest(self) -> str:
+        # Ids have no length limit and one live id can be named by many
+        # document edges, so every id enters the canonical form as its hash,
+        # each id hashed once.
+        id_hashes: Dict[Optional[str], Optional[str]] = {None: None}
+
+        def h(value: Optional[str]) -> Optional[str]:
+            if value not in id_hashes:
+                id_hashes[value] = hashlib.sha256(
+                    value.encode("utf-8", "surrogatepass")
+                ).hexdigest()
+            return id_hashes[value]
+
+        def endpoint(end: Optional[_Endpoint]) -> Any:
+            if end is None:
+                return None
+            return [end.kind, h(end.node_id)]
+
+        # Each entry is hashed on its own, so the canonical form below holds
+        # 64-character hashes rather than the document's text: its size grows
+        # with the number of entities and reads, not with their content.
+        node_hashes = [_entry_hash(raw) for raw in self.raw_nodes]
+        edge_hashes = [_entry_hash(raw) for raw in self.raw_edges]
+        canonical: Dict[str, Any] = {
+            "digest_version": DIGEST_VERSION,
+            # Every entry as sent, valid or not, as a sorted multiset: the
+            # digest follows any document edit and never its order.
+            "document": {
+                "nodes": sorted(node_hashes),
+                "edges": sorted(edge_hashes),
+            },
+            "parameters": self.params.canonical(),
+            "generation": self.generation,
+        }
+        if self.rejected.total:
+            # A rejected entry blocks any commit. Which occurrence of a repeated
+            # id was planned depends on document order, so a blocked plan's
+            # digest stops at what it was asked and when.
+            canonical["blocked"] = True
+        else:
+            canonical.update(
+                {
+                    "nodes": [
+                        {
+                            "id": h(d.node.id),
+                            "outcome": d.outcome,
+                            "reason": d.reason,
+                            "content": node_hashes[d.index],
+                        }
+                        for d in sorted(self.nodes.values(), key=lambda d: d.node.id)
+                    ],
+                    "edges": [
+                        {
+                            "id": h(d.edge.id),
+                            "outcome": d.outcome,
+                            "reason": d.reason,
+                            "source": endpoint(d.source),
+                            "target": endpoint(d.target),
+                            "duplicate_of": h(d.duplicate_of),
+                            "content": edge_hashes[d.index],
+                        }
+                        for d in sorted(self.edges, key=lambda d: d.edge.id)
+                    ],
+                    # By entity, not by document position.
+                    "conflicts": sorted(
+                        [c["kind"], h(c["id"]), c["reason"]] for c in self.conflicts
+                    ),
+                    "reads": sorted(
+                        [kind, h(entity_id), revision]
+                        for (kind, entity_id), revision in self.reads.items()
+                    ),
+                }
+            )
+        encoded = json.dumps(
+            canonical,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            default=str,
+        ).encode("ascii")
+        return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _entry_hash(raw: Any) -> str:
+    content = _content(raw) if isinstance(raw, dict) and "revision" in raw else raw
+    # One-shot (C) encoding without escaping, so an entry costs about its own
+    # text twice over (the string, then its bytes) and nesting is not walked
+    # by Python recursion; surrogatepass keeps lone surrogates hashable.
+    encoded = json.dumps(
+        content, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str
+    ).encode("utf-8", "surrogatepass")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+# A live id can be any length and one can be named by every document edge,
+# so the report shows a bounded prefix of it rather than repeating it whole.
+_SHOWN_ID_CHARS = 256
+
+
+def _shown(value: str) -> str:
+    if len(value) <= _SHOWN_ID_CHARS:
+        return value
+    return value[:_SHOWN_ID_CHARS] + "…"
+
+
+def _content(raw: Dict[str, Any]) -> Dict[str, Any]:
+    # ``revision`` is server-owned and ignored on every write, so a document
+    # carrying a different one asks for the same writes.
+    return {key: value for key, value in raw.items() if key != "revision"}
+
+
+def _field_changes(live: Any, incoming: Any, fields: Tuple[str, ...]) -> Dict[str, Any]:
+    changes: Dict[str, Dict[str, Any]] = {}
+    for name in fields:
+        main = getattr(live, name)
+        new = getattr(incoming, name)
+        if name == "type":
+            main, new = live.type_str, incoming.type_str
+        if main != new:
+            changes[name] = {"main": main, "incoming": new}
+    return changes
+
+
+def capped_renames(mapping: Dict[str, str]) -> Dict[str, Any]:
+    """Renamed ids, old -> new, for a commit response: exact count, the first
+    ``PLAN_LIST_CAP`` pairs by old id."""
+    items = [
+        {"old_id": old, "new_id": mapping[old]}
+        for old in sorted(mapping)[:PLAN_LIST_CAP]
+    ]
+    return {"count": len(mapping), "items": items}
+
+
+def _capped_ids(ids: List[str]) -> Dict[str, Any]:
+    return {"count": len(ids), "ids": ids[:PLAN_LIST_CAP]}
+
+
+def _capped_items(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return {"count": len(items), "items": items[:PLAN_LIST_CAP]}

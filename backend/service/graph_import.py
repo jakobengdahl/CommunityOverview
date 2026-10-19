@@ -18,7 +18,7 @@ graph, and a validation failure can never have written anything.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import ValidationError as PydanticValidationError
 
@@ -28,6 +28,7 @@ from backend.core.models import (
     Node,
     is_valid_node_type,
     is_valid_relationship_type,
+    metadata_depth_error,
 )
 
 # A generous but finite cap. Without one, a malformed or hostile document (a
@@ -71,76 +72,90 @@ class ImportValidationResult:
         }
 
 
+# A validation error lists every bad item, so one entity with a million bad
+# list entries would otherwise produce a message hundreds of times the size
+# of the request. Its first lines are enough to fix a document.
+_MAX_ERROR_CHARS = 500
+
+
+def describe_invalid(exc: Exception) -> str:
+    """A bounded description of why an entity failed to construct: the
+    validator's own text, cut. Its first lines name the count and the
+    first located failures."""
+    text = str(exc)
+    if len(text) > _MAX_ERROR_CHARS:
+        text = text[:_MAX_ERROR_CHARS] + "…"
+    return text
+
+
 def _fail(errors: List[ImportIssue]) -> ImportValidationResult:
     return ImportValidationResult(errors=errors, nodes=[], edges=[])
 
 
-def validate_import_document(document: Any) -> ImportValidationResult:
-    """
-    Validate a whole graph.json-shaped document for a REPLACE import.
+def read_document_lists(
+    document: Any,
+    *,
+    max_nodes: Optional[int] = None,
+    max_edges: Optional[int] = None,
+) -> Tuple[List[Any], List[Any], List[ImportIssue]]:
+    """Top-level shape and size checks shared by every import mode.
 
-    Collects every problem it finds rather than stopping at the first, so the
-    caller can report an actionable list in one round trip. Returns
-    constructed ``Node``/``Edge`` objects only when the document is fully
-    valid; a document with any error yields an empty ``nodes``/``edges``.
-
-    Checks performed (all against the document alone, never the live graph):
-      * top-level shape: a JSON object with a "nodes" list (and an optional
-        "edges" list, defaulting to empty)
-      * every node is an object with a non-empty "id" and a "type" that is a
-        configured node type
-      * no two nodes in the document share an id
-      * every node is constructible as a ``Node`` (field length limits, etc.)
-      * every edge is an object with a non-empty "id", "source" and "target"
-      * no two edges in the document share an id
-      * every edge's "type" (when given) is a configured relationship type
-      * every edge's source/target refers to a node id present in THIS
-        document — a dangling reference is invalid because v1 replaces the
-        whole graph, so there is no pre-existing graph left for it to resolve
-        against
-      * every edge is constructible as an ``Edge``
-      * every edge's type is applicable between its endpoints' types/subtypes,
-        per the same schema rule ``GraphStorage._validate_edge_applicability``
-        enforces on ordinary writes
+    Returns ``(raw_nodes, raw_edges, errors)``; when ``errors`` is non-empty
+    the lists are empty and the document cannot be judged entity by entity.
+    The caps default to ``MAX_IMPORT_NODES`` / ``MAX_IMPORT_EDGES``.
     """
+    max_nodes = MAX_IMPORT_NODES if max_nodes is None else max_nodes
+    max_edges = MAX_IMPORT_EDGES if max_edges is None else max_edges
     if not isinstance(document, dict):
-        return _fail([ImportIssue("$", "the import document must be a JSON object")])
+        return [], [], [ImportIssue("$", "the import document must be a JSON object")]
 
     raw_nodes = document.get("nodes")
     if raw_nodes is None:
-        return _fail([ImportIssue("nodes", 'the document has no "nodes" list')])
+        return [], [], [ImportIssue("nodes", 'the document has no "nodes" list')]
     if not isinstance(raw_nodes, list):
-        return _fail([ImportIssue("nodes", '"nodes" must be a list')])
+        return [], [], [ImportIssue("nodes", '"nodes" must be a list')]
 
     raw_edges = document.get("edges", [])
     if raw_edges is None:
         raw_edges = []
     if not isinstance(raw_edges, list):
-        return _fail([ImportIssue("edges", '"edges" must be a list')])
+        return [], [], [ImportIssue("edges", '"edges" must be a list')]
 
-    if len(raw_nodes) > MAX_IMPORT_NODES:
-        return _fail(
+    if len(raw_nodes) > max_nodes:
+        return (
+            [],
+            [],
             [
                 ImportIssue(
                     "nodes",
-                    f"{len(raw_nodes)} nodes exceeds the {MAX_IMPORT_NODES} import limit",
+                    f"{len(raw_nodes)} nodes exceeds the {max_nodes} import limit",
                 )
-            ]
+            ],
         )
-    if len(raw_edges) > MAX_IMPORT_EDGES:
-        return _fail(
+    if len(raw_edges) > max_edges:
+        return (
+            [],
+            [],
             [
                 ImportIssue(
                     "edges",
-                    f"{len(raw_edges)} edges exceeds the {MAX_IMPORT_EDGES} import limit",
+                    f"{len(raw_edges)} edges exceeds the {max_edges} import limit",
                 )
-            ]
+            ],
         )
+    return raw_nodes, raw_edges, []
 
-    errors: List[ImportIssue] = []
+
+def build_document_nodes(
+    raw_nodes: List[Any], errors: List[ImportIssue]
+) -> List[Tuple[int, Node]]:
+    """Check and construct every document node, appending problems to ``errors``.
+
+    Returns ``(index, node)`` for the first occurrence of each id that
+    constructs; a later duplicate is reported and never shadows the first.
+    """
     seen_node_ids: Dict[str, int] = {}
-    node_types: Dict[str, Tuple[str, List[str]]] = {}  # id -> (type_str, subtypes)
-    built_nodes: List[Node] = []
+    built: List[Tuple[int, Node]] = []
 
     for index, raw_node in enumerate(raw_nodes):
         location = f"nodes[{index}]"
@@ -176,65 +191,138 @@ def validate_import_document(document: Any) -> ImportValidationResult:
         try:
             node = Node.from_dict(dict(raw_node))
         except (PydanticValidationError, ValueError, TypeError) as exc:
-            errors.append(ImportIssue(location, f"invalid node: {exc}"))
+            errors.append(
+                ImportIssue(location, f"invalid node: {describe_invalid(exc)}")
+            )
+            continue
+        depth_error = metadata_depth_error(node.metadata)
+        if depth_error:
+            errors.append(ImportIssue(location, f"invalid node: {depth_error}"))
             continue
 
-        # Only the first occurrence of a given id is added to the reference
-        # map / commit set — a later duplicate is already reported above and
-        # must not silently shadow the first one's type for applicability
-        # checks below.
         if node_id is not None and seen_node_ids.get(node_id) == index:
-            node_types[node.id] = (node.type_str, list(node.subtypes))
-            built_nodes.append(node)
+            built.append((index, node))
+    return built
+
+
+def build_document_edge(
+    raw_edge: Dict[str, Any], location: str, errors: List[ImportIssue]
+) -> Optional[Edge]:
+    """Construct one document edge, or append why it cannot be and return None."""
+    try:
+        edge = Edge.from_dict(dict(raw_edge))
+    except (PydanticValidationError, ValueError, TypeError) as exc:
+        errors.append(ImportIssue(location, f"invalid edge: {describe_invalid(exc)}"))
+        return None
+    depth_error = metadata_depth_error(edge.metadata)
+    if depth_error:
+        errors.append(ImportIssue(location, f"invalid edge: {depth_error}"))
+        return None
+    return edge
+
+
+def check_document_edge_shape(
+    raw_edge: Any,
+    location: str,
+    index: int,
+    seen_edge_ids: Dict[str, int],
+    errors: List[ImportIssue],
+) -> bool:
+    """The per-edge checks that need no node lookup: object shape, id,
+    duplicate id, source/target presence and relationship type. Returns
+    False only when ``raw_edge`` is not an object at all."""
+    if not isinstance(raw_edge, dict):
+        errors.append(ImportIssue(location, "an edge must be a JSON object"))
+        return False
+
+    edge_id = raw_edge.get("id")
+    if not isinstance(edge_id, str) or not edge_id.strip():
+        errors.append(ImportIssue(location, 'an edge must have a non-empty "id"'))
+    elif edge_id in seen_edge_ids:
+        errors.append(
+            ImportIssue(
+                location,
+                f"duplicate edge id '{edge_id}' (first seen at "
+                f"edges[{seen_edge_ids[edge_id]}])",
+            )
+        )
+    else:
+        seen_edge_ids[edge_id] = index
+
+    source = raw_edge.get("source")
+    target = raw_edge.get("target")
+    if not isinstance(source, str) or not source.strip():
+        errors.append(ImportIssue(location, 'an edge must have a non-empty "source"'))
+    if not isinstance(target, str) or not target.strip():
+        errors.append(ImportIssue(location, 'an edge must have a non-empty "target"'))
+
+    edge_type = raw_edge.get("type")
+    if edge_type not in (None, "") and not isinstance(edge_type, str):
+        errors.append(ImportIssue(location, '"type" must be a string'))
+    elif (
+        isinstance(edge_type, str)
+        and edge_type
+        and not is_valid_relationship_type(edge_type)
+    ):
+        errors.append(
+            ImportIssue(
+                location, f"'{edge_type}' is not a configured relationship type"
+            )
+        )
+    return True
+
+
+def validate_import_document(document: Any) -> ImportValidationResult:
+    """
+    Validate a whole graph.json-shaped document for a REPLACE import.
+
+    Collects every problem it finds rather than stopping at the first, so the
+    caller can report an actionable list in one round trip. Returns
+    constructed ``Node``/``Edge`` objects only when the document is fully
+    valid; a document with any error yields an empty ``nodes``/``edges``.
+
+    Checks performed (all against the document alone, never the live graph):
+      * top-level shape: a JSON object with a "nodes" list (and an optional
+        "edges" list, defaulting to empty)
+      * every node is an object with a non-empty "id" and a "type" that is a
+        configured node type
+      * no two nodes in the document share an id
+      * every node is constructible as a ``Node`` (field length limits, etc.)
+      * every edge is an object with a non-empty "id", "source" and "target"
+      * no two edges in the document share an id
+      * every edge's "type" (when given) is a configured relationship type
+      * every edge's source/target refers to a node id present in THIS
+        document — a dangling reference is invalid because v1 replaces the
+        whole graph, so there is no pre-existing graph left for it to resolve
+        against
+      * every edge is constructible as an ``Edge``
+      * every edge's type is applicable between its endpoints' types/subtypes,
+        per the same schema rule ``GraphStorage._validate_edge_applicability``
+        enforces on ordinary writes
+    """
+    raw_nodes, raw_edges, shape_errors = read_document_lists(document)
+    if shape_errors:
+        return _fail(shape_errors)
+
+    errors: List[ImportIssue] = []
+    built_nodes: List[Node] = []
+    node_types: Dict[str, Tuple[str, List[str]]] = {}  # id -> (type_str, subtypes)
+    for _index, node in build_document_nodes(raw_nodes, errors):
+        node_types[node.id] = (node.type_str, list(node.subtypes))
+        built_nodes.append(node)
 
     seen_edge_ids: Dict[str, int] = {}
     built_edges: List[Edge] = []
 
     for index, raw_edge in enumerate(raw_edges):
         location = f"edges[{index}]"
-        if not isinstance(raw_edge, dict):
-            errors.append(ImportIssue(location, "an edge must be a JSON object"))
+        if not check_document_edge_shape(
+            raw_edge, location, index, seen_edge_ids, errors
+        ):
             continue
-
         edge_id = raw_edge.get("id")
-        if not isinstance(edge_id, str) or not edge_id.strip():
-            errors.append(ImportIssue(location, 'an edge must have a non-empty "id"'))
-            edge_id = None
-        elif edge_id in seen_edge_ids:
-            errors.append(
-                ImportIssue(
-                    location,
-                    f"duplicate edge id '{edge_id}' (first seen at "
-                    f"edges[{seen_edge_ids[edge_id]}])",
-                )
-            )
-        else:
-            seen_edge_ids[edge_id] = index
-
         source = raw_edge.get("source")
         target = raw_edge.get("target")
-        if not isinstance(source, str) or not source.strip():
-            errors.append(
-                ImportIssue(location, 'an edge must have a non-empty "source"')
-            )
-        if not isinstance(target, str) or not target.strip():
-            errors.append(
-                ImportIssue(location, 'an edge must have a non-empty "target"')
-            )
-
-        edge_type = raw_edge.get("type")
-        if edge_type not in (None, "") and not isinstance(edge_type, str):
-            errors.append(ImportIssue(location, '"type" must be a string'))
-        elif (
-            isinstance(edge_type, str)
-            and edge_type
-            and not is_valid_relationship_type(edge_type)
-        ):
-            errors.append(
-                ImportIssue(
-                    location, f"'{edge_type}' is not a configured relationship type"
-                )
-            )
 
         if isinstance(source, str) and source and source not in node_types:
             errors.append(
@@ -251,10 +339,8 @@ def validate_import_document(document: Any) -> ImportValidationResult:
                 )
             )
 
-        try:
-            edge = Edge.from_dict(dict(raw_edge))
-        except (PydanticValidationError, ValueError, TypeError) as exc:
-            errors.append(ImportIssue(location, f"invalid edge: {exc}"))
+        edge = build_document_edge(raw_edge, location, errors)
+        if edge is None:
             continue
 
         if (
@@ -282,7 +368,7 @@ def validate_import_document(document: Any) -> ImportValidationResult:
                     )
                 )
 
-        if edge_id is not None and seen_edge_ids.get(edge_id) == index:
+        if isinstance(edge_id, str) and seen_edge_ids.get(edge_id) == index:
             built_edges.append(edge)
 
     if errors:

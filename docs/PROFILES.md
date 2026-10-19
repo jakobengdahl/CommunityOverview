@@ -135,15 +135,15 @@ Each node type has the following fields:
 | `context_menu` | No | Array of extra items for the right-click context menu (see below) |
 | `allows_attachments` | No | `true` marks this node type as accepting file attachments. Defaults to `false`. Returned by `get_schema` on every node type, so clients can read it unconditionally. Per [ADR 0008](adr/0008-node-attachment-storage.md) section 7 it gates uploads only — listing, downloading and deleting files already attached stay available, so turning it back off never strands them. Uploads to a type without it answer `422 attachments_not_allowed`; the endpoints are listed in `backend/DEVELOPMENT.md` (*Node attachments*) |
 
-**A malformed value discards the whole file.** These fields are validated when
-the profile loads, and validation covers the schema file as a unit. A value of
-the wrong type for any of them — `"allows_attachments": "ture"`, a `null`, a
-list where a bool belongs — fails that validation, and the loader logs a
-warning and falls back to built-in defaults: every node type *and* relationship
-type the profile declares is dropped, leaving only the code-managed system
-types. Nothing else reports the profile as broken, so check the startup log
-after editing. Boolean fields do accept the usual spellings (`true`, `"true"`,
-`"yes"`, `1`), so only genuinely unparseable values trip this.
+**A malformed node type is dropped on its own.** These fields are validated
+per node type when the profile loads. A value of the wrong type for any of them
+— `"allows_attachments": "ture"`, a `null`, a list where a bool belongs — drops
+that one node type and logs a warning naming the type and the field; the
+profile's other node types and its relationship types still load, and the
+profile behaves as if the dropped type were not declared. Nothing else
+reports the dropped type, so check the startup log after editing. Boolean
+fields do accept the usual spellings (`true`, `"true"`, `"yes"`, `1`), so only
+genuinely unparseable values trip this.
 
 Every node — regardless of its type or its `fields` list — also carries a
 universal `aliases` field: a list of alternative names/synonyms. Aliases are

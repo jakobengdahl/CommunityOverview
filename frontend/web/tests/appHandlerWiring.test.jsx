@@ -520,4 +520,55 @@ describe('App handler wiring', () => {
       expect(canvas().isReferenceTargetAvailable('resource', 'res-1')).toBeUndefined();
     });
   });
+
+  // A toast is the only channel for several outcomes that change nothing on
+  // the canvas, so a sighted user's "nothing happened" is a screen-reader
+  // user's silence unless the toast is a live region. The urgency has to
+  // follow the kind: a failure interrupts, a notice waits.
+  describe('notification toast', () => {
+    it('announces a notice politely and names its dismiss button', async () => {
+      await renderApp();
+      api.getSession.mockRejectedValueOnce(Object.assign(new Error('not found'), { status: 404 }));
+      await act(async () => {
+        await canvas().onReferenceOpen({
+          targetKind: 'session',
+          target: '8244-1742-3391-0057',
+        });
+      });
+      // The session switch is queued behind a snapshot round trip the real
+      // canvas answers; this file's stub does not, so drive it here.
+      await act(async () => {
+        await canvas().onSaveView({ nodes: [], edges: [] });
+      });
+
+      const toast = await screen.findByRole('status');
+      expect(toast).toHaveTextContent(
+        'That session link could not be found — it may have been deleted or expired.'
+      );
+      expect(toast).toHaveAttribute('aria-live', 'polite');
+      // Without an accessible name the control reads as its glyph, "×".
+      expect(screen.getByRole('button', { name: 'Close' })).toBeInTheDocument();
+    });
+
+    it('announces a failure assertively', async () => {
+      const openSpy = vi.spyOn(window, 'open').mockReturnValue(null);
+      try {
+        await renderApp();
+        await act(async () => {
+          await canvas().onReferenceOpen({
+            targetKind: 'url',
+            // eslint-disable-next-line no-script-url
+            target: 'javascript:alert(1)',
+          });
+        });
+        expect(openSpy).not.toHaveBeenCalled();
+
+        const toast = await screen.findByRole('alert');
+        expect(toast).toHaveAttribute('aria-live', 'assertive');
+        expect(screen.queryByRole('status')).toBeNull();
+      } finally {
+        openSpy.mockRestore();
+      }
+    });
+  });
 });

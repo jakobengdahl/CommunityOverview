@@ -1,7 +1,7 @@
 # ADR 0013 — Graph import: MERGE mode beside REPLACE
 
-- **Status:** Proposed
-- **Date:** 2026-10-15
+- **Status:** Accepted
+- **Date:** 2026-10-15 (proposed and accepted 2026-10-15)
 - **Scope:** Open-source core only
 - **Related:** [ADR 0006](0006-graph-import-replace-mode.md) (the REPLACE
   pipeline this sits beside), [ADR 0007](0007-vector-aware-export-archive.md)
@@ -13,12 +13,219 @@
   §4 (entity revisions and expectations) and §10–§11 (the staged-merge design
   this borrows its vocabulary from), [`DURABLE_EXECUTION_CONTRACT.md`](../DURABLE_EXECUTION_CONTRACT.md)
 
-This ADR designs a second import mode. It implements nothing. Each section
-headed **Decision point** lists options, trade-offs and a recommendation; the
-recommendations are proposals for the reviewer to accept or change, not
-decisions already taken. When the ADR is accepted, the chosen option for each
-point is recorded in a short "Decisions on acceptance" table at the top, the way
-ADR 0009 records its sub-questions.
+This ADR designs a second import mode. Each section headed **Decision point**
+lists options, trade-offs and a recommendation. The ADR was proposed with the
+recommendations as proposals; on acceptance the recommended option was chosen
+for every point, as recorded below.
+
+## Decisions on acceptance
+
+Accepted on 2026-10-15: the **recommended option of every decision point** is
+the decision. Nothing was changed from the recommendations.
+
+| Point | Decision |
+|---|---|
+| §1 ID-collision policy | Default `fail` for nodes and edges; granularity (b), one default plus per-type overrides; type and endpoint mismatch (ii), a conflict under every policy except `rename`; subtype change under overwrite (a), re-judge live incident edges |
+| §2 Edge handling | Endpoints in the live graph allowed; dangling rejected; archived live endpoint allowed and reported; edges of skipped nodes (a), attached to the live node; duplicate triples (b), skipped and reported; live edges never deleted |
+| §3 Preview and binding | (c) stateless digest, with expectations and checks on every commit; a commit without a digest only when every policy is `fail`/`skip` and `include_system_types` is false |
+| §4 Atomicity | (a) all-or-nothing through a new `GraphStorage` method; backup (a), the v1 whole-graph backup before every merge; `generation` not bumped |
+| §5 Validation | Unknown types (a), reject the whole import; system types (b), excluded unless `include_system_types: true` |
+| §6 Embeddings | Per-node comparison in the worker (b); PostgreSQL entity-upsert embedding commit (a) in slice 3, slice 2 refusing PostgreSQL merges until then |
+| §7 Provenance and events | Provenance (c), opt-in and off; audit record (a), best-effort in `import_jobs.db`; events (b), one ordinary event per entity |
+| §8 Size limits | v1 document caps; no separate overwrite cap (a); thresholds below |
+| §9 API surface | REST (b), separate `/import/merge/preview` and `/import/merge` routes; MCP (b), preview tool only |
+| §10 Security | Narrowed callers (a), refused; the preview needs the commit's authorization |
+
+### Slice 1 as implemented
+
+Slice 1 (the planner, `POST /import/merge/preview` and the
+`preview_graph_merge` MCP tool) ships in `backend/service/graph_merge_plan.py`.
+Choices it made inside the decisions above:
+
+- `policy.by_type` keys may name a node type or a relationship type; an edge
+  collision follows its relationship type's entry, else `policy.default`. A key
+  that names neither is refused, as are unknown request or policy fields.
+- An `overwrite` whose document entity equals the live one in every
+  caller-writable field is listed under `skips` with reason `unchanged`, so a
+  re-import of an unchanged export writes and announces nothing.
+- An edge whose endpoint resolves to a live system-type node is excluded with
+  the system nodes, not only an edge whose endpoint is a document system node.
+- `attachments.checked` is `false` when no attachment store is configured,
+  rather than reporting no flags as if the check had run; an attachment index
+  that cannot be read flags its node rather than failing the preview.
+- Edges the commit would write onto a node a `skip` collision kept are listed
+  in `edges_to_skipped_nodes`, as well as under `adds`, `overwrites` or
+  `renames` (§2 (a): "every such edge listed"). A `rename` whose live edge already has the same source, target
+  and type is a duplicate-triple skip, since the renamed copy would repeat it.
+- The REST route plans in a worker thread, as planning at the document caps
+  takes tens of seconds. The MCP tool plans on the server's event loop, so it
+  takes documents of at most 10,000 nodes and 20,000 edges (§9: "for small
+  documents an assistant assembles").
+- A `SavedView` overwrite's metadata values pass through the same sanitizer
+  every other read applies before they are returned.
+- The digest covers every document entry as sent, valid or not, as a sorted
+  multiset, so any edit to the document — a skipped entity included — makes a
+  preview stale, and reordering it does not. Per-entity outcomes, conflicts
+  (by entity) and live reads enter it as §3 (c) describes; a plan with any
+  rejected entry, which no commit can apply, digests only the request, the
+  document and `generation`.
+- A live edge the same plan retypes under `overwrite` is not what a document
+  edge duplicates. The planner reads without the storage lock; a live write
+  that changes an adjacency map mid-read, or changes or deletes an entity the
+  plan read twice — by id, or once in a listing and once by id — restarts the
+  plan like a replace.
+- One preview runs at a time per process; another is refused with 503
+  `import_preview_busy` and can be retried, since a preview changes nothing.
+- A `SavedView`/`VisualizationView` document node whose annotations the write
+  path refuses (`saved_view_annotation_error`) is listed under `rejected`.
+- Besides the commit's `GRAPH_ACTION_MUTATE`, the preview also asks the hook
+  for `GRAPH_ACTION_READ` on the whole graph, since it returns live values; a
+  hook that grants mutation without unnarrowed reads is refused (§10).
+- For slice 2: the digest records every live entity the plan read and its
+  revision, not absences a listing found — the incident edges walked for a
+  subtype re-judge, or a duplicate-triple lookup that matched nothing. A write
+  to a *different* entity between two reads is an ordinary concurrent write,
+  not a restart. Live nodes are updated in place, so one read can also see a
+  concurrent update's fields under the revision it had before, or the fields
+  of an update that is then undone. The commit's checks (§3) must cover all
+  of these.
+- Each node an edge names is resolved once per plan attempt and keeps only
+  the subtypes some relationship rule names: `subtypes` has no size limit, so
+  per-edge work must not grow with its length.
+
+### Slice 1 measurements and thresholds (§8)
+
+Measured with `scripts/measure_merge_preview.py`, which builds the
+`scripts/measure_capacity.py` fixture: a 10,000-node, 17,998-edge document
+(half colliding with live ids under `overwrite`, half new, 1,000 duplicate
+triples) against a 100,000-node, 169,997-edge graph on the file backend. A
+local development container — 4 vCPU at 2.80 GHz, 15 GB RAM, Python 3.13 — not
+a tuned benchmark machine; three runs.
+
+| Figure | Measured | Pass/fail threshold |
+|---|---|---|
+| Preview latency, median of 3 after one warm-up | 1.90–1.98 s, of which ~0.8 s is one full garbage collection over the resident graph that the preview's allocations trigger (1.1–1.3 s without it) | ≤ 2.5 s |
+| Peak memory beyond the resident graph (`tracemalloc` peak during one preview) | 74.9 MB | ≤ 160 MB |
+
+Whether a full collection lands inside a preview depends on how many objects
+the process allocated before it, so the latency threshold leaves room for one.
+Later slices re-run the script and fail a threshold they exceed. The two other
+figures §8 names, how long the commit holds `_lock` and the event fan-out at
+10,000 entities, need the commit to exist; slice 2 sets their thresholds from
+its first measurement (below).
+
+### Slice 2 as implemented
+
+Slice 2 (the commit, `POST /import/merge`) ships in
+`GraphStorage.apply_import_merge` (`backend/core/storage.py`, write shapes in
+`backend/core/storage_merge.py`) and `commit_merge_import`
+(`backend/service/import_service.py`). Choices it made inside the decisions
+above:
+
+- **How the §3 checks are verified.** The commit plans twice: once before
+  the backup, to answer `import_merge_blocked` or `import_plan_stale` with a
+  plan before anything is written, and once more inside the locked unit,
+  through a `prepare` callback `apply_import_merge` runs under `_lock` before
+  it changes anything. The locked plan must have the bound digest. Since no
+  writer can move the in-memory model while the lock is held, that one
+  comparison verifies every read the digest records — each expectation, each
+  check and `generation` — and also what the digest does not record: the
+  absences a listing found (a new incident edge on a re-judged node, a new
+  duplicate triple) and fields a lock-free read saw mid-update, which the
+  slice-1 notes above leave to the commit. The storage method still checks
+  each write's expectation against memory and passes it to `_commit`. The
+  alternative, checking the recorded reads plus re-listing each listing under
+  the lock, was rejected: it needs the planner to export its listings and
+  still cannot catch a field read mid-update. The cost is that `_lock` is held
+  for a plan of the document (linear in the document, not the graph; the
+  report's attachment and vector counts are skipped under the lock).
+- **Without a digest** the commit binds to the plan it computed before the
+  backup, so a write landing between that plan and the lock still fails it.
+- **A digest is not single-use.** A committed create or overwrite moves what
+  the digest covers, so the same digest is stale afterwards; but a commit
+  whose only writes are renames (fresh ids, live entities untouched) can
+  leave the digest current — a node rename always does, while a renamed
+  edge between live nodes is a duplicate of its own copy on the next plan
+  — and resending it then creates the renamed copies again.
+  §3 rules out only the digest-less rename retry; making a digest
+  single-use is the caller-chosen idempotency key §3 and §7 (c) defer, so
+  it is left to that decision and documented for callers.
+- A stale plan found under the lock is answered with a plan recomputed after
+  the lock is released, as for one found before it.
+- **Vectors.** The commit drops the vectors of created and renamed nodes (a
+  stray vector under a reused id included) and of overwrites whose embedding
+  text changed, in memory inside the unit; an undone merge puts them back
+  (`_undo`, and the commit itself for a stray vector, which `_undo` cannot
+  restore under an id no node held). On the
+  file backend the drop moves the vector store's revision, so the batch's
+  write carries the embedding sidecar and writes it before the journal
+  record, as every write that moves a vector does; a failed sidecar write is
+  retried by the next write. The IMPORT job is enqueued only when the plan
+  embeds at least one node, stamped with the generation read inside the
+  commit's lock, so a replace landing just after it supersedes the job.
+- **Failure after hand-over** on the file backend: a batch whose journal
+  write and whole-graph re-save both failed raises `write_outcome_unknown`
+  with memory keeping the merge, no events, and the next write re-saving the
+  whole graph. Since that merge can still become durable unannounced (and
+  without an embeddings job), it gets an audit record too, with
+  `merge_status: "outcome_unknown"` and no revisions.
+- **A plan that writes nothing** (every entry skipped, unchanged or
+  excluded) is answered after the first plan with zero counts: no backup, no
+  lock, no record. There is no write for the §3 checks to protect, and a
+  digest-less `skip` commit repeated in a loop would otherwise write a
+  whole-graph backup each time.
+- **Audit record.** A terminal IMPORT job whose id is the `import_id`. Its
+  job state is `SUCCEEDED` (the record was written); `result.merge_status`
+  says whether the merge was confirmed. Its payload carries `phase: "merge"`
+  and the request's attribution (actor and scope) as the request context
+  reports it, which in the open core is header-derived and so only as
+  trustworthy as what sets those headers; the merge's
+  embeddings job carries `mode: "merge"` and the `import_id`. `GET /import`
+  rows gain `mode` (`replace` for every row written before this slice).
+- **Events** fire in write order (node creates, node overwrites, edge
+  creates, edge overwrites) under the lock, as every direct write's do.
+- One commit runs at a time per process (503 `import_merge_busy`), as one
+  preview does; the two slots are separate.
+- `POST /import/merge` asks for the preview's authorization, `GRAPH_ACTION_READ`
+  included, since its response carries the plan's live values.
+- **Not in this slice:** PostgreSQL mode is refused with 501
+  `import_merge_not_supported` before anything is planned or backed up
+  (slice 3), the worker's per-node revision guard (§6, slice 3), and an MCP
+  commit tool (§9 (b)).
+
+### Slice 2 measurements and thresholds (§8)
+
+Measured with `scripts/measure_merge_commit.py`: the slice-1 document (10,000
+nodes, half overwriting live nodes; 17,998 edges, of which 1,000 duplicate
+triples are skipped) committed under `overwrite` into the same 100,000-node,
+169,997-edge file-backend graph, with two `EventSubscription`s that between
+them match every event. The commit writes 24,532 entities (5,000 nodes
+created, 2,534 overwritten, 16,998 edges created). Same container as slice 1;
+three runs, each against a freshly seeded graph.
+
+| Figure | Measured | Pass/fail threshold |
+|---|---|---|
+| `_lock` held by the commit (`apply_import_merge`) | 12.1–13.8 s, median 12.8 s | ≤ 16 s |
+| Whole commit request (two plans, backup, locked unit, job and audit record) | 23.9–27.3 s, median 25.1 s | ≤ 32 s |
+| Whole-graph backup, before the lock | 8.9–12.4 s | reported, not gated: proportional to the graph (§4 (a)) |
+| Events fired | 24,532 — one per written entity | exactly one per written entity |
+| Webhook deliveries enqueued (§7 (b) fan-out) | 24,532 — one per event per matching subscription | one per event per matching subscription |
+
+Inside the lock, per-event work dominates: a profile of a 5,000-node commit
+puts most of the locked time in `_emit_event` — the dispatcher's copy of each
+event and one mutation-history append, which opens the history file, per
+event — and a smaller share, about 1.5 s, in the plan recomputed under the
+lock. That is
+the existing per-event cost every direct write pays, now paid once per
+merged entity while live writes queue behind the lock (reads take no lock).
+The lock hold scales with the document (the plan recomputed under it) and
+the merged entities (the writes and their events), not with the graph, as §8
+asks.
+Whether a large merge should emit a capped or batched form instead (§7) is
+an event-contract change and is left to a decision on these figures; the
+delivery-queue depth at return was 0 only because the measurement's
+loopback target is refused at once, so the enqueued count is the depth a
+slower target sees.
 
 ## Context
 
@@ -737,6 +944,5 @@ If accepted as recommended:
 
 ## What this ADR does not decide
 
-- Every **Decision point** above — they are the reviewer's to choose.
 - A "sync" mode that also deletes live entities absent from the document.
 - Merging attachments (they are not part of `graph.json`; ADR 0008 §10).

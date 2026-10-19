@@ -6,7 +6,10 @@ import { render, screen } from '@testing-library/react';
 import NodeDetailDialog from './NodeDetailDialog';
 
 vi.mock('../store/graphStore', () => ({
-  default: () => ({ getNodeColor: () => '#123456', schema: { node_types: {} } }),
+  default: () => ({
+    getNodeColor: () => '#123456',
+    schema: { node_types: { Document: { allows_attachments: true } } },
+  }),
 }));
 
 vi.mock('../i18n', () => ({
@@ -18,6 +21,17 @@ vi.mock('../i18n', () => ({
 vi.mock('./EntityHistoryView', () => ({
   default: ({ entityKind, entityId }) => (
     <div data-testid="entity-history" data-kind={entityKind} data-id={entityId} />
+  ),
+}));
+
+// The panel has its own tests; here only its placement and the flag it gets.
+vi.mock('./NodeAttachmentsPanel', () => ({
+  default: ({ nodeId, typeAllowsAttachments }) => (
+    <div
+      data-testid="attachments-panel"
+      data-id={nodeId}
+      data-allowed={String(typeAllowsAttachments)}
+    />
   ),
 }));
 
@@ -40,5 +54,21 @@ describe('NodeDetailDialog', () => {
     expect(
       screen.getByRole('tab', { name: 'history.view_history' }).getAttribute('aria-selected')
     ).toBe('true');
+  });
+
+  it('passes the schema allows_attachments flag of the node type to the panel', () => {
+    const { rerender } = render(<NodeDetailDialog node={node} onClose={vi.fn()} />);
+    const panel = screen.getByTestId('attachments-panel');
+    expect(panel.getAttribute('data-id')).toBe('n1');
+    expect(panel.getAttribute('data-allowed')).toBe('false');
+    rerender(
+      <NodeDetailDialog node={{ id: 'd1', data: { type: 'Document' } }} onClose={vi.fn()} />
+    );
+    expect(screen.getByTestId('attachments-panel').getAttribute('data-allowed')).toBe('true');
+  });
+
+  it('shows the attachments panel on the details tab only', () => {
+    render(<NodeDetailDialog node={node} onClose={vi.fn()} initialView="history" />);
+    expect(screen.queryByTestId('attachments-panel')).toBeNull();
   });
 });

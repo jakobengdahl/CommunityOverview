@@ -303,6 +303,55 @@ def test_denial_is_identical_whether_or_not_the_node_exists(tmp_path):
     assert existing == missing == unconfigured
 
 
+def test_a_provenance_less_local_node_is_not_denied_for_the_graph_its_id_names(
+    tmp_path,
+):
+    # The one case where the answer legitimately differs from a missing node: a
+    # node that exists here is classified by its own (absent) provenance, so
+    # an id naming an excluded graph does not speak for it. Pinned through the
+    # service because a resolver-only test once read a real leak as closed.
+    service = _service(tmp_path)
+    service._storage.add_nodes(
+        [Node(id="federated::esam-main::mine", type=NodeType.ACTOR, name="Mine")], []
+    )
+    service._authorization_hook = _NarrowingHook("other-graph")
+
+    local = service.resolve_teleport("federated::esam-main::mine")
+    missing = service.resolve_teleport("federated::esam-main::not-here")
+
+    assert local["status"] == teleport.STATUS_LOCAL
+    assert local["origin_graph_id"] == ""
+    assert "route" not in local
+    assert missing["status"] == teleport.STATUS_PERMISSION_DENIED
+
+
+def test_padded_provenance_routes_because_both_classifier_reads_normalise(tmp_path):
+    # The service reads the graph id through access.node_graph_id and the
+    # resolver reads it again itself; if either stopped stripping, the config
+    # lookup and the classification would disagree and this would not route.
+    service = _service(tmp_path)
+    service._storage.add_nodes(
+        [
+            Node(
+                id="padded-1",
+                type=NodeType.ACTOR,
+                name="Padded",
+                metadata={
+                    "origin_graph_id": " esam-main ",
+                    "origin_node_id": "remote-1",
+                },
+            )
+        ],
+        [],
+    )
+    service._authorization_hook = _NarrowingHook("esam-main")
+
+    result = service.resolve_teleport("padded-1")
+
+    assert result["status"] == teleport.STATUS_OK, result
+    assert result["origin_graph_id"] == "esam-main"
+
+
 def test_a_caller_narrowed_to_the_source_graph_still_gets_its_route(tmp_path):
     service = _service(tmp_path)
     service._authorization_hook = _NarrowingHook("esam-main")
