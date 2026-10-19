@@ -288,9 +288,8 @@ file it wrote.
 `POST /api/import/merge/preview` (see
 [ADR 0013](adr/0013-graph-import-merge-mode.md)) plans merging a document
 *into* the live graph instead of replacing it, and **writes nothing**: no
-graph change, no backup, no job, no events. Committing a merge is a later
-slice; today the preview is a dry run you can act on by editing the document
-or by importing with `POST /api/import`.
+graph change, no backup, no job, no events. A previewed plan is applied with
+`POST /api/import/merge` (see *Committing a merge import* below).
 
 ```http
 POST /api/import/merge/preview
@@ -345,6 +344,116 @@ assembles — at most 10,000 nodes and 20,000 edges, since it plans on the
 server's event loop; there is no MCP tool that commits a merge. One preview
 runs at a time; a second is refused with 503 `import_preview_busy` and can
 simply be retried.
+
+## Committing a merge import
+
+`POST /api/import/merge` applies a previewed plan. It takes the preview's
+request plus the `plan_digest` the preview returned:
+
+```http
+POST /api/import/merge
+{ "document": {...}, "policy": {...}, "include_system_types": false,
+  "plan_digest": "sha256:…" }
+→ 200 { "success": true, "import_id": "merge-…", "plan": {...},
+        "plan_digest": "sha256:…", "counts": {...}, "renamed": {...},
+        "backup_path": "…", "job_id": "…", "embeddings_status": "queued",
+        "audit_recorded": true }
+→ 409 { "error_code": "import_plan_stale", "plan": {...}, "plan_digest": "…" }
+→ 422 { "error_code": "import_merge_blocked", "plan": {...} }
+```
+
+What happens, in order:
+
+1. **Authorize** as the preview does: graph mutation and read rights, both
+   with unnarrowed graph access.
+2. **Re-plan and compare.** The plan is recomputed from the request and the
+   live graph. A plan with rejected or conflicting entries is refused with
+   `import_merge_blocked`; a digest that no longer matches — the document,
+   the parameters or a live entity the plan relied on changed, or the graph
+   was replaced — is refused with `import_plan_stale`, carrying the current
+   plan and its digest to review and commit instead. Nothing has been
+   written either way. A plan that writes nothing — every entry skipped,
+   unchanged or excluded — returns here with `success: true`, zero counts
+   and no `import_id`: no backup, no lock, no record.
+3. **Back up.** The whole current graph is written to `import-backups/`
+   exactly as `POST /api/import` does, and the merge is refused
+   (`backup_failed`) if it cannot be. Every entity the merge overwrites is
+   in it at the version the merge replaces. Restoring it with
+   `POST /api/import` is a *replace*: it also undoes every write made after
+   the backup was written, including a write to an unrelated entity that
+   landed while the merge was being applied.
+4. **Commit, all-or-nothing.** Under the storage lock the plan is computed
+   once more and must still have the same digest, so a write landing
+   between step 2 and here fails the commit with `import_plan_stale` instead
+   of being overwritten. Creates, overwrites and renames are then applied
+   and persisted as one batch (one journal record on the file backend).
+   Written entities take fresh revisions; nothing else changes, the graph's
+   `generation` included. Renamed nodes and edges get new ids, returned in
+   `renamed` as old → new pairs (at most 1,000 listed; `count` is exact).
+   Live edges the document does not name are never deleted. Other writes
+   wait while this step holds the lock (reads do not); it grows with the
+   size of the document and the number of entities merged, not the size of
+   the graph — see ADR 0013,
+   "Slice 2 measurements", for figures.
+5. **Events.** One ordinary `node.create`, `node.update`, `edge.create` or
+   `edge.update` event per written entity, after the batch lands. Their
+   origin is the request's `x-event-origin` header, else
+   `graph-import-merge`; their correlation id is `x-correlation-id`, else
+   the merge's `import_id`. A large merge fires as many events as it writes
+   entities — the preview's `events.count` says how many.
+6. **Embeddings.** Created and renamed nodes, and overwritten nodes whose
+   name, description, summary, tags or aliases changed, lose any vector in
+   the commit itself, so a stale vector is never served for new text; on
+   the file backend the embedding sidecar is rewritten with the same write
+   as the batch. The same background job a replace uses then embeds every
+   node without a vector (`embeddings_status: "queued"`, `job_id` set); a
+   merge that changed no embedded text queues nothing (`"not_needed"`). If
+   the job cannot be started the merge still stands (`"not_started"`).
+7. **Audit record.** A terminal record under the `import_id` in the same
+   job store (`GET /api/import/{import_id}`, and listed by `GET /api/import`
+   with `mode: "merge"`) keeps the digest, the parameters, the counts, the
+   backup path, the embeddings job id and every created, overwritten and
+   renamed entity with its resulting revision (none for an
+   `outcome_unknown` record, below). It is written after the
+   graph commit, in a separate store, so it is best-effort:
+   `audit_recorded: false` reports a merge that committed without one (a
+   commit that writes nothing returns `null`). The record also keeps the
+   request's attribution (actor and scope) as the request context reports
+   it; in the open core that comes from request headers, so it is only as
+   trustworthy as whatever sets them in front of the service. Its
+   `merge_status` is `committed`, or `outcome_unknown` for a merge answered
+   with 503 `write_outcome_unknown`. Whether such a merge survives is not
+   known when it is answered: it is applied in memory, it may already have
+   reached the store, and the next write that lands (or a clean shutdown)
+   saves the whole graph with it, while a crash before then can lose what
+   had not reached the store. It fires no events and queues no embeddings
+   job, so the nodes whose vectors it dropped (step 6) stay without one
+   until they are embedded again. The record, whose `import_id` the error
+   response carries, is the trace it leaves: check it and the live graph
+   before retrying (see retries below).
+
+A commit may omit `plan_digest` only when every policy is `fail` or `skip`
+and `include_system_types` is false — a merge that can only add and so can
+be retried blindly; anything else is refused with `plan_digest_required`.
+
+**Retries.** The digest proves a plan is still current, not that it has not
+been applied. A commit retried after a lost response, against a merge that
+did land, is not applied again when the first commit wrote under any of
+the document's own ids — a create or an overwrite — since that write moved
+what the digest covers: a `fail`-policy retry is refused as
+`import_merge_blocked`, a retry carrying the digest as `import_plan_stale`,
+and a digest-less `skip`-policy retry plans nothing and returns zero
+counts. A commit whose only writes are **renames** writes nothing under
+the document's ids and can leave everything the digest covers unchanged —
+a node rename always does — and when it does, the same request with the
+same digest is applied again and creates the renamed copies a second time. Check `GET /api/import`
+for the first commit's record before retrying any commit. One commit runs
+at a time (503
+`import_merge_busy`). A store failure is answered as for any direct write —
+502 `write_failed` (nothing changed) or 503 `write_outcome_unknown` — with
+the backup path. Merging is refused in PostgreSQL mode (501
+`import_merge_not_supported`) until its embedding commit exists. There is no
+MCP tool that commits a merge.
 
 ## Importing a vector-aware archive
 

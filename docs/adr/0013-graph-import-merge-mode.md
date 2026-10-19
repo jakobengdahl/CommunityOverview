@@ -112,7 +112,120 @@ the process allocated before it, so the latency threshold leaves room for one.
 Later slices re-run the script and fail a threshold they exceed. The two other
 figures §8 names, how long the commit holds `_lock` and the event fan-out at
 10,000 entities, need the commit to exist; slice 2 sets their thresholds from
-its first measurement in this table.
+its first measurement (below).
+
+### Slice 2 as implemented
+
+Slice 2 (the commit, `POST /import/merge`) ships in
+`GraphStorage.apply_import_merge` (`backend/core/storage.py`, write shapes in
+`backend/core/storage_merge.py`) and `commit_merge_import`
+(`backend/service/import_service.py`). Choices it made inside the decisions
+above:
+
+- **How the §3 checks are verified.** The commit plans twice: once before
+  the backup, to answer `import_merge_blocked` or `import_plan_stale` with a
+  plan before anything is written, and once more inside the locked unit,
+  through a `prepare` callback `apply_import_merge` runs under `_lock` before
+  it changes anything. The locked plan must have the bound digest. Since no
+  writer can move the in-memory model while the lock is held, that one
+  comparison verifies every read the digest records — each expectation, each
+  check and `generation` — and also what the digest does not record: the
+  absences a listing found (a new incident edge on a re-judged node, a new
+  duplicate triple) and fields a lock-free read saw mid-update, which the
+  slice-1 notes above leave to the commit. The storage method still checks
+  each write's expectation against memory and passes it to `_commit`. The
+  alternative, checking the recorded reads plus re-listing each listing under
+  the lock, was rejected: it needs the planner to export its listings and
+  still cannot catch a field read mid-update. The cost is that `_lock` is held
+  for a plan of the document (linear in the document, not the graph; the
+  report's attachment and vector counts are skipped under the lock).
+- **Without a digest** the commit binds to the plan it computed before the
+  backup, so a write landing between that plan and the lock still fails it.
+- **A digest is not single-use.** A committed create or overwrite moves what
+  the digest covers, so the same digest is stale afterwards; but a commit
+  whose only writes are renames (fresh ids, live entities untouched) can
+  leave the digest current — a node rename always does, while a renamed
+  edge between live nodes is a duplicate of its own copy on the next plan
+  — and resending it then creates the renamed copies again.
+  §3 rules out only the digest-less rename retry; making a digest
+  single-use is the caller-chosen idempotency key §3 and §7 (c) defer, so
+  it is left to that decision and documented for callers.
+- A stale plan found under the lock is answered with a plan recomputed after
+  the lock is released, as for one found before it.
+- **Vectors.** The commit drops the vectors of created and renamed nodes (a
+  stray vector under a reused id included) and of overwrites whose embedding
+  text changed, in memory inside the unit; an undone merge puts them back
+  (`_undo`, and the commit itself for a stray vector, which `_undo` cannot
+  restore under an id no node held). On the
+  file backend the drop moves the vector store's revision, so the batch's
+  write carries the embedding sidecar and writes it before the journal
+  record, as every write that moves a vector does; a failed sidecar write is
+  retried by the next write. The IMPORT job is enqueued only when the plan
+  embeds at least one node, stamped with the generation read inside the
+  commit's lock, so a replace landing just after it supersedes the job.
+- **Failure after hand-over** on the file backend: a batch whose journal
+  write and whole-graph re-save both failed raises `write_outcome_unknown`
+  with memory keeping the merge, no events, and the next write re-saving the
+  whole graph. Since that merge can still become durable unannounced (and
+  without an embeddings job), it gets an audit record too, with
+  `merge_status: "outcome_unknown"` and no revisions.
+- **A plan that writes nothing** (every entry skipped, unchanged or
+  excluded) is answered after the first plan with zero counts: no backup, no
+  lock, no record. There is no write for the §3 checks to protect, and a
+  digest-less `skip` commit repeated in a loop would otherwise write a
+  whole-graph backup each time.
+- **Audit record.** A terminal IMPORT job whose id is the `import_id`. Its
+  job state is `SUCCEEDED` (the record was written); `result.merge_status`
+  says whether the merge was confirmed. Its payload carries `phase: "merge"`
+  and the request's attribution (actor and scope) as the request context
+  reports it, which in the open core is header-derived and so only as
+  trustworthy as what sets those headers; the merge's
+  embeddings job carries `mode: "merge"` and the `import_id`. `GET /import`
+  rows gain `mode` (`replace` for every row written before this slice).
+- **Events** fire in write order (node creates, node overwrites, edge
+  creates, edge overwrites) under the lock, as every direct write's do.
+- One commit runs at a time per process (503 `import_merge_busy`), as one
+  preview does; the two slots are separate.
+- `POST /import/merge` asks for the preview's authorization, `GRAPH_ACTION_READ`
+  included, since its response carries the plan's live values.
+- **Not in this slice:** PostgreSQL mode is refused with 501
+  `import_merge_not_supported` before anything is planned or backed up
+  (slice 3), the worker's per-node revision guard (§6, slice 3), and an MCP
+  commit tool (§9 (b)).
+
+### Slice 2 measurements and thresholds (§8)
+
+Measured with `scripts/measure_merge_commit.py`: the slice-1 document (10,000
+nodes, half overwriting live nodes; 17,998 edges, of which 1,000 duplicate
+triples are skipped) committed under `overwrite` into the same 100,000-node,
+169,997-edge file-backend graph, with two `EventSubscription`s that between
+them match every event. The commit writes 24,532 entities (5,000 nodes
+created, 2,534 overwritten, 16,998 edges created). Same container as slice 1;
+three runs, each against a freshly seeded graph.
+
+| Figure | Measured | Pass/fail threshold |
+|---|---|---|
+| `_lock` held by the commit (`apply_import_merge`) | 12.1–13.8 s, median 12.8 s | ≤ 16 s |
+| Whole commit request (two plans, backup, locked unit, job and audit record) | 23.9–27.3 s, median 25.1 s | ≤ 32 s |
+| Whole-graph backup, before the lock | 8.9–12.4 s | reported, not gated: proportional to the graph (§4 (a)) |
+| Events fired | 24,532 — one per written entity | exactly one per written entity |
+| Webhook deliveries enqueued (§7 (b) fan-out) | 24,532 — one per event per matching subscription | one per event per matching subscription |
+
+Inside the lock, per-event work dominates: a profile of a 5,000-node commit
+puts most of the locked time in `_emit_event` — the dispatcher's copy of each
+event and one mutation-history append, which opens the history file, per
+event — and a smaller share, about 1.5 s, in the plan recomputed under the
+lock. That is
+the existing per-event cost every direct write pays, now paid once per
+merged entity while live writes queue behind the lock (reads take no lock).
+The lock hold scales with the document (the plan recomputed under it) and
+the merged entities (the writes and their events), not with the graph, as §8
+asks.
+Whether a large merge should emit a capped or batched form instead (§7) is
+an event-contract change and is left to a decision on these figures; the
+delivery-queue depth at return was 0 only because the measurement's
+loopback target is refused at once, so the enqueued count is the depth a
+slower target sees.
 
 ## Context
 
