@@ -353,8 +353,16 @@ class GraphHistoryStore:
                     f.write(prefix + line + "\n")
                     f.flush()
                     self._size_after_append = os.fstat(f.fileno()).st_size
+                except BaseException:
+                    # Close while still locked: close() flushes whatever the
+                    # failed write left in the buffer, and that late flush
+                    # must not land after another writer has taken the lock.
+                    self._close_append_handle()
+                    raise
                 finally:
-                    _unlock_file(f)
+                    # No-op on the handle just closed; closing released it.
+                    with contextlib.suppress(OSError, ValueError):
+                        _unlock_file(f)
             except BaseException:
                 # Do not reuse a handle that failed mid-write.
                 self._close_append_handle()

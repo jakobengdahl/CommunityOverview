@@ -396,9 +396,54 @@ def test_fragment_left_by_another_process_while_we_hold_a_handle(path):
 
 
 def test_unreadable_tail_counts_as_torn(path, monkeypatch):
+    path.parent.mkdir(parents=True)
+    path.write_bytes(json.dumps(_rec(0)).encode() + b'\n{"event_id": "evt-')
+    real_open = os.open
+
+    def deny(p, *a, **kw):
+        if Path(p) == path:
+            raise PermissionError("no read")
+        return real_open(p, *a, **kw)
+
+    store = GraphHistoryStore(path)
+    monkeypatch.setattr(os, "open", deny)
+    store.append_record(_rec(1))
+    monkeypatch.undo()
+    assert [r["event_id"] for r in store.get_recent()] == ["evt-1", "evt-0"]
+    store.close()
+
+
+def test_reopened_handle_rechecks_even_if_the_file_has_the_old_size(path):
     store = GraphHistoryStore(path)
     store.append_record(_rec(0))
+    size = path.stat().st_size
     store.close()
+    # Same byte length as before, but torn.
+    path.write_bytes(b"x" * size)
+    store.append_record(_rec(1))
+    assert [r["event_id"] for r in store.get_recent()] == ["evt-1"]
+    store.close()
+
+
+def test_failed_write_is_closed_before_the_lock_is_released(path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        history_store, "_lock_file", lambda f, exclusive=True: calls.append("lock")
+    )
+    monkeypatch.setattr(history_store, "_unlock_file", lambda f: calls.append("unlock"))
+    store = GraphHistoryStore(path)
+    store.append_record(_rec(0))
+    calls.clear()
+
+    class Failing(_FlakyHandle):
+        def close(self):
+            calls.append("close")
+            self._inner.close()
+
+    store._append_handle = Failing(store._append_handle)
+    with pytest.raises(OSError):
+        store.append_record(_rec(1))
+    assert calls == ["lock", "close", "unlock"]
     real_open = os.open
 
     def deny(p, *a, **kw):
