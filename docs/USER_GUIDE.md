@@ -109,6 +109,20 @@ Edges without any appearance settings keep the default look (thin grey line, no 
 fields are editable. The detail dialog also has a **History** tab showing the
 read-only change log for that node (see [5.2](#52-recent-activity-audit-log)).
 
+**Attachments:** For node types the schema marks with `allows_attachments: true`
+(see [PROFILES.md](PROFILES.md)), the **Details** tab of the detail dialog has an
+**Attachments** section. **Attach file** uploads one file; the hint next to the
+button shows the server's limits (size per file, and how many files and bytes one
+node may hold). A file over a limit is refused before it is sent, and a file the
+server refuses — for example a type it does not accept — shows the reason below
+the list. Each row shows the file's name, size and upload time; click the name to
+download it. **Delete** asks for confirmation in the row before removing the file.
+Files already attached stay listed (and downloadable and deletable) even if the
+node type later stops accepting new ones. Nodes shown from another graph through
+federation have no attachments section.
+
+![Attachments section in the node detail dialog](images/node-attachments.png)
+
 **Delete node:** Right-click → **Delete**, or select a node and press **Delete**.
 Deletions require confirmation. A single operation can remove up to 10 nodes at once.
 
@@ -1070,6 +1084,7 @@ interface.
 | `update_node` | Update node properties |
 | `delete_nodes` | Delete nodes by ID |
 | `get_graph_stats` | Get summary statistics about the graph |
+| `preview_graph_merge` | Preview what merging a small graph document into the graph would add, overwrite, skip or reject — writes nothing (see [DATA_MANAGEMENT.md](DATA_MANAGEMENT.md#previewing-a-merge-import)) |
 | `save_view` | Save a named canvas view |
 | `get_capabilities` | Discover what the server supports |
 | `connect_to_visualization_session` | Check that a session ID resolves, and whether a client is connected to it |
@@ -1309,3 +1324,4 @@ Screenshots for this guide are saved to `docs/images/` in PNG format.
 | `mobile-session-menu.png` | pending | Phone viewport with the session menu open as a full-width overlay and scrim |
 | `metamodel-explorer.png` | pending | Metamodel explorer network view with a node type selected and its detail panel open |
 | `annotation-reference-tiles.png` | pending | Canvas with reference tiles for a session, a web page and supporting material, plus one in its broken state |
+| `node-attachments.png` | pending | Node detail dialog, Details tab: Attachments section with two files, the Attach file button and the limits hint |

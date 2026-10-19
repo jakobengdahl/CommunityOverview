@@ -46,6 +46,7 @@ from backend.core.session_manager import SessionManager
 
 from backend.core import GraphStorage
 from backend.service import GraphService, create_rest_router, register_mcp_tools
+from backend.service.json_response import install_error_handlers
 from backend.service.mcp_tools import _push_to_session
 from backend.ui import ChatService, DocumentService, create_ui_router
 from backend.agents import AgentRegistry, AgentsSettings
@@ -100,6 +101,8 @@ def create_app(
         description="REST API and MCP server for community knowledge graph operations",
         version="1.0.0",
     )
+
+    install_error_handlers(app)
 
     # Middleware order matters: auth is installed first so CORS (added next)
     # wraps it as the outermost layer, letting preflight requests through.

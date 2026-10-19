@@ -569,7 +569,7 @@ class TestConfigLoader:
         config_loader = self._load_capability_config(tmp_path, capabilities)
         config_path = tmp_path / "schema_config.json"
         broken = json.loads(config_path.read_text())
-        broken["schema"]["node_types"] = "not-an-object"
+        broken["schema"] = "not-an-object"
         config_path.write_text(json.dumps(broken))
         config_loader.reset_loader()
         return config_loader
@@ -649,7 +649,7 @@ class TestConfigLoader:
         config_loader = self._write_raw_config(
             tmp_path,
             {
-                "schema": {"node_types": "not-an-object"},
+                "schema": "not-an-object",
                 "presentation": {"title": "No Capabilities Declared"},
             },
         )
@@ -1393,12 +1393,54 @@ class TestAllowsAttachmentsSchemaField:
         """Clients may read the key unconditionally, on any node type."""
         schema = self._load(tmp_path, {"Declared": {"fields": ["name"]}})
 
+        assert "Declared" in schema["node_types"], "sweep would be vacuous"
         missing = [
             name
             for name, cfg in schema["node_types"].items()
             if "allows_attachments" not in cfg
         ]
         assert missing == []
+
+    def test_flag_is_typed_bool_and_coerces_a_false_string(self, tmp_path):
+        """A hand-written "false" must not leak through as a truthy string."""
+        from backend.config.config_loader import NodeTypeConfig
+
+        assert NodeTypeConfig.model_fields["allows_attachments"].annotation is bool
+        schema = self._load(
+            tmp_path,
+            {"Stringy": {"fields": ["name"], "allows_attachments": "false"}},
+        )
+
+        assert schema["node_types"]["Stringy"]["allows_attachments"] is False
+
+    RICH = {
+        "fields": ["name", "description", "identifier"],
+        "static": True,
+        "category": "system",
+        "description": "A rich type",
+        "color": "#112233",
+        "icon": "FileEarmarkFill",
+        "ui_form": "skill",
+        "labels": {"sv": "Rik", "en": "Rich"},
+        "context_menu": [
+            {"id": "one", "label": "One"},
+            {"id": "two", "label": "Two"},
+        ],
+        "allows_attachments": True,
+    }
+
+    def test_flag_is_independent_of_and_does_not_disturb_sibling_fields(self, tmp_path):
+        """The flag holds beside non-default static/category, and every
+        sibling field reaches clients unchanged."""
+        from backend.config.config_loader import NodeTypeConfig
+
+        schema = self._load(tmp_path, {"Rich": self.RICH, "Plain": {}})
+
+        assert "Rich" in schema["node_types"], "fixture must not be vacuous"
+        rich = schema["node_types"]["Rich"]
+        assert rich == self.RICH
+        assert set(schema["node_types"]["Plain"]) == set(NodeTypeConfig.model_fields)
+        assert schema["node_types"]["Plain"]["allows_attachments"] is False
 
     def test_system_node_types_do_not_allow_attachments(self):
         """Code-injected system types stay at the default."""
@@ -1429,3 +1471,315 @@ class TestAllowsAttachmentsSchemaField:
                 if cfg["allows_attachments"]
             ]
             assert enabled == [], f"{profile.parent.name} enables uploads on {enabled}"
+
+    def test_no_shipped_profile_declares_an_en_label(self):
+        """docs/PROFILES.md says no profile shows a translated type name."""
+        from backend.config import config_loader
+
+        config_dir = Path(__file__).parent.parent.parent / "config"
+        profiles = sorted(config_dir.glob("*/schema_config.json"))
+        assert profiles, "no profile schema_config.json files found"
+
+        for profile in profiles:
+            os.environ["SCHEMA_FILE"] = str(profile)
+            config_loader.reset_loader()
+            node_types = config_loader.get_schema()["node_types"]
+            declared = set(
+                json.loads(profile.read_text(encoding="utf-8"))["schema"]["node_types"]
+            )
+            assert declared, f"{profile.parent.name} declares no node types"
+            assert declared <= set(node_types), (
+                f"{profile.parent.name} fell back to defaults instead of loading"
+            )
+            declaring = [
+                name for name, cfg in node_types.items() if "en" in cfg["labels"]
+            ]
+            assert declaring == [], (
+                f"{profile.parent.name} declares en labels on {declaring}"
+            )
+
+
+class TestNodeTypesSanitizer:
+    """One malformed node-type entry drops only that type, never the profile."""
+
+    @pytest.fixture(autouse=True)
+    def setup_and_cleanup(self):
+        from backend.config import config_loader
+
+        config_loader.reset_loader()
+        yield
+        os.environ.pop("SCHEMA_FILE", None)
+        config_loader.reset_loader()
+
+    @staticmethod
+    def _load(tmp_path, node_types):
+        from backend.config import config_loader
+
+        config_file = tmp_path / "schema_config.json"
+        config_file.write_text(
+            json.dumps(
+                {
+                    "schema": {
+                        "node_types": node_types,
+                        "relationship_types": {
+                            "USES": {"source_types": ["Good"], "target_types": ["Good"]}
+                        },
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        os.environ["SCHEMA_FILE"] = str(config_file)
+        config_loader.reset_loader()
+        return config_loader.get_schema()
+
+    @pytest.mark.parametrize("bad_value", ["ture", None, []])
+    def test_bad_allows_attachments_keeps_other_types_and_relationships(
+        self, tmp_path, bad_value
+    ):
+        schema = self._load(
+            tmp_path,
+            {
+                "Good": {"fields": ["name"], "allows_attachments": True},
+                "Bad": {"fields": ["name"], "allows_attachments": bad_value},
+            },
+        )
+
+        assert "Bad" not in schema["node_types"]
+        assert schema["node_types"]["Good"]["allows_attachments"] is True
+        assert list(schema["relationship_types"]) == ["USES"]
+
+    def test_warning_names_the_node_type_and_field(self, tmp_path, caplog):
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            self._load(
+                tmp_path,
+                {
+                    "Good": {"fields": ["name"]},
+                    "Bad": {"static": "maybe"},
+                },
+            )
+
+        skipped = [
+            r.getMessage()
+            for r in caplog.records
+            if "Skipping invalid schema.node_types" in r.getMessage()
+        ]
+        assert len(skipped) == 1
+        assert "'Bad'" in skipped[0]
+        assert "static" in skipped[0]
+
+    def test_malformed_system_type_warning_says_it_is_code_managed(
+        self, tmp_path, caplog
+    ):
+        from backend.config import config_loader
+
+        system_name = next(iter(config_loader.SYSTEM_NODE_TYPES))
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            self._load(
+                tmp_path,
+                {
+                    system_name: {"static": "maybe"},
+                    "Bad": {"static": "maybe"},
+                },
+            )
+
+        by_type = {
+            name: r.getMessage()
+            for r in caplog.records
+            for name in (system_name, "Bad")
+            if f"schema.node_types[{name!r}]" in r.getMessage()
+        }
+        assert "managed by code" in by_type[system_name]
+        assert "managed by code" not in by_type["Bad"]
+
+    def test_non_object_entry_is_dropped_alone(self, tmp_path):
+        schema = self._load(
+            tmp_path, {"Good": {"fields": ["name"]}, "Broken": "not-an-object"}
+        )
+
+        assert "Broken" not in schema["node_types"]
+        assert "Good" in schema["node_types"]
+        assert list(schema["relationship_types"]) == ["USES"]
+
+    @pytest.mark.parametrize("bad_node_types", [["Good"], None])
+    def test_non_object_node_types_is_ignored_not_fatal(
+        self, tmp_path, caplog, bad_node_types
+    ):
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            schema = self._load(tmp_path, bad_node_types)
+
+        from backend.config import config_loader
+
+        assert set(schema["node_types"]) == set(config_loader.SYSTEM_NODE_TYPES)
+        assert list(schema["relationship_types"]) == ["USES"]
+        assert any(
+            "schema.node_types must be an object" in r.getMessage()
+            for r in caplog.records
+        )
+
+
+class TestRelationshipTypesSanitizer:
+    """One malformed relationship-type entry drops only that type, never the profile."""
+
+    @pytest.fixture(autouse=True)
+    def setup_and_cleanup(self):
+        from backend.config import config_loader
+
+        config_loader.reset_loader()
+        yield
+        os.environ.pop("SCHEMA_FILE", None)
+        config_loader.reset_loader()
+
+    @staticmethod
+    def _load(tmp_path, document):
+        from backend.config import config_loader
+
+        config_file = tmp_path / "schema_config.json"
+        config_file.write_text(json.dumps(document), encoding="utf-8")
+        os.environ["SCHEMA_FILE"] = str(config_file)
+        config_loader.reset_loader()
+        return config_loader.get_schema()
+
+    @staticmethod
+    def _document(relationship_types):
+        return {
+            "schema": {
+                "node_types": {"Good": {"fields": ["name"]}},
+                "relationship_types": relationship_types,
+            }
+        }
+
+    @pytest.mark.parametrize(
+        "bad_entry",
+        [
+            {"description": 5},
+            {"source_types": {}},
+            {"target_types": [["Good"]]},
+            "not-an-object",
+            None,
+        ],
+    )
+    def test_bad_entry_keeps_other_relationships_and_node_types(
+        self, tmp_path, bad_entry
+    ):
+        schema = self._load(
+            tmp_path,
+            self._document(
+                {
+                    "USES": {"source_types": ["Good"], "target_types": ["Good"]},
+                    "BAD": bad_entry,
+                }
+            ),
+        )
+
+        assert list(schema["relationship_types"]) == ["USES"]
+        assert "Good" in schema["node_types"]
+
+    def test_warning_names_the_relationship_type_and_field(self, tmp_path, caplog):
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            self._load(
+                tmp_path,
+                self._document({"USES": {}, "BAD": {"description": 5}}),
+            )
+
+        skipped = [
+            r.getMessage()
+            for r in caplog.records
+            if "Skipping invalid schema.relationship_types" in r.getMessage()
+        ]
+        assert len(skipped) == 1
+        assert "'BAD'" in skipped[0]
+        assert "(field(s) description)" in skipped[0]
+
+    def test_non_object_entry_warning_reads_entry_not_a_field(self, tmp_path, caplog):
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            self._load(tmp_path, self._document({"USES": {}, "BAD": "nope"}))
+
+        skipped = [
+            r.getMessage()
+            for r in caplog.records
+            if "Skipping invalid schema.relationship_types" in r.getMessage()
+        ]
+        assert len(skipped) == 1
+        assert "(field(s) <entry>)" in skipped[0]
+
+    def test_absent_relationship_types_is_silent(self, tmp_path, caplog):
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            schema = self._load(
+                tmp_path, {"schema": {"node_types": {"Good": {"fields": ["name"]}}}}
+            )
+
+        assert "Good" in schema["node_types"]
+        assert not any("relationship_types" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize("bad_value", [["USES"], None, "USES"])
+    def test_non_object_relationship_types_is_ignored_not_fatal(
+        self, tmp_path, caplog, bad_value
+    ):
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            schema = self._load(tmp_path, self._document(bad_value))
+
+        assert "Good" in schema["node_types"]
+        assert schema["relationship_types"] == {}
+        assert any(
+            "schema.relationship_types must be an object" in r.getMessage()
+            for r in caplog.records
+        )
+
+
+class TestRestInterfacesNull:
+    """An explicit ``rest_interfaces: null`` is ignored, not a global fallback."""
+
+    @pytest.fixture(autouse=True)
+    def setup_and_cleanup(self):
+        from backend.config import config_loader
+
+        config_loader.reset_loader()
+        yield
+        os.environ.pop("SCHEMA_FILE", None)
+        config_loader.reset_loader()
+
+    def test_null_rest_interfaces_keeps_declared_types(self, tmp_path, caplog):
+        from backend.config import config_loader
+
+        config_file = tmp_path / "schema_config.json"
+        config_file.write_text(
+            json.dumps(
+                {
+                    "schema": {
+                        "node_types": {"Good": {"fields": ["name"]}},
+                        "relationship_types": {"USES": {}},
+                    },
+                    "rest_interfaces": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        os.environ["SCHEMA_FILE"] = str(config_file)
+        config_loader.reset_loader()
+
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            schema = config_loader.get_schema()
+
+        assert "Good" in schema["node_types"]
+        assert list(schema["relationship_types"]) == ["USES"]
+        assert any(
+            "rest_interfaces must be a list" in r.getMessage() for r in caplog.records
+        )
+
+    def test_absent_rest_interfaces_is_silent(self, tmp_path, caplog):
+        from backend.config import config_loader
+
+        config_file = tmp_path / "schema_config.json"
+        config_file.write_text(
+            json.dumps({"schema": {"node_types": {"Good": {"fields": ["name"]}}}}),
+            encoding="utf-8",
+        )
+        os.environ["SCHEMA_FILE"] = str(config_file)
+        config_loader.reset_loader()
+
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            schema = config_loader.get_schema()
+
+        assert "Good" in schema["node_types"]
+        assert not any("rest_interfaces" in r.getMessage() for r in caplog.records)

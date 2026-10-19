@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import EntityHistoryView from './EntityHistoryView';
+import NodeAttachmentsPanel from './NodeAttachmentsPanel';
 import './NodeDetailDialog.css';
 
 const BASE_FIELDS = new Set([
@@ -263,6 +264,12 @@ function NodeDetailDialog({ node, onClose, onEdit, initialView = 'details' }) {
                 </div>
               </div>
             )}
+
+            <NodeAttachmentsPanel
+              key={node.id}
+              nodeId={node.id}
+              typeAllowsAttachments={schema?.node_types?.[nodeType]?.allows_attachments === true}
+            />
           </div>
         )}
 

@@ -269,6 +269,18 @@ class GraphService:
         event_correlation_id: Optional[str] = None,
         expect_absent: bool = False,
     ) -> Dict[str, Any]:
+        # Files left under an id whose node was deleted must not become the
+        # new node's (ADR 0008 sec 8): note them now, quarantine them once
+        # the node is in the graph.
+        leftovers = attachments.leftover_attachments_of_absent_nodes(
+            self._storage,
+            self._attachment_settings,
+            [
+                n["id"]
+                for n in nodes
+                if isinstance(n, dict) and isinstance(n.get("id"), str)
+            ],
+        )
         return mutations.add_nodes(
             self._storage,
             self._authorization_hook,
@@ -278,6 +290,9 @@ class GraphService:
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
             expect_absent=expect_absent,
+            on_nodes_landed=lambda landed: attachments.quarantine_leftover_attachments(
+                self._attachment_settings, leftovers, landed
+            ),
         )
 
     def resolve_teleport(
@@ -722,6 +737,48 @@ class GraphService:
             archive_bytes,
             event_origin=event_origin,
             event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
+
+    def preview_merge_import(
+        self,
+        body: Any,
+        max_nodes: Optional[int] = None,
+        max_edges: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Read-only MERGE import plan and digest. See
+        ``backend.service.import_service.preview_merge_import`` and
+        docs/adr/0013-graph-import-merge-mode.md.
+        """
+        return import_service.preview_merge_import(
+            self._storage,
+            self._authorization_hook,
+            body,
+            attachment_settings=self._attachment_settings,
+            max_nodes=max_nodes,
+            max_edges=max_edges,
+        )
+
+    def commit_merge_import(
+        self,
+        body: Any,
+        execution_store: "ExecutionStore",
+        event_origin: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Commit a MERGE import bound to a previewed plan. See
+        ``backend.service.import_service.commit_merge_import`` and
+        docs/adr/0013-graph-import-merge-mode.md.
+        """
+        return import_service.commit_merge_import(
+            self._storage,
+            self._authorization_hook,
+            execution_store,
+            body,
+            attachment_settings=self._attachment_settings,
+            event_origin=event_origin,
             event_correlation_id=event_correlation_id,
         )
 

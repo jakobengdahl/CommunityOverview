@@ -274,6 +274,22 @@ class TestTheOriginComparedAgainst:
         assert body["reason"] == "gui_url_not_absolute"
         assert "route" not in body
 
+    @pytest.mark.parametrize(
+        "gui_url", ["http://[::1/app", "http://host:99999/app", "http:///app"]
+    )
+    def test_a_malformed_gui_url_is_a_200_graph_unavailable_not_a_500(
+        self, make_client, gui_url
+    ):
+        client, _ = make_client(gui_url=gui_url)
+
+        response = _post(client, "federated::esam-main::remote-1")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == teleport.STATUS_GRAPH_UNAVAILABLE
+        assert body["reason"] == "gui_url_not_absolute"
+        assert "route" not in body
+
     def test_the_request_body_field_names_are_the_ones_the_client_sends(
         self, make_client
     ):
@@ -292,7 +308,17 @@ class TestTheOriginComparedAgainst:
 
         assert "backlink" not in body
 
-    @pytest.mark.parametrize("public_base_url", ["localhost:8100", "not-a-url", "/app"])
+    @pytest.mark.parametrize(
+        "public_base_url",
+        [
+            "localhost:8100",
+            "not-a-url",
+            "/app",
+            # Parses as absolute with a host, so only the scheme allowlist
+            # rejects it.
+            "javascript://x/%0aalert(1)//",
+        ],
+    )
     def test_a_public_url_that_is_not_a_web_url_gives_us_no_origin(
         self, make_client, public_base_url
     ):

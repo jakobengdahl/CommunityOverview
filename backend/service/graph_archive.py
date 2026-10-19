@@ -30,6 +30,7 @@ from backend.core.embedding_sidecar import (
     parse_sidecar_bytes,
     serialize_sidecar_bytes,
 )
+from backend.core.storage_backends import dumps_storable
 
 ARCHIVE_SCHEMA_VERSION = "1.0"
 GRAPH_MEMBER = "graph.json"
@@ -87,7 +88,7 @@ def build_archive_bytes(
     the "someone zipped a plain graph.json" shape ``extract_archive`` already
     has to handle gracefully on import.
     """
-    graph_bytes = json.dumps(export_document, ensure_ascii=False).encode("utf-8")
+    graph_bytes = dumps_storable(export_document).encode("utf-8")
 
     embeddings_bytes: Optional[bytes] = None
     embedding_dimension: Optional[int] = None

@@ -5,7 +5,7 @@ All functions are standalone; they receive storage, the authorization hook,
 and (where required) the federation manager as explicit parameters.
 """
 
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from backend.core import (
     Edge,
@@ -16,6 +16,7 @@ from backend.core import (
     NodeType,
     StaleUpdateError,
 )
+from backend.core.models import metadata_depth_error
 from backend.core.session_annotations import saved_view_annotation_error
 from backend.runtime.authorization import (
     GRAPH_ACTION_MUTATE,
@@ -105,7 +106,10 @@ def add_nodes(
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
     expect_absent: bool = False,
+    on_nodes_landed: Optional[Callable[[List[str]], None]] = None,
 ) -> Dict[str, Any]:
+    """``on_nodes_landed`` gets the ids of the nodes this call left in the
+    graph, including those a failed call keeps."""
     denied = access.authorize_graph_access(
         hook, action=GRAPH_ACTION_MUTATE, target="add_nodes"
     )
@@ -129,6 +133,9 @@ def add_nodes(
                 for k in extra:
                     node_dict.pop(k)
             node = Node(**node_dict)
+            depth_error = metadata_depth_error(node.metadata)
+            if depth_error:
+                raise ValueError(depth_error)
             if node.type_str in _SAVED_VIEW_NODE_TYPES:
                 annotation_error = saved_view_annotation_error(node.metadata)
                 if annotation_error:
@@ -139,10 +146,15 @@ def add_nodes(
                         "added_edge_ids": [],
                     }
             node_objects.append(node)
-        edge_objects = [
-            Edge(**{k: v for k, v in dict(e).items() if k not in _SERVER_OWNED_FIELDS})
-            for e in edges
-        ]
+        edge_objects = []
+        for e in edges:
+            edge = Edge(
+                **{k: v for k, v in dict(e).items() if k not in _SERVER_OWNED_FIELDS}
+            )
+            depth_error = metadata_depth_error(edge.metadata)
+            if depth_error:
+                raise ValueError(depth_error)
+            edge_objects.append(edge)
     except Exception as e:
         return {
             "success": False,
@@ -178,6 +190,10 @@ def add_nodes(
         )
     except _WRITE_ERRORS as e:
         return write_error_result(e, added_node_ids=[], added_edge_ids=[])
+    if on_nodes_landed is not None:
+        on_nodes_landed(
+            result.added_node_ids if result.success else result.landed_node_ids
+        )
     response = serialize_add_result(result)
 
     if result.success:
@@ -803,6 +819,16 @@ def adopt_federated_node(
         aliases=list(source_node.aliases),
         metadata=metadata,
     )
+
+    # The source reference below copies the same metadata, so this covers it.
+    depth_error = metadata_depth_error(local_node.metadata)
+    if depth_error:
+        return {
+            "success": False,
+            "message": f"Error validating input: {depth_error}",
+            "added_node_ids": [],
+            "added_edge_ids": [],
+        }
 
     if local_node.type_str in _SAVED_VIEW_NODE_TYPES:
         annotation_error = saved_view_annotation_error(local_node.metadata)

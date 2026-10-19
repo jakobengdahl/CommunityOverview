@@ -260,7 +260,7 @@ and `easing` (default `"ease-in-out"`). These are a **hint** the canvas honors:
   reads as one coherent motion. A human bulk drag arrives *without* an animation
   hint (§10) and is applied instantly.
 - **The seam:** the hint travels intact inside the broadcast op (§10), so the
-  canvas animation (`task-frontend-animated-layout-transitions`) honors it
+  canvas animation honors it
   *without a contract or tool change* — it reads `animation` off the
   `layout_applied` op and tweens from the previous to the new positions.
 - **Reduced motion.** `prefers-reduced-motion` is a **client-side** decision:
@@ -386,17 +386,5 @@ differ between the open core and the hosted layer.
   effective limit was always the smaller of the two. Only the classification
   changed. A `rate_limited` that no amount of waiting could clear contradicted
   §11's promise that `rate_limited` is retryable.
-- The requirement node `req-mcp-layout-contract` and the decision
-  `dec-visualization-layout-contract` in the Corp planning graph govern this
-  document; status and evidence live there, not here.
-
-## 15. Realizing and dependent tasks
-
-| Task (Corp graph) | Relationship to this contract |
-|---|---|
-| `task-implement-mcp-layout-read` | Implements §2–§4 — `get_visualization_layout` (shipped, PR #287). |
-| `task-implement-mcp-layout-write` | Implements §5–§7, §10, §11 — `apply_visualization_layout` / `SessionManager.apply_layout` (shipped, PR #287). |
-| `task-frontend-animated-layout-transitions` | Consumes §9–§10 — tweens the `layout_applied` op and honors reduced motion. |
-| `task-test-agent-layout-workflow` | Verifies §2–§12 end to end — geometry accuracy, collision-free layout, concurrency, limits, reduced motion. |
-| `task-document-agent-visualization-tools` | Publishes §2–§11 into the tool docstrings and `backend/DEVELOPMENT.md`. |
-| `task-mcp-layout-read-semantic-metadata` | Extends §4 additively with the semantic projection (§4.1) and the merged selection (§4.2); no version bump per §14. |
+- Planning status and evidence for this contract are tracked outside this
+  repository, not here.
