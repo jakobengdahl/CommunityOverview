@@ -635,6 +635,23 @@ def capabilities_of(backend: Any) -> BackendCapabilities:
     return caps
 
 
+def dumps_storable(value: Any, **kwargs: Any) -> str:
+    """``value`` as JSON text that is guaranteed to encode as UTF-8.
+
+    Ordinary content keeps its characters as they are. A string holding a
+    lone UTF-16 surrogate (``"\\ud800"``, which a JSON body may carry as an
+    escape) has no UTF-8 form, so that text is written with every non-ASCII
+    character as a ``\\u`` escape instead: still valid JSON, and it reads
+    back as the same string.
+    """
+    text = json.dumps(value, ensure_ascii=False, **kwargs)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return json.dumps(value, ensure_ascii=True, **kwargs)
+    return text
+
+
 def _new_journal_id() -> str:
     return uuid.uuid4().hex
 
@@ -975,9 +992,8 @@ class FileGraphPersistenceBackend:
                 # if that fails the append fails, or the record would name an
                 # id the file does not carry.
                 self._checkpoint_locked()
-            line = json.dumps(
-                {"journal_id": self._metadata["journal_id"], "ops": ops},
-                ensure_ascii=False,
+            line = dumps_storable(
+                {"journal_id": self._metadata["journal_id"], "ops": ops}
             )
             self.journal_path.parent.mkdir(parents=True, exist_ok=True)
             # Unbuffered, so a failed write leaves nothing queued to flush at
@@ -1065,7 +1081,13 @@ class FileGraphPersistenceBackend:
             with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
                 _lock_file(f, exclusive=True)
                 try:
-                    json.dump(data, f, indent=2, ensure_ascii=False)
+                    try:
+                        json.dump(data, f, indent=2, ensure_ascii=False)
+                    except UnicodeEncodeError:
+                        # A lone surrogate; see dumps_storable.
+                        f.seek(0)
+                        f.truncate()
+                        json.dump(data, f, indent=2, ensure_ascii=True)
                     f.flush()
                     os.fsync(f.fileno())
                 finally:
