@@ -348,8 +348,69 @@ def test_clean_file_gets_no_spurious_blank_line(path):
         store.append_record(_rec(i))
     store.close()
     GraphHistoryStore(path).append_record(_rec(3))
-    assert b"\n\n" not in path.read_bytes()
-    assert _ids(path) == [f"evt-{i}" for i in range(4)]
+    assert path.read_bytes() == b"".join(
+        json.dumps(_rec(i)).encode() + b"\n" for i in range(4)
+    )
+
+
+def test_tail_is_checked_once_per_handle_not_per_append(path, monkeypatch):
+    calls = []
+    real = GraphHistoryStore._tail_is_torn
+    monkeypatch.setattr(
+        GraphHistoryStore,
+        "_tail_is_torn",
+        lambda self: calls.append(1) or real(self),
+    )
+    store = GraphHistoryStore(path)
+    for i in range(5):
+        store.append_record(_rec(i))
+    assert len(calls) == 1
+    store.close()
+
+
+def test_tail_check_runs_under_the_exclusive_lock(path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        history_store, "_lock_file", lambda f, exclusive=True: calls.append("lock")
+    )
+    monkeypatch.setattr(history_store, "_unlock_file", lambda f: calls.append("unlock"))
+    monkeypatch.setattr(
+        GraphHistoryStore, "_tail_is_torn", lambda self: calls.append("tail") or False
+    )
+    store = GraphHistoryStore(path)
+    store.append_record(_rec(0))
+    assert calls == ["lock", "tail", "unlock"]
+    store.close()
+
+
+def test_fragment_left_by_another_process_while_we_hold_a_handle(path):
+    store = GraphHistoryStore(path)
+    store.append_record(_rec(0))
+    # Another process fails partway through its append: same inode, no newline.
+    with open(path, "ab") as other:
+        other.write(b'{"event_id": "evt-x')
+    store.append_record(_rec(1))
+    store.append_record(_rec(2))
+    assert [r["event_id"] for r in store.get_recent()] == ["evt-2", "evt-1", "evt-0"]
+    store.close()
+
+
+def test_unreadable_tail_counts_as_torn(path, monkeypatch):
+    store = GraphHistoryStore(path)
+    store.append_record(_rec(0))
+    store.close()
+    real_open = os.open
+
+    def deny(p, *a, **kw):
+        if Path(p) == path:
+            raise PermissionError("no read")
+        return real_open(p, *a, **kw)
+
+    monkeypatch.setattr(os, "open", deny)
+    store.append_record(_rec(1))
+    monkeypatch.undo()
+    assert [r["event_id"] for r in store.get_recent()] == ["evt-1", "evt-0"]
+    store.close()
 
 
 def test_close_waits_for_an_in_flight_append(path):

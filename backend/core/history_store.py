@@ -238,9 +238,11 @@ class GraphHistoryStore:
         # handle is checked against the file at history_path before every append
         # (see _handle_is_current), which also covers a changed history_path.
         self._append_handle: Optional[Any] = None
-        # Set whenever a handle is opened fresh: the first write on it checks
-        # that the file ends on a newline (see _tail_is_torn).
-        self._verify_tail = False
+        # Size the file had when our last write finished, None on a fresh
+        # handle. Any other size under the lock means someone else wrote (a
+        # second process, or a failed write of ours), so the tail is checked
+        # for a torn line before appending (see _tail_is_torn).
+        self._size_after_append: Optional[int] = None
 
     def close(self) -> None:
         """Release the append handle. Safe to call repeatedly; appends reopen."""
@@ -279,7 +281,7 @@ class GraphHistoryStore:
             self._close_append_handle()
             self.history_path.parent.mkdir(parents=True, exist_ok=True)
             self._append_handle = open(self.history_path, "a", encoding="utf-8")
-            self._verify_tail = True
+            self._size_after_append = None
         return self._append_handle
 
     def _tail_is_torn(self) -> bool:
@@ -346,10 +348,11 @@ class GraphHistoryStore:
                 try:
                     # Checked under the OS lock so another process cannot
                     # append between the check and the write.
-                    prefix = "\n" if self._verify_tail and self._tail_is_torn() else ""
+                    unchanged = os.fstat(f.fileno()).st_size == self._size_after_append
+                    prefix = "\n" if not unchanged and self._tail_is_torn() else ""
                     f.write(prefix + line + "\n")
                     f.flush()
-                    self._verify_tail = False
+                    self._size_after_append = os.fstat(f.fileno()).st_size
                 finally:
                     _unlock_file(f)
             except BaseException:
