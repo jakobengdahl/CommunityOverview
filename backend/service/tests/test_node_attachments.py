@@ -1577,6 +1577,29 @@ class TestStoreCallsRunOffTheEventLoop:
         self._run(storage, store, scenario)
         assert threads["list"] != loop_thread, threads
 
+    def test_upload_over_an_unreadable_index_is_refused_and_stages_nothing(
+        self, storage, store
+    ):
+        from backend.core.attachment_store import AttachmentIndexCorrupt
+
+        def corrupt(*args):
+            raise AttachmentIndexCorrupt("unreadable")
+
+        store.list = corrupt
+        staged = []
+        real_stage = store.stage
+
+        async def tracking_stage(*args):
+            staged.append(args)
+            return await real_stage(*args)
+
+        store.stage = tracking_stage
+        client = _client(GraphService(storage, attachment_settings=_settings(store)))
+        response = _upload(client, "doc")
+        assert "attachment_index_corrupt" in response.text
+        assert response.status_code != 201
+        assert staged == []
+
     def test_type_sniffing_runs_off_the_loop(self, storage, store, monkeypatch):
         import threading
 
