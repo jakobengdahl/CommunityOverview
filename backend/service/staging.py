@@ -224,11 +224,14 @@ class Layer:
             doc = self.edge_ignoring_endpoints(entity_id)
             if doc is not None and node_id in (doc["source"], doc["target"]):
                 candidates.add(entity_id)
-        return sorted(
-            edge_id
-            for edge_id in candidates
-            if self.edge_ignoring_endpoints(edge_id) is not None
-        )
+        incident = []
+        for edge_id in sorted(candidates):
+            # As composed: a main-graph edge re-created over its tombstone may
+            # have other endpoints now.
+            doc = self.edge_ignoring_endpoints(edge_id)
+            if doc is not None and node_id in (doc["source"], doc["target"]):
+                incident.append(edge_id)
+        return incident
 
     def edge_ignoring_endpoints(self, edge_id: str) -> Optional[Dict[str, Any]]:
         return compose(self.entry(("edge", edge_id)), self.main_edge(edge_id))
@@ -293,7 +296,11 @@ class StagedWrite:
         upserts = layer.upserts()
         removals = layer.removals()
         if not upserts and not removals:
-            return {"entries": [], "removals": [], "session_seq": None}
+            # Nothing to stage, but the caller's expectation is still answered.
+            seq = self._manager.check_session_seq(
+                self.session_id, self._expected_session_seq
+            )
+            return {"entries": [], "removals": [], "session_seq": seq}
         store = self._manager.write_modes.layer_store
 
         def commit(seq: int) -> Dict[str, Any]:

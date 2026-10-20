@@ -1881,6 +1881,37 @@ class PostgresGraphPersistenceBackend:
             )
         self._ensure_schema()
 
+    def holds_staged_sessions(self) -> bool:
+        """Whether this scope's store has any staged-session record.
+
+        Read-only, and safe on a backend constructed without staged_sessions:
+        it creates nothing, and a store that never had the tables answers
+        False. An instance must not run with staged sessions off over a store
+        that has them, or it would write those sessions as direct.
+        """
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                self._bind_scope(conn)
+                exists = conn.execute(
+                    "SELECT to_regclass(%s)",
+                    (
+                        sql.Identifier(self.schema, "graph_staged_sessions").as_string(
+                            conn
+                        ),
+                    ),
+                ).fetchone()[0]
+                if exists is None:
+                    return False
+                scope, params = self._layer_scope()
+                return bool(
+                    conn.execute(
+                        sql.SQL("SELECT EXISTS (SELECT 1 FROM {} WHERE true{})").format(
+                            self._table("graph_staged_sessions"), scope
+                        ),
+                        params,
+                    ).fetchone()[0]
+                )
+
     def _layer_scope(self) -> Tuple[sql.Composed, Tuple]:
         """` AND <predicate>` for a layer table: this instance's scope, exactly.
 

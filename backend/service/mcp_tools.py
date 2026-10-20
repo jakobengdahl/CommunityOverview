@@ -19,7 +19,10 @@ import functools
 import inspect
 import json
 import secrets
-from typing import List, Optional, Dict, Any, Callable
+from typing import List, Optional, Dict, Any, Callable, Tuple
+
+from mcp.shared.context import RequestContext
+from starlette.requests import Request as StarletteRequest
 
 from backend.core.session_auto_add import AutoAddRuleError
 from backend.service.mcp_widget import (
@@ -86,7 +89,11 @@ from backend.config.config_loader import build_session_url
 from backend.core import layer_store
 from backend.core.write_modes import WriteModeRefused
 from backend.runtime import session_context
-from backend.runtime.authorization import GRAPH_ACTION_MUTATE, GRAPH_ACTION_READ
+from backend.runtime.authorization import (
+    GRAPH_ACTION_MUTATE,
+    GRAPH_ACTION_READ,
+    use_request_authorization,
+)
 from . import access, graph_merge_plan
 from .service import GraphService
 
@@ -163,14 +170,60 @@ _COMPOSING_TOOLS = frozenset(
 _PUSHING_TOOLS = frozenset({"search_graph", "get_related_nodes", "get_saved_view"})
 
 
-def _session_aware(func: Callable, is_retired: Callable[[str], bool], staged_status):
+def _message_request(mcp) -> Tuple[bool, Any]:
+    """``(in_message, request)`` for the MCP message being handled, if any.
+
+    A tool call runs in the MCP server's own task, created when the client's
+    MCP session began, so a binding made around a later HTTP request does not
+    reach it. The server sets a request context per message instead, carrying
+    that message's own HTTP request (None over stdio). Outside a message - a
+    tool called through ``tools_map`` by ``/execute_tool`` or the chat - there
+    is none, and the caller's own binding stands.
+    """
+    get_context = getattr(mcp, "get_context", None)
+    if get_context is None:
+        return False, None
+    try:
+        context = get_context().request_context
+    except (LookupError, ValueError):
+        return False, None
+    if not isinstance(context, RequestContext):
+        return False, None
+    request = context.request
+    return True, request if isinstance(request, StarletteRequest) else None
+
+
+def _message_session(request) -> Optional[str]:
+    """The session an MCP message's HTTP request names in its header."""
+    if request is None:
+        return None
+    named = {
+        value.strip()
+        for value in request.headers.getlist(session_context.SESSION_ID_HEADER)
+    }
+    if len(named) > 1:
+        first, second = sorted(named)[:2]
+        raise session_context.mismatch(first, second)
+    session_id = named.pop() if named else None
+    if session_id == "":
+        raise session_context.not_found(session_id)
+    return session_id
+
+
+def _session_aware(
+    func: Callable,
+    is_retired: Callable[[str], bool],
+    staged_status,
+    message_request: Callable[[], Tuple[bool, Any]] = lambda: (False, None),
+):
     """Wrap a tool so the session it acts in is decided once, before it runs.
 
-    The session a request bound - the HTTP header, through the transport - and
-    the one the tool names must agree (`session_mismatch`). A staging or
-    composing tool then runs bound to that session; the graph service decides
-    from its write mode whether a write stages. A session tool's own session
-    must not be a retired one. Any other tool refuses a bound session.
+    The session a request bound - the HTTP header of the MCP message, or the
+    binding of a caller of ``tools_map`` - and the one the tool names must
+    agree (`session_mismatch`). A staging or composing tool then runs bound to
+    that session; the graph service decides from its write mode whether a
+    write stages. A session tool's own session must not be a retired one. Any
+    other tool refuses a bound session.
 
     The three read tools already took `visualization_session_id` as a push
     target before sessions could stage, and a push may go to a session with no
@@ -191,32 +244,47 @@ def _session_aware(func: Callable, is_retired: Callable[[str], bool], staged_sta
     else:
         kind, key = None, None
 
+    def run(bound, args, kwargs):
+        if kind is None:
+            if bound is not None:
+                raise session_context.not_supported(f"tool {name}")
+            return func(*args, **kwargs)
+        named = kwargs.get(key)
+        if named is not None and not isinstance(named, str):
+            raise session_context.not_found(str(named))
+        if kind == "session":
+            session_context.reconcile(bound, named)
+            if named and is_retired(named):
+                raise session_context.not_found(named)
+            return func(*args, **kwargs)
+        session = session_context.reconcile(bound, named)
+        if (
+            name in _PUSHING_TOOLS
+            and bound is None
+            and named
+            and staged_status(named) == layer_store.STATUS_NONE
+        ):
+            return func(*args, **kwargs)
+        with session_context.bind_session(session):
+            return func(*args, **kwargs)
+
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        bound = session_context.current_session_id()
         try:
-            if kind is None:
-                if bound is not None:
-                    raise session_context.not_supported(f"tool {name}")
-                return func(*args, **kwargs)
-            named = kwargs.get(key)
-            if named is not None and not isinstance(named, str):
-                raise session_context.not_found(str(named))
-            if kind == "session":
-                session_context.reconcile(bound, named)
-                if named and is_retired(named):
-                    raise session_context.not_found(named)
-                return func(*args, **kwargs)
-            session = session_context.reconcile(bound, named)
-            if (
-                name in _PUSHING_TOOLS
-                and bound is None
-                and named
-                and staged_status(named) == layer_store.STATUS_NONE
-            ):
-                return func(*args, **kwargs)
-            with session_context.bind_session(session):
-                return func(*args, **kwargs)
+            in_message, request = message_request()
+            if not in_message:
+                return run(session_context.current_session_id(), args, kwargs)
+            # This message's own headers, for the session and for the
+            # authorization inputs alike; whatever the task inherited from
+            # the request that opened the MCP session no longer applies.
+            bound = _message_session(request)
+            authorization = (
+                use_request_authorization(headers=request.headers)
+                if request is not None
+                else use_request_authorization()
+            )
+            with authorization, session_context.bind_session(bound):
+                return run(bound, args, kwargs)
         except session_context.SessionRefused as exc:
             return exc.to_result()
 
@@ -446,6 +514,7 @@ def register_mcp_tools(
             func,
             lambda sid: _staged_status(sid) == layer_store.STATUS_RETIRED,
             _staged_status,
+            lambda: _message_request(mcp),
         )
         mcp.tool()(wrapped)
         tools_map[func.__name__] = wrapped

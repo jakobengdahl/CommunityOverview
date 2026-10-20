@@ -820,6 +820,20 @@ class SessionManager:
 
     # ---------------- staged graph changes ----------------
 
+    def check_session_seq(
+        self, session_id: str, expected_session_seq: Optional[int]
+    ) -> int:
+        """The session's sequence number; ``SessionSeqConflict`` when
+        ``expected_session_seq`` is given and differs."""
+        session = (
+            self.store.get(session_id) if is_valid_session_id(session_id) else None
+        )
+        if session is None:
+            raise SessionNotFound()
+        if expected_session_seq is not None and expected_session_seq != session.seq:
+            raise SessionSeqConflict(expected_session_seq, session.seq)
+        return session.seq
+
     def stage_graph_change(
         self,
         session_id: str,

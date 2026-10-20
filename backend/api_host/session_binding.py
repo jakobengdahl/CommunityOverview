@@ -14,9 +14,13 @@ requests that could not honour a session at all.
 
 A route that names its own session in its path (the session routes) may carry
 the header only for that same session (``session_mismatch`` otherwise). A
-retired session id in such a path is answered ``session_not_found`` here, for
-every one of them: a retired id is never recreated (§5.3), and several of
-those routes would otherwise create it.
+retired session id in such a path is answered 404 here, for every one of them:
+a retired id is never recreated (§5.3), and several of those routes would
+otherwise create it.
+
+Over MCP the header binds here too, but a tool call runs in the MCP server's
+own task, which this binding does not reach; the tool wrapper in
+``service/mcp_tools.py`` reads the header of each message's own request.
 """
 
 from __future__ import annotations
@@ -112,7 +116,9 @@ class SessionBindingMiddleware:
         path = scope.get("path", "")
         path_session = self._path_session(path)
         if path_session is not None and self._is_retired(path_session):
-            await _refuse(send, session_context.not_found(path_session))
+            # Answered as the session routes answer an id they do not hold,
+            # so a retired id reads like any unknown one.
+            await _send_json(send, 404, {"detail": "session not found"})
             return
 
         values = Headers(scope=scope).getlist(session_context.SESSION_ID_HEADER)
@@ -144,13 +150,19 @@ class SessionBindingMiddleware:
 
 
 async def _refuse(send, refusal: session_context.SessionRefused) -> None:
-    body = json.dumps(
-        {"detail": {"error": refusal.code, "message": refusal.message}}
-    ).encode("utf-8")
+    await _send_json(
+        send,
+        refusal.status,
+        {"detail": {"error": refusal.code, "message": refusal.message}},
+    )
+
+
+async def _send_json(send, status: int, payload) -> None:
+    body = json.dumps(payload).encode("utf-8")
     await send(
         {
             "type": "http.response.start",
-            "status": refusal.status,
+            "status": status,
             "headers": [
                 (b"content-type", b"application/json"),
                 (b"content-length", str(len(body)).encode("ascii")),

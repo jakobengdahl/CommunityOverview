@@ -618,3 +618,45 @@ def test_a_staged_session_whose_record_cannot_be_read_is_refused_not_direct(
         result = service.update_node("a", {"name": "A1"})
     assert result["error"] == "staged_unsupported"
     assert storage.get_node("a").name == "Alpha"
+
+
+def test_an_edge_recreated_elsewhere_is_not_incident_to_its_old_endpoint(world):
+    sid = world.staged_session()
+    with bind_session(sid):
+        world.service.add_nodes([{"id": "c", "type": "Actor", "name": "C"}], [])
+        world.service.delete_edges(["ab"], confirmed=True)
+        world.service.add_nodes(
+            [], [{"id": "ab", "source": "b", "target": "c", "type": "RELATES_TO"}]
+        )
+        result = world.service.delete_nodes(["a"], confirmed=True)
+    assert result["affected_edge_ids"] == []
+    assert world.layer(sid)[("edge", "ab")]["action"] == "update"
+
+
+def test_a_stale_expected_session_seq_is_refused_even_when_nothing_changes(world):
+    sid = world.staged_session()
+    with bind_session(sid):
+        world.service.update_node("a", {"name": "A1"})
+        refused = world.service.delete_nodes(
+            ["absent"], confirmed=True, expected_session_seq=0
+        )
+    assert refused["error"] == "session_seq_conflict"
+
+
+def test_postgres_refuses_to_boot_with_staging_off_over_staged_sessions():
+    if not _server_reachable():
+        pytest.skip("no PostgreSQL server configured")
+    from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+
+    schema = f"co_staged_{uuid.uuid4().hex[:16]}"
+    try:
+        on = PostgresGraphPersistenceBackend(DSN, schema=schema, staged_sessions=True)
+        off = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        assert off.holds_staged_sessions() is False
+        on.record_staged("1234-5678-1234-5678")
+        assert off.holds_staged_sessions() is True
+        on.close()
+        off.close()
+    finally:
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')

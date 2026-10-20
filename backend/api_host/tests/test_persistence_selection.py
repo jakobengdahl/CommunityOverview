@@ -93,6 +93,10 @@ class StubBackend:
     def default_graph_name(self) -> str:
         return "stub"
 
+    def holds_staged_sessions(self) -> bool:
+        # Asked at boot when staged sessions are off; this store holds none.
+        return False
+
     def capabilities(self) -> BackendCapabilities:
         return BackendCapabilities()
 

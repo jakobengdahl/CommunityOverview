@@ -210,4 +210,16 @@ def build_persistence_backend(config: AppConfig):
     if staged:
         kwargs["staged_sessions"] = True
 
-    return PostgresGraphPersistenceBackend(dsn, **kwargs)
+    built = PostgresGraphPersistenceBackend(dsn, **kwargs)
+    if not staged and built.holds_staged_sessions():
+        built.close()
+        # As for the file backend above: the records decide which sessions
+        # stage, and an instance that cannot read them would write those
+        # sessions as direct.
+        raise PersistenceConfigurationError(
+            "GRAPH_STAGED_SESSIONS is not enabled, but the PostgreSQL graph "
+            "store holds staged sessions. Set GRAPH_STAGED_SESSIONS=true on "
+            "every instance; it cannot be turned off once sessions have been "
+            "staged."
+        )
+    return built

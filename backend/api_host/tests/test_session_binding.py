@@ -300,3 +300,87 @@ def test_an_invalid_staged_patch_is_422_like_a_direct_one(client):
     )
     assert response.status_code == 422
     assert client.app.state.graph_storage.layer_store.load_layer(sid) == []
+
+
+# -- the real MCP transport -----------------------------------------------------
+
+_MCP_ACCEPT = {"Accept": "application/json, text/event-stream"}
+
+
+def _rpc(client, mcp_session, method, params, rpc_id, headers=None):
+    sent = dict(_MCP_ACCEPT, **(headers or {}))
+    if mcp_session:
+        sent["mcp-session-id"] = mcp_session
+    return client.post(
+        "/mcp/",
+        json={"jsonrpc": "2.0", "id": rpc_id, "method": method, "params": params},
+        headers=sent,
+    )
+
+
+def _open_mcp(client, headers=None):
+    opened = _rpc(
+        client,
+        None,
+        "initialize",
+        {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": {"name": "t", "version": "1"},
+        },
+        1,
+        headers,
+    )
+    mcp_session = opened.headers.get("mcp-session-id")
+    client.post(
+        "/mcp/",
+        json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+        headers=dict(_MCP_ACCEPT, **{"mcp-session-id": mcp_session}),
+    )
+    return mcp_session
+
+
+@pytest.mark.parametrize("opened_in", [None, "other"])
+def test_over_the_mcp_transport_each_call_acts_in_its_own_header_session(
+    staged_config, mock_llm_provider, opened_in
+):
+    with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
+        with TestClient(create_app(staged_config)) as client:
+            staged = _staged(client)
+            other = _staged(client)
+            mcp_session = _open_mcp(
+                client, {SESSION_ID_HEADER: other} if opened_in else None
+            )
+            _rpc(
+                client,
+                mcp_session,
+                "tools/call",
+                {
+                    "name": "add_nodes",
+                    "arguments": {
+                        "nodes": [{"id": "p1", "type": "Actor", "name": "p1"}],
+                        "edges": [],
+                    },
+                },
+                2,
+                {SESSION_ID_HEADER: staged},
+            )
+            store = client.app.state.write_modes.layer_store
+            assert _node(client, "p1") is None
+            assert [e["entity_id"] for e in store.load_layer(staged)] == ["p1"]
+            assert store.load_layer(other) == []
+            # A later call without the header is in no session at all.
+            _rpc(
+                client,
+                mcp_session,
+                "tools/call",
+                {
+                    "name": "add_nodes",
+                    "arguments": {
+                        "nodes": [{"id": "p2", "type": "Actor", "name": "p2"}],
+                        "edges": [],
+                    },
+                },
+                3,
+            )
+            assert _node(client, "p2") is not None
