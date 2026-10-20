@@ -16,6 +16,7 @@ from backend.core import (
     NodeType,
     StaleUpdateError,
 )
+from backend.core.models import metadata_depth_error
 from backend.core.session_annotations import saved_view_annotation_error
 from backend.runtime.authorization import (
     GRAPH_ACTION_MUTATE,
@@ -132,6 +133,9 @@ def add_nodes(
                 for k in extra:
                     node_dict.pop(k)
             node = Node(**node_dict)
+            depth_error = metadata_depth_error(node.metadata)
+            if depth_error:
+                raise ValueError(depth_error)
             if node.type_str in _SAVED_VIEW_NODE_TYPES:
                 annotation_error = saved_view_annotation_error(node.metadata)
                 if annotation_error:
@@ -142,10 +146,15 @@ def add_nodes(
                         "added_edge_ids": [],
                     }
             node_objects.append(node)
-        edge_objects = [
-            Edge(**{k: v for k, v in dict(e).items() if k not in _SERVER_OWNED_FIELDS})
-            for e in edges
-        ]
+        edge_objects = []
+        for e in edges:
+            edge = Edge(
+                **{k: v for k, v in dict(e).items() if k not in _SERVER_OWNED_FIELDS}
+            )
+            depth_error = metadata_depth_error(edge.metadata)
+            if depth_error:
+                raise ValueError(depth_error)
+            edge_objects.append(edge)
     except Exception as e:
         return {
             "success": False,
@@ -810,6 +819,16 @@ def adopt_federated_node(
         aliases=list(source_node.aliases),
         metadata=metadata,
     )
+
+    # The source reference below copies the same metadata, so this covers it.
+    depth_error = metadata_depth_error(local_node.metadata)
+    if depth_error:
+        return {
+            "success": False,
+            "message": f"Error validating input: {depth_error}",
+            "added_node_ids": [],
+            "added_edge_ids": [],
+        }
 
     if local_node.type_str in _SAVED_VIEW_NODE_TYPES:
         annotation_error = saved_view_annotation_error(local_node.metadata)

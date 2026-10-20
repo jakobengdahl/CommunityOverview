@@ -550,16 +550,17 @@ class TestRedactJob:
 
 
 class TestRetentionSweeper:
-    def test_failing_store_is_logged_not_raised(self, caplog):
+    def test_failing_store_is_logged_and_flagged_not_raised(self, caplog):
         broken = MagicMock()
-        broken.list_terminal_older_than.side_effect = RuntimeError("db gone")
+        broken.list_running_older_than.side_effect = RuntimeError("db gone")
         sweeper = RetentionSweeper(
             broken, RetentionPolicy.from_values(retention_days=30), clock=lambda: T0
         )
         with caplog.at_level(logging.ERROR):
-            assert sweeper.run_once() is None
+            report = sweeper.run_once()
         assert "retention sweep failed" in caplog.text
-        assert sweeper.last_report is None
+        assert report is not None and report.run_history_failed is True
+        assert sweeper.last_report is report
 
     def test_start_sweeps_immediately_and_stop_joins(self):
         store = _store()

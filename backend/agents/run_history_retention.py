@@ -202,6 +202,7 @@ class SweepReport:
     proposals_redacted: int = 0
     proposals_purged: int = 0
     proposals_failed: bool = False
+    run_history_failed: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -217,6 +218,7 @@ class SweepReport:
             "proposals_redacted": self.proposals_redacted,
             "proposals_purged": self.proposals_purged,
             "proposals_failed": self.proposals_failed,
+            "run_history_failed": self.run_history_failed,
         }
 
 
@@ -236,8 +238,9 @@ def sweep(
 
     Idempotent: a second sweep at the same ``now`` changes nothing. With
     ``dry_run`` the counts are what a real sweep would change, and the store is
-    left untouched. Run-store errors propagate; ``RetentionSweeper`` contains
-    them. A proposal-store error is logged and reported as ``proposals_failed``.
+    left untouched. A run-store error is logged and reported as
+    ``run_history_failed``, a proposal-store error as ``proposals_failed``; each
+    phase runs whatever the other did.
     """
     now = now or utcnow()
     redact_cutoff = (
@@ -251,31 +254,39 @@ def sweep(
         else None
     )
 
+    # Each phase is contained on its own: a failing store is logged and flagged
+    # in the report, and neither costs the other phase its work or the sweep its
+    # audit record. Counts of steps that finished before a failure stay in.
     abandoned = redacted = purged = 0
-    if store is not None and purge_cutoff is not None:
-        ids = [job.id for job in store.list_running_older_than(purge_cutoff)]
-        abandoned = (
-            len(ids) if dry_run else store.abandon(ids, cutoff=purge_cutoff, now=now)
-        )
-    # An abandoned run is unredacted and finished before the purge cutoff, which
-    # is never later than the redact cutoff, so a real sweep redacts and purges
-    # it below; a dry run, which abandons nothing, counts it in by hand.
-    if store is not None and redact_cutoff is not None:
-        ids = [
-            job.id
-            for job in store.list_terminal_older_than(redact_cutoff, redacted=False)
-        ]
-        redacted = len(ids) if dry_run else store.redact(ids, now=now)
-        if dry_run:
-            redacted += abandoned
-    if store is not None and purge_cutoff is not None:
-        ids = [job.id for job in store.list_terminal_older_than(purge_cutoff)]
-        purged = len(ids) if dry_run else store.purge(ids)
-        if dry_run:
-            purged += abandoned
+    run_history_failed = False
+    try:
+        if store is not None and purge_cutoff is not None:
+            ids = [job.id for job in store.list_running_older_than(purge_cutoff)]
+            abandoned = (
+                len(ids)
+                if dry_run
+                else store.abandon(ids, cutoff=purge_cutoff, now=now)
+            )
+        # An abandoned run is unredacted and finished before the purge cutoff, which
+        # is never later than the redact cutoff, so a real sweep redacts and purges
+        # it below; a dry run, which abandons nothing, counts it in by hand.
+        if store is not None and redact_cutoff is not None:
+            ids = [
+                job.id
+                for job in store.list_terminal_older_than(redact_cutoff, redacted=False)
+            ]
+            redacted = len(ids) if dry_run else store.redact(ids, now=now)
+            if dry_run:
+                redacted += abandoned
+        if store is not None and purge_cutoff is not None:
+            ids = [job.id for job in store.list_terminal_older_than(purge_cutoff)]
+            purged = len(ids) if dry_run else store.purge(ids)
+            if dry_run:
+                purged += abandoned
+    except Exception:
+        logger.exception("Run-history retention sweep failed")
+        run_history_failed = True
 
-    # Run-history changes are committed by now; a failing proposal store must
-    # not cost them their audit record, so its error is contained and reported.
     proposals_redacted = proposals_purged = 0
     proposals_failed = False
     try:
@@ -307,6 +318,7 @@ def sweep(
         proposals_redacted=proposals_redacted,
         proposals_purged=proposals_purged,
         proposals_failed=proposals_failed,
+        run_history_failed=run_history_failed,
     )
     audit_logger.info("run-history retention sweep %s", json.dumps(report.to_dict()))
     return report
@@ -316,8 +328,8 @@ class RetentionSweeper:
     """
     Runs ``sweep`` on a daemon thread: once at start, then every interval.
 
-    A sweep that raises is logged and the loop carries on, so retention can
-    never take the agent runtime down. With a policy that never sweeps, ``start``
+    A sweep that raises, or a phase that fails inside one, is logged and the
+    loop carries on, so retention can never take the agent runtime down. With a policy that never sweeps, ``start``
     does nothing.
     """
 
@@ -342,7 +354,7 @@ class RetentionSweeper:
         return self._last_report
 
     def run_once(self) -> Optional[SweepReport]:
-        """Sweep once; return the report, or None if the sweep failed."""
+        """Sweep once; return the report, or None if the sweep itself raised."""
         try:
             report = sweep(
                 self._store,
@@ -421,19 +433,26 @@ def main(argv: Optional[list] = None) -> int:
     from .execution import SqliteExecutionStore
     from .governance.store import SqliteProposalStore
 
-    store = SqliteExecutionStore(db_path) if db_path else None
-    proposal_store = SqliteProposalStore(governance_db) if governance_db else None
+    # A dry run opens read-only: no journal-mode switch, no schema creation.
+    store = proposal_store = None
     try:
+        if db_path:
+            store = SqliteExecutionStore(db_path, read_only=args.dry_run)
+        if governance_db:
+            proposal_store = SqliteProposalStore(governance_db, read_only=args.dry_run)
         report = sweep(
             store, policy, dry_run=args.dry_run, proposal_store=proposal_store
         )
     finally:
-        if store is not None:
-            store.close()
-        if proposal_store is not None:
-            proposal_store.close()
+        # Nested so a store whose close() raises cannot leave the other open.
+        try:
+            if store is not None:
+                store.close()
+        finally:
+            if proposal_store is not None:
+                proposal_store.close()
     print(json.dumps(report.to_dict(), indent=2))
-    return 1 if report.proposals_failed else 0
+    return 1 if report.proposals_failed or report.run_history_failed else 0
 
 
 if __name__ == "__main__":

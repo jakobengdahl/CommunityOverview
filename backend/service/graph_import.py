@@ -28,6 +28,7 @@ from backend.core.models import (
     Node,
     is_valid_node_type,
     is_valid_relationship_type,
+    metadata_depth_error,
 )
 
 # A generous but finite cap. Without one, a malformed or hostile document (a
@@ -194,10 +195,30 @@ def build_document_nodes(
                 ImportIssue(location, f"invalid node: {describe_invalid(exc)}")
             )
             continue
+        depth_error = metadata_depth_error(node.metadata)
+        if depth_error:
+            errors.append(ImportIssue(location, f"invalid node: {depth_error}"))
+            continue
 
         if node_id is not None and seen_node_ids.get(node_id) == index:
             built.append((index, node))
     return built
+
+
+def build_document_edge(
+    raw_edge: Dict[str, Any], location: str, errors: List[ImportIssue]
+) -> Optional[Edge]:
+    """Construct one document edge, or append why it cannot be and return None."""
+    try:
+        edge = Edge.from_dict(dict(raw_edge))
+    except (PydanticValidationError, ValueError, TypeError) as exc:
+        errors.append(ImportIssue(location, f"invalid edge: {describe_invalid(exc)}"))
+        return None
+    depth_error = metadata_depth_error(edge.metadata)
+    if depth_error:
+        errors.append(ImportIssue(location, f"invalid edge: {depth_error}"))
+        return None
+    return edge
 
 
 def check_document_edge_shape(
@@ -318,12 +339,8 @@ def validate_import_document(document: Any) -> ImportValidationResult:
                 )
             )
 
-        try:
-            edge = Edge.from_dict(dict(raw_edge))
-        except (PydanticValidationError, ValueError, TypeError) as exc:
-            errors.append(
-                ImportIssue(location, f"invalid edge: {describe_invalid(exc)}")
-            )
+        edge = build_document_edge(raw_edge, location, errors)
+        if edge is None:
             continue
 
         if (

@@ -3,6 +3,7 @@
 import json
 import logging
 import sqlite3
+import threading
 from datetime import timedelta
 from unittest.mock import MagicMock
 
@@ -15,6 +16,7 @@ from backend.agents.execution import (
     ExecutionState,
     InMemoryExecutionStore,
     RetryPolicy,
+    SqliteExecutionStore,
 )
 from backend.agents.execution.contract import T0
 from backend.agents.governance import (
@@ -268,6 +270,7 @@ class TestAuditAndWiring:
         record = json.loads(audit[0].split(" ", 3)[3])
         assert (record["proposals_redacted"], record["proposals_purged"]) == (1, 1)
         assert record["proposals_failed"] is False
+        assert record["run_history_failed"] is False
         for leaked in (SECRET, p.id, "corr", "n1", "reviewer"):
             assert leaked not in audit[0]
 
@@ -460,3 +463,278 @@ class TestAlongsideRunHistory:
             if r.name == "backend.agents.run_history_retention.audit"
         ]
         assert len(audit) == 1
+
+
+class TestPhaseIsolation:
+    def _broken_runs(self):
+        broken = MagicMock()
+        broken.list_running_older_than.side_effect = RuntimeError("runs locked")
+        return broken
+
+    def test_failing_run_history_store_does_not_stop_the_proposal_phase(
+        self, proposals, caplog
+    ):
+        p = _proposal(proposals, decided_days_ago=40)
+        with caplog.at_level(
+            logging.INFO, logger="backend.agents.run_history_retention.audit"
+        ):
+            report = sweep(
+                self._broken_runs(), POLICY, now=T0, proposal_store=proposals
+            )
+        assert (report.run_history_failed, report.proposals_failed) == (True, False)
+        assert (report.proposals_redacted, report.proposals_purged) == (1, 1)
+        assert proposals.get(p.id) is None
+        audit = [r for r in caplog.records if r.name.endswith(".audit")]
+        assert len(audit) == 1
+        assert (
+            json.loads(audit[0].getMessage().split(" ", 3)[3])["run_history_failed"]
+            is True
+        )
+
+    def test_failing_proposal_store_does_not_flag_the_run_history_phase(self):
+        runs = InMemoryExecutionStore(retry_policy=RetryPolicy(max_attempts=1))
+        broken = MagicMock()
+        broken.list_decided_older_than.side_effect = RuntimeError("db locked")
+        report = sweep(runs, POLICY, now=T0, proposal_store=broken)
+        assert (report.run_history_failed, report.proposals_failed) == (False, True)
+
+    def test_both_stores_failing_still_yields_a_report_flagging_both(self):
+        broken = MagicMock()
+        broken.list_decided_older_than.side_effect = RuntimeError("db locked")
+        report = sweep(self._broken_runs(), POLICY, now=T0, proposal_store=broken)
+        assert (report.run_history_failed, report.proposals_failed) == (True, True)
+
+    def test_cli_exits_one_and_still_sweeps_governance_when_run_history_fails(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        gov = tmp_path / "governance.db"
+        store = SqliteProposalStore(gov)
+        old = _proposal(store, decided_days_ago=4000)
+        store.close()
+        runs_db = tmp_path / "runs.db"
+        SqliteExecutionStore(runs_db).close()
+
+        def broken(*args, **kwargs):
+            raise RuntimeError("db locked")
+
+        monkeypatch.setattr(SqliteExecutionStore, "list_terminal_older_than", broken)
+        monkeypatch.setenv("AGENTS_RUN_HISTORY_DB", str(runs_db))
+        monkeypatch.setenv("AGENTS_GOVERNANCE_DB", str(gov))
+        monkeypatch.setenv("AGENTS_RUN_HISTORY_RETENTION_DAYS", "30")
+        assert main([]) == 1
+        out = json.loads(capsys.readouterr().out)
+        assert (out["run_history_failed"], out["proposals_purged"]) == (True, 1)
+        store = SqliteProposalStore(gov)
+        try:
+            assert store.get(old.id) is None
+        finally:
+            store.close()
+
+    def test_partial_run_history_counts_survive_a_later_failure(self):
+        runs = InMemoryExecutionStore(retry_policy=RetryPolicy(max_attempts=1))
+        runs.enqueue(
+            ExecutionJob(
+                agent_id="a1",
+                kind=ExecutionKind.EVENT,
+                idempotency_key="stuck",
+                payload={},
+                state=ExecutionState.RUNNING,
+                created_at=T0 - timedelta(days=41),
+                updated_at=T0 - timedelta(days=41),
+            )
+        )
+
+        def broken(*args, **kwargs):
+            raise RuntimeError("runs locked")
+
+        runs.list_terminal_older_than = broken
+        report = sweep(runs, POLICY, now=T0)
+        assert (report.abandoned, report.run_history_failed) == (1, True)
+
+    def test_partial_proposal_counts_survive_a_later_failure(self):
+        store = MagicMock()
+        store.list_decided_older_than.side_effect = [[MagicMock(id="p1")], RuntimeError]
+        store.redact.return_value = 1
+        report = sweep(None, POLICY, now=T0, proposal_store=store)
+        assert (report.proposals_redacted, report.proposals_failed) == (1, True)
+
+    def test_run_history_only_sweep_with_redaction_does_not_flag_proposals(self):
+        runs = InMemoryExecutionStore(retry_policy=RetryPolicy(max_attempts=1))
+        # Older than the redaction cutoff (7 days) but inside retention (30).
+        runs.enqueue(
+            ExecutionJob(
+                agent_id="a1",
+                kind=ExecutionKind.EVENT,
+                idempotency_key="redactable",
+                payload={},
+                state=ExecutionState.SUCCEEDED,
+                finished_at=T0 - timedelta(days=10),
+                created_at=T0 - timedelta(days=11),
+                updated_at=T0 - timedelta(days=10),
+            )
+        )
+        report = sweep(runs, POLICY, now=T0, proposal_store=None)
+        assert report.redacted == 1
+        assert (report.proposals_failed, report.run_history_failed) == (False, False)
+
+    def test_cli_closes_the_run_store_when_opening_the_proposal_store_raises(
+        self, tmp_path, monkeypatch
+    ):
+        gov, runs_db = tmp_path / "governance.db", tmp_path / "runs.db"
+        SqliteProposalStore(gov).close()
+        SqliteExecutionStore(runs_db).close()
+        closed = []
+        real = SqliteExecutionStore.close
+        monkeypatch.setattr(
+            SqliteExecutionStore,
+            "close",
+            lambda self: (closed.append(self), real(self)),
+        )
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("cannot open")
+
+        monkeypatch.setattr(SqliteProposalStore, "__init__", boom)
+        monkeypatch.setenv("AGENTS_RUN_HISTORY_DB", str(runs_db))
+        monkeypatch.setenv("AGENTS_GOVERNANCE_DB", str(gov))
+        monkeypatch.setenv("AGENTS_RUN_HISTORY_RETENTION_DAYS", "30")
+        with pytest.raises(RuntimeError, match="cannot open"):
+            main([])
+        assert len(closed) == 1
+
+    def test_cli_closes_both_stores_when_an_exception_escapes_sweep(
+        self, tmp_path, monkeypatch
+    ):
+        gov, runs_db = tmp_path / "governance.db", tmp_path / "runs.db"
+        SqliteProposalStore(gov).close()
+        SqliteExecutionStore(runs_db).close()
+        closed = []
+        for cls in (SqliteProposalStore, SqliteExecutionStore):
+            real = cls.close
+            monkeypatch.setattr(
+                cls, "close", lambda self, real=real: (closed.append(self), real(self))
+            )
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("escaped")
+
+        monkeypatch.setattr("backend.agents.run_history_retention.sweep", boom)
+        monkeypatch.setenv("AGENTS_RUN_HISTORY_DB", str(runs_db))
+        monkeypatch.setenv("AGENTS_GOVERNANCE_DB", str(gov))
+        monkeypatch.setenv("AGENTS_RUN_HISTORY_RETENTION_DAYS", "30")
+        with pytest.raises(RuntimeError, match="escaped"):
+            main([])
+        assert len(closed) == 2
+
+    def test_cli_closes_the_proposal_store_when_the_run_store_close_raises(
+        self, tmp_path, monkeypatch
+    ):
+        gov, runs_db = tmp_path / "governance.db", tmp_path / "runs.db"
+        SqliteProposalStore(gov).close()
+        SqliteExecutionStore(runs_db).close()
+        closed = []
+        real = SqliteProposalStore.close
+        monkeypatch.setattr(
+            SqliteProposalStore,
+            "close",
+            lambda self: (closed.append(self), real(self)),
+        )
+
+        real_runs_close = SqliteExecutionStore.close
+
+        def broken_close(self):
+            real_runs_close(self)
+            raise RuntimeError("close failed")
+
+        monkeypatch.setattr(SqliteExecutionStore, "close", broken_close)
+        monkeypatch.setenv("AGENTS_RUN_HISTORY_DB", str(runs_db))
+        monkeypatch.setenv("AGENTS_GOVERNANCE_DB", str(gov))
+        monkeypatch.setenv("AGENTS_RUN_HISTORY_RETENTION_DAYS", "30")
+        with pytest.raises(RuntimeError, match="close failed"):
+            main([])
+        assert len(closed) == 1
+
+
+class TestDryRunIsReadOnly:
+    def _fresh_dbs(self, tmp_path):
+        # Plain rollback-journal files with no schema: what a dry run must not
+        # convert to WAL or populate.
+        paths = []
+        for name in ("governance.db", "runs.db"):
+            path = tmp_path / name
+            sqlite3.connect(path).close()
+            paths.append(path)
+        return paths
+
+    def test_dry_run_neither_switches_to_wal_nor_creates_schema(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        gov, runs = self._fresh_dbs(tmp_path)
+        before = {p: p.read_bytes() for p in (gov, runs)}
+        monkeypatch.setenv("AGENTS_RUN_HISTORY_DB", str(runs))
+        monkeypatch.setenv("AGENTS_GOVERNANCE_DB", str(gov))
+        monkeypatch.setenv("AGENTS_RUN_HISTORY_RETENTION_DAYS", "30")
+        # Neither file has a schema, so both phases report failure: the dry run
+        # must say so rather than create the tables.
+        assert main(["--dry-run"]) == 1
+        out = json.loads(capsys.readouterr().out)
+        assert (out["run_history_failed"], out["proposals_failed"]) == (True, True)
+        for p in (gov, runs):
+            assert p.read_bytes() == before[p]
+            assert not p.with_name(p.name + "-wal").exists()
+            conn = sqlite3.connect(p)
+            try:
+                assert conn.execute("PRAGMA journal_mode").fetchone()[0] != "wal"
+                assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
+            finally:
+                conn.close()
+
+    def test_read_only_stores_refuse_writes(self, tmp_path):
+        gov = tmp_path / "governance.db"
+        store = SqliteProposalStore(gov)
+        p = _proposal(store, decided_days_ago=40)
+        store.close()
+        ro = SqliteProposalStore(gov, read_only=True)
+        try:
+            assert ro.get(p.id) is not None
+            with pytest.raises(sqlite3.OperationalError):
+                ro.purge([p.id])
+        finally:
+            ro.close()
+
+    def test_read_only_run_history_store_refuses_writes(self, tmp_path):
+        db = tmp_path / "runs.db"
+        SqliteExecutionStore(db).close()
+        ro = SqliteExecutionStore(db, read_only=True)
+        try:
+            with pytest.raises(sqlite3.OperationalError):
+                ro.purge(["any-id"])
+        finally:
+            ro.close()
+
+    def test_read_only_stores_keep_busy_timeout_and_cross_thread_use(self, tmp_path):
+        gov, runs = tmp_path / "governance.db", tmp_path / "runs.db"
+        SqliteProposalStore(gov).close()
+        SqliteExecutionStore(runs).close()
+        ro_gov = SqliteProposalStore(gov, read_only=True)
+        ro_runs = SqliteExecutionStore(runs, read_only=True)
+        try:
+            for ro in (ro_gov, ro_runs):
+                assert ro._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+            # check_same_thread=False: a worker thread may read through them.
+            errors = []
+
+            def read():
+                try:
+                    ro_gov.get("missing")
+                    ro_runs.list_terminal_older_than(T0)
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(exc)
+
+            t = threading.Thread(target=read)
+            t.start()
+            t.join()
+            assert errors == []
+        finally:
+            ro_gov.close()
+            ro_runs.close()

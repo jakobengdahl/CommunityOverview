@@ -3,7 +3,10 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/react';
-import NodeAttachmentsPanel, { precheckUpload } from './NodeAttachmentsPanel';
+import NodeAttachmentsPanel, {
+  precheckUpload,
+  resetAttachmentsAvailability,
+} from './NodeAttachmentsPanel';
 
 // t echoes the key plus its params so assertions can see which message and
 // which values were chosen without depending on the English wording.
@@ -54,6 +57,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  resetAttachmentsAvailability();
   vi.unstubAllGlobals();
 });
 
@@ -91,6 +95,59 @@ describe('NodeAttachmentsPanel gating', () => {
     expect(await screen.findByText('attachments.load_error')).toBeTruthy();
     expect(screen.queryByText('attachments.empty')).toBeNull();
     expect(screen.queryByText('attachments.loading')).toBeNull();
+  });
+});
+
+describe('NodeAttachmentsPanel unavailable storage', () => {
+  const unavailable = () =>
+    jsonResponse(503, { detail: { error: 'attachments_unavailable', message: 'off' } });
+
+  it('shows the unavailable message instead of the generic load error', async () => {
+    fetchMock.mockResolvedValueOnce(unavailable());
+    render(<NodeAttachmentsPanel nodeId="n1" typeAllowsAttachments />);
+    expect(await screen.findByText(/^attachments\.errors\.attachments_unavailable/)).toBeTruthy();
+    expect(screen.queryByText('attachments.load_error')).toBeNull();
+  });
+
+  it('does not request the list again once the server is known to lack storage', async () => {
+    fetchMock.mockResolvedValueOnce(unavailable());
+    const first = render(<NodeAttachmentsPanel nodeId="n1" typeAllowsAttachments />);
+    await screen.findByText(/^attachments\.errors\.attachments_unavailable/);
+    first.unmount();
+    render(<NodeAttachmentsPanel nodeId="n2" typeAllowsAttachments />);
+    expect(screen.getByText(/^attachments\.errors\.attachments_unavailable/)).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps requesting the list after a failure that is not attachments_unavailable', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(503, { detail: { error: 'x' } }));
+    const first = render(<NodeAttachmentsPanel nodeId="n1" typeAllowsAttachments />);
+    await screen.findByText('attachments.load_error');
+    first.unmount();
+    fetchMock.mockResolvedValueOnce(listing([]));
+    render(<NodeAttachmentsPanel nodeId="n2" typeAllowsAttachments />);
+    await screen.findByText('attachments.empty');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('remembers the signal when the answer arrives after the panel unmounted', async () => {
+    let answer;
+    fetchMock.mockReturnValueOnce(new Promise((resolve) => (answer = resolve)));
+    render(<NodeAttachmentsPanel nodeId="n1" typeAllowsAttachments />).unmount();
+    answer(unavailable());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    render(<NodeAttachmentsPanel nodeId="n2" typeAllowsAttachments />);
+    expect(screen.getByText(/^attachments\.errors\.attachments_unavailable/)).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders nothing for a type without the flag on a server without storage', async () => {
+    fetchMock.mockResolvedValueOnce(unavailable());
+    const { container } = render(
+      <NodeAttachmentsPanel nodeId="n1" typeAllowsAttachments={false} />
+    );
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(container.innerHTML).toBe('');
   });
 });
 
@@ -301,6 +358,12 @@ describe('precheckUpload', () => {
     expect(precheckUpload({ size: 100 }, used, LIMITS)).toBeNull();
   });
 
+  it('treats an over-budget node as having no room, but still takes an empty file', () => {
+    const over = [record('a', 300)];
+    expect(precheckUpload({ size: 1 }, over, LIMITS)).toBe('node_attachment_limit');
+    expect(precheckUpload({ size: 0 }, over, LIMITS)).toBeNull();
+  });
+
   it('lets a file of exactly the cap through', () => {
     expect(precheckUpload({ size: 100 }, [], LIMITS)).toBeNull();
   });
@@ -322,6 +385,16 @@ describe('NodeAttachmentsPanel delete', () => {
     const [url, options] = fetchMock.mock.calls[1];
     expect(url).toBe('/api/nodes/n1/attachments/a1');
     expect(options.method).toBe('DELETE');
+  });
+
+  it('moves keyboard focus into the confirmation when it opens', async () => {
+    fetchMock.mockResolvedValueOnce(listing([record('a1'), record('a2')]));
+    render(<NodeAttachmentsPanel nodeId="n1" typeAllowsAttachments />);
+    await screen.findByText('a1.pdf');
+    fireEvent.click(screen.getByLabelText('attachments.delete_named {"name":"a2.pdf"}'));
+    const prompt = screen.getByText('attachments.confirm_delete {"name":"a2.pdf"}');
+    expect(prompt.parentElement.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement.textContent).toBe('attachments.cancel');
   });
 
   it('cancelling the confirmation sends nothing', async () => {
