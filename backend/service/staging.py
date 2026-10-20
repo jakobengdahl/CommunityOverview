@@ -330,7 +330,13 @@ class StagedWrite:
             "staged": True,
             "session_id": self.session_id,
             "session_seq": committed["session_seq"],
-            "entries": committed["entries"],
+            # Without the base: a cascade reaches edges the writer's narrowed
+            # view may not show, and the base is the diff's, read with
+            # authorization.
+            "entries": [
+                {k: v for k, v in entry.items() if k != "base"}
+                for entry in committed["entries"]
+            ],
             "removed_entries": committed["removals"],
         }
 

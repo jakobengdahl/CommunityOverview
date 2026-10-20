@@ -129,6 +129,7 @@ _DEFAULT_IMAGE_BUCKET_REFILL_PER_SEC = _DEFAULT_LOOKUP_REFILL_PER_SEC
 # genuinely changed server-side state and every *other* client sees it. A
 # distinct marker for this one attribution is required, not optional.
 _UNDO_REPLAY_CLIENT_ID = "undo-replay"
+_STREAM_WITHHELD = frozenset({"base", "staged_by"})
 
 
 class SessionNotFound(Exception):
@@ -151,8 +152,7 @@ class SessionSeqConflict(Exception):
 
 
 # The client id a staged graph change is fanned out under. Distinct from any
-# browser's, so no participant drops it as the echo of its own op; who staged
-# it travels in each entry's `staged_by`.
+# browser's, so no participant drops it as the echo of its own op.
 GRAPH_STAGING_CLIENT_ID = "graph-staging"
 
 
@@ -709,20 +709,11 @@ class SessionManager:
             return session, False
         if self.store.session_count() >= self._max_sessions:
             raise SessionLimitReached()
-        # Materialising a session is creating it, so it takes the graph
-        # default like any created session (§5.1).
-        mode, source = self.write_modes.choose(None)
+        # Materialising a session the browser already holds is never a create
+        # request, so it is direct whatever the graph default (§5.1): a staged
+        # session is created explicitly, where the hook is asked.
         try:
-            return self.store.get_or_create(
-                session_id,
-                write_mode=mode,
-                write_mode_source=source,
-                on_allocate=(
-                    self.write_modes.record_staged
-                    if mode == WRITE_MODE_STAGED
-                    else None
-                ),
-            )
+            return self.store.get_or_create(session_id)
         except (SessionRetired, layer_store.StagedSessionRetired):
             raise SessionNotFound() from None
 
@@ -878,10 +869,11 @@ class SessionManager:
         op = {
             "op": "graph_change_staged",
             # What changed, not the main-graph snapshot each entry keeps as
-            # its base: the stream reaches anyone holding the session id, and
-            # the base and main values are the diff's, read with authorization.
+            # its base nor the writer's resolved actor id: the stream reaches
+            # anyone holding the session id, and those are the diff's, read
+            # with authorization.
             "entries": [
-                {k: v for k, v in entry.items() if k != "base"}
+                {k: v for k, v in entry.items() if k not in _STREAM_WITHHELD}
                 for entry in payload.get("entries", [])
             ],
             "removals": payload.get("removals", []),

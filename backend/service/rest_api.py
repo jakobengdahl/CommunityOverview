@@ -1717,6 +1717,9 @@ def _register_session_endpoints(
             session_manager.get_or_create(session_id)
         except SessionLimitReached:
             raise HTTPException(status_code=503, detail="too many sessions")
+        except SessionNotFound:
+            # Retired after the binding middleware looked.
+            raise HTTPException(status_code=404, detail="session not found")
 
         subscription, _member = session_manager.connect(session_id, client_id, name)
 

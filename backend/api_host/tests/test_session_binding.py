@@ -761,13 +761,15 @@ def test_a_retired_path_answers_exactly_like_an_unknown_one(client):
     )
 
 
-def test_a_staged_default_reaches_a_session_materialised_by_rename(
-    staged_config, mock_llm_provider
+def test_a_staged_session_is_never_materialised_past_the_hook(
+    staged_config, mock_llm_provider, monkeypatch
 ):
     config = dataclasses.replace(staged_config, session_write_mode_default="staged")
     with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
         client = TestClient(create_app(config))
+    monkeypatch.setenv("COMMUNITYOVERVIEW_AUTHORIZATION_MODE", "read-only")
+    assert client.post("/api/sessions", json={"name": "x"}).status_code == 403
     renamed = client.patch(f"/api/sessions/{UNKNOWN}", json={"name": "joined"})
-    assert renamed.json()["write_mode"] == "staged"
-    assert _add(client, {SESSION_ID_HEADER: UNKNOWN}).json()["staged"] is True
-    assert _node(client, "s1") is None
+    assert renamed.json()["write_mode"] == "direct"
+    store = client.app.state.graph_storage.layer_store
+    assert store.staged_status(UNKNOWN) == "none"

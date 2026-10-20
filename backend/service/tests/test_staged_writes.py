@@ -409,15 +409,18 @@ def test_the_fanned_out_op_carries_what_changed_not_the_main_graph_base(world):
     op = next(e["op"] for _, e in world.published if e.get("type") == "op")
     assert op["entries"][0]["staged"] == {"description": "staged"}
     assert "base" not in op["entries"][0]
+    assert "staged_by" not in op["entries"][0]
     assert all(
-        "base" not in entry for entry in world.store.ops_since(sid, 0)[0]["entries"]
+        "base" not in entry and "staged_by" not in entry
+        for entry in world.store.ops_since(sid, 0)[0]["entries"]
     )
-    # The writer's own answer, and the layer, keep it.
-    assert result["entries"][0]["base"]["name"] == "Alpha"
+    # Nor does the writer's own answer carry the base; only the layer does.
+    assert "base" not in result["entries"][0]
+    assert result["entries"][0]["staged"] == {"description": "staged"}
     assert world.layer(sid)[("node", "a")]["base"]["name"] == "Alpha"
 
 
-def test_a_session_materialised_under_a_staged_default_is_staged(tmp_path):
+def test_a_session_materialised_under_a_staged_default_stays_direct(tmp_path):
     backend = FileGraphPersistenceBackend(tmp_path / "g.json", staged_sessions=True)
     storage = GraphStorage(str(tmp_path / "g.json"), persistence_backend=backend)
     _seed(storage)
@@ -425,11 +428,8 @@ def test_a_session_materialised_under_a_staged_default_is_staged(tmp_path):
     world.manager.write_modes._default = "staged"
     session, created = world.manager.get_or_create("1111-2222-3333-4444")
     assert created
-    assert storage.layer_store.staged_status(session.id) == "active"
-    assert (session.write_mode, session.write_mode_source) == ("staged", "inherited")
-    with bind_session(session.id):
-        assert world.service.update_node("a", {"name": "A1"})["staged"] is True
-    assert storage.get_node("a").name == "Alpha"
+    assert storage.layer_store.staged_status(session.id) == "none"
+    assert world.manager.write_mode_of(session)["write_mode"] == "direct"
 
 
 def test_a_stale_expected_session_seq_stages_nothing(world):
@@ -883,6 +883,25 @@ def test_staged_delete_of_a_node_outside_the_narrowing_stages_nothing(world):
     with bind_session(sid):
         world.service.delete_nodes(["a"], confirmed=True)
     assert world.layer(sid) == {}
+
+
+def test_a_staged_cascade_answers_nothing_of_an_edge_outside_the_narrowing(world):
+    sid = _narrowed(world)
+    world.storage.add_edge(
+        Edge(
+            id="va",
+            source="v",
+            target="a",
+            type="RELATES_TO",
+            label="SECRET-LABEL",
+            metadata={"note": "SECRET-META"},
+        )
+    )
+    with bind_session(sid):
+        result = world.service.delete_nodes(["v"], confirmed=True)
+    assert result["success"] is True
+    assert "SECRET" not in json.dumps(result)
+    assert world.layer(sid)[("edge", "va")]["base"]["label"] == "SECRET-LABEL"
 
 
 def test_staged_archive_of_a_node_outside_the_narrowing_stages_nothing(world):
