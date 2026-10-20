@@ -120,6 +120,25 @@ class AppConfig:
         )
     )
 
+    # Staged sessions (docs/SESSION_OVERLAY_CONTRACT.md). Read raw and
+    # validated by build_session_settings, which refuses a bad value at boot
+    # with the variable named.
+    #
+    # GRAPH_STAGED_SESSIONS=true lets the graph backend hold session layers -
+    # without it no session can be staged, and the backend creates no layer
+    # file or table. SESSION_WRITE_MODE_DEFAULT is the mode a session created
+    # without one gets: direct (the default, today's behaviour) or staged.
+    # SESSION_LAYER_MAX_ENTRIES caps a layer; unset is 1000.
+    graph_staged_sessions: Optional[str] = field(
+        default_factory=lambda: os.getenv("GRAPH_STAGED_SESSIONS")
+    )
+    session_write_mode_default: Optional[str] = field(
+        default_factory=lambda: os.getenv("SESSION_WRITE_MODE_DEFAULT")
+    )
+    session_layer_max_entries: Optional[str] = field(
+        default_factory=lambda: os.getenv("SESSION_LAYER_MAX_ENTRIES")
+    )
+
     # Node attachments (docs/adr/0008-node-attachment-storage.md). Read raw and
     # validated by build_attachment_settings, which refuses a bad value at boot
     # with the variable named, rather than failing here on the first int().

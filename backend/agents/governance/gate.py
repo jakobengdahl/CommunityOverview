@@ -19,6 +19,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
+from backend.runtime.session_context import current_session_id
+
 from .models import AutonomyLevel, Proposal
 from .store import ProposalStore
 
@@ -150,6 +152,7 @@ class AutonomyGate:
                     autonomy_level=self._level,
                     run_id=self._run_id,
                     correlation_id=self._correlation_id,
+                    session_id=current_session_id(),
                 )
             )
             return {

@@ -15,6 +15,8 @@ Usage:
     tools_map = register_mcp_tools(mcp, service)
 """
 
+import functools
+import inspect
 import json
 import secrets
 from typing import List, Optional, Dict, Any, Callable
@@ -81,6 +83,9 @@ from backend.core.session_annotations import (
     translate_line_endpoints,
 )
 from backend.config.config_loader import build_session_url
+from backend.core import layer_store
+from backend.core.write_modes import WriteModeRefused
+from backend.runtime import session_context
 from backend.runtime.authorization import GRAPH_ACTION_MUTATE, GRAPH_ACTION_READ
 from . import access, graph_merge_plan
 from .service import GraphService
@@ -122,6 +127,100 @@ _UNDELIVERED_PUSH_REMEDY = (
     "reachability check made before the push (connect_to_visualization_session): "
     "a client present then may have left by the time the push was sent."
 )
+
+
+# How a tool treats the session a request acts in (docs/SESSION_OVERLAY_CONTRACT
+# .md §16.1). A graph write stages in a staged session; a graph read composes
+# in one (refused until composed reads exist). Both take the session as
+# `visualization_session_id`. A session tool names its own session; any other
+# tool refuses a session with `session_not_supported`.
+_STAGING_TOOLS = frozenset(
+    {
+        "add_nodes",
+        "update_node",
+        "delete_nodes",
+        "delete_edges",
+        "archive_nodes",
+        "unarchive_nodes",
+        "archive_edges",
+        "unarchive_edges",
+    }
+)
+_COMPOSING_TOOLS = frozenset(
+    {
+        "search_graph",
+        "get_node_details",
+        "get_related_nodes",
+        "find_similar_nodes",
+        "find_similar_nodes_batch",
+        "get_graph_stats",
+        "get_subtypes",
+        "audit_relationship_applicability",
+        "get_saved_view",
+    }
+)
+# The read tools whose `visualization_session_id` was a push target first.
+_PUSHING_TOOLS = frozenset({"search_graph", "get_related_nodes", "get_saved_view"})
+
+
+def _session_aware(func: Callable, is_retired: Callable[[str], bool], staged_status):
+    """Wrap a tool so the session it acts in is decided once, before it runs.
+
+    The session a request bound - the HTTP header, through the transport - and
+    the one the tool names must agree (`session_mismatch`). A staging or
+    composing tool then runs bound to that session; the graph service decides
+    from its write mode whether a write stages. A session tool's own session
+    must not be a retired one. Any other tool refuses a bound session.
+
+    The three read tools already took `visualization_session_id` as a push
+    target before sessions could stage, and a push may go to a session with no
+    stored state yet. So on them the argument binds the session only when it
+    names a staged-session record; otherwise it stays a push target.
+    """
+    name = func.__name__
+    params = inspect.signature(func).parameters
+    if name in _STAGING_TOOLS or name in _COMPOSING_TOOLS:
+        kind, key = (
+            ("stage" if name in _STAGING_TOOLS else "compose"),
+            (session_context.SESSION_ARGUMENT),
+        )
+    elif "session_id" in params:
+        kind, key = "session", "session_id"
+    elif session_context.SESSION_ARGUMENT in params:
+        kind, key = "session", session_context.SESSION_ARGUMENT
+    else:
+        kind, key = None, None
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        bound = session_context.current_session_id()
+        try:
+            if kind is None:
+                if bound is not None:
+                    raise session_context.not_supported(f"tool {name}")
+                return func(*args, **kwargs)
+            named = kwargs.get(key)
+            if named is not None and not isinstance(named, str):
+                raise session_context.not_found(str(named))
+            if kind == "session":
+                session_context.reconcile(bound, named)
+                if named and is_retired(named):
+                    raise session_context.not_found(named)
+                return func(*args, **kwargs)
+            session = session_context.reconcile(bound, named)
+            if (
+                name in _PUSHING_TOOLS
+                and bound is None
+                and named
+                and staged_status(named) == layer_store.STATUS_NONE
+            ):
+                return func(*args, **kwargs)
+            with session_context.bind_session(session):
+                return func(*args, **kwargs)
+        except session_context.SessionRefused as exc:
+            return exc.to_result()
+
+    return wrapper
 
 
 def _undelivered_push_warning(
@@ -336,11 +435,21 @@ def register_mcp_tools(
         push_target = bool(callable(has_consumer) and has_consumer(session_id))
         return stored, clients, push_target
 
+    def _staged_status(session_id: str) -> str:
+        if session_manager is None:
+            return layer_store.STATUS_NONE
+        return session_manager.write_modes.staged_status(session_id)
+
     def register_tool(func: Callable) -> Callable:
         """Register a function as both MCP tool and in tools_map."""
-        mcp.tool()(func)
-        tools_map[func.__name__] = func
-        return func
+        wrapped = _session_aware(
+            func,
+            lambda sid: _staged_status(sid) == layer_store.STATUS_RETIRED,
+            _staged_status,
+        )
+        mcp.tool()(wrapped)
+        tools_map[func.__name__] = wrapped
+        return wrapped
 
     # ==================== Search Tools ====================
 
@@ -504,12 +613,18 @@ def register_mcp_tools(
         return build_widget_html(widget_dist_path)
 
     @register_tool
-    def get_node_details(node_id: str) -> Dict[str, Any]:
+    def get_node_details(
+        node_id: str, visualization_session_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Get complete information about a specific node
 
         Args:
             node_id: ID of the node
+            visualization_session_id: Optional. The session to read in; one
+                that does not exist is refused with session_not_found, and a
+                staged session (whose composed view is not readable yet) with
+                session_not_supported.
 
         Returns:
             Dict with the node and its incident edges (``edges``, visible ones
@@ -568,6 +683,7 @@ def register_mcp_tools(
         node_type: Optional[str] = None,
         threshold: float = 0.7,
         limit: int = 5,
+        visualization_session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Find similar nodes based on name (for duplicate detection)
@@ -577,6 +693,10 @@ def register_mcp_tools(
             node_type: Optional node type to filter on
             threshold: Similarity threshold 0.0-1.0 (default 0.7)
             limit: Max number of results (default 5)
+            visualization_session_id: Optional. The session to read in; one
+                that does not exist is refused with session_not_found, and a
+                staged session (whose composed view is not readable yet) with
+                session_not_supported.
 
         Returns:
             Dict with similar nodes and similarity scores
@@ -591,6 +711,7 @@ def register_mcp_tools(
         node_type: Optional[str] = None,
         threshold: float = 0.7,
         limit: int = 5,
+        visualization_session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Find similar nodes for multiple names at once (batch processing)
@@ -604,6 +725,10 @@ def register_mcp_tools(
             node_type: Optional node type to filter on
             threshold: Similarity threshold 0.0-1.0 (default 0.7)
             limit: Max number of results per name (default 5)
+            visualization_session_id: Optional. The session to read in; one
+                that does not exist is refused with session_not_found, and a
+                staged session (whose composed view is not readable yet) with
+                session_not_supported.
 
         Returns:
             Dict with results for each name
@@ -621,6 +746,8 @@ def register_mcp_tools(
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
         expect_absent: bool = False,
+        visualization_session_id: Optional[str] = None,
+        expected_session_seq: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Add new nodes and edges to the graph
@@ -643,6 +770,15 @@ def register_mcp_tools(
             expect_absent: When True, every node and edge must not exist yet;
                 if one does, nothing is added and the result carries
                 error="entity_revision_conflict".
+            visualization_session_id: Optional. The session to act in. In a
+                staged session the change is held in the session's layer
+                (result has staged=true) and the graph is not changed; in a
+                direct session it lands in the graph as without one. A session
+                that does not exist is refused with session_not_found.
+            expected_session_seq: Optional, with a session: the session
+                sequence number you last read. If another participant changed
+                the session since, nothing is written and the result has
+                error="session_seq_conflict".
 
         Returns:
             Dict with result (added_node_ids, added_edge_ids, success, message)
@@ -654,6 +790,7 @@ def register_mcp_tools(
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
             expect_absent=expect_absent,
+            expected_session_seq=expected_session_seq,
         )
 
     @register_tool
@@ -665,6 +802,8 @@ def register_mcp_tools(
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
         expected_revision: Optional[int] = None,
+        visualization_session_id: Optional[str] = None,
+        expected_session_seq: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Update an existing node
@@ -688,6 +827,15 @@ def register_mcp_tools(
             expected_revision: Optional. The node's `revision` as you last
                 read it; if it has moved, nothing is written and the result
                 has error="entity_revision_conflict" and `current_revision`.
+            visualization_session_id: Optional. The session to act in. In a
+                staged session the change is held in the session's layer
+                (result has staged=true) and the graph is not changed; in a
+                direct session it lands in the graph as without one. A session
+                that does not exist is refused with session_not_found.
+            expected_session_seq: Optional, with a session: the session
+                sequence number you last read. If another participant changed
+                the session since, nothing is written and the result has
+                error="session_seq_conflict".
 
         Returns:
             Dict with updated node or error
@@ -701,6 +849,7 @@ def register_mcp_tools(
             metadata_merge=metadata_merge,
             expected_updated_at=expected_updated_at,
             expected_revision=expected_revision,
+            expected_session_seq=expected_session_seq,
         )
 
     @register_tool
@@ -710,6 +859,8 @@ def register_mcp_tools(
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
         expected_revisions: Optional[Dict[str, int]] = None,
+        visualization_session_id: Optional[str] = None,
+        expected_session_seq: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Delete nodes from the graph (max 10 at a time)
@@ -724,6 +875,15 @@ def register_mcp_tools(
             expected_revisions: Optional map of node id -> the `revision` it
                 must still have. Any mismatch deletes nothing and returns
                 error="entity_revision_conflict".
+            visualization_session_id: Optional. The session to act in. In a
+                staged session the change is held in the session's layer
+                (result has staged=true) and the graph is not changed; in a
+                direct session it lands in the graph as without one. A session
+                that does not exist is refused with session_not_found.
+            expected_session_seq: Optional, with a session: the session
+                sequence number you last read. If another participant changed
+                the session since, nothing is written and the result has
+                error="session_seq_conflict".
 
         Returns:
             Dict with result (deleted_node_ids, affected_edge_ids, success, message)
@@ -735,6 +895,7 @@ def register_mcp_tools(
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
             expected_revisions=expected_revisions,
+            expected_session_seq=expected_session_seq,
         )
 
     @register_tool
@@ -743,6 +904,8 @@ def register_mcp_tools(
         confirmed: bool = False,
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
+        visualization_session_id: Optional[str] = None,
+        expected_session_seq: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Delete edges from the graph (max 50 at a time)
@@ -752,6 +915,15 @@ def register_mcp_tools(
             confirmed: Must be True to execute deletion
             event_session_id: Optional session ID for webhook loop prevention
             event_correlation_id: Optional correlation ID for chaining events
+            visualization_session_id: Optional. The session to act in. In a
+                staged session the change is held in the session's layer
+                (result has staged=true) and the graph is not changed; in a
+                direct session it lands in the graph as without one. A session
+                that does not exist is refused with session_not_found.
+            expected_session_seq: Optional, with a session: the session
+                sequence number you last read. If another participant changed
+                the session since, nothing is written and the result has
+                error="session_seq_conflict".
 
         Returns:
             Dict with result (deleted_edge_ids, success, message)
@@ -762,6 +934,7 @@ def register_mcp_tools(
             event_origin="mcp",
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
+            expected_session_seq=expected_session_seq,
         )
 
     # ==================== Archive Tools ====================
@@ -773,6 +946,8 @@ def register_mcp_tools(
         node_ids: List[str],
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
+        visualization_session_id: Optional[str] = None,
+        expected_session_seq: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Archive nodes: hide them from search/traversal by default without deleting.
@@ -785,6 +960,15 @@ def register_mcp_tools(
             node_ids: List of node IDs to archive
             event_session_id: Optional session ID for webhook loop prevention
             event_correlation_id: Optional correlation ID for chaining events
+            visualization_session_id: Optional. The session to act in. In a
+                staged session the change is held in the session's layer
+                (result has staged=true) and the graph is not changed; in a
+                direct session it lands in the graph as without one. A session
+                that does not exist is refused with session_not_found.
+            expected_session_seq: Optional, with a session: the session
+                sequence number you last read. If another participant changed
+                the session since, nothing is written and the result has
+                error="session_seq_conflict".
 
         Returns:
             Dict with result (archived, node_ids, nodes, success)
@@ -794,6 +978,7 @@ def register_mcp_tools(
             event_origin="mcp",
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
+            expected_session_seq=expected_session_seq,
         )
 
     @register_tool
@@ -801,6 +986,8 @@ def register_mcp_tools(
         node_ids: List[str],
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
+        visualization_session_id: Optional[str] = None,
+        expected_session_seq: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Unarchive nodes: make previously archived nodes visible again.
@@ -809,6 +996,15 @@ def register_mcp_tools(
             node_ids: List of node IDs to unarchive
             event_session_id: Optional session ID for webhook loop prevention
             event_correlation_id: Optional correlation ID for chaining events
+            visualization_session_id: Optional. The session to act in. In a
+                staged session the change is held in the session's layer
+                (result has staged=true) and the graph is not changed; in a
+                direct session it lands in the graph as without one. A session
+                that does not exist is refused with session_not_found.
+            expected_session_seq: Optional, with a session: the session
+                sequence number you last read. If another participant changed
+                the session since, nothing is written and the result has
+                error="session_seq_conflict".
 
         Returns:
             Dict with result (archived, node_ids, nodes, success)
@@ -818,6 +1014,7 @@ def register_mcp_tools(
             event_origin="mcp",
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
+            expected_session_seq=expected_session_seq,
         )
 
     @register_tool
@@ -825,6 +1022,8 @@ def register_mcp_tools(
         edge_ids: List[str],
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
+        visualization_session_id: Optional[str] = None,
+        expected_session_seq: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Archive edges: hide them from search/traversal by default without deleting.
@@ -835,6 +1034,15 @@ def register_mcp_tools(
             edge_ids: List of edge IDs to archive
             event_session_id: Optional session ID for webhook loop prevention
             event_correlation_id: Optional correlation ID for chaining events
+            visualization_session_id: Optional. The session to act in. In a
+                staged session the change is held in the session's layer
+                (result has staged=true) and the graph is not changed; in a
+                direct session it lands in the graph as without one. A session
+                that does not exist is refused with session_not_found.
+            expected_session_seq: Optional, with a session: the session
+                sequence number you last read. If another participant changed
+                the session since, nothing is written and the result has
+                error="session_seq_conflict".
 
         Returns:
             Dict with result (archived, edge_ids, edges, success)
@@ -844,6 +1052,7 @@ def register_mcp_tools(
             event_origin="mcp",
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
+            expected_session_seq=expected_session_seq,
         )
 
     @register_tool
@@ -851,6 +1060,8 @@ def register_mcp_tools(
         edge_ids: List[str],
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
+        visualization_session_id: Optional[str] = None,
+        expected_session_seq: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Unarchive edges: make previously archived edges visible again.
@@ -859,6 +1070,15 @@ def register_mcp_tools(
             edge_ids: List of edge IDs to unarchive
             event_session_id: Optional session ID for webhook loop prevention
             event_correlation_id: Optional correlation ID for chaining events
+            visualization_session_id: Optional. The session to act in. In a
+                staged session the change is held in the session's layer
+                (result has staged=true) and the graph is not changed; in a
+                direct session it lands in the graph as without one. A session
+                that does not exist is refused with session_not_found.
+            expected_session_seq: Optional, with a session: the session
+                sequence number you last read. If another participant changed
+                the session since, nothing is written and the result has
+                error="session_seq_conflict".
 
         Returns:
             Dict with result (archived, edge_ids, edges, success)
@@ -868,14 +1088,23 @@ def register_mcp_tools(
             event_origin="mcp",
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
+            expected_session_seq=expected_session_seq,
         )
 
     # ==================== Statistics & Metadata Tools ====================
 
     @register_tool
-    def get_graph_stats() -> Dict[str, Any]:
+    def get_graph_stats(
+        visualization_session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Get statistics for the graph
+
+        Args:
+            visualization_session_id: Optional. The session to read in; one
+                that does not exist is refused with session_not_found, and a
+                staged session (whose composed view is not readable yet) with
+                session_not_supported.
 
         Returns:
             Dict with statistics (total_nodes, total_edges, nodes_by_type, edges_by_type)
@@ -935,13 +1164,19 @@ def register_mcp_tools(
         return service.list_node_types()
 
     @register_tool
-    def get_subtypes(node_type: Optional[str] = None) -> Dict[str, Any]:
+    def get_subtypes(
+        node_type: Optional[str] = None, visualization_session_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Get existing subtypes used in the graph, grouped by node type.
         Use this to suggest consistent subtypes when adding or updating nodes.
 
         Args:
             node_type: Optional filter for a specific node type (e.g. 'Actor')
+            visualization_session_id: Optional. The session to read in; one
+                that does not exist is refused with session_not_found, and a
+                staged session (whose composed view is not readable yet) with
+                session_not_supported.
 
         Returns:
             Dict with subtypes grouped by node type
@@ -959,11 +1194,19 @@ def register_mcp_tools(
         return service.list_relationship_types()
 
     @register_tool
-    def audit_relationship_applicability() -> Dict[str, Any]:
+    def audit_relationship_applicability(
+        visualization_session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Report existing edges that violate configured relationship applicability rules.
 
         This tool is read-only. It does not delete or modify legacy graph data.
+
+        Args:
+            visualization_session_id: Optional. The session to read in; one
+                that does not exist is refused with session_not_found, and a
+                staged session (whose composed view is not readable yet) with
+                session_not_supported.
         """
         return service.audit_relationship_applicability()
 
@@ -2112,6 +2355,7 @@ def register_mcp_tools(
             "updated_at": session.updated_at,
             "revision": session.seq,
             "node_count": len(session.state.get("node_refs", [])),
+            **session_manager.write_mode_of(session),
             "capabilities": ["read"]
             + (["rename", "delete", "layout"] if mutate_allowed else []),
             # Server-owned canonical link (contract §5); None when no public base
@@ -2135,13 +2379,17 @@ def register_mcp_tools(
             "created_at": meta.get("created_at"),
             "updated_at": meta.get("updated_at"),
             "revision": meta.get("seq"),
+            "write_mode": meta.get("write_mode", "direct"),
+            "write_mode_source": meta.get("write_mode_source", "inherited"),
             "capabilities": ["read"]
             + (["rename", "delete", "layout"] if mutate_allowed else []),
             "session_url": build_session_url(meta["id"]),
         }
 
     @register_tool
-    def create_visualization_session(name: Optional[str] = None) -> Dict[str, Any]:
+    def create_visualization_session(
+        name: Optional[str] = None, write_mode: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Create a new, empty visualization session and return its identity.
 
@@ -2161,6 +2409,12 @@ def register_mcp_tools(
         Args:
             name: Optional display name. Names are not required to be unique; when
                 omitted the server assigns a default.
+            write_mode: Optional, "direct" or "staged". In a staged session,
+                graph writes made in it (``visualization_session_id`` on the
+                write tools) are held in the session and do not change the
+                graph. Omitted, the session takes the deployment's default. A
+                deployment that cannot hold staged sessions refuses "staged"
+                with staged_unsupported.
 
         Returns:
             Dict with success and the session resource (session_id, name,
@@ -2177,7 +2431,11 @@ def register_mcp_tools(
             return denied
         chosen = name.strip() if isinstance(name, str) and name.strip() else None
         try:
-            session = session_manager.create_session(chosen or _DEFAULT_SESSION_NAME)
+            session = session_manager.create_session(
+                chosen or _DEFAULT_SESSION_NAME, write_mode
+            )
+        except WriteModeRefused as exc:
+            return exc.to_result()
         except SessionLimitReached:
             return {
                 "success": False,
@@ -2394,8 +2652,70 @@ def register_mcp_tools(
         }
 
     @register_tool
+    def set_session_write_mode(session_id: str, write_mode: str) -> Dict[str, Any]:
+        """
+        Switch a visualization session to another write mode.
+
+        Only "direct" -> "staged" is allowed. From then on every graph write
+        made in the session (``visualization_session_id`` on the write tools)
+        is held in the session's layer, and nothing reaches the graph until
+        the staged changes are merged. A staged session never becomes direct
+        again: asking for it is refused with write_mode_irreversible - start a
+        new session to edit the graph directly.
+
+        Args:
+            session_id: The session ID (e.g. "8244-1742-3391-0057").
+            write_mode: "staged" (or "direct", which changes nothing for a
+                direct session).
+
+        Returns:
+            Dict with success and the session resource, or an error:
+            staged_unsupported, write_mode_irreversible, session_not_found,
+            busy (retryable).
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {"success": False, "error": _INVALID_SESSION_ID_ERROR}
+        denied = access.authorize_graph_access(
+            service.authorization_hook,
+            action=GRAPH_ACTION_MUTATE,
+            target="set_session_write_mode",
+            session_id=session_id,
+        )
+        if denied:
+            return denied
+        try:
+            session = session_manager.set_write_mode_sync(
+                session_id,
+                write_mode,
+                client_id=_MCP_SESSION_CLIENT_ID,
+                rate_limit_label="set_session_write_mode",
+            )
+        except WriteModeRefused as exc:
+            return exc.to_result()
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many session writes; slow down and retry.",
+            }
+        except LayoutBusy:
+            return {
+                "success": False,
+                "error": "busy",
+                "message": "Another change is being applied to this session; retry.",
+            }
+        except (SessionNotFound, layer_store.StagedSessionRetired):
+            return session_context.not_found(session_id).to_result()
+        return {
+            "success": True,
+            "session": _project_session(session, mutate_allowed=True),
+        }
+
+    @register_tool
     def delete_visualization_session(
-        session_id: str, confirm: bool = False
+        session_id: str, confirm: bool = False, discard_staged: bool = False
     ) -> Dict[str, Any]:
         """
         Permanently delete a visualization session (hard delete, no recovery).
@@ -2408,6 +2728,9 @@ def register_mcp_tools(
             session_id: The session ID (e.g. "8244-1742-3391-0057").
             confirm: Must be true to actually delete. Defaults to false so a delete
                 is never performed on a loose instruction.
+            discard_staged: A staged session holding staged changes is not
+                deleted (layer_not_empty) unless this is true; then its staged
+                changes are dropped with it.
 
         Returns:
             Dict with success and deleted=true, or a confirmation_required / error
@@ -2421,7 +2744,13 @@ def register_mcp_tools(
                 "success": False,
                 "error": _INVALID_SESSION_ID_ERROR,
             }
-        denied = _authorize_session(GRAPH_ACTION_MUTATE, "delete_visualization_session")
+        denied = access.authorize_graph_access(
+            service.authorization_hook,
+            action=GRAPH_ACTION_MUTATE,
+            target="delete_visualization_session",
+            graph_operation="discard" if discard_staged else "",
+            session_id=session_id,
+        )
         if denied:
             return denied
         if not confirm:
@@ -2438,7 +2767,18 @@ def register_mcp_tools(
                 session_id,
                 deleted_by=_MCP_SESSION_CLIENT_ID,
                 rate_limit_label="delete_visualization_session",
+                discard_staged=discard_staged,
             )
+        except layer_store.LayerNotEmpty as exc:
+            return {
+                "success": False,
+                "error": exc.code,
+                "message": (
+                    f"The session holds {exc.entries} staged changes; merge or "
+                    "discard them, or re-call with discard_staged=true."
+                ),
+                "entries": exc.entries,
+            }
         except LayoutBusy:
             return {
                 "success": False,

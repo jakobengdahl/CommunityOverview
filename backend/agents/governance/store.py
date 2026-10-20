@@ -23,7 +23,7 @@ from typing import List, Optional, Protocol, Sequence, Union, runtime_checkable
 
 from .models import Proposal, ProposalStatus, utcnow
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 _CREATE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS proposals (
@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS proposals (
     apply_error     TEXT,
     created_at      REAL NOT NULL,
     updated_at      REAL NOT NULL,
-    decided_at      REAL
+    decided_at      REAL,
+    session_id      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_proposals_created ON proposals (created_at);
 CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals (status);
@@ -230,6 +231,16 @@ class SqliteProposalStore:
             version = self._conn.execute("PRAGMA user_version").fetchone()[0]
             if version < _SCHEMA_VERSION:
                 self._conn.executescript(_CREATE_SCHEMA)
+                columns = {
+                    row["name"]
+                    for row in self._conn.execute("PRAGMA table_info(proposals)")
+                }
+                if "session_id" not in columns:
+                    # v2: the session a proposal was made in, so approving it
+                    # stages there (docs/SESSION_OVERLAY_CONTRACT.md §9.1).
+                    self._conn.execute(
+                        "ALTER TABLE proposals ADD COLUMN session_id TEXT"
+                    )
                 self._conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
                 self._conn.commit()
 
@@ -244,8 +255,8 @@ class SqliteProposalStore:
                 INSERT INTO proposals (
                     id, agent_id, agent_name, tool, input_args, autonomy_level,
                     status, run_id, correlation_id, decided_by, apply_result,
-                    apply_error, created_at, updated_at, decided_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    apply_error, created_at, updated_at, decided_at, session_id
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 self._to_row(proposal),
             )
@@ -434,6 +445,7 @@ class SqliteProposalStore:
             _to_epoch(p.created_at),
             _to_epoch(p.updated_at),
             _to_epoch(p.decided_at),
+            p.session_id,
         )
 
     @staticmethod
@@ -457,4 +469,5 @@ class SqliteProposalStore:
         p.created_at = _from_epoch(row["created_at"])
         p.updated_at = _from_epoch(row["updated_at"])
         p.decided_at = _from_epoch(row["decided_at"])
+        p.session_id = row["session_id"]
         return p

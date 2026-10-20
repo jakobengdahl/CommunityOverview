@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 
+from backend.runtime.session_context import current_session_id, mismatch
+
 logger = logging.getLogger(__name__)
 
 
@@ -131,7 +133,20 @@ def register_agent_routes(
         """
         Approve a proposal. For act_after_approval agents this also applies the
         captured action and reports the outcome.
+
+        The action is applied in the session it was made in. A request acting
+        in another session (x-communityoverview-session-id) is refused with
+        session_mismatch, before anything is decided.
         """
+        bound = current_session_id()
+        if bound is not None:
+            proposal = agent_registry.get_proposal(proposal_id)
+            if proposal is not None and proposal.get("session_id") != bound:
+                refusal = mismatch(bound, proposal.get("session_id") or "none")
+                raise HTTPException(
+                    status_code=refusal.status,
+                    detail={"error": refusal.code, "message": refusal.message},
+                )
         result = agent_registry.approve_proposal(proposal_id, decided_by=decided_by)
         if result is None:
             raise HTTPException(
