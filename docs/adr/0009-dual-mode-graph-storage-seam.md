@@ -108,10 +108,7 @@ two different ways. The owner settled it for Option A (see Decision).
   pool on every construction, and once change notification is running — which
   this backend declares, so a server process always starts it — it also holds
   its own listening connection, opened by `start_change_notification` rather
-  than by the constructor. (That document's own sentence attributes both to
-  `__init__`; the arithmetic it draws from them is unaffected, because a
-  server process always starts notification, but the constructor is not where
-  the second connection opens.) Nothing shares either across two of them, so
+  than by the constructor. Nothing shares either across two of them, so
   a process holding N graphs holds N of both. [`PERSISTENCE_BACKENDS.md`](../PERSISTENCE_BACKENDS.md)
   ("Sizing it: what an instance costs") gives the multiplier as
   `instance_count × (pool_size + 1) × graph_count`, which at the default
