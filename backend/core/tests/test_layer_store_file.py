@@ -15,6 +15,7 @@ from backend.core.storage_backends import (
 )
 from backend.core.tests.layer_store_contract import (
     A,
+    B,
     LayerStoreContract,
     entry,
     fresh,
@@ -677,3 +678,268 @@ class TestStagedSessionsAreOptIn:
         backend.apply_batch([EntityOperation.upsert_node(node_payload("b"))])
         assert not backend.layers_path.exists()
         assert not backend.merge_log_path.exists()
+
+
+# -- failures beyond a crash: an error that lands after a line is durable, an
+# interrupt, and the merge-log shapes the reader must refuse ------------------
+
+
+def log_lines(backend):
+    return backend.merge_log_path.read_text().splitlines()
+
+
+def write_log(backend, lines):
+    backend.merge_log_path.write_text("\n".join(lines) + "\n")
+
+
+def durable_then_raise(backend, monkeypatch, failing_line, error):
+    real = backend._append_merge_log_locked
+    calls = {"n": 0}
+
+    def f(line):
+        real(line)
+        calls["n"] += 1
+        if calls["n"] == failing_line:
+            raise error()
+
+    monkeypatch.setattr(backend, "_append_merge_log_locked", f)
+
+
+@pytest.mark.parametrize("error", [OSError, KeyboardInterrupt])
+def test_a_pending_line_that_landed_and_raised_is_seen_by_the_next_merge(
+    staged, path, monkeypatch, error
+):
+    current = by_id(staged.load_graph_data(), "nodes")["a"]
+
+    def op(name):
+        return EntityOperation(
+            "node",
+            "upsert",
+            "a",
+            fresh({**current, "name": name}),
+            expected_revision=current["revision"],
+        )
+
+    durable_then_raise(staged, monkeypatch, 1, error)
+    with pytest.raises(error):
+        staged.merge(A, "m1", [op("One")], [], [("node", "a")], {})
+    monkeypatch.undo()
+    # Next operation is another merge id entirely (no graph read in between).
+    staged.merge(A, "m2", [op("Two")], [], [("node", "a")], {})
+    after = reopen(path)
+    assert name_of_a(after) == "Two"
+
+
+def test_a_landed_merge_is_reported_even_when_its_completion_also_fails(
+    staged, path, monkeypatch
+):
+    real = staged._append_journal_locked
+
+    def durable_then_raise_j(ops, stored):
+        real(ops, stored)
+        raise OSError("close failed")
+
+    def broken(sessions):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(staged, "_append_journal_locked", durable_then_raise_j)
+    monkeypatch.setattr(staged, "_write_layers_file", broken)
+    result = merge_a(staged)  # landed: must be reported as success
+    assert not result.replayed
+
+
+def test_load_merge_answers_none_for_a_merge_that_did_not_land(
+    staged, path, monkeypatch
+):
+    crash_on(monkeypatch, staged, "_append_journal_locked")
+    with pytest.raises(Crash):
+        merge_a(staged)
+    monkeypatch.undo()
+    after = reopen(path)
+    monkeypatch.setattr(
+        FileGraphPersistenceBackend,
+        "_append_merge_log_locked",
+        lambda self, line: (_ for _ in ()).throw(OSError("log gone")),
+    )
+    assert after.load_merge("m1") is None
+
+
+def test_load_merge_refuses_to_guess_at_a_part_landed_merge(staged, path, monkeypatch):
+    current = by_id(staged.load_graph_data(), "nodes")
+    ops = [
+        EntityOperation(
+            "node",
+            "upsert",
+            k,
+            fresh({**current[k], "name": "M"}),
+            expected_revision=current[k]["revision"],
+        )
+        for k in ("a", "b")
+    ]
+
+    def broken(sessions):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(staged, "_write_layers_file", broken)
+    staged.merge(A, "m1", ops, [], [("node", "a"), ("node", "b")], {})
+    assert staged._pending_merge is not None
+    old_b = dict(current["b"])
+    staged._nodes["b"] = old_b  # memory now shows part of the batch only
+    with pytest.raises(GraphJournalError):
+        staged.load_merge("m1")
+
+
+def test_an_interrupt_during_the_layers_load_leaves_the_backend_unmirrored(
+    staged, path, monkeypatch
+):
+    fresh_b = reopen(path)
+    real = fresh_b._load_layers_locked
+    calls = {"n": 0}
+
+    def f():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise KeyboardInterrupt()
+        return real()
+
+    monkeypatch.setattr(fresh_b, "_load_layers_locked", f)
+    with pytest.raises(KeyboardInterrupt):
+        fresh_b.load_layer(A)
+    assert fresh_b._mirrored is False
+
+
+def test_a_read_that_settles_the_pending_merge_shows_the_settled_layer(
+    staged, path, monkeypatch
+):
+    real = staged._complete_pending_locked
+    calls = {"n": 0}
+
+    def once():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("first completion fails")
+        return real()
+
+    monkeypatch.setattr(staged, "_complete_pending_locked", once)
+    merge_a(staged)
+    assert staged_keys(staged) == [("node", "b")]
+
+
+def test_a_landed_merge_hides_only_its_own_sessions_entries(staged, path, monkeypatch):
+    staged.record_staged(B)
+    staged.stage(B, [entry("node", "a", session_id=B)])
+
+    def broken(sessions):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(staged, "_write_layers_file", broken)
+    merge_a(staged)
+    assert [e["entity_id"] for e in staged.load_layer(B)] == ["a"]
+    assert B in staged.layers_in_use()
+
+
+def test_a_layer_emptied_by_a_landed_merge_is_not_in_use(staged, path, monkeypatch):
+    current = by_id(staged.load_graph_data(), "nodes")["a"]
+    staged.discard(A)
+    staged.stage(A, [entry("node", "a")])
+    op = EntityOperation(
+        "node",
+        "upsert",
+        "a",
+        fresh({**current, "name": "M"}),
+        expected_revision=current["revision"],
+    )
+
+    def broken(sessions):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(staged, "_write_layers_file", broken)
+    staged.merge(A, "m1", [op], [], [("node", "a")], {})
+    assert staged.layers_in_use() == []
+    assert staged.load_layer(A) == []
+
+
+def test_a_second_pending_line_for_one_merge_with_other_content_is_damage(staged, path):
+    merge_a(staged)
+    lines = log_lines(staged)
+    p = json.loads(lines[0])
+    q = {**p, "record": {**p["record"], "actor": "someone-else"}}
+    write_log(staged, [json.dumps(p), json.dumps(q)])
+    with pytest.raises(GraphJournalError):
+        reopen(path).load_graph_data()
+
+
+def test_a_mark_for_another_merge_after_a_closed_one_is_damage(staged, path):
+    merge_a(staged)
+    lines = log_lines(staged)
+    write_log(staged, lines + [json.dumps({"merge_id": "zzz", "status": "applied"})])
+    with pytest.raises(GraphJournalError):
+        reopen(path).load_graph_data()
+
+
+def test_applied_then_aborted_for_one_merge_is_damage(staged, path):
+    merge_a(staged)
+    lines = log_lines(staged)
+    write_log(staged, lines + [json.dumps({"merge_id": "m1", "status": "aborted"})])
+    with pytest.raises(GraphJournalError):
+        reopen(path).load_graph_data()
+
+
+def test_a_repeated_mark_after_another_merge_opened_is_damage(staged, path):
+    merge_a(staged)
+    lines = log_lines(staged)
+    p = json.loads(lines[0])
+    other = {**p, "merge_id": "other"}
+    write_log(
+        staged,
+        lines
+        + [json.dumps(other), json.dumps({"merge_id": "m1", "status": "applied"})],
+    )
+    with pytest.raises(GraphJournalError):
+        reopen(path).load_graph_data()
+
+
+def test_a_merge_that_did_not_land_raises_even_when_its_abort_mark_fails(
+    staged, path, monkeypatch
+):
+    def fail_journal(ops, stored):
+        raise OSError("before durable")
+
+    monkeypatch.setattr(staged, "_append_journal_locked", fail_journal)
+    real = FileGraphPersistenceBackend._append_merge_log_locked
+    calls = {"n": 0}
+
+    def log(self, line):
+        calls["n"] += 1
+        if line["status"] == "aborted":
+            raise OSError("log gone")
+        return real(self, line)
+
+    monkeypatch.setattr(FileGraphPersistenceBackend, "_append_merge_log_locked", log)
+    with pytest.raises(OSError):
+        merge_a(staged)
+
+
+def test_a_failed_reload_after_a_failed_commit_raises_the_original_error(
+    staged, path, monkeypatch
+):
+    def fail_journal(ops, stored):
+        raise OSError("original")
+
+    monkeypatch.setattr(staged, "_append_journal_locked", fail_journal)
+    current = by_id(staged.load_graph_data(), "nodes")["a"]
+    op = EntityOperation(
+        "node",
+        "upsert",
+        "a",
+        fresh({**current, "name": "X"}),
+        expected_revision=current["revision"],
+    )
+
+    def bad_load():
+        raise ValueError("reload failed")
+
+    monkeypatch.setattr(staged, "_load_locked", bad_load)
+    with pytest.raises(OSError, match="original"):
+        staged.merge(A, "m1", [op], [], [("node", "a")], {})
+    assert staged._mirrored is False

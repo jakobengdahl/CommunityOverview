@@ -1324,6 +1324,9 @@ class FileGraphPersistenceBackend:
                     pending_line = {k: v for k, v in parsed.items() if k != "status"}
                     if pending is not None and pending != pending_line:
                         raise ValueError("two merges pending at once")
+                    if pending is None:
+                        # A mark may only repeat the line right before it.
+                        last_mark = None
                     pending = pending_line
                 elif status in (_layer.MERGE_APPLIED, "aborted"):
                     if pending is None or pending["merge_id"] != merge_id:
