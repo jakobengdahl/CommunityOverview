@@ -274,7 +274,8 @@ class ChatService:
           - (None, None, True) when short_name is not found — no enforcement applied.
             Not cached so a collection created after first miss is picked up immediately.
           - ("", {}, True) on exception — fail-closed; enforced tools installed, all
-            writes denied. Not cached so transient errors are retried on the next message.
+            node writes denied. Not cached so transient errors are retried on the next
+            message.
           - ("", {}, False) when the caller may not read collections — fail-closed as
             above, and no save_collection_response tool, so the assistant cannot
             write at all. Not cached.
@@ -847,11 +848,12 @@ class ChatService:
             # Only applied within an active collection session; None means
             # unrestricted, matching the AIAgent model. Read from the identity
             # cache populated by _resolve_collection above.
-            # Note: on the fail-closed path (prefix == "") the metadata was not
-            # read for this caller, so the allowlist is the one an earlier
-            # successful resolution recorded, or None if there was none. An
-            # allowlist only narrows tools; fail-closed blocks all writes via the
-            # enforced tool wrappers either way.
+            # Note: on the fail-closed path (prefix == "") the allowlist is
+            # whatever _resolve_collection last recorded for this short name, or
+            # None. An allowlist only narrows tools. The enforced wrappers block
+            # every node write on that path; save_collection_response is still
+            # installed when the sentinel reports collect_responses (the
+            # exception path), and its write goes through the authorization hook.
             tool_allowlist = None
             if collection_short_name and effective_prefix is not None:
                 tool_allowlist = (
