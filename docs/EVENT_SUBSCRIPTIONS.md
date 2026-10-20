@@ -139,6 +139,12 @@ Events are delivered as JSON POST requests:
 }
 ```
 
+Where an event carries attribution, its `attribution.scope.graph_id` is whatever the
+caller declared for the request. It is not checked against the store the write
+landed in, so read it as "the graph the caller said it was addressing", not as
+proof of which graph changed
+([ADR 0009](./adr/0009-dual-mode-graph-storage-seam.md)).
+
 The top-level `schema_version` identifies the shape of the event envelope.
 Subscribers should treat it as a contract version: additive changes keep the
 same major version, while a backwards-incompatible change bumps it and is
