@@ -77,6 +77,7 @@ import psycopg
 from psycopg import sql
 from psycopg_pool import ConnectionPool
 
+from backend.core import layer_store
 from backend.core.storage_backends import (
     BackendCapabilities,
     EntityOperation,
@@ -118,6 +119,40 @@ SCOPE_POLICY_SUFFIX = "_scope_policy"
 # backend already separates whole graphs - a schema each - and this column is
 # the row-level layer underneath that, not a replacement for it.
 SCOPED_TABLES = ("graph_nodes", "graph_edges")
+
+# The layer store's tables (docs/SESSION_OVERLAY_CONTRACT.md §7), created
+# only by an instance constructed with `staged_sessions=True`. Each carries
+# the scope column from birth and, where a scope is configured, the same
+# policy as the graph tables, so a layer is as isolated as the rows it would
+# change.
+LAYER_TABLES = ("graph_staged_sessions", "graph_layer_entries", "graph_merge_records")
+
+_LAYER_TABLE_COLUMNS = {
+    "graph_staged_sessions": (
+        "session_id text PRIMARY KEY,"
+        " status text NOT NULL CHECK (status IN ('active', 'retired')),"
+        " scope_id text"
+    ),
+    "graph_layer_entries": (
+        "session_id text NOT NULL,"
+        " kind text NOT NULL CHECK (kind IN ('node', 'edge')),"
+        " entity_id text NOT NULL,"
+        " doc jsonb NOT NULL,"
+        " scope_id text,"
+        " PRIMARY KEY (session_id, kind, entity_id)"
+    ),
+    "graph_merge_records": (
+        "merge_id text PRIMARY KEY,"
+        " session_id text NOT NULL,"
+        " doc jsonb NOT NULL,"
+        " scope_id text"
+    ),
+}
+
+# Merges of one merge id are serialised on this advisory lock (two-argument
+# form, keyed per merge id), so two instances retrying one merge cannot both
+# apply it: the second finds the first's record.
+MERGE_LOCK_KEY = 1_872_015_734
 
 # Stored inside graph_metadata.doc, and stripped back out on load. The visible
 # metadata keeps its file-backend shape, while the PostgreSQL schema still has
@@ -327,6 +362,7 @@ class PostgresGraphPersistenceBackend:
         pool_size: int = DEFAULT_POOL_SIZE,
         graph_name: str = "graph",
         scope: Optional[str] = None,
+        staged_sessions: bool = False,
     ):
         if pool_size < 1:
             raise ValueError("pool_size must be at least 1")
@@ -343,6 +379,10 @@ class PostgresGraphPersistenceBackend:
         self.schema = schema
         self._graph_name = graph_name
         self._scope = scope
+        # Opt-in. Without it the backend declares nothing new, creates no
+        # table, and issues exactly the statements it did before the layer
+        # store existed.
+        self._staged_sessions = staged_sessions
         self._graph_identity_checked = False
         # Settled by the migration, before any statement that would name the
         # column is built. False means the store has no scope column - an
@@ -516,6 +556,8 @@ class PostgresGraphPersistenceBackend:
                                 f"and grant USAGE, SELECT, UPDATE on it - see "
                                 f"docs/PERSISTENCE_BACKENDS.md"
                             ) from exc
+                    if self._staged_sessions:
+                        self._create_layer_tables(conn)
             # Outside the migration transaction, on purpose, and one
             # connection each. Every level of the traversal filters on
             # doc->>'source' and doc->>'target', which no index covers by
@@ -629,6 +671,26 @@ class PostgresGraphPersistenceBackend:
                 with conn.transaction():
                     self._claim_or_check_graph_identity(conn)
             self._migrated = True
+
+    def _create_layer_tables(self, conn) -> None:
+        """The layer store's tables, behind the same catalog guard.
+
+        Inside the migrating transaction, so N instances booting together
+        create each one once. A role that may not create them gets an error
+        that says what to provision, rather than a boot that half-succeeds:
+        staged sessions were asked for, and a store that cannot hold them must
+        not start as if it could.
+        """
+        for table in LAYER_TABLES:
+            try:
+                self._create_missing(conn, table, _LAYER_TABLE_COLUMNS[table])
+            except psycopg.errors.InsufficientPrivilege as exc:
+                raise RuntimeError(
+                    f"staged sessions are enabled, and {self.schema}.{table} "
+                    f"does not exist and this role may not create it; "
+                    f"provision the layer tables and grant SELECT, INSERT, "
+                    f"UPDATE, DELETE on them - see docs/PERSISTENCE_BACKENDS.md"
+                ) from exc
 
     def _metadata_without_graph_identity(
         self, metadata: Dict[str, Any]
@@ -893,6 +955,27 @@ class PostgresGraphPersistenceBackend:
                 unprotected.append(table)
 
         self._scope_column = not missing_column
+        if self._staged_sessions:
+            layer_missing: List[str] = []
+            for table in LAYER_TABLES:
+                try:
+                    self._try_provision_scope_isolation(table)
+                except Exception:
+                    pass
+                column_missing, policy_incomplete = self._scope_isolation_state(table)
+                if column_missing:
+                    layer_missing.append(table)
+                if policy_incomplete:
+                    unprotected.append(table)
+            if layer_missing:
+                # New tables, so there is no older shape to stay compatible
+                # with: every layer statement names the column, scoped or not.
+                raise ScopeIsolationUnavailable(
+                    f"staged sessions are enabled, and {', '.join(layer_missing)} "
+                    f"in schema {self.schema!r} has no {SCOPE_COLUMN} column. "
+                    f"Provision the layer tables as docs/PERSISTENCE_BACKENDS.md "
+                    f"shows."
+                )
         if self._scope is not None and missing_column:
             raise ScopeIsolationUnavailable(
                 f"a scope was configured, and {', '.join(missing_column)} in "
@@ -994,6 +1077,7 @@ class PostgresGraphPersistenceBackend:
             change_notification=True,
             store_traversal=True,
             revision_enforcement=True,
+            staged_sessions=self._staged_sessions,
         )
 
     # -- traversal contract --------------------------------------------------
@@ -1777,6 +1861,543 @@ class PostgresGraphPersistenceBackend:
                     for entity_id, revision, token in rows:
                         found[(kind, entity_id)] = (int(revision), token)
         return found
+
+    # -- layer store (staged_sessions) ---------------------------------------
+    #
+    # docs/SESSION_OVERLAY_CONTRACT.md §7, in three tables of the graph's
+    # schema. Every operation is one READ COMMITTED transaction that binds
+    # the scope first and carries the scope predicate in every statement, as
+    # the graph's own do. Every operation that changes a layer locks the
+    # session's record row FOR UPDATE before anything else, so the
+    # operations on one session are serialised across instances - staging,
+    # discarding, merging and retiring cannot interleave, and a layer's cap
+    # is counted on a layer nobody else is changing.
+
+    def _require_staged_sessions(self) -> None:
+        if not self._staged_sessions:
+            raise RuntimeError(
+                "this backend was constructed without staged_sessions; it "
+                "holds no layers"
+            )
+        self._ensure_schema()
+
+    def _layer_scope(self) -> Tuple[sql.Composed, Tuple]:
+        """` AND <predicate>` for a layer table: this instance's scope, exactly.
+
+        Stricter than the graph tables' predicate on purpose. There a row
+        carrying no scope is shared by every scope, because it predates the
+        column; a layer row has no such past. A session belongs to the one
+        scope that recorded it - NULL being one - and every entry and merge
+        record of it carries that same scope, so a scoped instance cannot
+        stage into an unscoped session (leaving entries its owner cannot see
+        and `retire` would not drop) or the other way round. The server's
+        policy stays the graph tables' own, the outer bound.
+        """
+        return (
+            sql.SQL(" AND {col} IS NOT DISTINCT FROM %s").format(
+                col=sql.Identifier(SCOPE_COLUMN)
+            ),
+            (self._scope,),
+        )
+
+    def _conflict_scope(self, table: str) -> Tuple[sql.Composed, Tuple]:
+        """` WHERE <predicate>` on the row an `ON CONFLICT DO UPDATE` meets.
+
+        The key is unique across scopes, so the conflicting row may be
+        another scope's; this keeps the update off it, and the missing
+        RETURNING row is how the caller learns that.
+        """
+        return (
+            sql.SQL(" WHERE {t}.{col} IS NOT DISTINCT FROM %s").format(
+                t=sql.Identifier(table), col=sql.Identifier(SCOPE_COLUMN)
+            ),
+            (self._scope,),
+        )
+
+    def _layer_transaction(self, conn) -> None:
+        conn.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        self._bind_scope(conn)
+
+    def _layer_cross_scope(self, what: str) -> "CrossScopeWriteRefused":
+        return CrossScopeWriteRefused(
+            f"{what} in schema {self.schema!r} belongs to a scope this "
+            f"instance may not write"
+        )
+
+    def _session_status(self, conn, session_id: str, lock: bool) -> str:
+        scope, params = self._layer_scope()
+        row = conn.execute(
+            sql.SQL("SELECT status FROM {} WHERE session_id = %s{}{}").format(
+                self._table("graph_staged_sessions"),
+                scope,
+                sql.SQL(" FOR UPDATE") if lock else sql.SQL(""),
+            ),
+            (session_id, *params),
+        ).fetchone()
+        return row[0] if row else layer_store.STATUS_NONE
+
+    def _lock_active_session(self, conn, session_id: str) -> None:
+        status = self._session_status(conn, session_id, lock=True)
+        if status != layer_store.STATUS_ACTIVE:
+            raise layer_store.StagedSessionNotActive(session_id, status)
+
+    def _layer_entries(self, conn, session_id: str, lock: bool) -> Dict:
+        scope, params = self._layer_scope()
+        rows = conn.execute(
+            sql.SQL(
+                "SELECT kind, entity_id, doc FROM {} WHERE session_id = %s{}"
+                " ORDER BY kind, entity_id{}"
+            ).format(
+                self._table("graph_layer_entries"),
+                scope,
+                sql.SQL(" FOR UPDATE") if lock else sql.SQL(""),
+            ),
+            (session_id, *params),
+        ).fetchall()
+        return {(kind, entity_id): doc for kind, entity_id, doc in rows}
+
+    def _delete_entries(self, conn, session_id: str, keys) -> List[Tuple[str, str]]:
+        scope, params = self._layer_scope()
+        removed = []
+        for kind, entity_id in keys:
+            row = conn.execute(
+                sql.SQL(
+                    "DELETE FROM {} WHERE session_id = %s AND kind = %s"
+                    " AND entity_id = %s{} RETURNING kind"
+                ).format(self._table("graph_layer_entries"), scope),
+                (session_id, kind, entity_id, *params),
+            ).fetchone()
+            if row is not None:
+                removed.append((kind, entity_id))
+        return removed
+
+    def _run_layer(self, work):
+        """Run `work(conn)` in one transaction, retrying a deadlock."""
+        self._require_staged_sessions()
+        for attempt in range(self.DEADLOCK_RETRIES + 1):
+            try:
+                with self._pool.connection() as conn:
+                    with conn.transaction():
+                        self._layer_transaction(conn)
+                        return work(conn)
+            except psycopg.errors.DeadlockDetected:
+                if attempt == self.DEADLOCK_RETRIES:
+                    raise
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    def load_layer(self, session_id: str) -> List[Dict[str, Any]]:
+        session_id = layer_store.check_session_id(session_id)
+        return self._run_layer(
+            lambda conn: list(self._layer_entries(conn, session_id, False).values())
+        )
+
+    def staged_status(self, session_id: str) -> str:
+        session_id = layer_store.check_session_id(session_id)
+        return self._run_layer(
+            lambda conn: self._session_status(conn, session_id, lock=False)
+        )
+
+    def layers_in_use(self) -> List[str]:
+        def work(conn):
+            scope, params = self._layer_scope()
+            where = sql.SQL(" WHERE true") + scope
+            rows = conn.execute(
+                sql.SQL("SELECT DISTINCT session_id FROM {}{} ORDER BY 1").format(
+                    self._table("graph_layer_entries"), where
+                ),
+                params or None,
+            ).fetchall()
+            return [row[0] for row in rows]
+
+        return self._run_layer(work)
+
+    def load_merge(self, merge_id: str) -> Optional[Dict[str, Any]]:
+        merge_id = layer_store.check_merge_id(merge_id)
+
+        def work(conn):
+            scope, params = self._layer_scope()
+            row = conn.execute(
+                sql.SQL("SELECT doc FROM {} WHERE merge_id = %s{}").format(
+                    self._table("graph_merge_records"), scope
+                ),
+                (merge_id, *params),
+            ).fetchone()
+            return row[0] if row else None
+
+        return self._run_layer(work)
+
+    def record_staged(self, session_id: str) -> None:
+        session_id = layer_store.check_session_id(session_id)
+
+        def work(conn):
+            inserted = conn.execute(
+                sql.SQL(
+                    "INSERT INTO {} (session_id, status, {}) VALUES (%s, %s, %s)"
+                    " ON CONFLICT (session_id) DO NOTHING RETURNING status"
+                ).format(
+                    self._table("graph_staged_sessions"), sql.Identifier(SCOPE_COLUMN)
+                ),
+                (session_id, layer_store.STATUS_ACTIVE, self._scope),
+            ).fetchone()
+            if inserted is not None:
+                return
+            status = self._session_status(conn, session_id, lock=False)
+            if status == layer_store.STATUS_RETIRED:
+                raise layer_store.StagedSessionRetired(session_id)
+            if status == layer_store.STATUS_NONE:
+                # Taken, by a record this instance may not see.
+                raise self._layer_cross_scope("session record")
+
+        self._run_layer(work)
+
+    def retire(self, session_id: str) -> None:
+        session_id = layer_store.check_session_id(session_id)
+
+        def work(conn):
+            scope_pred, pred_params = self._conflict_scope("graph_staged_sessions")
+            row = conn.execute(
+                sql.SQL(
+                    "INSERT INTO {} (session_id, status, {col}) VALUES (%s, %s, %s)"
+                    " ON CONFLICT (session_id) DO UPDATE SET status = EXCLUDED.status"
+                ).format(
+                    self._table("graph_staged_sessions"),
+                    col=sql.Identifier(SCOPE_COLUMN),
+                )
+                + scope_pred
+                + sql.SQL(" RETURNING status"),
+                (session_id, layer_store.STATUS_RETIRED, self._scope) + pred_params,
+            ).fetchone()
+            if row is None:
+                raise self._layer_cross_scope("session record")
+            scope, params = self._layer_scope()
+            conn.execute(
+                sql.SQL("DELETE FROM {} WHERE session_id = %s{}").format(
+                    self._table("graph_layer_entries"), scope
+                ),
+                (session_id, *params),
+            )
+
+        self._run_layer(work)
+
+    def stage(
+        self,
+        session_id: str,
+        entries: Sequence[Any],
+        removals: Sequence[Any] = (),
+        *,
+        max_entries: Optional[int] = None,
+    ) -> None:
+        session_id = layer_store.check_session_id(session_id)
+        by_key, removed = layer_store.check_entries(entries, removals)
+        limit = layer_store.check_max_entries(max_entries)
+
+        def work(conn):
+            conflict_pred, pred_params = self._conflict_scope("graph_layer_entries")
+            self._lock_active_session(conn, session_id)
+            self._delete_entries(conn, session_id, removed)
+            for (kind, entity_id), doc in sorted(by_key.items()):
+                row = conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {} (session_id, kind, entity_id, doc, {col})"
+                        " VALUES (%s, %s, %s, %s, %s)"
+                        " ON CONFLICT (session_id, kind, entity_id)"
+                        " DO UPDATE SET doc = EXCLUDED.doc"
+                    ).format(
+                        self._table("graph_layer_entries"),
+                        col=sql.Identifier(SCOPE_COLUMN),
+                    )
+                    + conflict_pred
+                    + sql.SQL(" RETURNING kind"),
+                    (
+                        session_id,
+                        kind,
+                        entity_id,
+                        psycopg.types.json.Jsonb(doc),
+                        self._scope,
+                    )
+                    + pred_params,
+                ).fetchone()
+                if row is None:
+                    raise self._layer_cross_scope("layer entry")
+            if limit is not None:
+                scope, params = self._layer_scope()
+                held = conn.execute(
+                    sql.SQL("SELECT count(*) FROM {} WHERE session_id = %s{}").format(
+                        self._table("graph_layer_entries"), scope
+                    ),
+                    (session_id, *params),
+                ).fetchone()[0]
+                if held > limit:
+                    raise layer_store.LayerFull(session_id, limit, int(held))
+
+        self._run_layer(work)
+
+    def discard(
+        self, session_id: str, removals: Optional[Sequence[Any]] = None
+    ) -> List[Tuple[str, str]]:
+        session_id = layer_store.check_session_id(session_id)
+        keys = None if removals is None else layer_store.check_keys(removals)
+
+        def work(conn):
+            self._lock_active_session(conn, session_id)
+            if keys is not None:
+                return self._delete_entries(conn, session_id, keys)
+            scope, params = self._layer_scope()
+            rows = conn.execute(
+                sql.SQL(
+                    "DELETE FROM {} WHERE session_id = %s{} RETURNING kind, entity_id"
+                ).format(self._table("graph_layer_entries"), scope),
+                (session_id, *params),
+            ).fetchall()
+            return sorted((kind, entity_id) for kind, entity_id in rows)
+
+        return self._run_layer(work)
+
+    def drop_layer(self, session_id: str) -> None:
+        session_id = layer_store.check_session_id(session_id)
+
+        def work(conn):
+            self._session_status(conn, session_id, lock=True)
+            scope, params = self._layer_scope()
+            conn.execute(
+                sql.SQL("DELETE FROM {} WHERE session_id = %s{}").format(
+                    self._table("graph_layer_entries"), scope
+                ),
+                (session_id, *params),
+            )
+
+        self._run_layer(work)
+
+    def merge(
+        self,
+        session_id: str,
+        merge_id: str,
+        operations: Sequence[EntityOperation],
+        checks: Sequence[Any],
+        removals: Sequence[Any],
+        record: Any,
+    ) -> "layer_store.MergeResult":
+        """The merge unit of §7, as one transaction.
+
+        In order: the merge id's advisory lock, then its record (a recorded
+        id returns that record and does nothing else); the session's record,
+        locked; the layer's entries, locked, with the removals and
+        `entry_unchanged` checks verified on them; the nodes whose incident
+        edges are checked, locked FOR UPDATE - so an edge create elsewhere,
+        which holds its endpoints FOR KEY SHARE, is ordered against it - and
+        their incident edges compared; every other node a `node_exists` check
+        names, held FOR KEY SHARE; the graph operations through the same
+        statements as a direct write, each with its expectation, the store's
+        revision and a write token; `node_exists` on the result; the entries
+        removed; the record stored; the graph changes announced. A failed
+        check or expectation raises MergeRaced and the transaction rolls back
+        whole.
+
+        A connection lost at commit leaves the outcome open; the merge
+        record is its evidence (§4.4), so the caller asks `load_merge`.
+        """
+        session_id = layer_store.check_session_id(session_id)
+        merge_id = layer_store.check_merge_id(merge_id)
+        ops, verified, removed, caller_record = layer_store.check_merge_request(
+            operations, checks, removals, record
+        )
+        self._require_staged_sessions()
+        write_token = uuid.uuid4().hex
+        for attempt in range(self.DEADLOCK_RETRIES + 1):
+            try:
+                return self._merge_once(
+                    session_id,
+                    merge_id,
+                    ops,
+                    verified,
+                    removed,
+                    caller_record,
+                    write_token,
+                )
+            except psycopg.errors.DeadlockDetected:
+                if attempt == self.DEADLOCK_RETRIES:
+                    raise
+            except EntityRevisionConflict as exc:
+                raised = layer_store.MergeRaced(str(exc))
+                raise raised from exc
+            except psycopg.errors.UniqueViolation as exc:
+                # The merge id's record row exists under another scope: the
+                # select under the lock saw nothing, and the insert met it.
+                raise layer_store.MergeIdTaken(merge_id) from exc
+            except (
+                psycopg.DataError,
+                psycopg.ProgrammingError,
+                UnicodeEncodeError,
+            ) as exc:
+                if getattr(exc, "sqlstate", None) is None:
+                    raise WriteRefusedByStore(
+                        f"the driver refused a value in the merge: {exc}"
+                    ) from exc
+                raise
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    def _merge_once(
+        self,
+        session_id: str,
+        merge_id: str,
+        ops: List[EntityOperation],
+        checks: List[Any],
+        removed: List[Tuple[str, str]],
+        caller_record: Dict[str, Any],
+        write_token: str,
+    ) -> "layer_store.MergeResult":
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                self._layer_transaction(conn)
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
+                    (MERGE_LOCK_KEY, f"{self.schema}\x1f{merge_id}"),
+                )
+                # What a direct batch takes first, taken first here too: the
+                # save's shared lock, so a whole-graph save never runs inside
+                # a merge.
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock_shared(%s, hashtext(%s))",
+                    (SAVE_LOCK_KEY, self.schema),
+                )
+                scope, params = self._layer_scope()
+                existing = conn.execute(
+                    sql.SQL("SELECT doc FROM {} WHERE merge_id = %s{}").format(
+                        self._table("graph_merge_records"), scope
+                    ),
+                    (merge_id, *params),
+                ).fetchone()
+                if existing is not None:
+                    return layer_store.replay(existing[0], session_id, merge_id)
+                self._lock_active_session(conn, session_id)
+                entries = self._layer_entries(conn, session_id, lock=True)
+                for key in removed:
+                    if key not in entries:
+                        raise layer_store.MergeRaced(
+                            f"{key[0]} {key[1]!r} is no longer staged"
+                        )
+                for check in checks:
+                    if check.check != "entry_unchanged":
+                        continue
+                    entry = entries.get((check.kind, check.entity_id))
+                    if entry is None or entry.get("session_seq") != check.session_seq:
+                        raise layer_store.MergeRaced(
+                            f"the staged entry for {check.kind} "
+                            f"{check.entity_id!r} changed"
+                        )
+                self._claim_or_check_graph_identity(conn)
+                self._verify_incident_edges(conn, checks)
+                existing_nodes = sorted(
+                    {c.entity_id for c in checks if c.check == "node_exists"}
+                    - {c.entity_id for c in checks if c.check == "incident_edges"}
+                )
+                node_scope, node_params = self._and_scope()
+                for node_id in existing_nodes:
+                    conn.execute(
+                        sql.SQL(
+                            "SELECT 1 FROM {} WHERE id = %s{} FOR KEY SHARE"
+                        ).format(self._table("graph_nodes"), node_scope),
+                        (node_id, *node_params),
+                    )
+                self._hold_endpoints(conn, ops)
+                revisions = []
+                for operation in ops:
+                    if operation.action == "delete":
+                        # Locked and required, as layer_store's reference does:
+                        # a delete with nothing to delete was decided on a
+                        # graph that has changed since.
+                        table = (
+                            "graph_nodes" if operation.kind == "node" else "graph_edges"
+                        )
+                        if (
+                            conn.execute(
+                                sql.SQL(
+                                    "SELECT 1 FROM {} WHERE id = %s{} FOR UPDATE"
+                                ).format(self._table(table), node_scope),
+                                (operation.entity_id, *node_params),
+                            ).fetchone()
+                            is None
+                        ):
+                            raise layer_store.MergeRaced(
+                                f"{operation.kind} {operation.entity_id!r} is "
+                                f"already absent"
+                            )
+                    revisions.append(self._apply_one(conn, operation, write_token))
+                for node_id in sorted(
+                    {c.entity_id for c in checks if c.check == "node_exists"}
+                ):
+                    if (
+                        conn.execute(
+                            sql.SQL("SELECT 1 FROM {} WHERE id = %s{}").format(
+                                self._table("graph_nodes"), node_scope
+                            ),
+                            (node_id, *node_params),
+                        ).fetchone()
+                        is None
+                    ):
+                        raise layer_store.MergeRaced(f"node {node_id!r} does not exist")
+                self._delete_entries(conn, session_id, removed)
+                stored = layer_store.build_record(
+                    caller_record,
+                    merge_id=merge_id,
+                    session_id=session_id,
+                    status=layer_store.MERGE_APPLIED,
+                    applied=layer_store.applied_items(ops, revisions),
+                )
+                conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {} (merge_id, session_id, doc, {})"
+                        " VALUES (%s, %s, %s, %s)"
+                    ).format(
+                        self._table("graph_merge_records"),
+                        sql.Identifier(SCOPE_COLUMN),
+                    ),
+                    (
+                        merge_id,
+                        session_id,
+                        psycopg.types.json.Jsonb(stored),
+                        self._scope,
+                    ),
+                )
+                if ops:
+                    self._announce(conn, ops)
+                return layer_store.MergeResult(record=stored)
+
+    def _verify_incident_edges(self, conn, checks: Sequence[Any]) -> None:
+        """Lock each checked node FOR UPDATE, then compare its incident edges.
+
+        The node row lock is what a direct edge create's FOR KEY SHARE on its
+        endpoints conflicts with, so no edge to the node can be created by
+        anyone between this read and the commit.
+        """
+        incident = sorted(
+            (c for c in checks if c.check == "incident_edges"),
+            key=lambda c: c.entity_id,
+        )
+        node_scope, node_params = self._and_scope()
+        edge_scope, edge_params = self._and_scope()
+        for check in incident:
+            conn.execute(
+                sql.SQL("SELECT 1 FROM {} WHERE id = %s{} FOR UPDATE").format(
+                    self._table("graph_nodes"), node_scope
+                ),
+                (check.entity_id, *node_params),
+            )
+        for check in incident:
+            rows = conn.execute(
+                sql.SQL(
+                    "SELECT id FROM {} WHERE (doc->>'source' = %s"
+                    " OR doc->>'target' = %s){}"
+                ).format(self._table("graph_edges"), edge_scope),
+                (check.entity_id, check.entity_id, *edge_params),
+            ).fetchall()
+            # Compared as sorted in Python: the server's collation need not
+            # order ids the way the check was built.
+            if sorted(row[0] for row in rows) != list(check.edge_ids):
+                raise layer_store.MergeRaced(
+                    f"node {check.entity_id!r} has incident edges the merge "
+                    f"did not list"
+                )
 
     # -- change notification -------------------------------------------------
 
