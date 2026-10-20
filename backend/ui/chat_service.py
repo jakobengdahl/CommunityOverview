@@ -847,10 +847,11 @@ class ChatService:
             # Only applied within an active collection session; None means
             # unrestricted, matching the AIAgent model. Read from the identity
             # cache populated by _resolve_collection above.
-            # Note: on the fail-closed path (resolution error → prefix == ""), the
-            # node metadata could not be read, so the allowlist is unavailable and
-            # stays None here. Fail-closed still blocks all writes via the enforced
-            # tool wrappers; it does not additionally restrict read/action tools.
+            # Note: on the fail-closed path (prefix == "") the metadata was not
+            # read for this caller, so the allowlist is the one an earlier
+            # successful resolution recorded, or None if there was none. An
+            # allowlist only narrows tools; fail-closed blocks all writes via the
+            # enforced tool wrappers either way.
             tool_allowlist = None
             if collection_short_name and effective_prefix is not None:
                 tool_allowlist = (
