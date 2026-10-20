@@ -306,8 +306,15 @@ class TestScopesKeepLayersApart:
             other.retire(A)
         other.drop_layer(A)
         assert [e["entity_id"] for e in owner.load_layer(A)] == ["q"]
+        owner.stage(A, [entry("node", "r")])
+        owner.merge(A, "m-owner", [], [], [("node", "r")], {})
+        assert other.load_merge("m-owner") is None
+        other.record_staged(B)
+        other.stage(B, [entry("node", "s", session_id=B)])
+        with pytest.raises(ls.MergeIdTaken):
+            other.merge(B, "m-owner", [], [], [("node", "s")], {})
         owner.retire(A)
-        assert owner.layers_in_use() == [] and other.layers_in_use() == []
+        assert owner.layers_in_use() == [] and other.layers_in_use() == [B]
 
     def test_the_server_refuses_another_scopes_rows_without_the_predicate(
         self, pair, owner

@@ -528,6 +528,87 @@ class TestTheWriteAheadMerge:
         with pytest.raises(GraphJournalError, match="different graph.json"):
             reopen(path).load_graph_data()
 
+    def test_a_later_operation_failing_leaves_the_mirror_untouched(self, staged):
+        current = by_id(staged.load_graph_data(), "nodes")
+        ok = EntityOperation(
+            "node",
+            "upsert",
+            "a",
+            fresh({**current["a"], "name": "M"}),
+            expected_revision=current["a"]["revision"],
+        )
+        stale = EntityOperation(
+            "node",
+            "upsert",
+            "b",
+            fresh({**current["b"], "name": "M"}),
+            expected_revision=current["b"]["revision"] + 5,
+        )
+        with pytest.raises(ls.MergeRaced):
+            staged.merge(A, "m1", [ok, stale], [], [("node", "a"), ("node", "b")], {})
+        assert staged._nodes["a"]["name"] == "A"
+
+    @pytest.mark.parametrize(
+        "lines,match",
+        [
+            (["{garbage", "VALID"], "cannot be read"),
+            (['{"merge_id": "x", "status": "applied"}'], "no pending merge"),
+            (["PENDING", '{"merge_id": "other", "status": "applied"}'], "no pending"),
+            (['{"merge_id": "x", "status": "aborted"}'], "no pending merge"),
+            (["PENDING", '{"merge_id": "m1", "status": "weird"}'], "unknown status"),
+        ],
+        ids=[
+            "damaged-middle",
+            "applied-first",
+            "mark-for-other",
+            "aborted-first",
+            "unknown",
+        ],
+    )
+    def test_a_damaged_merge_log_stops_the_load_and_is_kept(
+        self, staged, path, lines, match
+    ):
+        merge_a(staged)
+        pending = staged.merge_log_path.read_text().splitlines()[0]
+        text = (
+            "\n".join(
+                pending if line in ("PENDING", "VALID") else line for line in lines
+            )
+            + "\n"
+        )
+        staged.merge_log_path.write_text(text)
+        with pytest.raises(GraphJournalError, match=match):
+            reopen(path).load_graph_data()
+        assert staged.merge_log_path.read_text() == text
+
+    def test_load_merge_answers_only_for_the_pending_merge_it_names(
+        self, staged, monkeypatch
+    ):
+        def broken(sessions):
+            raise OSError("disk gone")
+
+        monkeypatch.setattr(staged, "_write_layers_file", broken)
+        merge_a(staged)
+        assert staged.load_merge("unrelated") is None
+
+    @pytest.mark.parametrize(
+        "crash_at", ["_append_journal_locked", "_commit_sessions_locked"]
+    )
+    def test_a_pending_merge_with_a_delete_is_judged_both_ways(
+        self, staged, path, monkeypatch, crash_at
+    ):
+        staged.stage(A, [entry("edge", "e1", action="delete")])
+        edge = by_id(staged.load_graph_data(), "edges")["e1"]
+        op = EntityOperation("edge", "delete", "e1", expected_revision=edge["revision"])
+        crash_on(monkeypatch, staged, crash_at)
+        with pytest.raises(Crash):
+            staged.merge(A, "md", [op], [], [("edge", "e1")], {})
+        after = reopen(path)
+        landed = crash_at == "_commit_sessions_locked"
+        assert ("e1" in by_id(after.load_graph_data(), "edges")) is not landed
+        assert (after.load_merge("md") is not None) is landed
+        assert (("edge", "e1") in staged_keys(after)) is not landed
+
     def test_a_torn_last_line_of_the_merge_log_is_dropped(self, staged, path):
         merge_a(staged)
         with open(staged.merge_log_path, "a", encoding="utf-8") as f:
