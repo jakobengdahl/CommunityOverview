@@ -51,6 +51,7 @@ import {
   persistNodeUpdates,
   setEdgeType,
 } from './utils/sessionScopedGraphEdits';
+import { loadUrlSavedView } from './utils/urlSavedView';
 import { createAnnotationChangeScheduler } from './utils/annotationChangeScheduler';
 import { createSelfEchoDedup } from './utils/selfEchoDedup';
 import { applyIngestedImageOptimistically } from './utils/imageIngestApply';
@@ -164,6 +165,9 @@ function App() {
 
   const urlGuideStartedRef = useRef(false);
   const urlViewLoadedRef = useRef(false);
+  // The in-flight ?session= bootstrap load, so a ?view= in the same URL can wait
+  // for it and be applied on top.
+  const urlSessionBootstrapRef = useRef(null);
   const urlFocusNodeLoadedRef = useRef(false);
   // The saved-view load clears the canvas after its own await, so focusing a
   // ?node= before it settles can have the node wiped out from under the focus.
@@ -966,7 +970,7 @@ function App() {
       // This id came in via a ?session= deep link, so a 404 means the linked
       // session is gone/expired (not a brand-new local one) — surface it rather
       // than silently opening an empty canvas (contract §5.3).
-      loadSessionFromServer(urlSession, {
+      urlSessionBootstrapRef.current = loadSessionFromServer(urlSession, {
         eagerConnect: true,
         onMissing: () => showNotification('info', t('sessions.link_not_found')),
       });
@@ -1062,17 +1066,22 @@ function App() {
     urlViewLoadedRef.current = true;
     (async () => {
       try {
-        const result = await api.getSavedView(urlViewName);
-        if (!result?.success || !result.nodes?.length) return;
-        const positioned = result.nodes.map((n) =>
-          result.positions?.[n.id] ? { ...n, _savedPosition: result.positions[n.id] } : n
-        );
-        clearVisualization();
-        addNodesToVisualization(positioned, result.edges || []);
-        if (result.hidden_node_ids?.length) setHiddenNodeIds(result.hidden_node_ids);
-        if (result.groups?.length)
-          setPendingGroups({ groups: result.groups, parentIds: result.parentIds || {} });
-        if (result.annotations?.length) setPendingAnnotations(result.annotations);
+        await loadUrlSavedView({
+          name: urlViewName,
+          sessionBootstrap: urlSessionBootstrapRef.current,
+          getSavedView: api.getSavedView,
+          applyView: (result) => {
+            const positioned = result.nodes.map((n) =>
+              result.positions?.[n.id] ? { ...n, _savedPosition: result.positions[n.id] } : n
+            );
+            clearVisualization();
+            addNodesToVisualization(positioned, result.edges || []);
+            if (result.hidden_node_ids?.length) setHiddenNodeIds(result.hidden_node_ids);
+            if (result.groups?.length)
+              setPendingGroups({ groups: result.groups, parentIds: result.parentIds || {} });
+            if (result.annotations?.length) setPendingAnnotations(result.annotations);
+          },
+        });
       } catch (err) {
         console.error('[App] Failed to load view from URL:', err);
       } finally {
