@@ -1608,6 +1608,15 @@ own.
 | GET | `/ui/info` | Get service info (provider, tools) |
 | GET | `/ui/supported-formats` | Get supported document formats |
 
+The routes that reach the graph (`/ui/chat`, `/ui/chat/simple`,
+`/ui/propose-nodes`, `/ui/upload`, `/ui/info`) bind the caller's request
+authorization exactly like the REST graph routes, so every assistant tool call
+is evaluated by the service authorization hook as the caller. A denied tool
+call comes back to the model as an `access_denied` tool result and nothing is
+written. With `AUTH_ENABLED=true`, the auth middleware also rejects an
+unauthenticated request to any `/ui/*` route with 401. MCP-only auth
+(`MCP_BASIC_AUTH`) leaves `/ui/*` as open as `/api/*`.
+
 #### Chat Example
 
 ```bash
