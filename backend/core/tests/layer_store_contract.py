@@ -465,6 +465,30 @@ class LayerStoreContract:
             seeded, factory, [stale], [], [("edge", "e1")], {}
         )
 
+    @pytest.mark.parametrize("expectation", [False, True])
+    def test_a_delete_of_an_entity_already_gone_fails_the_merge(
+        self, seeded, factory, expectation
+    ):
+        seeded.stage(
+            A,
+            [
+                entry("node", "n", action="create"),
+                entry("edge", "gone", action="delete"),
+            ],
+        )
+        create = EntityOperation(
+            "node", "upsert", "n", fresh(node_payload("n")), expect_absent=True
+        )
+        gone = EntityOperation("edge", "delete", "gone", expect_absent=expectation)
+        self._assert_raced_and_untouched(
+            seeded,
+            factory,
+            [create, gone],
+            [],
+            [("node", "n"), ("edge", "gone")],
+            {},
+        )
+
     def test_removing_an_entry_no_longer_staged_fails_the_merge(self, seeded, factory):
         seeded.stage(A, [entry("node", "b")])
         self._assert_raced_and_untouched(

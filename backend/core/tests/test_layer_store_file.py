@@ -6,6 +6,7 @@ import json
 import pytest
 
 import backend.core.layer_store as ls
+import backend.core.storage_backends as storage_backends
 from backend.core.storage_backends import (
     BackendCapabilities,
     EntityOperation,
@@ -185,6 +186,65 @@ class TestTheWriteAheadMerge:
         after = reopen(path)
         assert staged_keys(after) == [("node", "b"), ("node", "c")]
         assert name_of_a(after) == "Merged"
+
+    def test_an_error_after_the_batch_is_durable_does_not_hide_the_merge(
+        self, staged, path, monkeypatch
+    ):
+        """The journal line is on disk and the append still raises - a close
+        reporting a failed upload, say. The merge landed and is reported so,
+        not marked aborted while the journal replays it."""
+        real = staged._append_journal_locked
+
+        def durable_then_raise(ops, stored):
+            real(ops, stored)
+            raise OSError("close reported a failed upload")
+
+        monkeypatch.setattr(staged, "_append_journal_locked", durable_then_raise)
+        result = merge_a(staged)
+        assert not result.replayed
+        monkeypatch.undo()
+        after = reopen(path)
+        assert name_of_a(after) == "Merged"
+        assert staged_keys(after) == [("node", "b")]
+        assert after.load_merge("m1") == result.record
+        assert merge_a(after, name="Again").replayed
+
+    def test_an_error_before_the_batch_is_durable_still_fails_the_merge(
+        self, staged, path, monkeypatch
+    ):
+        real_fsync = storage_backends.os.fsync
+
+        def fail_once(fd):
+            monkeypatch.setattr(storage_backends.os, "fsync", real_fsync)
+            raise OSError("power lost during append")
+
+        # The first fsync is the pending line's; fail the journal's.
+        calls = {"n": 0}
+
+        def second(fd):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                return fail_once(fd)
+            return real_fsync(fd)
+
+        monkeypatch.setattr(storage_backends.os, "fsync", second)
+        with pytest.raises(OSError):
+            merge_a(staged)
+        monkeypatch.undo()
+        after = reopen(path)
+        assert name_of_a(after) == "A"
+        assert staged_keys(after) == [("node", "a"), ("node", "b")]
+        assert after.load_merge("m1") is None
+
+    def test_load_merge_answers_for_a_landed_merge_whose_completion_fails(
+        self, staged, monkeypatch
+    ):
+        def broken(sessions):
+            raise OSError("disk gone")
+
+        monkeypatch.setattr(staged, "_write_layers_file", broken)
+        result = merge_a(staged)
+        assert staged.load_merge("m1") == result.record
 
     def test_a_write_waits_for_a_pending_merge_to_settle(
         self, staged, path, monkeypatch

@@ -935,10 +935,21 @@ class FileGraphPersistenceBackend:
             # A pending record is resolved first (§11.6). Best effort: if the
             # remaining steps cannot be written now, the answer is still the
             # judged outcome, and the next write retries them.
+            pending = self._pending_merge
             try:
                 self._settle_merge_locked()
+            except GraphJournalError:
+                raise
             except Exception as exc:
                 logger.warning(f"could not settle a pending merge: {exc}")
+                # Judged landed, completion still owed: the answer is the
+                # record that merge will be completed with.
+                if (
+                    pending is not None
+                    and pending["merge_id"] == merge_id
+                    and self._judge_pending_locked() == "landed"
+                ):
+                    return copy.deepcopy(pending["record"])
             record = self._merges.get(merge_id)
             return copy.deepcopy(record) if record is not None else None
 
@@ -1087,11 +1098,13 @@ class FileGraphPersistenceBackend:
                 if journal_ops:
                     self._append_journal_locked(journal_ops, stored_ops)
             except Exception:
-                try:
-                    self._abort_pending_locked()
-                except Exception as exc:
-                    # Still pending: judged, not landed, before the next write.
-                    logger.warning(f"could not mark an aborted merge: {exc}")
+                # Not taken as "did not land": the record can be durable with
+                # the error raised after it (a close that reports a failed
+                # upload, an unlock). So the backend re-reads what is on
+                # disk, which settles the pending merge on what is there.
+                landed = self._reload_after_failed_commit_locked(merge_id)
+                if landed is not None:
+                    return _layer.MergeResult(record=copy.deepcopy(landed))
                 raise
             # Steps 3 and 4. The merge has landed whatever happens here.
             try:
@@ -1302,9 +1315,22 @@ class FileGraphPersistenceBackend:
         as it was. Anything else cannot come from an atomic batch under this
         lock, and refuses to guess.
         """
-        pending = self._pending_merge
-        if pending is None:
+        if self._pending_merge is None:
             return
+        if self._judge_pending_locked() == "landed":
+            self._complete_pending_locked()
+        else:
+            self._abort_pending_locked()
+
+    def _judge_pending_locked(self) -> str:
+        """`landed` or `not_landed` for the pending merge, or raise.
+
+        Sound because every delete a merge applies names an entity present
+        when it was issued (a merge refuses one that is absent), so "absent"
+        tells the two outcomes apart for a delete as "carries this revision"
+        does for an upsert.
+        """
+        pending = self._pending_merge
         ops = [EntityOperation(**op) for op in pending["operations"]]
 
         def present(op: EntityOperation) -> bool:
@@ -1316,14 +1342,43 @@ class FileGraphPersistenceBackend:
 
         landed = [present(op) for op in ops]
         if all(landed):
-            self._complete_pending_locked()
-        elif not any(landed):
-            self._abort_pending_locked()
-        else:
-            raise GraphJournalError(
-                f"merge {pending['merge_id']!r} is pending and the graph holds "
-                f"part of it; the layer and the graph need an operator's look"
-            )
+            return "landed"
+        if not any(landed):
+            return "not_landed"
+        raise GraphJournalError(
+            f"merge {pending['merge_id']!r} is pending and the graph holds "
+            f"part of it; the layer and the graph need an operator's look"
+        )
+
+    def _reload_after_failed_commit_locked(
+        self, merge_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Re-read graph, journal and sidecars after step 2 raised.
+
+        The load judges the pending merge on disk and settles it. Returns the
+        record when it landed, None when it did not or the outcome could not
+        be read yet - then the backend stays unmirrored, and its next
+        operation loads and settles again before doing anything else.
+        """
+        self._mirrored = False
+        self._layers_loaded = False
+        try:
+            self._load_locked()
+        except Exception as exc:
+            logger.warning(f"could not re-read the store after a failed merge: {exc}")
+            return None
+        if (
+            self._pending_merge is not None
+            and self._pending_merge["merge_id"] == merge_id
+        ):
+            # Judged, but the mark could not be written; report what was judged.
+            try:
+                if self._judge_pending_locked() == "landed":
+                    return self._pending_merge["record"]
+            except GraphJournalError:
+                return None
+            return None
+        return self._merges.get(merge_id)
 
     def _complete_pending_locked(self) -> None:
         pending = self._pending_merge

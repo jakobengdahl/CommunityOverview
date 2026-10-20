@@ -479,7 +479,8 @@ def apply_merge_to_model(
        every `entry_unchanged` holds;
     2. `incident_edges`, on the state before the operations;
     3. the operations, in order, each checked against its expectation on
-       the state the operations before it left;
+       the state the operations before it left; a delete must find its
+       entity;
     4. `node_exists`, on the state the operations leave.
     """
     for key in removals:
@@ -512,6 +513,11 @@ def apply_merge_to_model(
             raise _raced(op, current)
         if op.expected_revision is not None and current != op.expected_revision:
             raise _raced(op, current)
+        if op.action == "delete" and current is None:
+            # A delete with nothing left to delete is not an operation: it is
+            # left out of the merge (§10), and one issued anyway was decided
+            # on a graph that has changed since.
+            raise MergeRaced(f"{op.kind} {op.entity_id!r} is already absent")
         if op.action == "upsert":
             table[op.entity_id] = op.payload
         else:

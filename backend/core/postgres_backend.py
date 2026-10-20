@@ -2300,9 +2300,29 @@ class PostgresGraphPersistenceBackend:
                         (node_id, *node_params),
                     )
                 self._hold_endpoints(conn, ops)
-                revisions = [
-                    self._apply_one(conn, operation, write_token) for operation in ops
-                ]
+                revisions = []
+                for operation in ops:
+                    if operation.action == "delete":
+                        # Locked and required, as layer_store's reference does:
+                        # a delete with nothing to delete was decided on a
+                        # graph that has changed since.
+                        table = (
+                            "graph_nodes" if operation.kind == "node" else "graph_edges"
+                        )
+                        if (
+                            conn.execute(
+                                sql.SQL(
+                                    "SELECT 1 FROM {} WHERE id = %s{} FOR UPDATE"
+                                ).format(self._table(table), node_scope),
+                                (operation.entity_id, *node_params),
+                            ).fetchone()
+                            is None
+                        ):
+                            raise layer_store.MergeRaced(
+                                f"{operation.kind} {operation.entity_id!r} is "
+                                f"already absent"
+                            )
+                    revisions.append(self._apply_one(conn, operation, write_token))
                 for node_id in sorted(
                     {c.entity_id for c in checks if c.check == "node_exists"}
                 ):

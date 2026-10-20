@@ -608,6 +608,10 @@ def layers_in_use() -> list[str]
   already recorded for the same session returns that record with
   `replayed=True` and writes nothing; one recorded for another session
   raises `MergeIdTaken`.
+- **Every merge delete must find its entity**; one that does not raises
+  `MergeRaced`. A delete with nothing left to do is left out of a merge, and
+  the file backend's recovery tells a landed delete from one that did not
+  land by the entity being gone.
 - **A single-writer store keeps the revision an upsert carries**, which the
   instance assigned (§4.2); the file backend refuses a merge upsert whose
   revision is missing or equal to the stored entity's, because its crash
@@ -624,8 +628,11 @@ by each operation that changes one; and `<stem>.merges.ndjson`, the merge
 log, appended to. A merge follows §11.6 under the backend's lock: a `pending`
 line holding the operations, removals and record, synced; the operations as
 one journal record — the commit point; the layers file without the merged
-entries; an `applied` line. A failure before the journal record aborts the
-merge. A failure after it does not fail the merge, which has landed: the
+entries; an `applied` line. A failure while writing the journal record does
+not by itself mean the merge did not land — the error can come after the
+record is durable — so the backend re-reads the store and settles the
+pending merge on what is there: it returns the merge if it landed, raises if
+not. A failure after it does not fail the merge, which has landed: the
 remaining steps are completed before the backend accepts any other write,
 so nothing touches the merged entities in between, or at the next load if
 the process dies first. At load a pending merge is judged against the graph,
@@ -648,14 +655,16 @@ scopes apart*). The application's own predicate on these tables is stricter
 than on the graph tables: `scope_id IS NOT DISTINCT FROM` the instance's
 scope, so a session belongs to exactly the scope that recorded it — no
 scope being one — and an unscoped session is not shared with scoped
-instances the way an unscoped graph row is. A scoped instance cannot see,
-stage into, retire or reuse the session id or merge id of another scope
-(`CrossScopeWriteRefused`, `MergeIdTaken`). Every operation is one
-`READ COMMITTED` transaction that locks the session's record row first, so
-the operations on one session are serialised across instances. A merge also
-takes a per-merge-id advisory lock (two instances retrying one merge apply
-it once), the save's shared lock, the layer rows, and the rows its checks
-read — a node whose incident edges are checked `FOR UPDATE`, which is what a
+instances the way an unscoped graph row is. To a scoped instance
+another scope's session is not there (`StagedSessionNotActive` on staging,
+discarding or merging), and it cannot take over its session id
+(`CrossScopeWriteRefused` on `record_staged` or `retire`) or reuse its merge
+id (`MergeIdTaken`). Every operation is one `READ COMMITTED` transaction, and
+every one that changes a layer locks the session's record row, so the
+changes to one session are serialised across instances. A merge first takes
+a per-merge-id advisory lock (two instances retrying one merge apply it
+once) and the save's shared lock, then the session row, the layer rows, and
+the rows its checks read — a node whose incident edges are checked `FOR UPDATE`, which is what a
 direct edge create's `FOR KEY SHARE` on its endpoints is ordered against —
 then applies the operations through the same statements as a direct write,
 removes the entries, stores the record and announces the graph changes
