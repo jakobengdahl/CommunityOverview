@@ -273,8 +273,9 @@ class ChatService:
             unless the collection metadata sets `collect_responses` to false.
           - (None, None, True) when short_name is not found — no enforcement applied.
             Not cached so a collection created after first miss is picked up immediately.
-          - ("", {}, True) on exception — fail-closed; enforced tools installed, all
-            writes denied. Not cached so transient errors are retried on the next message.
+          - ("", {}, True) on exception or a denied lookup — fail-closed; enforced
+            tools installed, all writes denied. Not cached so transient errors are
+            retried on the next message.
 
         permissions_dict maps node_type → {"create": bool, "update": bool, "delete": bool}.
         Successful lookups are cached on this instance to avoid repeated 500-node scans.
@@ -285,6 +286,16 @@ class ChatService:
             result = self._graph_service.search_graph(
                 query="", node_types=["ActiveKnowledgeCollection"], limit=500
             )
+            if result.get("success") is False:
+                # The caller may not read collections: fail closed like a
+                # resolution error rather than treating it as "not found",
+                # which would drop the collection's write restrictions.
+                logger.warning(
+                    "AKC short_name %r could not be resolved: %s",
+                    short_name,
+                    result.get("error_code") or result.get("error"),
+                )
+                return ("", {}, True)
             nodes = result.get("nodes", [])
             found = False
             for node in nodes:

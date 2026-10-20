@@ -32,7 +32,8 @@ from backend.ui import ChatService, DocumentService, create_ui_router
 
 
 class ActorRoleHook:
-    """Header-driven hook: viewers may read, outsiders may do nothing.
+    """Header-driven hook: viewers may only read, writer-only actors may only
+    write, outsiders may do nothing.
 
     An anonymous request is allowed, so a route that drops the caller's
     identity lets an under-privileged caller through — the regression guarded
@@ -47,8 +48,10 @@ class ActorRoleHook:
     ) -> GraphAuthorizationDecision:
         actor_id = context.actor.get("actor_id", "")
         self.seen_actor_ids.append(actor_id)
-        if actor_id == "outsider" or (
-            actor_id == "viewer" and context.action == GRAPH_ACTION_MUTATE
+        if (
+            actor_id == "outsider"
+            or (actor_id == "viewer" and context.action == GRAPH_ACTION_MUTATE)
+            or (actor_id == "writer-only" and context.action != GRAPH_ACTION_MUTATE)
         ):
             return GraphAuthorizationDecision(
                 allowed=False, reason="denied for this actor", source="test"
@@ -136,6 +139,45 @@ def test_chat_write_by_permitted_actor_is_authorized_as_that_actor(hooked_client
         graph_service.get_node_details(_NEW_NODE["id"])["node"]["name"]
         == (_NEW_NODE["name"])
     )
+
+
+def test_collection_chat_fails_closed_when_caller_cannot_read_collection(
+    hooked_client,
+):
+    client, mock_llm, graph_service, _ = hooked_client
+    graph_service.add_nodes(
+        nodes=[
+            {
+                "id": "akc-kiosk",
+                "name": "Kiosk",
+                "type": "ActiveKnowledgeCollection",
+                "description": "Collects actors only",
+                "metadata": {
+                    "short_name": "kiosk",
+                    "prompt": "Collect actors.",
+                    "node_type_permissions": {
+                        "Actor": {"create": True, "update": False, "delete": False}
+                    },
+                },
+            }
+        ],
+        edges=[],
+    )
+    mock_llm.mock_tool_calls = [
+        {"name": "add_nodes", "input": {"nodes": [_NEW_NODE], "edges": []}}
+    ]
+
+    response = client.post(
+        "/ui/chat",
+        json={
+            "messages": [{"role": "user", "content": "add"}],
+            "collection_short_name": "kiosk",
+        },
+        headers={ACTOR_ID_HEADER: "writer-only"},
+    )
+
+    assert response.status_code == 200
+    assert graph_service.get_node_details(_NEW_NODE["id"]).get("success") is False
 
 
 def test_upload_analysis_write_by_read_only_actor_is_denied(hooked_client):
