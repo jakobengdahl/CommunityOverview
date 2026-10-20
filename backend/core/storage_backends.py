@@ -1092,10 +1092,19 @@ class FileGraphPersistenceBackend:
                 "removals": [list(key) for key in removed],
                 "record": applied,
             }
-            # Step 1. Nothing has happened if this fails.
-            self._append_merge_log_locked(
-                {"merge_id": merge_id, "status": _layer.MERGE_PENDING, **pending}
-            )
+            # Step 1. The line can be durable even when the append raises
+            # (an error after the sync, an interrupt), so on any failure the
+            # backend forgets what it holds and the next operation re-reads
+            # the log - a second pending line written behind an unseen first
+            # would make the store unloadable.
+            try:
+                self._append_merge_log_locked(
+                    {"merge_id": merge_id, "status": _layer.MERGE_PENDING, **pending}
+                )
+            except BaseException:
+                self._mirrored = False
+                self._layers_loaded = False
+                raise
             self._pending_merge = pending
             # Step 2, the commit point.
             try:
@@ -1283,6 +1292,7 @@ class FileGraphPersistenceBackend:
             lines.pop()
         kept = 0
         last = len(lines) - 1
+        last_mark: Optional[Tuple[str, str]] = None
         for index, line in enumerate(lines):
             # Only a line a crash could have left - unterminated or not
             # parseable - is dropped, and only as the last one. A complete,
@@ -1305,17 +1315,25 @@ class FileGraphPersistenceBackend:
                     f"{self.merge_log_path} line {index + 1} cannot be read "
                     f"({exc}); the graph was not loaded"
                 ) from exc
+            # An append can land and still raise (an error after the sync),
+            # and its caller then writes the same line again. So a line that
+            # repeats the one before it exactly is that retry, and is skipped;
+            # anything else out of sequence is damage.
             try:
                 if status == _layer.MERGE_PENDING:
-                    if pending is not None:
+                    pending_line = {k: v for k, v in parsed.items() if k != "status"}
+                    if pending is not None and pending != pending_line:
                         raise ValueError("two merges pending at once")
-                    pending = {k: v for k, v in parsed.items() if k != "status"}
+                    pending = pending_line
                 elif status in (_layer.MERGE_APPLIED, "aborted"):
                     if pending is None or pending["merge_id"] != merge_id:
-                        raise ValueError(f"a {status} mark for no pending merge")
-                    if status == _layer.MERGE_APPLIED:
-                        merges[merge_id] = pending["record"]
-                    pending = None
+                        if last_mark != (merge_id, status):
+                            raise ValueError(f"a {status} mark for no pending merge")
+                    else:
+                        if status == _layer.MERGE_APPLIED:
+                            merges[merge_id] = pending["record"]
+                        pending = None
+                        last_mark = (merge_id, status)
                 else:
                     raise ValueError(f"unknown status {status!r}")
             except (ValueError, KeyError, TypeError) as exc:

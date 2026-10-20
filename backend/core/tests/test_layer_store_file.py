@@ -365,6 +365,54 @@ class TestTheWriteAheadMerge:
         after = reopen(path)
         assert staged_keys(after) == [("node", "b")]
 
+    @pytest.mark.parametrize("error", [KeyboardInterrupt, OSError])
+    @pytest.mark.parametrize("failing_line", [1, 2], ids=["pending", "applied"])
+    def test_a_log_line_that_landed_with_an_error_does_not_break_the_log(
+        self, staged, path, monkeypatch, error, failing_line
+    ):
+        """The line is synced and the append still raises, so it may be
+        written again by whatever settles next. The log must still load, and
+        say what happened."""
+        real = staged._append_merge_log_locked
+        calls = {"n": 0}
+
+        def durable_then_raise(line):
+            real(line)
+            calls["n"] += 1
+            if calls["n"] == failing_line:
+                raise error()
+
+        monkeypatch.setattr(staged, "_append_merge_log_locked", durable_then_raise)
+        if failing_line == 1:
+            with pytest.raises(error):
+                merge_a(staged)
+        else:
+            try:
+                merge_a(staged)
+            except KeyboardInterrupt:
+                pass
+        # Whatever comes next settles, then retries the same merge id.
+        staged.stage(A, [entry("node", "c")])
+        retry = merge_a(staged)
+        monkeypatch.undo()
+        after = reopen(path)
+        assert name_of_a(after) == "Merged"
+        assert after.load_merge("m1") == retry.record
+        assert staged_keys(after) == [("node", "b"), ("node", "c")]
+
+    def test_a_repeated_pending_line_for_another_merge_still_stops_the_load(
+        self, staged, path
+    ):
+        merge_a(staged)
+        lines = staged.merge_log_path.read_text().splitlines()
+        pending = json.loads(lines[0])
+        other = {**pending, "merge_id": "other"}
+        staged.merge_log_path.write_text(
+            "\n".join([json.dumps(pending), json.dumps(other)]) + "\n"
+        )
+        with pytest.raises(GraphJournalError, match="two merges pending"):
+            reopen(path).load_graph_data()
+
     def test_an_interrupt_during_the_commit_is_judged_on_disk(
         self, staged, path, monkeypatch
     ):
