@@ -2455,8 +2455,9 @@ class TestSearchToolRedirects:
     ):
         """The far end chooses Location; it must not reach the model's tool
         result, where it would read as instructions or a link to follow.
-        Every 3xx, because raise_for_status quotes Location for any status
-        that carries one, so a guard narrowed to some statuses would leak it."""
+        Every 3xx, because the guard is status-only (`is_redirect`) and a guard
+        narrowed to some statuses would let the rest fall through to
+        raise_for_status, which quotes Location for 301/302/303/307/308."""
         _, install = requests_seen
         install(
             lambda request: _redirect("https://elsewhere.example/collect", status_code)
@@ -2468,14 +2469,16 @@ class TestSearchToolRedirects:
         assert str(status_code) in result["error"]
 
     @pytest.mark.parametrize(
-        "location",
+        "location, quoted_by_parse_error",
         [
-            "https://[elsewhere.example]/collect",
-            "https://999.999.999.999/collect",
-            "https://elsewhere.example:99999/collect",
+            ("https://[elsewhere.example]/collect", "elsewhere.example"),
+            ("https://999.999.999.999/collect", "999"),
+            ("https://elsewhere.example:abc/collect", "abc"),
         ],
     )
-    def test_malformed_location_is_not_echoed(self, requests_seen, location):
+    def test_malformed_location_is_not_echoed(
+        self, requests_seen, location, quoted_by_parse_error
+    ):
         """httpx parses Location even when not following it, and its parse
         error quotes the offending host or port."""
         seen, install = requests_seen
@@ -2483,8 +2486,8 @@ class TestSearchToolRedirects:
 
         result = MCPLoader([])._execute_search_tool("search", {"query": "q"})
 
-        assert "elsewhere.example" not in result["error"]
-        assert "999" not in result["error"]
+        assert "error" in result
+        assert quoted_by_parse_error not in result["error"]
         assert len(seen) == 1
 
     @pytest.mark.parametrize("status_code", [401, 429, 500])
@@ -2529,6 +2532,49 @@ class TestSearchToolRedirects:
             ],
         }
         assert seen[0].headers["x-subscription-token"] == SEARCH_TOKEN
+
+    def test_result_count_is_capped_at_the_requested_count(self, requests_seen):
+        """The provider may return more than `count`; the slice bounds what
+        reaches the model."""
+        _, install = requests_seen
+        install(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "web": {
+                        "results": [
+                            {"title": f"T{i}", "url": f"https://r{i}.example/"}
+                            for i in range(3)
+                        ]
+                    }
+                },
+            )
+        )
+
+        result = MCPLoader([])._execute_search_tool(
+            "search", {"query": "q", "count": 2}
+        )
+
+        assert [r["title"] for r in result["results"]] == ["T0", "T1"]
+
+    def test_search_call_does_not_follow_redirects(self, requests_seen, monkeypatch):
+        """httpx2 defaults follow_redirects to False; the explicit kwarg is what
+        keeps that from silently changing with the call site."""
+        _, install = requests_seen
+        install(lambda request: httpx.Response(200, json={"web": {"results": []}}))
+        stub = mcp_loader.httpx
+        calls = []
+        real_get = stub.get
+
+        def recording_get(*args, **kwargs):
+            calls.append(kwargs)
+            return real_get(*args, **kwargs)
+
+        monkeypatch.setattr(stub, "get", recording_get)
+
+        MCPLoader([])._execute_search_tool("search", {"query": "q"})
+
+        assert calls[0]["follow_redirects"] is False
 
 
 class TestRedirectCapIsShared:
