@@ -170,4 +170,32 @@ describe('Widget canvas undo baseline', () => {
 
     expect(nodeById('n1').position).toEqual({ x: 30, y: 40 });
   });
+
+  it('discards the undo history when the host delivers a tool result', async () => {
+    let onToolResult;
+    mcp.connectHost.mockImplementation((handlers) => {
+      onToolResult = handlers.onToolResult;
+      return Promise.resolve(() => {});
+    });
+    mcp.searchGraph.mockResolvedValue({ nodes: [NODE], edges: [] });
+
+    render(<Widget />);
+    await waitFor(() => expect(onToolResult).toBeTypeOf('function'));
+    await search('first', 'n1');
+    dragNode();
+
+    // The host replaces the contents wholesale (a new show_graph_widget call),
+    // taking the dragged node away, and a second delivery brings it back.
+    act(() => onToolResult({ nodes: [OTHER_NODE], edges: [] }));
+    await waitFor(() => expect(nodeById('n1')).toBeUndefined());
+    act(() => onToolResult({ nodes: [NODE], edges: [] }));
+    await waitFor(() => expect(nodeById('n1')).toBeDefined());
+
+    const restored = { ...nodeById('n1').position };
+    expect(restored).not.toEqual({ x: 30, y: 40 });
+
+    pressUndo();
+
+    expect(nodeById('n1').position).toEqual(restored);
+  });
 });
