@@ -11,6 +11,7 @@ import os
 import pytest
 
 from backend.core import Edge, GraphStorage, Node
+from backend.core.models import MAX_METADATA_DEPTH
 from backend.service import graph_merge_plan
 from backend.service.attachments import AttachmentSettings
 from backend.service.graph_merge_plan import (
@@ -1304,14 +1305,12 @@ class TestDescribeInvalid:
 
 
 class TestDeepNesting:
-    def test_metadata_nested_past_the_recursion_limit_is_planned_or_refused(
-        self, storage
-    ):
+    def test_metadata_nested_past_the_depth_cap_is_rejected_or_refused(self, storage):
         import sys
 
         nested: dict = {}
         cursor = nested
-        for _ in range(sys.getrecursionlimit() + 100):
+        for _ in range(max(sys.getrecursionlimit(), MAX_METADATA_DEPTH) + 100):
             cursor["k"] = {}
             cursor = cursor["k"]
         # Nesting past MAX_METADATA_DEPTH must never be planned as an add. Where
@@ -1327,6 +1326,7 @@ class TestDeepNesting:
         else:
             assert plan.report["adds"]["nodes"]["ids"] == []
             assert plan.report["rejected"]["count"] == 1
+            assert "nests deeper than" in plan.report["rejected"]["items"][0]["message"]
             assert plan.report["committable"] is False
 
     def test_a_recursion_error_while_planning_is_a_refusal(self, storage, monkeypatch):
