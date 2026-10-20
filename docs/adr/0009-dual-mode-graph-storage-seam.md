@@ -417,8 +417,9 @@ owner — who answered it for Option A on 2026-10-14 (see Decision).
    [`PERSISTENCE_BACKENDS.md`](../PERSISTENCE_BACKENDS.md) already says every
    deployment this repository ships holds one graph per process, and
    [`CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md`](../CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md)
-   says a deployment normally serves one graph. But it sits there as an aside inside a capacity-sizing
-   section, next to the arithmetic for a process that holds several. What is
+   says a deployment normally serves one graph. But at proposal time it sat there as an aside inside a
+   capacity-sizing section, next to the arithmetic for a process that holds
+   several. What is
    proposed is elevating it to a stated property of the seam, where a
    third-party backend author reads the contract rather than the sizing notes.
 
@@ -565,8 +566,7 @@ With this proposal accepted:
 - Audit attribution gains no new guarantee, and gains an accurate
   description: an event's `graph_id` is to be read as what the caller
   declared rather than as which graph the write landed in (the recommended
-  default for sub-question 4). This ADR is where that reading is stated; no
-  consumer-facing event or attribution document states it yet. Item 4 explains
+  default for sub-question 4). This ADR and `EVENT_SUBSCRIPTIONS.md` state that reading. Item 4 explains
   why the core cannot currently promise the stronger reading, so a consumer
   of the audit trail is not left inferring it.
 - Nothing changes for an existing standalone deployment. No migration, no new

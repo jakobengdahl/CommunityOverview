@@ -1384,8 +1384,9 @@ is how the listening thread reads its channel while still noticing a stop.
 ### Sizing it: what an instance costs
 
 One instance costs **`pool_size + 1`** server connections *per backend it
-holds* — one, since a core process holds one graph — while notification is running — the pool, plus the listening
-connection that cannot go back to a pool and still be listening.
+holds* while notification is running — the pool, plus the listening
+connection that cannot go back to a pool and still be listening. A core
+process holds one backend.
 `PostgresGraphPersistenceBackend.__init__` builds its own `ConnectionPool`,
 and `start_change_notification` opens its own listening connection; nothing
 here pools or shares either across two instances of the class, so a process
@@ -1445,10 +1446,9 @@ nothing left for a `psql` session or a migration.
 Three things worth reading off that table. Raising `pool_size` costs
 `instance_count × graph_count` connections per step, not one — it is the
 fully multiplied number, which is why the default is deliberately small.
-Adding a graph to the server costs as much as adding a replica to every
-graph — the two dimensions multiply rather than add, so a deployment serving
-many small graphs reaches the ceiling far sooner than the replica count
-alone suggests. And scaling out is cheaper per
+Each dimension's step costs `pool_size + 1` times the other dimension —
+the two multiply rather than add, so a deployment serving many small graphs
+reaches the ceiling far sooner than the replica count alone suggests. And scaling out is cheaper per
 instance at a small pool than at a large one, so a deployment adding
 instances or graphs should lower `pool_size` before it raises
 `max_connections`.
