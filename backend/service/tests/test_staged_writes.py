@@ -1002,3 +1002,86 @@ def test_session_store_validates_server_only_ops(op):
     session = store.create("s", write_mode="staged")
     with pytest.raises(OpError):
         store.apply_state_op(session, op)
+
+
+# -- net metadata changes, composed endpoints, record ordering, PG locking ---
+
+
+def test_update_over_a_staged_create_removes_a_metadata_key_set_to_none(world):
+    """G7: one entry per entity holding the NET change; a merge-patch None on a
+    key of a staged create removes it from the staged doc."""
+    sid = world.staged_session()
+    with bind_session(sid):
+        world.service.add_nodes(
+            [{"id": "c", "type": "Actor", "name": "C", "metadata": {"k": 1, "j": 2}}],
+            [],
+        )
+        world.service.update_node("c", {"metadata": {"k": None}}, metadata_merge=True)
+    entry = world.layer(sid)[("node", "c")]
+    assert entry["action"] == "create"
+    assert entry["staged"]["metadata"] == {"j": 2}
+
+
+def test_an_edge_whose_endpoint_vanished_from_main_is_not_in_the_composed_view(world):
+    """G7 (§6.3): a composed edge needs both endpoints in the composed view."""
+    sid = world.staged_session()
+    with bind_session(sid):
+        world.service.update_edge("ab", {"label": "l"})
+    # b disappears from the main graph behind the session's back (cascading ab).
+    world.storage.delete_nodes(["b"], confirmed=True)
+    with bind_session(sid):
+        result = world.service.delete_edges(["ab"], confirmed=True)
+    assert result["deleted_edge_ids"] == []
+
+
+def test_choose_staged_without_a_layer_store_is_staged_unsupported():
+    """G2/G10: a deployment with no layer store refuses `staged` at the choice
+    itself, not only when a record is later written."""
+    with pytest.raises(WriteModeRefused) as exc:
+        WriteModes().choose("staged")
+    assert exc.value.code == "staged_unsupported"
+
+
+def test_a_failing_record_leaves_no_session_document_behind():
+    """G4: the staged-session record is written before the document; when it
+    fails nothing is saved - not in memory, not in the backend."""
+    backend = InMemorySessionPersistenceBackend()
+    store = SessionStore(backend)
+
+    def boom(_sid):
+        raise RuntimeError("record failed")
+
+    with pytest.raises(RuntimeError):
+        store.create("w", write_mode="staged", on_allocate=boom)
+    assert store.session_count() == 0
+    assert store.list_meta() == []
+
+
+def test_a_record_is_written_before_its_document_is_visible():
+    """G4: at the moment the record is written, no document names the session."""
+    store = SessionStore(InMemorySessionPersistenceBackend())
+    seen = []
+    store.create(
+        "w", write_mode="staged", on_allocate=lambda sid: seen.append(store.get(sid))
+    )
+    assert seen == [None]
+
+
+def test_postgres_retire_requiring_empty_takes_the_record_row_lock(world, monkeypatch):
+    """G5: the emptiness check is made under the record row's lock, so a stage on
+    another instance either committed (and is counted) or waits."""
+    backend = world.storage.layer_store
+    if type(backend).__name__ != "PostgresGraphPersistenceBackend":
+        pytest.skip("postgres only")
+    sid = world.staged_session()
+    calls = []
+    original = backend._session_status
+
+    def spy(conn, session_id, *, lock):
+        calls.append(lock)
+        return original(conn, session_id, lock=lock)
+
+    monkeypatch.setattr(backend, "_session_status", spy)
+    backend.retire(sid, require_empty=True)
+    assert calls and calls[0] is True
+    assert backend.staged_status(sid) == layer_store.STATUS_RETIRED
