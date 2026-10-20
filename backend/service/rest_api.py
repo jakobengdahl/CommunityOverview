@@ -67,6 +67,7 @@ from backend.runtime.authorization import use_request_authorization
 
 from . import attachments as attachment_ops
 from .json_response import GraphJSONRoute
+from .mutations import VALIDATION_ERROR_CODE
 from .service import GraphService
 
 if TYPE_CHECKING:
@@ -584,6 +585,18 @@ def _raise_for_access_denied(result: Dict[str, Any]) -> None:
         raise HTTPException(status_code=status, detail=detail)
 
 
+def _raise_for_invalid_update(result: Dict[str, Any]) -> None:
+    """A refused update body is 422; only an absent entity stays 404. Runs after
+    `_raise_for_access_denied`, and the mutation checks access before it looks
+    the entity up, so the status never tells an unauthorized caller anything."""
+    if result.get("success") is False and result.get("error_code") == (
+        VALIDATION_ERROR_CODE
+    ):
+        raise HTTPException(
+            status_code=422, detail=result.get("error") or result.get("message")
+        )
+
+
 async def _read_body_within_cap(
     http_request: Request, max_bytes: int, oversized_detail: str
 ) -> bytes:
@@ -790,6 +803,7 @@ def _register_node_crud_endpoints(router: APIRouter, service: GraphService) -> N
         _raise_for_access_denied(result)
         if result.get("conflict"):
             raise HTTPException(status_code=409, detail=result.get("error"))
+        _raise_for_invalid_update(result)
         if not result.get("success", True):
             raise HTTPException(status_code=404, detail=result.get("error"))
         return result
@@ -870,6 +884,7 @@ def _register_edge_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 expected_revision=request.expected_revision,
             )
         _raise_for_access_denied(result)
+        _raise_for_invalid_update(result)
         if not result.get("success", True):
             raise HTTPException(status_code=404, detail=result.get("error"))
         return result
