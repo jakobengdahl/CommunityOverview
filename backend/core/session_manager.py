@@ -709,9 +709,21 @@ class SessionManager:
             return session, False
         if self.store.session_count() >= self._max_sessions:
             raise SessionLimitReached()
+        # Materialising a session is creating it, so it takes the graph
+        # default like any created session (§5.1).
+        mode, source = self.write_modes.choose(None)
         try:
-            return self.store.get_or_create(session_id)
-        except SessionRetired:
+            return self.store.get_or_create(
+                session_id,
+                write_mode=mode,
+                write_mode_source=source,
+                on_allocate=(
+                    self.write_modes.record_staged
+                    if mode == WRITE_MODE_STAGED
+                    else None
+                ),
+            )
+        except (SessionRetired, layer_store.StagedSessionRetired):
             raise SessionNotFound() from None
 
     def write_mode_of(self, session: Session) -> Dict[str, str]:
@@ -865,7 +877,13 @@ class SessionManager:
         payload = commit(session.seq + 1)
         op = {
             "op": "graph_change_staged",
-            "entries": payload.get("entries", []),
+            # What changed, not the main-graph snapshot each entry keeps as
+            # its base: the stream reaches anyone holding the session id, and
+            # the base and main values are the diff's, read with authorization.
+            "entries": [
+                {k: v for k, v in entry.items() if k != "base"}
+                for entry in payload.get("entries", [])
+            ],
             "removals": payload.get("removals", []),
             "client_id": GRAPH_STAGING_CLIENT_ID,
         }

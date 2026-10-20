@@ -396,6 +396,7 @@ def test_an_mcp_connection_opened_in_a_session_stays_in_it(transport):
     for rpc_id, headers in ((3, {SESSION_ID_HEADER: other}), (4, None)):
         refused = _call_add(transport, mcp_session, f"x{rpc_id}", rpc_id, headers)
         assert "session_mismatch" in refused.text
+        assert staged not in refused.text
         assert _node(transport, f"x{rpc_id}") is None
     store = transport.app.state.write_modes.layer_store
     assert [e["entity_id"] for e in store.load_layer(staged)] == ["p1"]
@@ -586,6 +587,7 @@ def test_the_widget_tool_refuses_a_session_header_per_message(transport):
         3,
     )
     assert "session_not_supported" not in answered.text
+    assert '"nodes"' in answered.text
 
 
 # -- the per-message MCP helpers, authorization and boot -------------------
@@ -757,3 +759,15 @@ def test_a_retired_path_answers_exactly_like_an_unknown_one(client):
         unknown.status_code,
         unknown.json(),
     )
+
+
+def test_a_staged_default_reaches_a_session_materialised_by_rename(
+    staged_config, mock_llm_provider
+):
+    config = dataclasses.replace(staged_config, session_write_mode_default="staged")
+    with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
+        client = TestClient(create_app(config))
+    renamed = client.patch(f"/api/sessions/{UNKNOWN}", json={"name": "joined"})
+    assert renamed.json()["write_mode"] == "staged"
+    assert _add(client, {SESSION_ID_HEADER: UNKNOWN}).json()["staged"] is True
+    assert _node(client, "s1") is None

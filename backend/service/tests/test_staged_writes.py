@@ -401,6 +401,37 @@ def test_each_staging_op_is_one_sequenced_session_op(world):
     assert ops[0]["op"]["entries"][0]["session_seq"] == first["session_seq"]
 
 
+def test_the_fanned_out_op_carries_what_changed_not_the_main_graph_base(world):
+    sid = world.staged_session()
+    world.published.clear()
+    with bind_session(sid):
+        result = world.service.update_node("a", {"description": "staged"})
+    op = next(e["op"] for _, e in world.published if e.get("type") == "op")
+    assert op["entries"][0]["staged"] == {"description": "staged"}
+    assert "base" not in op["entries"][0]
+    assert all(
+        "base" not in entry for entry in world.store.ops_since(sid, 0)[0]["entries"]
+    )
+    # The writer's own answer, and the layer, keep it.
+    assert result["entries"][0]["base"]["name"] == "Alpha"
+    assert world.layer(sid)[("node", "a")]["base"]["name"] == "Alpha"
+
+
+def test_a_session_materialised_under_a_staged_default_is_staged(tmp_path):
+    backend = FileGraphPersistenceBackend(tmp_path / "g.json", staged_sessions=True)
+    storage = GraphStorage(str(tmp_path / "g.json"), persistence_backend=backend)
+    _seed(storage)
+    world = World(storage)
+    world.manager.write_modes._default = "staged"
+    session, created = world.manager.get_or_create("1111-2222-3333-4444")
+    assert created
+    assert storage.layer_store.staged_status(session.id) == "active"
+    assert (session.write_mode, session.write_mode_source) == ("staged", "inherited")
+    with bind_session(session.id):
+        assert world.service.update_node("a", {"name": "A1"})["staged"] is True
+    assert storage.get_node("a").name == "Alpha"
+
+
 def test_a_stale_expected_session_seq_stages_nothing(world):
     sid = world.staged_session()
     with bind_session(sid):

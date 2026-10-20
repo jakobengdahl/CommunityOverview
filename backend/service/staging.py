@@ -303,8 +303,11 @@ class StagedWrite:
             return {"entries": [], "removals": [], "session_seq": seq}
         store = self._manager.write_modes.layer_store
 
+        staged_entries: List[Dict[str, Any]] = []
+
         def commit(seq: int) -> Dict[str, Any]:
             stamped = [{**entry, "session_seq": seq} for entry in upserts]
+            staged_entries.extend(stamped)
             store.stage(
                 self.session_id, stamped, removals, max_entries=self._max_entries
             )
@@ -316,7 +319,7 @@ class StagedWrite:
             commit=commit,
         )
         return {
-            "entries": applied["entries"],
+            "entries": staged_entries,
             "removals": applied["removals"],
             "session_seq": applied["seq"],
         }

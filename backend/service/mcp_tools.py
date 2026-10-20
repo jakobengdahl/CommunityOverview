@@ -283,7 +283,11 @@ def _session_aware(
             # written somewhere its client does not expect.
             bound = _message_session(request)
             if inherited is not None and bound != inherited:
-                raise session_context.mismatch(inherited, bound or "none")
+                raise session_context.SessionRefused(
+                    session_context.SESSION_MISMATCH,
+                    "this MCP connection was opened in a session; every "
+                    "message on it must name that same session",
+                )
             authorization = (
                 use_request_authorization(headers=request.headers)
                 if request is not None

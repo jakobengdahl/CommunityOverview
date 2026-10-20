@@ -845,7 +845,8 @@ chat assistant's graph tools and an approved agent proposal made in the session.
 A staged write answers with the direct write's shape plus `staged: true`,
 `session_id`, `session_seq`, `entries` (the resulting layer entries) and
 `removed_entries`. Each one is a `graph_change_staged` session op on the
-session's stream. In a direct-mode session the header changes nothing. Over
+session's stream, carrying the entries without their `base` (the main-graph
+snapshot): the stream is reachable with the session id alone. In a direct-mode session the header changes nothing. Over
 MCP the header is read per message; an MCP connection opened with the header
 stays in that session, so a later message naming another session, or none, is
 refused with `session_mismatch`.

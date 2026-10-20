@@ -656,11 +656,20 @@ class SessionStore:
             self._meta_cache = None
             return session
 
-    def get_or_create(self, session_id: str) -> "tuple[Session, bool]":
+    def get_or_create(
+        self,
+        session_id: str,
+        *,
+        write_mode: str = "direct",
+        write_mode_source: str = "inherited",
+        on_allocate: Optional[Callable[[str], None]] = None,
+    ) -> "tuple[Session, bool]":
         """Return ``(session, created)``, creating it with the given id if absent.
 
         Supports the connect-by-ID / share-URL flow where a client joins a
         specific session id that may not exist server-side yet (design 3.6).
+        A session created here takes ``write_mode``; ``on_allocate`` runs
+        before its document is saved, as in ``create``.
         """
         if not is_valid_session_id(session_id):
             raise OpError(f"invalid session id: {session_id!r}")
@@ -672,7 +681,13 @@ class SessionStore:
             existing = self._sessions.get(session_id)
             if existing is not None:
                 return existing, False
-            session = Session(id=session_id)
+            session = Session(
+                id=session_id,
+                write_mode=write_mode,
+                write_mode_source=write_mode_source,
+            )
+            if on_allocate is not None:
+                on_allocate(session_id)
             self._sessions[session_id] = session
             self._rings[session_id] = deque(maxlen=self._ring_size)
             self._backend.save(session.to_dict())
