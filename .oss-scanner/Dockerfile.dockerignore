@@ -1,0 +1,13 @@
+# Used instead of the root .dockerignore when building .oss-scanner/Dockerfile.
+# Keeps the whole source tree (docs/, .github/, .git for bisection) and drops
+# only local state and installed dependencies.
+**/node_modules
+**/__pycache__
+**/.pytest_cache
+.venv
+venv
+.env
+.env.*
+!.env.example
+frontend/*/dist
+packages/*/dist
