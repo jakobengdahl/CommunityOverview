@@ -185,6 +185,32 @@ def test_collection_chat_fails_closed_when_caller_cannot_read_collection(
     assert graph_service.get_node_details(_NEW_NODE["id"]).get("success") is False
 
 
+def test_collection_chat_cannot_save_responses_when_caller_cannot_read_collection(
+    hooked_client,
+):
+    client, mock_llm, graph_service, _ = hooked_client
+    _add_kiosk_collection(graph_service)
+    mock_llm.mock_tool_calls = [
+        {
+            "name": "save_collection_response",
+            "input": {"answers": [{"field_id": "q1", "value": "yes"}]},
+        }
+    ]
+
+    response = client.post(
+        "/ui/chat",
+        json={
+            "messages": [{"role": "user", "content": "save"}],
+            "collection_short_name": "kiosk",
+        },
+        headers={ACTOR_ID_HEADER: "writer-only"},
+    )
+
+    assert response.status_code == 200
+    saved = graph_service.search_graph(query="", node_types=["CollectionResponse"])
+    assert saved["nodes"] == []
+
+
 def test_cached_collection_is_not_served_to_a_caller_who_cannot_read_it(
     hooked_client,
 ):
