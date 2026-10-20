@@ -29,12 +29,14 @@ _bound_session: ContextVar[Optional[str]] = ContextVar(
 SESSION_NOT_FOUND = "session_not_found"
 SESSION_NOT_SUPPORTED = "session_not_supported"
 SESSION_MISMATCH = "session_mismatch"
+STAGED_UNSUPPORTED = "staged_unsupported"
 
 # §16.3.
 REFUSAL_STATUS = {
     SESSION_NOT_FOUND: 404,
     SESSION_NOT_SUPPORTED: 400,
     SESSION_MISMATCH: 400,
+    STAGED_UNSUPPORTED: 422,
 }
 
 
@@ -72,6 +74,16 @@ def mismatch(first: str, second: str) -> SessionRefused:
     return SessionRefused(
         SESSION_MISMATCH,
         f"the request names two sessions, {first!r} and {second!r}",
+    )
+
+
+def sessions_unreadable() -> SessionRefused:
+    """This instance cannot read the staged-session records its graph store
+    holds, so it cannot tell which sessions stage; it acts in none."""
+    return SessionRefused(
+        STAGED_UNSUPPORTED,
+        "the graph store holds staged sessions, and staged sessions are not "
+        "enabled on this instance",
     )
 
 

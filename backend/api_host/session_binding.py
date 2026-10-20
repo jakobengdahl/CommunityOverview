@@ -84,9 +84,11 @@ class SessionBindingMiddleware:
         *,
         api_prefix: str,
         is_retired: Callable[[str], bool],
+        sessions_unreadable: Callable[[], bool] = lambda: False,
     ) -> None:
         self.app = app
         self._is_retired = is_retired
+        self._sessions_unreadable = sessions_unreadable
         self._aware = _compile(api_prefix, _API_SESSION_AWARE) + _compile(
             "", _HOST_SESSION_AWARE
         )
@@ -123,6 +125,14 @@ class SessionBindingMiddleware:
             return
 
         values = Headers(scope=scope).getlist(session_context.SESSION_ID_HEADER)
+        if (
+            (path_session is not None or values)
+            and method != "OPTIONS"
+            and self._sessions_unreadable()
+        ):
+            # Asked only for a request naming a session, so others cost nothing.
+            await _refuse(send, session_context.sessions_unreadable())
+            return
         if not values or method == "OPTIONS":
             await self.app(scope, receive, send)
             return
@@ -176,8 +186,15 @@ async def _send_json(send, status: int, payload) -> None:
 
 
 def add_session_binding_middleware(
-    app, *, api_prefix: str, is_retired: Callable[[str], bool]
+    app,
+    *,
+    api_prefix: str,
+    is_retired: Callable[[str], bool],
+    sessions_unreadable: Callable[[], bool] = lambda: False,
 ) -> None:
     app.add_middleware(
-        SessionBindingMiddleware, api_prefix=api_prefix, is_retired=is_retired
+        SessionBindingMiddleware,
+        api_prefix=api_prefix,
+        is_retired=is_retired,
+        sessions_unreadable=sessions_unreadable,
     )

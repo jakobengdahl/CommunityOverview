@@ -797,3 +797,33 @@ def test_rest_delete_nodes_in_a_staged_session_stages_a_tombstone(client):
     assert response.status_code == 200, response.text
     assert response.json().get("staged") is True
     assert _node(client, "m1") is not None
+
+
+def test_an_instance_that_cannot_read_the_stores_records_acts_in_no_session(
+    app_config, mock_llm_provider, monkeypatch
+):
+    with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
+        client = TestClient(create_app(app_config))
+    tools = client.app.state.tools_map
+    sid = client.post("/api/sessions", json={"name": "s"}).json()["id"]
+    monkeypatch.setattr(
+        client.app.state.write_modes, "store_holds_unreadable_records", lambda: True
+    )
+    deleted = client.delete(f"/api/sessions/{sid}")
+    assert deleted.status_code == 422
+    assert deleted.json()["detail"]["error"] == "staged_unsupported"
+    assert client.app.state.session_manager.get_session(sid) is not None
+    assert _add(client, {SESSION_ID_HEADER: sid}).status_code == 422
+    for result in (
+        tools["search_graph"](query="x", visualization_session_id=sid),
+        tools["delete_visualization_session"](session_id=sid, confirm=True),
+        tools["add_nodes"](
+            nodes=[{"id": "u", "type": "Actor", "name": "u"}],
+            edges=[],
+            visualization_session_id=sid,
+        ),
+    ):
+        assert result["error"] == "staged_unsupported"
+    assert _node(client, "u") is None
+    # A request naming no session is untouched.
+    assert _add(client, {}, "plain").status_code == 200

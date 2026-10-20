@@ -503,12 +503,22 @@ class StagedWrite:
             return False
         if existing.get("action") != "delete":
             return False
-        base = existing.get("base") or {}
+        # The base as first staged and the main entity as it stands now: the
+        # re-created entity composes over the latter.
         if kind == "node":
-            return not self._visible(base, graph_access)
-        return not all(
-            self._visible(layer.main_node(base.get(end) or ""), graph_access)
-            for end in ("source", "target")
+            snapshots = [existing.get("base"), layer.main_node(entity_id)]
+            return any(
+                doc is not None and not self._visible(doc, graph_access)
+                for doc in snapshots
+            )
+        snapshots = [existing.get("base"), layer.main_edge(entity_id)]
+        return any(
+            doc is not None
+            and not all(
+                self._visible(layer.main_node(doc.get(end) or ""), graph_access)
+                for end in ("source", "target")
+            )
+            for doc in snapshots
         )
 
     # -- the writes (§9.1) ----------------------------------------------------------
@@ -941,18 +951,18 @@ class SessionGate:
         if status == layer_store.STATUS_ACTIVE:
             return WRITE_MODE_STAGED
         session = self._manager.get_session(session_id)
-        if (
-            session is not None
-            and session.write_mode == WRITE_MODE_STAGED
-            and not self._manager.write_modes.supports_staged
-        ):
-            # Staged once, on a deployment that can no longer read its record:
-            # refused, never treated as direct (I2).
-            raise StagingRefused(
-                STAGED_UNSUPPORTED,
-                f"session {session_id!r} is staged, and staged sessions are not "
-                "enabled on this deployment's graph backend",
-            )
+        if session is not None and session.write_mode == WRITE_MODE_STAGED:
+            # Staged once, with no record to read now: refused, never treated
+            # as direct (I2). The record is written before the document, so
+            # this is a deployment that cannot read records, or one whose
+            # records were lost while its session documents were kept.
+            if not self._manager.write_modes.supports_staged:
+                raise StagingRefused(
+                    STAGED_UNSUPPORTED,
+                    f"session {session_id!r} is staged, and staged sessions are "
+                    "not enabled on this deployment's graph backend",
+                )
+            raise session_context.not_found(session_id)
         known = session is not None or bool(
             self._push_target_known and self._push_target_known(session_id)
         )

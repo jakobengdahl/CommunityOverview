@@ -687,6 +687,15 @@ def test_an_instance_without_staging_refuses_sessions_once_the_store_holds_recor
     assert asked == []
 
 
+def test_a_staged_session_whose_record_was_lost_is_never_written_directly(world):
+    session = world.manager.create_session("restored")
+    session.write_mode = "staged"  # the document kept, the record gone
+    with bind_session(session.id):
+        result = world.service.update_node("a", {"name": "A1"})
+    assert result["error"] == "session_not_found"
+    assert world.storage.get_node("a").name == "Alpha"
+
+
 def test_an_edge_recreated_elsewhere_is_not_incident_to_its_old_endpoint(world):
     sid = world.staged_session()
     with bind_session(sid):
@@ -991,6 +1000,30 @@ def test_re_creating_a_tombstoned_node_outside_the_narrowing_is_refused(world):
     assert result["success"] is False
     assert "keep" not in json.dumps(result)
     assert world.layer(sid)[("node", "a")]["action"] == "delete"
+
+
+def test_re_creating_a_node_that_has_since_left_the_narrowing_is_refused(world):
+    sid = _narrowed(world)
+    with bind_session(sid):
+        world.service.delete_nodes(["v"], confirmed=True)
+    world.storage.update_node(
+        "v", {"metadata": {"origin_graph_id": "g2", "secret_key": "s3cr3t"}}
+    )
+    with bind_session(sid):
+        result = world.service.add_nodes(
+            [
+                {
+                    "id": "v",
+                    "type": "Actor",
+                    "name": "V",
+                    "metadata": {"origin_graph_id": "g1"},
+                }
+            ],
+            [],
+        )
+    assert result["success"] is False
+    assert "s3cr3t" not in json.dumps(result)
+    assert world.layer(sid)[("node", "v")]["action"] == "delete"
 
 
 def test_staged_archive_of_a_node_outside_the_narrowing_stages_nothing(world):

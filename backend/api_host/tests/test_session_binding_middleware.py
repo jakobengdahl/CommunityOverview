@@ -53,3 +53,46 @@ def test_an_empty_header_is_refused_by_the_middleware_itself():
 def test_header_values_are_stripped_before_binding_and_deduping():
     seen, sent = _run("POST", "/api/nodes", [SID, " " + SID + " "])
     assert seen.get("bound") == SID
+
+
+def test_a_request_naming_a_session_is_refused_where_records_are_unreadable():
+    asked = []
+
+    def unreadable():
+        asked.append(1)
+        return True
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    mw = SessionBindingMiddleware(
+        app,
+        api_prefix="/api",
+        is_retired=lambda s: False,
+        sessions_unreadable=unreadable,
+    )
+
+    def status(path, values):
+        sent = []
+
+        async def send(m):
+            sent.append(m)
+
+        async def receive():
+            return {"type": "http.request", "body": b""}
+
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": path,
+            "headers": [(HDR, v.encode()) for v in values],
+        }
+        asyncio.run(mw(scope, receive, send))
+        return sent[0]["status"]
+
+    assert status("/api/search", [SID]) == 422
+    assert status(f"/api/sessions/{SID}", []) == 422
+    asked.clear()
+    assert status("/api/schema", []) == 204
+    assert asked == []

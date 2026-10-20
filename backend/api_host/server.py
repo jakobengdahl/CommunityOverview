@@ -117,6 +117,9 @@ def create_app(
         app,
         api_prefix=config.api_prefix,
         is_retired=lambda session_id: app.state.write_modes.is_retired(session_id),
+        sessions_unreadable=lambda: (
+            app.state.write_modes.store_holds_unreadable_records()
+        ),
     )
     _auth_active = compute_auth_active(config)
     add_auth_middleware(app, config)

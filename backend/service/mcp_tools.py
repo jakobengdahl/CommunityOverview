@@ -215,6 +215,7 @@ def _session_aware(
     is_retired: Callable[[str], bool],
     staged_status,
     message_request: Callable[[], Tuple[bool, Any]] = lambda: (False, None),
+    sessions_unreadable: Callable[[], bool] = lambda: False,
 ):
     """Wrap a tool so the session it acts in is decided once, before it runs.
 
@@ -250,6 +251,8 @@ def _session_aware(
                 raise session_context.not_supported(f"tool {name}")
             return func(*args, **kwargs)
         named = kwargs.get(key)
+        if (bound or named) and sessions_unreadable():
+            raise session_context.sessions_unreadable()
         if named is not None and not isinstance(named, str):
             raise session_context.not_found(str(named))
         if kind == "session":
@@ -522,6 +525,12 @@ def register_mcp_tools(
             return layer_store.STATUS_NONE
         return session_manager.write_modes.staged_status(session_id)
 
+    def _sessions_unreadable() -> bool:
+        return (
+            session_manager is not None
+            and session_manager.write_modes.store_holds_unreadable_records()
+        )
+
     def register_tool(func: Callable) -> Callable:
         """Register a function as both MCP tool and in tools_map."""
         wrapped = _session_aware(
@@ -529,6 +538,7 @@ def register_mcp_tools(
             lambda sid: _staged_status(sid) == layer_store.STATUS_RETIRED,
             _staged_status,
             lambda: _message_request(mcp),
+            _sessions_unreadable,
         )
         mcp.tool()(wrapped)
         tools_map[func.__name__] = wrapped
@@ -690,6 +700,7 @@ def register_mcp_tools(
             lambda sid: _staged_status(sid) == layer_store.STATUS_RETIRED,
             _staged_status,
             lambda: _message_request(mcp),
+            _sessions_unreadable,
         )
     )
 
