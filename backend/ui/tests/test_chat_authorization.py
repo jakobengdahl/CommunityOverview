@@ -141,11 +141,8 @@ def test_chat_write_by_permitted_actor_is_authorized_as_that_actor(hooked_client
     )
 
 
-def test_collection_chat_fails_closed_when_caller_cannot_read_collection(
-    hooked_client,
-):
-    client, mock_llm, graph_service, _ = hooked_client
-    graph_service.add_nodes(
+def _add_kiosk_collection(graph_service):
+    result = graph_service.add_nodes(
         nodes=[
             {
                 "id": "akc-kiosk",
@@ -163,6 +160,14 @@ def test_collection_chat_fails_closed_when_caller_cannot_read_collection(
         ],
         edges=[],
     )
+    assert result.get("success", True), result
+
+
+def test_collection_chat_fails_closed_when_caller_cannot_read_collection(
+    hooked_client,
+):
+    client, mock_llm, graph_service, _ = hooked_client
+    _add_kiosk_collection(graph_service)
     mock_llm.mock_tool_calls = [
         {"name": "add_nodes", "input": {"nodes": [_NEW_NODE], "edges": []}}
     ]
@@ -178,6 +183,30 @@ def test_collection_chat_fails_closed_when_caller_cannot_read_collection(
 
     assert response.status_code == 200
     assert graph_service.get_node_details(_NEW_NODE["id"]).get("success") is False
+
+
+def test_cached_collection_is_not_served_to_a_caller_who_cannot_read_it(
+    hooked_client,
+):
+    client, mock_llm, graph_service, _ = hooked_client
+    _add_kiosk_collection(graph_service)
+
+    def _collection_chat(actor_id):
+        mock_llm.reset()
+        return client.post(
+            "/ui/chat",
+            json={
+                "messages": [{"role": "user", "content": "hi"}],
+                "collection_short_name": "kiosk",
+            },
+            headers={ACTOR_ID_HEADER: actor_id},
+        )
+
+    assert _collection_chat("editor").status_code == 200
+    assert "Collect actors." in mock_llm.received_system_prompts[0]
+
+    assert _collection_chat("writer-only").status_code == 200
+    assert "Collect actors." not in mock_llm.received_system_prompts[0]
 
 
 def test_upload_analysis_write_by_read_only_actor_is_denied(hooked_client):

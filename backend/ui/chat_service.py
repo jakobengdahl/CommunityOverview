@@ -278,10 +278,19 @@ class ChatService:
             retried on the next message.
 
         permissions_dict maps node_type → {"create": bool, "update": bool, "delete": bool}.
-        Successful lookups are cached on this instance to avoid repeated 500-node scans.
+        Successful lookups are cached on this instance to avoid repeated 500-node scans;
+        a cached entry is served only to a caller who may read the collection node.
         """
-        if short_name in self._collection_cache:
-            return self._collection_cache[short_name]
+        cached = self._collection_cache.get(short_name)
+        if cached is not None:
+            # The cache is shared by every caller: serve it only to a caller who
+            # may read the collection node, else resolve again as this caller.
+            node_id = self._collection_nodes.get(short_name, {}).get("id")
+            if node_id and (
+                self._graph_service.get_node_details(node_id).get("success")
+                is not False
+            ):
+                return cached
         try:
             result = self._graph_service.search_graph(
                 query="", node_types=["ActiveKnowledgeCollection"], limit=500
