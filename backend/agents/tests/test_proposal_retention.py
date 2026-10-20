@@ -640,7 +640,10 @@ class TestPhaseIsolation:
             lambda self: (closed.append(self), real(self)),
         )
 
+        real_runs_close = SqliteExecutionStore.close
+
         def broken_close(self):
+            real_runs_close(self)
             raise RuntimeError("close failed")
 
         monkeypatch.setattr(SqliteExecutionStore, "close", broken_close)
