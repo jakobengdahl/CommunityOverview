@@ -116,8 +116,9 @@ class SessionBindingMiddleware:
         path = scope.get("path", "")
         path_session = self._path_session(path)
         if path_session is not None and self._is_retired(path_session):
-            # Answered as the session routes answer an id they do not hold,
-            # so a retired id reads like any unknown one.
+            # Answered as the session routes answer an id they do not hold.
+            # A route that would create an unknown id still tells the two
+            # apart, by refusing the retired one: that is never recreating it.
             await _send_json(send, 404, {"detail": "session not found"})
             return
 
@@ -158,7 +159,9 @@ async def _refuse(send, refusal: session_context.SessionRefused) -> None:
 
 
 async def _send_json(send, status: int, payload) -> None:
-    body = json.dumps(payload).encode("utf-8")
+    # FastAPI's own encoding, so a refusal here reads byte for byte like the
+    # routes' answers.
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     await send(
         {
             "type": "http.response.start",

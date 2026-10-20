@@ -343,50 +343,68 @@ def _open_mcp(client, headers=None):
     return mcp_session
 
 
-@pytest.mark.parametrize("opened_in", [None, "other"])
-def test_over_the_mcp_transport_each_call_acts_in_its_own_header_session(
-    staged_config, mock_llm_provider, opened_in
-):
+def _call_add(client, mcp_session, node_id, rpc_id, headers=None):
+    return _rpc(
+        client,
+        mcp_session,
+        "tools/call",
+        {
+            "name": "add_nodes",
+            "arguments": {
+                "nodes": [{"id": node_id, "type": "Actor", "name": node_id}],
+                "edges": [],
+            },
+        },
+        rpc_id,
+        headers,
+    )
+
+
+@pytest.fixture
+def transport(staged_config, mock_llm_provider):
     with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
         with TestClient(create_app(staged_config)) as client:
-            staged = _staged(client)
-            other = _staged(client)
-            mcp_session = _open_mcp(
-                client, {SESSION_ID_HEADER: other} if opened_in else None
-            )
-            _rpc(
-                client,
-                mcp_session,
-                "tools/call",
-                {
-                    "name": "add_nodes",
-                    "arguments": {
-                        "nodes": [{"id": "p1", "type": "Actor", "name": "p1"}],
-                        "edges": [],
-                    },
-                },
-                2,
-                {SESSION_ID_HEADER: staged},
-            )
-            store = client.app.state.write_modes.layer_store
-            assert _node(client, "p1") is None
-            assert [e["entity_id"] for e in store.load_layer(staged)] == ["p1"]
-            assert store.load_layer(other) == []
-            # A later call without the header is in no session at all.
-            _rpc(
-                client,
-                mcp_session,
-                "tools/call",
-                {
-                    "name": "add_nodes",
-                    "arguments": {
-                        "nodes": [{"id": "p2", "type": "Actor", "name": "p2"}],
-                        "edges": [],
-                    },
-                },
-                3,
-            )
-            assert _node(client, "p2") is not None
+            yield client
+
+
+def test_over_the_mcp_transport_a_call_acts_in_its_own_header_session(transport):
+    staged = _staged(transport)
+    mcp_session = _open_mcp(transport)
+    _call_add(transport, mcp_session, "p1", 2, {SESSION_ID_HEADER: staged})
+    store = transport.app.state.write_modes.layer_store
+    assert _node(transport, "p1") is None
+    assert [e["entity_id"] for e in store.load_layer(staged)] == ["p1"]
+    # A later call without the header, on a connection opened in no session,
+    # is in no session at all.
+    _call_add(transport, mcp_session, "p2", 3)
+    assert _node(transport, "p2") is not None
+
+
+def test_an_mcp_connection_opened_in_a_session_stays_in_it(transport):
+    staged = _staged(transport)
+    other = _staged(transport)
+    mcp_session = _open_mcp(transport, {SESSION_ID_HEADER: staged})
+    _call_add(transport, mcp_session, "p1", 2, {SESSION_ID_HEADER: staged})
+    for rpc_id, headers in ((3, {SESSION_ID_HEADER: other}), (4, None)):
+        refused = _call_add(transport, mcp_session, f"x{rpc_id}", rpc_id, headers)
+        assert "session_mismatch" in refused.text
+        assert _node(transport, f"x{rpc_id}") is None
+    store = transport.app.state.write_modes.layer_store
+    assert [e["entity_id"] for e in store.load_layer(staged)] == ["p1"]
+    assert store.load_layer(other) == []
+
+
+def test_a_retired_session_path_answers_byte_for_byte_like_an_unknown_one(client):
+    import asyncio
+
+    sid = _staged(client)
+    asyncio.run(client.app.state.session_manager.delete_session(sid))
+    retired = client.get(f"/api/sessions/{sid}")
+    unknown = client.get(f"/api/sessions/{UNKNOWN}")
+    assert (retired.status_code, retired.content) == (
+        unknown.status_code,
+        unknown.content,
+    )
 
 
 # -- session routes and tools ask the hook; more refusals ---------------------
@@ -538,3 +556,25 @@ def test_a_session_known_only_by_its_push_channel_writes_directly(client):
     response = _add(client, {SESSION_ID_HEADER: sid})
     assert response.status_code == 200 and "staged" not in response.json()
     assert _node(client, "s1") is not None
+
+
+def test_the_widget_tool_refuses_a_session_header_per_message(transport):
+    staged = _staged(transport)
+    mcp_session = _open_mcp(transport)
+    refused = _rpc(
+        transport,
+        mcp_session,
+        "tools/call",
+        {"name": "show_graph_widget", "arguments": {"query": "*"}},
+        2,
+        {SESSION_ID_HEADER: staged},
+    )
+    assert "session_not_supported" in refused.text
+    answered = _rpc(
+        transport,
+        mcp_session,
+        "tools/call",
+        {"name": "show_graph_widget", "arguments": {"query": "*"}},
+        3,
+    )
+    assert "session_not_supported" not in answered.text

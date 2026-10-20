@@ -272,12 +272,18 @@ def _session_aware(
     def wrapper(*args, **kwargs):
         try:
             in_message, request = message_request()
+            inherited = session_context.current_session_id()
             if not in_message:
-                return run(session_context.current_session_id(), args, kwargs)
+                return run(inherited, args, kwargs)
             # This message's own headers, for the session and for the
-            # authorization inputs alike; whatever the task inherited from
-            # the request that opened the MCP session no longer applies.
+            # authorization inputs alike. What the task inherited is the
+            # session of the request that opened the MCP connection; a
+            # connection opened in a session stays in it, so a message
+            # naming another session, or none, is refused rather than
+            # written somewhere its client does not expect.
             bound = _message_session(request)
+            if inherited is not None and bound != inherited:
+                raise session_context.mismatch(inherited, bound or "none")
             authorization = (
                 use_request_authorization(headers=request.headers)
                 if request is not None
@@ -669,7 +675,15 @@ def register_mcp_tools(
             "edges": result.get("edges", []),
         }
 
-    mcp.tool(meta=widget_tool_meta())(show_graph_widget)
+    # MCP only, not in tools_map; still decided per message like every tool.
+    mcp.tool(meta=widget_tool_meta())(
+        _session_aware(
+            show_graph_widget,
+            lambda sid: _staged_status(sid) == layer_store.STATUS_RETIRED,
+            _staged_status,
+            lambda: _message_request(mcp),
+        )
+    )
 
     @mcp.resource(
         WIDGET_RESOURCE_URI,
