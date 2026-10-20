@@ -488,9 +488,10 @@ A failed check or expectation fails the whole unit and changes nothing. A
 
 Backend obligations:
 
-- **PostgreSQL.** Two tables live in the graph's schema: one for layer entries,
-  keyed on `(session_id, kind, entity_id)`, and one for merge records keyed on
-  `merge_id`. Where the store keeps scopes apart, both tables carry the scope
+- **PostgreSQL.** Three tables live in the graph's schema: one for
+  staged-session records keyed on `session_id`, one for layer entries, keyed
+  on `(session_id, kind, entity_id)`, and one for merge records keyed on
+  `merge_id`. Where the store keeps scopes apart, all three carry the scope
   column and the same policy as the graph tables, so a layer is as isolated as
   the rows it would change. `merge` is one transaction, and it notifies inside
   it as other writes do.

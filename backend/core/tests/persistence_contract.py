@@ -37,6 +37,7 @@ What a subclass provides:
 from __future__ import annotations
 
 import copy
+import dataclasses
 import threading
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
@@ -44,6 +45,7 @@ from typing import Any, Dict, List, Sequence, Tuple
 
 import pytest
 
+import backend.core.layer_store as layer
 from backend.core.models import Edge, Node, NodeType
 from backend.core.storage import GraphStorage
 from backend.core.storage_backends import (
@@ -150,10 +152,14 @@ class InMemoryGraphPersistenceBackend:
         *,
         incremental: bool = True,
         deferred: bool = False,
+        staged: bool = False,
     ):
         self._store = store
         self._incremental = incremental
         self._deferred = deferred
+        self._staged = staged
+        store.setdefault("sessions", {})
+        store.setdefault("merges", {})
         self._lock = store.setdefault("lock", threading.Lock())
         store.setdefault("nodes", {})
         store.setdefault("edges", {})
@@ -165,6 +171,13 @@ class InMemoryGraphPersistenceBackend:
     def capabilities(self) -> BackendCapabilities:
         if not self._incremental:
             return BackendCapabilities()
+        if self._staged:
+            # The layer store's reference: a single-writer store, the shape
+            # of the file backend. A notifying store would also have to
+            # enforce revisions (§4.4), which this reference does not.
+            return BackendCapabilities(
+                incremental_writes=True, transactions=True, staged_sessions=True
+            )
         return BackendCapabilities(
             incremental_writes=True,
             transactions=True,
@@ -264,6 +277,137 @@ class InMemoryGraphPersistenceBackend:
 
     def checkpoint(self) -> None:
         pass  # nothing is deferred
+
+    # -- the layer store (staged_sessions) ------------------------------------
+    #
+    # The reference semantics of backend.core.layer_store, as plainly as they
+    # can be written: every operation builds the new state and swaps it in at
+    # the end, so a refusal part-way leaves the store as it was. A merge is
+    # one swap of graph, layer and merge record together, which is I8 in its
+    # simplest form.
+
+    def load_layer(self, session_id):
+        session_id = layer.check_session_id(session_id)
+        with self._lock:
+            session = self._store["sessions"].get(session_id)
+            return copy.deepcopy(list(session["entries"].values())) if session else []
+
+    def staged_status(self, session_id):
+        session_id = layer.check_session_id(session_id)
+        with self._lock:
+            session = self._store["sessions"].get(session_id)
+            return session["status"] if session else layer.STATUS_NONE
+
+    def layers_in_use(self):
+        with self._lock:
+            return sorted(
+                sid for sid, s in self._store["sessions"].items() if s["entries"]
+            )
+
+    def load_merge(self, merge_id):
+        merge_id = layer.check_merge_id(merge_id)
+        with self._lock:
+            return copy.deepcopy(self._store["merges"].get(merge_id))
+
+    def record_staged(self, session_id):
+        session_id = layer.check_session_id(session_id)
+        with self._lock:
+            session = self._store["sessions"].get(session_id)
+            if session is not None:
+                if session["status"] == layer.STATUS_RETIRED:
+                    raise layer.StagedSessionRetired(session_id)
+                return
+            self._swap_session(session_id, layer.STATUS_ACTIVE, {})
+
+    def retire(self, session_id):
+        session_id = layer.check_session_id(session_id)
+        with self._lock:
+            self._swap_session(session_id, layer.STATUS_RETIRED, {})
+
+    def stage(self, session_id, entries, removals=(), *, max_entries=None):
+        session_id = layer.check_session_id(session_id)
+        by_key, removed = layer.check_entries(entries, removals)
+        limit = layer.check_max_entries(max_entries)
+        with self._lock:
+            session = self._active(session_id)
+            updated = dict(session["entries"])
+            for key in removed:
+                updated.pop(key, None)
+            updated.update(by_key)
+            if limit is not None and len(updated) > limit:
+                raise layer.LayerFull(session_id, limit, len(updated))
+            self._swap_session(session_id, session["status"], updated)
+
+    def discard(self, session_id, removals=None):
+        session_id = layer.check_session_id(session_id)
+        keys = None if removals is None else layer.check_keys(removals)
+        with self._lock:
+            session = self._active(session_id)
+            present = session["entries"]
+            gone = list(present) if keys is None else [k for k in keys if k in present]
+            updated = {k: v for k, v in present.items() if k not in set(gone)}
+            self._swap_session(session_id, session["status"], updated)
+            return gone
+
+    def drop_layer(self, session_id):
+        session_id = layer.check_session_id(session_id)
+        with self._lock:
+            session = self._store["sessions"].get(session_id)
+            if session is not None:
+                self._swap_session(session_id, session["status"], {})
+
+    def merge(self, session_id, merge_id, operations, checks, removals, record):
+        session_id = layer.check_session_id(session_id)
+        merge_id = layer.check_merge_id(merge_id)
+        ops, verified, removed, caller_record = layer.check_merge_request(
+            operations, checks, removals, record
+        )
+        ops = [dataclasses.replace(op, payload=copy.deepcopy(op.payload)) for op in ops]
+        with self._lock:
+            existing = self._store["merges"].get(merge_id)
+            if existing is not None:
+                return layer.replay(existing, session_id, merge_id)
+            session = self._active(session_id)
+            nodes = dict(self._store["nodes"])
+            edges = dict(self._store["edges"])
+            layer.apply_merge_to_model(
+                nodes, edges, session["entries"], ops, verified, removed
+            )
+            revisions = [
+                layer.stored_revision(op.payload) if op.action == "upsert" else None
+                for op in ops
+            ]
+            stored = layer.build_record(
+                caller_record,
+                merge_id=merge_id,
+                session_id=session_id,
+                status=layer.MERGE_APPLIED,
+                applied=layer.applied_items(ops, revisions),
+            )
+            entries = {k: v for k, v in session["entries"].items() if k not in removed}
+            sessions = {
+                **self._store["sessions"],
+                session_id: {"status": session["status"], "entries": entries},
+            }
+            merges = {**self._store["merges"], merge_id: stored}
+            self._store.update(
+                nodes=nodes, edges=edges, sessions=sessions, merges=merges, written=True
+            )
+            return layer.MergeResult(record=copy.deepcopy(stored))
+
+    def _active(self, session_id):
+        session = self._store["sessions"].get(session_id)
+        if session is None or session["status"] != layer.STATUS_ACTIVE:
+            raise layer.StagedSessionNotActive(
+                session_id, session["status"] if session else layer.STATUS_NONE
+            )
+        return session
+
+    def _swap_session(self, session_id, status, entries):
+        self._store["sessions"] = {
+            **self._store["sessions"],
+            session_id: {"status": status, "entries": entries},
+        }
 
     # -- change notification --------------------------------------------------
 

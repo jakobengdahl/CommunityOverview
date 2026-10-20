@@ -77,6 +77,7 @@ class BackendCapabilities:
     change_notification: bool = False
     store_traversal: bool = False
     revision_enforcement: bool = False
+    staged_sessions: bool = False
 ```
 
 | Flag | Means | Consequence in `GraphStorage` |
@@ -86,6 +87,7 @@ class BackendCapabilities:
 | `change_notification` | the backend can report changes made by another instance | `GraphStorage` subscribes before its first load, holds what arrives until the load returns, then refreshes what each reported entity touches; see *Reporting external changes* |
 | `store_traversal` | `traverse` is implemented | `get_related_nodes` asks the store for the reachable ids instead of walking the in-memory graph — but only while the store is current; see *Answering a traversal from the store* |
 | `revision_enforcement` | the store assigns entity revisions and checks expectations itself; `apply_batch` takes a write token and returns revisions, and `read_write_evidence` is implemented | every write waits for the store; one the store refused outright fails at once, any other failed one is resolved on its own evidence; see *Entity revisions* |
+| `staged_sessions` | the layer store is implemented: session layers, staged-session records and merge records live next to the graph | nothing yet — the slices that stage and merge build on it; see *The layer store* |
 
 Everything defaults to `False`; `SNAPSHOT_ONLY` is that default.
 
@@ -95,8 +97,10 @@ implementing all six methods of the incremental contract is refused there
 with a `TypeError`
 naming the missing ones — better than failing on the first mutation, after
 the in-memory graph has already changed. `change_notification`,
-`store_traversal` and `revision_enforcement` are checked the same way (the
-last also requires `incremental_writes` and `transactions`), and for the same reason stated
+`store_traversal`, `revision_enforcement` and `staged_sessions` are checked
+the same way (the last two also require `incremental_writes` and
+`transactions`, and `staged_sessions` beside `change_notification` also
+requires `revision_enforcement`), and for the same reason stated
 twice over: a missing `start_change_notification` would fail at first use, and
 a missing `traverse` would not fail at all — every traversal would warn and fall back
 to the walk, quietly, for the life of the process.
@@ -547,6 +551,129 @@ that *A local write that failed* describes: that path does not exist for a
 store that enforces revisions. A backend that declares `change_notification`
 without `revision_enforcement` gets per-instance revisions, which are not
 unique across instances; `GraphStorage` warns about it at construction.
+
+## The layer store
+
+A backend declaring `staged_sessions` persists what a staged session
+([`SESSION_OVERLAY_CONTRACT.md` §7](SESSION_OVERLAY_CONTRACT.md#7-storage-seam))
+needs next to the graph: each session's **layer** (at most one entry per
+`(kind, entity_id)`), its **staged-session record** (`active` or `retired`,
+§5.3) and the **records of merges** applied from it. All three backends here
+implement it, and each only when constructed with `staged_sessions=True`;
+without it a backend declares nothing new, reads and writes nothing new, and
+its layer methods raise. Nothing in the application calls the layer store
+yet: write modes, staged writes and merges are later slices of the contract.
+
+The operations are `backend.core.layer_store.LayerStoreBackend`:
+
+```python
+def load_layer(session_id) -> list[dict]
+def stage(session_id, entries, removals=(), *, max_entries=None) -> None
+def merge(session_id, merge_id, operations, checks, removals, record) -> MergeResult
+def discard(session_id, removals=None) -> list[tuple[str, str]]
+def load_merge(merge_id) -> dict | None
+def drop_layer(session_id) -> None
+def record_staged(session_id) -> None
+def staged_status(session_id) -> "active" | "retired" | "none"
+def retire(session_id) -> None
+def layers_in_use() -> list[str]
+```
+
+- **Arguments are validated before anything is read.** A session id must
+  have the shape a session id has; a key is `("node" | "edge", id)` with a
+  non-empty id of at most 512 characters and no NUL; an entry, a payload
+  and a record must be JSON with no NUL or lone surrogate in any string.
+  Anything else raises `InvalidLayerRequest`. The store keeps an entry whole
+  and reads only its `kind`, `entity_id` and, for one check, `session_seq`.
+- **Only an active record has a layer.** `stage`, `discard` and `merge` on a
+  session without one raise `StagedSessionNotActive` (`status` says whether
+  it is `none` or `retired`). `record_staged` is idempotent for an active
+  record and raises `StagedSessionRetired` for a retired one; `retire` drops
+  the layer and marks the record retired in one unit, and records an unknown
+  id as retired. A retired record is never active again.
+- **`stage` is one unit**: upserts and removals land together, a key named
+  twice in one op is refused, and with `max_entries` an op that would leave
+  the layer holding more raises `LayerFull` and applies nothing.
+- **`merge` is one unit** (§7, §11.3). `operations` are `EntityOperation`s,
+  one per entity, each with its expectation; `checks` are `MergeCheck`s:
+  `node_exists(id)` (judged on the state the operations leave),
+  `incident_edges(node_id, edge_ids)` (the node's incident edges before the
+  operations are exactly those) and `entry_unchanged(kind, id, session_seq)`
+  (the layer still holds the entry the decision read). Every removal must
+  name an entry the layer holds. Any failure raises `MergeRaced` and nothing
+  — graph, layer or record — changes. On success the entries are removed and
+  the record stored: the caller's `record` with `merge_id`, `session_id`,
+  `status: "applied"` and `applied`, one `{kind, entity_id, action,
+  revision}` per operation with the revision the store wrote. A merge id
+  already recorded for the same session returns that record with
+  `replayed=True` and writes nothing; one recorded for another session
+  raises `MergeIdTaken`.
+- **Every merge delete must find its entity**; one that does not raises
+  `MergeRaced`. A delete with nothing left to do is left out of a merge, and
+  the file backend's recovery tells a landed delete from one that did not
+  land by the entity being gone.
+- **A single-writer store keeps the revision an upsert carries**, which the
+  instance assigned (§4.2); the file backend refuses a merge upsert whose
+  revision is missing or equal to the stored entity's, because its crash
+  recovery recognises a landed write by that revision. A store declaring
+  `revision_enforcement` assigns its own.
+
+`backend/core/tests/layer_store_contract.py` is the executable form; the
+in-memory reference backend, the file backend and the PostgreSQL backend
+(scoped and unscoped) all run it.
+
+**The file backend** keeps two sidecars beside `graph.json`:
+`<stem>.layers.json`, every record and layer, rewritten whole and atomically
+by each operation that changes one; and `<stem>.merges.ndjson`, the merge
+log, appended to. A merge follows §11.6 under the backend's lock: a `pending`
+line holding the operations, removals and record, synced; the operations as
+one journal record — the commit point; the layers file without the merged
+entries; an `applied` line. A failure while writing the journal record does
+not by itself mean the merge did not land — the error can come after the
+record is durable — so the backend re-reads the store and settles the
+pending merge on what is there: it returns the merge if it landed, raises if
+not. A failure after it does not fail the merge, which has landed: the
+remaining steps are completed before the backend accepts any other write,
+so nothing touches the merged entities in between, or at the next load if
+the process dies first. At load a pending merge is judged against the graph,
+never the journal (a checkpoint empties it): every upsert's payload present
+and every deleted entity absent means it landed and is completed; none
+present means it did not and it is marked aborted; part of it raises
+`GraphJournalError` rather than guess. So does a pending merge written
+against a different `graph.json`, an unreadable layers file, or a damaged
+line other than an interrupted last one in the merge log.
+
+**The PostgreSQL backend** creates three tables at boot, inside the
+migrating transaction and behind the same catalog guard as the others:
+`graph_staged_sessions`, `graph_layer_entries` (keyed
+`(session_id, kind, entity_id)`) and `graph_merge_records` (keyed
+`merge_id`). Each carries `scope_id` from birth and, where a scope is
+configured, the same row-level security policy as the graph tables, so a
+layer is as isolated as the rows it would change (a role that may not create
+the policies needs them provisioned; the statements are under *Keeping
+scopes apart*). The application's own predicate on these tables is stricter
+than on the graph tables: `scope_id IS NOT DISTINCT FROM` the instance's
+scope, so a session belongs to exactly the scope that recorded it — no
+scope being one — and an unscoped session is not shared with scoped
+instances the way an unscoped graph row is. To a scoped instance
+another scope's session is not there (`StagedSessionNotActive` on staging,
+discarding or merging), and it cannot take over its session id
+(`CrossScopeWriteRefused` on `record_staged` or `retire`) or reuse its merge
+id (`MergeIdTaken`). Every operation is one `READ COMMITTED` transaction, and
+every one that changes a layer locks the session's record row, so the
+changes to one session are serialised across instances. A merge first takes
+a per-merge-id advisory lock (two instances retrying one merge apply it
+once) and the save's shared lock, then the session row, the layer rows, and
+the rows its checks read — a node whose incident edges are checked `FOR UPDATE`, which is what a
+direct edge create's `FOR KEY SHARE` on its endpoints is ordered against —
+then applies the operations through the same statements as a direct write,
+removes the entries, stores the record and announces the graph changes
+inside the transaction. A connection lost at commit leaves the outcome
+open; the merge record is the evidence (`load_merge`). A role that may not
+create the tables needs them provisioned, and the boot names them; the
+statements are under *Inside the PostgreSQL backend*, after the graph's own.
+If a scope is configured and the role may not create the policies, the boot
+warns as it does for the graph tables.
 
 ## Answering a traversal from the store
 
@@ -1019,7 +1146,9 @@ the revision sequence, and grant the app role `USAGE` on the schema,
 on the sequence (`nextval` on every write, `setval` on a whole-graph save).
 A store provisioned before entity revisions needs only the sequence and its
 grant added; an app role that may create in its schema creates it itself at
-boot. The grants cover the app's
+boot. An instance run with staged sessions needs the three layer tables at
+the end of the block too, with the same table grants; one run without them
+never asks for them. The grants cover the app's
 reads and writes; they do not cover maintenance. A role that owns nothing
 cannot `ANALYZE`, and PostgreSQL answers that with a warning rather than an
 error - the backend now logs it as a WARNING, but keeping the statistics
@@ -1063,6 +1192,28 @@ CREATE INDEX graph_edges_target_idx ON <schema>.graph_edges ((doc->>'target'));
 
 -- The graph-wide revision counter (see "Entity revisions").
 CREATE SEQUENCE <schema>.graph_revision_seq;
+
+-- Only for an instance run with staged sessions (see "The layer store").
+-- The app role needs SELECT, INSERT, UPDATE, DELETE on all three.
+CREATE TABLE <schema>.graph_staged_sessions (
+  session_id text PRIMARY KEY,
+  status text NOT NULL CHECK (status IN ('active', 'retired')),
+  scope_id text
+);
+CREATE TABLE <schema>.graph_layer_entries (
+  session_id text NOT NULL,
+  kind text NOT NULL CHECK (kind IN ('node', 'edge')),
+  entity_id text NOT NULL,
+  doc jsonb NOT NULL,
+  scope_id text,
+  PRIMARY KEY (session_id, kind, entity_id)
+);
+CREATE TABLE <schema>.graph_merge_records (
+  merge_id text PRIMARY KEY,
+  session_id text NOT NULL,
+  doc jsonb NOT NULL,
+  scope_id text
+);
 ```
 
 #### Keeping scopes apart
@@ -1185,6 +1336,16 @@ ALTER TABLE <schema>.graph_nodes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE <schema>.graph_nodes FORCE ROW LEVEL SECURITY;
 ALTER TABLE <schema>.graph_edges ENABLE ROW LEVEL SECURITY;
 ALTER TABLE <schema>.graph_edges FORCE ROW LEVEL SECURITY;
+
+-- With staged sessions, the same for each layer table (see "The layer
+-- store"): graph_staged_sessions, graph_layer_entries, graph_merge_records.
+CREATE POLICY graph_layer_entries_scope_policy ON <schema>.graph_layer_entries
+  FOR ALL USING (scope_id IS NULL
+                 OR scope_id = current_setting('app.graph_scope', true));
+ALTER TABLE <schema>.graph_layer_entries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE <schema>.graph_layer_entries FORCE ROW LEVEL SECURITY;
+-- ...and likewise graph_staged_sessions_scope_policy and
+-- graph_merge_records_scope_policy on the other two.
 ```
 
 **What the upgrade itself costs.** The first boot after this change runs
