@@ -911,10 +911,10 @@ class FileGraphPersistenceBackend:
         session_id = _layer.check_session_id(session_id)
         with self._lock:
             self._ensure_layers_locked()
-            session = self._sessions.get(session_id)
-            if session is None:
+            entries = self._settled_entries_locked().get(session_id)
+            if not entries:
                 return []
-            return [copy.deepcopy(e) for e in session["entries"].values()]
+            return [copy.deepcopy(e) for e in entries.values()]
 
     def staged_status(self, session_id: str) -> str:
         session_id = _layer.check_session_id(session_id)
@@ -926,7 +926,11 @@ class FileGraphPersistenceBackend:
     def layers_in_use(self) -> List[str]:
         with self._lock:
             self._ensure_layers_locked()
-            return sorted(sid for sid, s in self._sessions.items() if s["entries"])
+            return sorted(
+                sid
+                for sid, entries in self._settled_entries_locked().items()
+                if entries
+            )
 
     def load_merge(self, merge_id: str) -> Optional[Dict[str, Any]]:
         merge_id = _layer.check_merge_id(merge_id)
@@ -1106,6 +1110,12 @@ class FileGraphPersistenceBackend:
                 if landed is not None:
                     return _layer.MergeResult(record=copy.deepcopy(landed))
                 raise
+            except BaseException:
+                # Interrupted with the outcome unknown: memory may lag the
+                # disk, so the next operation re-reads it before anything.
+                self._mirrored = False
+                self._layers_loaded = False
+                raise
             # Steps 3 and 4. The merge has landed whatever happens here.
             try:
                 self._complete_pending_locked()
@@ -1139,6 +1149,33 @@ class FileGraphPersistenceBackend:
             raise _layer.InvalidLayerRequest(
                 f"{op.kind} {op.entity_id!r}: a merge upsert carries a fresh revision"
             )
+
+    def _settled_entries_locked(self) -> Dict[str, Dict[Tuple[str, str], Any]]:
+        """Each session's entries as the reads must show them.
+
+        A pending merge is settled first, best effort. If its completion
+        cannot be written yet and it is judged landed, its removals are left
+        out all the same: the merge has applied, and a read that showed its
+        entries as still staged would show one change twice (I8).
+        """
+        pending = self._pending_merge
+        try:
+            self._settle_merge_locked()
+        except GraphJournalError:
+            raise
+        except Exception as exc:
+            logger.warning(f"could not settle a pending merge: {exc}")
+        view = {sid: s["entries"] for sid, s in self._sessions.items()}
+        if (
+            pending is not None
+            and self._pending_merge is pending
+            and self._judge_pending_locked() == "landed"
+        ):
+            removed = {tuple(key) for key in pending["removals"]}
+            sid = pending["session_id"]
+            if sid in view:
+                view[sid] = {k: v for k, v in view[sid].items() if k not in removed}
+        return view
 
     def _require_staged_sessions(self) -> None:
         if not self._staged_sessions:
@@ -1376,6 +1413,7 @@ class FileGraphPersistenceBackend:
             self._load_locked()
         except Exception as exc:
             logger.warning(f"could not re-read the store after a failed merge: {exc}")
+            self._mirrored = False
             return None
         if (
             self._pending_merge is not None
@@ -1445,9 +1483,16 @@ class FileGraphPersistenceBackend:
         self._mirrored = True
         if self._staged_sessions:
             # After the journal, so a pending merge is judged against the
-            # whole graph as it stands (§11.6).
+            # whole graph as it stands (§11.6). A refusal here leaves the
+            # backend unmirrored, as a refused journal does: every write
+            # loads again first and is refused again, so nothing lands while
+            # a pending merge is unjudged or the sidecars are unreadable.
             self._layers_loaded = False
-            self._load_layers_locked()
+            try:
+                self._load_layers_locked()
+            except BaseException:
+                self._mirrored = False
+                raise
         if self._journaled:
             data = {
                 "nodes": [json.loads(json.dumps(n)) for n in self._nodes.values()],

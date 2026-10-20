@@ -306,6 +306,85 @@ class TestTheWriteAheadMerge:
         with pytest.raises(GraphJournalError, match="two merges pending"):
             reopen(path).load_graph_data()
 
+    @pytest.mark.parametrize("then", ["upsert", "save"])
+    def test_a_refused_layers_load_refuses_every_write_after_it(
+        self, staged, path, monkeypatch, then
+    ):
+        """A merge landed and crashed before its mark; the next instance
+        cannot read the layers file once. Nothing may be written before the
+        merge is judged, or the judgement later would be against a graph the
+        write changed."""
+        crash_on(monkeypatch, staged, "_commit_sessions_locked")
+        with pytest.raises(Crash):
+            merge_a(staged)
+        after = reopen(path)
+        real = after._load_layers_locked
+        fails = {"n": 1}
+
+        def flaky():
+            if fails["n"]:
+                fails["n"] -= 1
+                raise OSError("transient read error")
+            return real()
+
+        monkeypatch.setattr(after, "_load_layers_locked", flaky)
+        with pytest.raises(OSError):
+            after.load_graph_data()
+        if then == "upsert":
+            after.apply_batch(
+                [EntityOperation.upsert_node(fresh(node_payload("a", name="Later")))]
+            )
+        else:
+            after.save_graph_data(
+                snapshot([node_payload("a", name="Later", revision=50)])
+            )
+        final = reopen(path)
+        assert final.load_merge("m1")["status"] == ls.MERGE_APPLIED
+        assert staged_keys(final) == [("node", "b")]
+
+    def test_a_damaged_layers_file_refuses_writes_too(self, staged, path):
+        staged.layers_path.write_text("{not json")
+        after = reopen(path)
+        with pytest.raises(GraphJournalError):
+            after.apply_batch([EntityOperation.upsert_node(node_payload("z"))])
+        with pytest.raises(GraphJournalError):
+            after.save_graph_data(snapshot([node_payload("z")]))
+
+    def test_reads_do_not_show_a_landed_merge_as_still_staged(
+        self, staged, path, monkeypatch
+    ):
+        def broken(sessions):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(staged, "_write_layers_file", broken)
+        merge_a(staged)
+        assert staged_keys(staged) == [("node", "b")]
+        assert staged.layers_in_use() == [A]
+        with pytest.raises(OSError):
+            staged.stage(A, [entry("node", "c")])
+        after = reopen(path)
+        assert staged_keys(after) == [("node", "b")]
+
+    def test_an_interrupt_during_the_commit_is_judged_on_disk(
+        self, staged, path, monkeypatch
+    ):
+        """The record is synced and an interrupt lands before memory follows
+        it: the next operation must re-read the disk, not judge the merge on
+        the stale mirror."""
+
+        def interrupted(op):
+            raise KeyboardInterrupt()
+
+        monkeypatch.setattr(staged, "_apply", interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            merge_a(staged)
+        monkeypatch.undo()
+        staged.stage(A, [entry("node", "c")])
+        after = reopen(path)
+        assert name_of_a(after) == "Merged"
+        assert after.load_merge("m1")["status"] == ls.MERGE_APPLIED
+        assert staged_keys(after) == [("node", "b"), ("node", "c")]
+
     def test_a_write_waits_for_a_pending_merge_to_settle(
         self, staged, path, monkeypatch
     ):
