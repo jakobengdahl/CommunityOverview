@@ -203,7 +203,7 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | `GRAPH_POSTGRES_SCHEMA` | `public` | Schema holding the graph tables; one database can serve several graphs |
 | `GRAPH_POSTGRES_POOL_SIZE` | *(backend default)* | Pooled connections per instance, on top of one dedicated `LISTEN` connection; must be at least 1 |
 | `GRAPH_POSTGRES_SCOPE` | *(unset)* | Opaque identifier tagging this instance's rows and narrowing the rows it reads (`postgres` only). Unset keeps no scopes apart; set-but-empty, or set without `GRAPH_BACKEND=postgres`, fails at boot. See [PERSISTENCE_BACKENDS.md](../docs/PERSISTENCE_BACKENDS.md) |
-| `GRAPH_STAGED_SESSIONS` | `false` | `true` lets the graph backend hold staged sessions' layers (see Staged sessions below); without it no session can be staged and no layer file or table is created. A value that is not a boolean fails at boot |
+| `GRAPH_STAGED_SESSIONS` | `false` | `true` lets the graph backend hold staged sessions' layers (see Staged sessions below); without it no session can be staged and no layer file or table is created. A value that is not a boolean fails at boot. Set it on every instance sharing a store: an instance without it refuses to boot over a store holding staged sessions, and refuses every request naming a session once another instance has staged one |
 | `SESSION_WRITE_MODE_DEFAULT` | `direct` | Write mode of a session created without one: `direct` or `staged`. `staged` without `GRAPH_STAGED_SESSIONS=true`, or any other value, fails at boot |
 | `SESSION_LAYER_MAX_ENTRIES` | `1000` | Most entries one staged session's layer holds; a staging write that would exceed it is refused with `layer_full`. Less than 1 fails at boot |
 | `ATTACHMENT_DIR` | `<graph stem>.attachments` next to the graph | Root of the node attachment store. Required for attachments with `GRAPH_BACKEND=postgres` (every instance serving the schema must share it); without it the attachment routes answer `503 attachments_unavailable` |
@@ -865,7 +865,7 @@ sequence number equals it.
 | `session_mismatch` | 400 | the request names two different sessions (header vs. path, argument or proposal) |
 | `session_seq_conflict` | 409 | `expected_session_seq` did not hold; carries `expected_session_seq` and `session_seq` |
 | `layer_full` | 422 | the write would take the layer past `SESSION_LAYER_MAX_ENTRIES`; carries `limit`. Nothing was staged |
-| `staged_unsupported` | 422 | staged mode asked for where `GRAPH_STAGED_SESSIONS` is off |
+| `staged_unsupported` | 422 | staged mode asked for where `GRAPH_STAGED_SESSIONS` is off, or a session named on an instance without it whose store holds staged sessions |
 | `write_mode_irreversible` | 409 | a staged session asked to become direct |
 | `layer_not_empty` | 409 | deleting a staged session that holds staged changes, without `discard_staged` |
 | `busy` | 409 | an op batch was being applied to the session; retry |
