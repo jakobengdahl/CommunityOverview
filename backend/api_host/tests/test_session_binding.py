@@ -640,7 +640,7 @@ def test_a_bound_header_naming_an_unknown_session_is_not_a_push(client):
     assert result["error"] == "session_not_found"
 
 
-@pytest.mark.parametrize("falsy", [0, False, [], {}])
+@pytest.mark.parametrize("falsy", ["", 0, False, [], {}])
 def test_a_falsy_non_string_session_argument_is_not_read_as_none(client, falsy):
     result = client.app.state.tools_map["add_nodes"](
         nodes=[{"id": "z", "type": "Actor", "name": "z"}],
@@ -649,6 +649,13 @@ def test_a_falsy_non_string_session_argument_is_not_read_as_none(client, falsy):
     )
     assert result["error"] == "session_not_found"
     assert client.app.state.graph_storage.get_node("z") is None
+
+
+def test_an_empty_push_argument_still_means_no_push(client):
+    result = client.app.state.tools_map["search_graph"](
+        query="x", visualization_session_id=""
+    )
+    assert "error" not in result
 
 
 def test_check_session_seq_on_an_unknown_session_raises():
@@ -773,3 +780,20 @@ def test_a_staged_session_is_never_materialised_past_the_hook(
     assert renamed.json()["write_mode"] == "direct"
     store = client.app.state.graph_storage.layer_store
     assert store.staged_status(UNKNOWN) == "none"
+
+
+def test_rest_delete_nodes_in_a_staged_session_stages_a_tombstone(client):
+    client.post(
+        "/api/nodes",
+        json={"nodes": [{"id": "m1", "type": "Actor", "name": "m1"}], "edges": []},
+    )
+    sid = _staged(client)
+    response = client.request(
+        "DELETE",
+        "/api/nodes",
+        headers={SESSION_ID_HEADER: sid},
+        json={"node_ids": ["m1"], "confirmed": True},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json().get("staged") is True
+    assert _node(client, "m1") is not None

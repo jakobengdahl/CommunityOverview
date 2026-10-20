@@ -488,6 +488,29 @@ class StagedWrite:
     def _visible(doc: Optional[Dict[str, Any]], graph_access: GraphAccessNarrowing):
         return doc is not None and access.is_node_visible(_node(doc), graph_access)
 
+    def _hides_tombstone(
+        self,
+        layer: Layer,
+        kind: str,
+        entity_id: str,
+        graph_access: GraphAccessNarrowing,
+    ) -> bool:
+        """Whether ``entity_id`` is tombstoned over a main-graph entity outside
+        the writer's view. Re-creating it would stage against that base, whose
+        metadata keys and timestamps the answer and the stream then carry."""
+        existing = layer.entry((kind, entity_id))
+        if not graph_access.enabled or existing is None:
+            return False
+        if existing.get("action") != "delete":
+            return False
+        base = existing.get("base") or {}
+        if kind == "node":
+            return not self._visible(base, graph_access)
+        return not all(
+            self._visible(layer.main_node(base.get(end) or ""), graph_access)
+            for end in ("source", "target")
+        )
+
     # -- the writes (§9.1) ----------------------------------------------------------
 
     def add_nodes(
@@ -503,7 +526,9 @@ class StagedWrite:
         for node in nodes:
             if expect_absent and layer.node(node.id) is not None:
                 raise EntityRevisionConflict("node", node.id, None, None)
-            if layer.node(node.id) is not None:
+            if layer.node(node.id) is not None or self._hides_tombstone(
+                layer, "node", node.id, graph_access
+            ):
                 return {
                     **failure,
                     "success": False,
@@ -539,7 +564,11 @@ class StagedWrite:
                 }
             if expect_absent and layer.edge_ignoring_endpoints(edge.id) is not None:
                 raise EntityRevisionConflict("edge", edge.id, None, None)
-            if layer.edge_ignoring_endpoints(edge.id) is not None:
+            if layer.edge_ignoring_endpoints(
+                edge.id
+            ) is not None or self._hides_tombstone(
+                layer, "edge", edge.id, graph_access
+            ):
                 return {
                     **failure,
                     "success": False,
@@ -724,7 +753,9 @@ class StagedWrite:
                 return not_found
             endpoints.append(value)
         edge.source, edge.target = endpoints
-        if layer.edge_ignoring_endpoints(edge.id) is not None:
+        if layer.edge_ignoring_endpoints(edge.id) is not None or self._hides_tombstone(
+            layer, "edge", edge.id, graph_access
+        ):
             return not_found
         error = edge_applicability_error(
             edge.type_str,
@@ -898,6 +929,12 @@ class SessionGate:
         """The write mode of ``session_id``, or ``session_not_found`` (§16.1)."""
         if self._manager is None:
             raise session_context.not_found(session_id)
+        if self._manager.write_modes.store_holds_unreadable_records():
+            raise StagingRefused(
+                STAGED_UNSUPPORTED,
+                "the graph store holds staged sessions, and staged sessions are "
+                "not enabled on this instance",
+            )
         status = self._manager.write_modes.staged_status(session_id)
         if status == layer_store.STATUS_RETIRED:
             raise session_context.not_found(session_id)

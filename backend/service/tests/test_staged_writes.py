@@ -652,6 +652,41 @@ def test_a_staged_session_whose_record_cannot_be_read_is_refused_not_direct(
     assert storage.get_node("a").name == "Alpha"
 
 
+@pytest.mark.parametrize("held", [False, True])
+def test_an_instance_without_staging_refuses_sessions_once_the_store_holds_records(
+    tmp_path, held
+):
+    storage = GraphStorage(str(tmp_path / "g.json"))
+    _seed(storage)
+    asked = []
+
+    def records():
+        asked.append(1)
+        return held
+
+    write_modes = WriteModes(None, unreadable_records=records)
+    manager = SessionManager(
+        SessionStore(InMemorySessionPersistenceBackend()), write_modes=write_modes
+    )
+    sid = manager.create_session("joined").id
+    service = GraphService(storage)
+    service.attach_sessions(manager)
+    with bind_session(sid):
+        result = service.update_node("a", {"name": "A1"})
+        again = service.update_node("a", {"name": "A2"})
+    if held:
+        assert result["error"] == again["error"] == "staged_unsupported"
+        assert storage.get_node("a").name == "Alpha"
+        assert len(asked) == 1  # sticky once seen
+    else:
+        assert storage.get_node("a").name == "A2"
+        assert len(asked) == 2
+    # Without a session the instance writes as before, and asks nothing.
+    asked.clear()
+    assert service.update_node("b", {"name": "B1"})["success"] is True
+    assert asked == []
+
+
 def test_an_edge_recreated_elsewhere_is_not_incident_to_its_old_endpoint(world):
     sid = world.staged_session()
     with bind_session(sid):
@@ -904,6 +939,60 @@ def test_a_staged_cascade_answers_nothing_of_an_edge_outside_the_narrowing(world
     assert world.layer(sid)[("edge", "va")]["base"]["label"] == "SECRET-LABEL"
 
 
+def _hidden_edge_tombstoned(world):
+    sid = _narrowed(world)
+    world.storage.add_edge(
+        Edge(
+            id="va",
+            source="v",
+            target="a",
+            type="RELATES_TO",
+            metadata={"SECRET_KEY_NAME": 1},
+        )
+    )
+    with bind_session(sid):
+        world.service.delete_nodes(["v"], confirmed=True)
+    return sid
+
+
+def test_re_creating_a_tombstoned_edge_outside_the_narrowing_is_refused(world):
+    sid = _hidden_edge_tombstoned(world)
+    before = world.layer(sid)
+    with bind_session(sid):
+        batch = world.service.add_nodes(
+            [],
+            [{"id": "va", "source": "w", "target": "w", "type": "RELATES_TO"}],
+        )
+        single = world.service.add_edge("w", "w", type="RELATES_TO")
+    assert batch["success"] is False
+    assert "SECRET" not in json.dumps(batch)
+    assert world.layer(sid).keys() == before.keys() | (
+        {("edge", single["edge"]["id"])} if single.get("success") else set()
+    )
+
+
+def test_re_creating_a_tombstoned_node_outside_the_narrowing_is_refused(world):
+    sid = world.staged_session()
+    with bind_session(sid):
+        world.service.delete_nodes(["a"], confirmed=True)
+    world.service._authorization_hook = Narrow()
+    with bind_session(sid):
+        result = world.service.add_nodes(
+            [
+                {
+                    "id": "a",
+                    "type": "Actor",
+                    "name": "A",
+                    "metadata": {"origin_graph_id": "g1"},
+                }
+            ],
+            [],
+        )
+    assert result["success"] is False
+    assert "keep" not in json.dumps(result)
+    assert world.layer(sid)[("node", "a")]["action"] == "delete"
+
+
 def test_staged_archive_of_a_node_outside_the_narrowing_stages_nothing(world):
     sid = _narrowed(world)
     with bind_session(sid):
@@ -1104,3 +1193,33 @@ def test_postgres_retire_requiring_empty_takes_the_record_row_lock(world, monkey
     backend.retire(sid, require_empty=True)
     assert calls and calls[0] is True
     assert backend.staged_status(sid) == layer_store.STATUS_RETIRED
+
+
+def test_a_staged_record_exists_before_the_session_document_is_saved(world):
+    world.write_modes._default = "staged"
+    seen = []
+    backend = world.store._backend
+    original = backend.save
+
+    def save(doc):
+        seen.append(world.storage.layer_store.staged_status(doc["id"]))
+        return original(doc)
+
+    backend.save = save
+    world.manager.create_session("x")
+    assert seen == ["active"]
+
+
+def test_expected_revision_on_an_absent_entity_conflicts_like_a_direct_write(world):
+    sid = world.staged_session()
+    direct = world.service.update_node("ghost", {"name": "N"}, expected_revision=3)
+    with bind_session(sid):
+        staged = world.service.update_node("ghost", {"name": "N"}, expected_revision=3)
+        staged_edge = world.service.update_edge(
+            "ghost-edge", {"label": "x"}, expected_revision=3
+        )
+    assert direct["error"] == "entity_revision_conflict"
+    assert staged["error"] == "entity_revision_conflict"
+    assert staged["current_revision"] is None
+    assert staged_edge["error"] == "entity_revision_conflict"
+    assert world.layer(sid) == {}

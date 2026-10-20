@@ -247,6 +247,7 @@ def create_app(
             graph_storage.layer_store,
             default_mode=session_settings.default_write_mode,
             max_entries=session_settings.layer_max_entries,
+            unreadable_records=graph_storage.staged_records_check,
         )
     except ValueError as exc:
         raise PersistenceConfigurationError(

@@ -257,6 +257,10 @@ def _session_aware(
             if named and is_retired(named):
                 raise session_context.not_found(named)
             return func(*args, **kwargs)
+        if named == "" and name not in _PUSHING_TOOLS:
+            # As for an empty header: a templated-out id names no session, and
+            # reading it as none would turn a staged write into a direct one.
+            raise session_context.not_found(named)
         session = session_context.reconcile(bound, named)
         if (
             name in _PUSHING_TOOLS

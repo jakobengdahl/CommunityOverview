@@ -692,6 +692,12 @@ class GraphStorage:
             return self._persistence_backend
         return None
 
+    @property
+    def staged_records_check(self) -> Optional[Callable[[], bool]]:
+        """Asks a shared backend whether its store holds staged-session records,
+        where it can tell; None for a backend no other instance writes."""
+        return getattr(self._persistence_backend, "holds_staged_sessions", None)
+
     def _init_history_store(self) -> Optional["GraphHistoryStore"]:
         """Create the append-only history sidecar for file-backed standalone mode."""
         if not isinstance(self._persistence_backend, FileGraphPersistenceBackend):

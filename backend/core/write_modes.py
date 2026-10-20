@@ -19,7 +19,7 @@ so both are re-read from the store on every resolution.
 from __future__ import annotations
 
 import threading
-from typing import Any, Optional, Set, Tuple
+from typing import Any, Callable, Optional, Set, Tuple
 
 from . import layer_store
 from .session_store import is_valid_session_id
@@ -94,6 +94,7 @@ class WriteModes:
         *,
         default_mode: str = WRITE_MODE_DIRECT,
         max_entries: int = DEFAULT_LAYER_MAX_ENTRIES,
+        unreadable_records: Optional[Callable[[], bool]] = None,
     ) -> None:
         if default_mode not in WRITE_MODES:
             raise ValueError(f"default write mode must be one of {WRITE_MODES}")
@@ -110,10 +111,26 @@ class WriteModes:
         self._max_entries = max_entries
         self._retired: Set[str] = set()
         self._lock = threading.Lock()
+        self._unreadable_records = unreadable_records
+        self._saw_unreadable = False
 
     @property
     def supports_staged(self) -> bool:
         return self._store is not None
+
+    def store_holds_unreadable_records(self) -> bool:
+        """Whether, staging being off here, the shared graph store holds
+        staged-session records another instance wrote.
+
+        Checked when a request names a session, not only at boot: an instance
+        started before any record existed would otherwise write those sessions
+        as direct. Once true it stays true, as records are never removed.
+        """
+        if self._store is not None or self._unreadable_records is None:
+            return False
+        if not self._saw_unreadable and self._unreadable_records():
+            self._saw_unreadable = True
+        return self._saw_unreadable
 
     @property
     def default_mode(self) -> str:
