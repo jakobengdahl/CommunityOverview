@@ -75,6 +75,11 @@ _SERVER_OWNED_FIELDS = frozenset({"revision"})
 _WRITE_ERRORS = (EntityRevisionConflict, GraphWriteFailed, GraphWriteOutcomeUnknown)
 
 
+# Marks a refusal of the request's content, so a transport can tell it from a
+# missing entity without matching message text.
+VALIDATION_ERROR_CODE = "validation_error"
+
+
 def write_error_result(exc: Exception, **extra: Any) -> Dict[str, Any]:
     """The refusal a direct write answers with (§16.3): an `error` code, a
     `message`, and for a conflict the entity and its `current_revision`."""
@@ -303,6 +308,7 @@ def update_node(
                 return {
                     "success": False,
                     "error": f"Error validating input: {annotation_error}",
+                    "error_code": VALIDATION_ERROR_CODE,
                 }
 
     event_context = access.build_event_context(
@@ -331,7 +337,11 @@ def update_node(
             "current_updated_at": e.current_updated_at.isoformat(),
         }
     except ValueError as e:
-        return {"success": False, "error": f"Error validating input: {e}"}
+        return {
+            "success": False,
+            "error": f"Error validating input: {e}",
+            "error_code": VALIDATION_ERROR_CODE,
+        }
     if not updated_node:
         return {"success": False, "error": f"Node with ID {node_id} not found"}
 
@@ -651,7 +661,11 @@ def update_edge(
     except _WRITE_ERRORS as e:
         return write_error_result(e)
     except ValueError as e:
-        return {"success": False, "message": str(e)}
+        return {
+            "success": False,
+            "message": str(e),
+            "error_code": VALIDATION_ERROR_CODE,
+        }
     if not updated_edge:
         return {"success": False, "error": f"Edge with ID {edge_id} not found"}
 
