@@ -211,16 +211,20 @@ function App() {
   // The visualization session ID doubles as the working-session identity.
   // It is state (not a constant) so the user can switch sessions; the SSE
   // stream and state uploads reconnect automatically when it changes.
-  const [sessionId, setSessionId] = useState(() => {
+  const [sessionId, setSessionIdState] = useState(() => {
     const urlSession = _urlParams.get('session');
     return sessionStore.isValidSessionId(urlSession)
       ? urlSession
       : api.generateVisualizationSessionId();
   });
+  // Written together with the state, not from an effect: a switch bumps the
+  // session epoch before React re-renders, and the ?view= load must not see the
+  // previous id in that gap.
   const sessionIdRef = useRef(sessionId);
-  useEffect(() => {
-    sessionIdRef.current = sessionId;
-  }, [sessionId]);
+  const setSessionId = useCallback((id) => {
+    sessionIdRef.current = id;
+    setSessionIdState(id);
+  }, []);
   // The session the page was opened into, for the ?view= load to compare against.
   const urlSessionIdRef = useRef(sessionId);
   const [drawerOpen, setDrawerOpen] = useState(false);
