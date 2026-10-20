@@ -1368,11 +1368,17 @@ describe('AnnotationToolbox pen options fold-out', () => {
 
   it('survives localStorage.setItem throwing: the choice still applies, nothing crashes', () => {
     const onFreehandOptionsChange = vi.fn();
+    const onSelectTool = vi.fn();
     const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
       throw new Error('quota');
     });
     try {
-      render(<AnnotationToolbox onFreehandOptionsChange={onFreehandOptionsChange} />);
+      render(
+        <AnnotationToolbox
+          onFreehandOptionsChange={onFreehandOptionsChange}
+          onSelectTool={onSelectTool}
+        />
+      );
       open();
       fireEvent.click(screen.getByRole('button', { name: /choose pen options/i }));
       fireEvent.click(
@@ -1383,6 +1389,8 @@ describe('AnnotationToolbox pen options fold-out', () => {
       expect(onFreehandOptionsChange).toHaveBeenLastCalledWith(
         expect.objectContaining({ color: '#4ADE80' })
       );
+      // The throw must not abort the handler before the pen is armed.
+      expect(onSelectTool).toHaveBeenCalledWith('freehand', undefined);
     } finally {
       spy.mockRestore();
     }
