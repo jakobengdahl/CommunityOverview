@@ -444,10 +444,13 @@ def main(argv: Optional[list] = None) -> int:
             store, policy, dry_run=args.dry_run, proposal_store=proposal_store
         )
     finally:
-        if store is not None:
-            store.close()
-        if proposal_store is not None:
-            proposal_store.close()
+        # Nested so a store whose close() raises cannot leave the other open.
+        try:
+            if store is not None:
+                store.close()
+        finally:
+            if proposal_store is not None:
+                proposal_store.close()
     print(json.dumps(report.to_dict(), indent=2))
     return 1 if report.proposals_failed or report.run_history_failed else 0
 
