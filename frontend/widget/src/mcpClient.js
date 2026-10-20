@@ -211,7 +211,6 @@ export async function searchGraph(query, options = {}) {
   return callTool('search_graph', {
     query,
     node_types: options.nodeTypes,
-    communities: options.communities,
     limit: options.limit || 50,
   });
 }
@@ -249,8 +248,8 @@ export async function deleteNodes(nodeIds, confirmed = false) {
   return callTool('delete_nodes', { node_ids: nodeIds, confirmed });
 }
 
-export async function getGraphStats(communities = null) {
-  return callTool('get_graph_stats', { communities });
+export async function getGraphStats() {
+  return callTool('get_graph_stats', {});
 }
 
 export async function exportGraph() {

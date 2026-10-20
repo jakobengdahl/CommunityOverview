@@ -331,3 +331,55 @@ describe('window.openai bridge', () => {
     delete window.openai;
   });
 });
+
+describe('MCP Apps bridge message handling', () => {
+  it('answers a host request that reuses a pending request id without settling the call', async () => {
+    const { callTool } = await import('../src/mcpClient');
+    const pendingCall = callTool('search_graph', {});
+    const req = await nextMessage((m) => m.method === 'tools/call');
+    let settled = false;
+    pendingCall.then(
+      () => (settled = true),
+      () => (settled = true)
+    );
+
+    fromHost({ jsonrpc: '2.0', id: req.id, method: 'ping' });
+    const reply = await nextMessage((m) => m.id === req.id && m.result !== undefined);
+    expect(reply.result).toEqual({});
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+
+    fromHost({ jsonrpc: '2.0', id: req.id, result: { structuredContent: { nodes: [] } } });
+    await expect(pendingCall).resolves.toEqual({ nodes: [] });
+  });
+
+  it('ignores a second response to a request that already settled', async () => {
+    const { callTool } = await import('../src/mcpClient');
+    const pendingCall = callTool('search_graph', {});
+    const req = await nextMessage((m) => m.method === 'tools/call');
+
+    fromHost({ jsonrpc: '2.0', id: req.id, result: { structuredContent: { nodes: [1] } } });
+    await expect(pendingCall).resolves.toEqual({ nodes: [1] });
+    const sentBefore = sent.length;
+
+    expect(() =>
+      fromHost({ jsonrpc: '2.0', id: req.id, error: { code: -32000, message: 'late' } })
+    ).not.toThrow();
+    expect(sent).toHaveLength(sentBefore);
+  });
+});
+
+describe('connectHost outside any host', () => {
+  it('returns a no-op disconnect and posts nothing on an unframed page without window.openai', async () => {
+    Object.defineProperty(window, 'parent', { value: window, configurable: true });
+    const { connectHost } = await import('../src/mcpClient');
+    const onToolResult = vi.fn();
+
+    const disconnect = await connectHost({ onToolResult });
+
+    expect(disconnect).toBeTypeOf('function');
+    expect(() => disconnect()).not.toThrow();
+    expect(sent).toEqual([]);
+    expect(addedListeners.filter(([type]) => type === 'message')).toEqual([]);
+  });
+});

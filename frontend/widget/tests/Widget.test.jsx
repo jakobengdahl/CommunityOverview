@@ -457,6 +457,38 @@ describe('Host-delivered tool result', () => {
     expect(screen.getByTestId('node-count')).toHaveTextContent('0 nodes');
   });
 
+  it('disconnects from the host when unmounted after the connection is established', async () => {
+    const disconnect = vi.fn();
+    mcp.connectHost.mockResolvedValue(disconnect);
+
+    const { unmount } = render(<Widget />);
+    await waitFor(() => expect(mcp.connectHost).toHaveBeenCalled());
+    await act(async () => {});
+    unmount();
+
+    expect(disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('disconnects as soon as a connection that resolves after unmount arrives', async () => {
+    const disconnect = vi.fn();
+    let resolveConnect;
+    mcp.connectHost.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveConnect = resolve;
+        })
+    );
+
+    const { unmount } = render(<Widget />);
+    await waitFor(() => expect(mcp.connectHost).toHaveBeenCalled());
+    unmount();
+    expect(disconnect).not.toHaveBeenCalled();
+
+    await act(async () => resolveConnect(disconnect));
+
+    expect(disconnect).toHaveBeenCalledTimes(1);
+  });
+
   it('does not connect to a host when MCP is unavailable', () => {
     mcp.isMCPAvailable.mockReturnValue(false);
     render(<Widget />);
