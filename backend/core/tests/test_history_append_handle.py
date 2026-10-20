@@ -11,6 +11,10 @@ G5 concurrent appenders neither lose nor duplicate nor tear records
 G6 the file is opened once for N appends (the cost this change removes)
 G7 a torn tail (partial write, crash) is never glued onto by the next record:
    the next record and get_recent stay readable
+G9 a compaction rename that lands while an append waits for the OS lock never
+   sends the record to the unlinked inode: it lands in the live file
+G10 a failing append releases its resources (guard fd, handle, lock) and the
+    caller always sees the write's own exception, never a cleanup error
 G8 close() waits for an in-flight append; a failing handle.close() and a failing
    compaction never fail the caller
 """
@@ -522,4 +526,135 @@ def test_compaction_failure_does_not_fail_the_append(path, monkeypatch):
     store.append_record(_rec(0))
     store.append_record(_rec(1))
     assert _ids(path) == ["evt-0", "evt-1"]
+    store.close()
+
+
+def test_rename_landing_before_the_lock_is_acquired_does_not_lose_the_record(
+    path, monkeypatch
+):
+    store = GraphHistoryStore(path)
+    store.append_record(_rec(0))
+    real_lock = history_store._lock_file
+    renamed = []
+
+    def lock_after_rename(f, exclusive=True):
+        if not renamed:
+            # Another process's compaction finishes while this append waits
+            # for the lock: the held handle is now an unlinked inode.
+            renamed.append(1)
+            replacement = path.with_name("replacement.tmp")
+            replacement.write_text(json.dumps(_rec(0)) + "\n")
+            os.rename(replacement, path)
+        real_lock(f, exclusive=exclusive)
+
+    monkeypatch.setattr(history_store, "_lock_file", lock_after_rename)
+    store.append_record(_rec(1))
+    monkeypatch.undo()
+    assert _ids(path) == ["evt-0", "evt-1"]
+    # The reopened handle is the live file: the next append lands there too.
+    store.append_record(_rec(2))
+    assert _ids(path) == ["evt-0", "evt-1", "evt-2"]
+    store.close()
+
+
+def test_rename_before_the_lock_still_guards_against_a_torn_tail(path, monkeypatch):
+    store = GraphHistoryStore(path)
+    store.append_record(_rec(0))
+    real_lock = history_store._lock_file
+    renamed = []
+
+    def lock_after_rename(f, exclusive=True):
+        if not renamed:
+            renamed.append(1)
+            replacement = path.with_name("replacement.tmp")
+            replacement.write_bytes(json.dumps(_rec(0)).encode() + b'\n{"event_id": "x')
+            os.rename(replacement, path)
+        real_lock(f, exclusive=exclusive)
+
+    monkeypatch.setattr(history_store, "_lock_file", lock_after_rename)
+    store.append_record(_rec(1))
+    monkeypatch.undo()
+    assert [r["event_id"] for r in store.get_recent()] == ["evt-1", "evt-0"]
+    store.close()
+
+
+def test_failed_write_closes_the_guard_fd_it_duplicated(path, monkeypatch):
+    store = GraphHistoryStore(path)
+    store.append_record(_rec(0))
+    store._append_handle = _FlakyHandle(store._append_handle)
+    duped, closed = [], []
+    real_dup, real_close = os.dup, os.close
+
+    def spy_dup(fd):
+        new = real_dup(fd)
+        duped.append(new)
+        return new
+
+    def spy_close(fd):
+        closed.append(fd)
+        return real_close(fd)
+
+    monkeypatch.setattr(history_store.os, "dup", spy_dup)
+    monkeypatch.setattr(history_store.os, "close", spy_close)
+    with pytest.raises(OSError, match="disk full"):
+        store.append_record(_rec(1))
+    monkeypatch.undo()
+    assert len(duped) == 1
+    assert duped[0] in closed
+
+
+def test_failed_dup_does_not_mask_the_write_error_or_wedge_the_store(path, monkeypatch):
+    store = GraphHistoryStore(path)
+    store.append_record(_rec(0))
+    store._append_handle = _FlakyHandle(store._append_handle)
+
+    def no_fds(fd):
+        raise OSError("too many open files")
+
+    monkeypatch.setattr(history_store.os, "dup", no_fds)
+    with pytest.raises(OSError, match="disk full"):
+        store.append_record(_rec(1))
+    monkeypatch.undo()
+    assert store._append_handle is None
+    store.append_record(_rec(2))
+    assert _ids(path) == ["evt-0", "evt-2"]
+    store.close()
+
+
+def test_failing_unlock_on_the_failure_path_does_not_mask_the_write_error(
+    path, monkeypatch
+):
+    store = GraphHistoryStore(path)
+    store.append_record(_rec(0))
+    store._append_handle = _FlakyHandle(store._append_handle)
+
+    def bad_unlock(f):
+        raise OSError("unlock failed")
+
+    monkeypatch.setattr(history_store, "_unlock_file", bad_unlock)
+    with pytest.raises(OSError, match="disk full"):
+        store.append_record(_rec(1))
+    monkeypatch.undo()
+    assert store._append_handle is None
+    store.append_record(_rec(2))
+    assert _ids(path) == ["evt-0", "evt-2"]
+    store.close()
+
+
+def test_failing_lock_drops_the_handle_and_the_next_append_succeeds(path, monkeypatch):
+    store = GraphHistoryStore(path)
+    store.append_record(_rec(0))
+    inner = store._append_handle
+
+    def bad_lock(f, exclusive=True):
+        raise OSError("lock failed")
+
+    monkeypatch.setattr(history_store, "_lock_file", bad_lock)
+    with pytest.raises(OSError, match="lock failed"):
+        store.append_record(_rec(1))
+    monkeypatch.undo()
+    assert store._append_handle is None
+    assert inner.closed
+    store.append_record(_rec(2))
+    assert _ids(path) == ["evt-0", "evt-2"]
     store.close()
