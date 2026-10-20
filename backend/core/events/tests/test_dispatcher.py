@@ -532,3 +532,62 @@ class TestDeepMetadataDelivery:
         dispatcher.dispatch(create_event(after=after))
 
         assert delivered[0].entity.after == after
+
+    def test_before_patch_and_origin_are_isolated_per_subscriber(self):
+        storage = MockStorage(
+            [
+                create_subscription_node("sub-1", "One", webhook_url="https://a.com"),
+                create_subscription_node("sub-2", "Two", webhook_url="https://b.com"),
+            ]
+        )
+        dispatcher = EventDispatcher(storage)
+        delivered = []
+
+        def deliver(event, url):
+            event.entity.before["k"]["x"].append("mutated")
+            event.entity.patch["k"]["x"].append("mutated")
+            event.origin.event_origin = f"changed-by-{url}"
+            delivered.append(event)
+
+        dispatcher.set_delivery_callback(deliver)
+        event = create_event(
+            event_type=EventType.NODE_UPDATE,
+            event_origin="original",
+            before={"k": {"x": []}},
+            after={"k": {"x": [1]}},
+        )
+        event.entity.patch = {"k": {"x": []}}
+
+        dispatcher.dispatch(event)
+
+        assert delivered[1].entity.before == {"k": {"x": ["mutated"]}}
+        assert delivered[1].entity.patch == {"k": {"x": ["mutated"]}}
+        assert delivered[1].origin.event_origin == "changed-by-https://b.com"
+        assert event.entity.before == {"k": {"x": []}}
+        assert event.entity.patch == {"k": {"x": []}}
+        assert event.origin.event_origin == "original"
+
+    def test_absent_payloads_stay_absent(self):
+        storage = MockStorage([create_subscription_node("sub-1", "All")])
+        dispatcher = EventDispatcher(storage)
+        delivered = []
+        dispatcher.set_delivery_callback(lambda e, u: delivered.append(e))
+
+        dispatcher.dispatch(create_event(EventType.NODE_CREATE, before=None))
+        delete = create_event(EventType.NODE_DELETE, before={"a": 1})
+        delete.entity.after = None
+        dispatcher.dispatch(delete)
+
+        assert delivered[0].entity.before is None and delivered[0].entity.patch is None
+        assert delivered[1].entity.after is None
+
+    def test_dict_key_order_is_preserved(self):
+        storage = MockStorage([create_subscription_node("sub-1", "All")])
+        dispatcher = EventDispatcher(storage)
+        delivered = []
+        dispatcher.set_delivery_callback(lambda e, u: delivered.append(e))
+
+        dispatcher.dispatch(create_event(after={"z": {"b": 1, "a": 2}, "y": 0}))
+
+        after = delivered[0].entity.after
+        assert list(after) == ["z", "y"] and list(after["z"]) == ["b", "a"]
