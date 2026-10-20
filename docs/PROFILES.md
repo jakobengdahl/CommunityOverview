@@ -489,12 +489,19 @@ identity_status:                confirmed | not_confirmed | potential | unknown
 
 ## System Node Types
 
-Certain node types are always present regardless of profile:
+The loader injects these node types from code (`SYSTEM_NODE_TYPES` in `backend/config/config_loader.py`) on every load, regardless of profile:
 
-- **SavedView** — Saved graph view snapshots (auto-injected if missing)
-- **VisualizationView** — Legacy saved views (auto-injected if missing)
+- **SavedView** — Saved graph view snapshots
+- **VisualizationView** — Legacy saved views
+- **EventSubscription** — Webhook subscription for graph mutation events
+- **Agent** — AI agent configuration
+- **Skill** — Reusable AI skill definition
+- **ActiveKnowledgeCollection** — Structured data-gathering collection configuration
+- **CollectionResponse** — A single submission gathered by an ActiveKnowledgeCollection
 
-Other system types (Agent, EventSubscription) should be defined in each profile's schema config if needed.
+Do not declare these in a profile's `schema_config.json`: a profile's own declaration of a system type is removed at load time (with a warning) and replaced by the code-managed definition, so it has no effect.
+
+To omit a system type from a profile, list its name in `system.disabled_node_types`, for example `"system": {"disabled_node_types": ["Skill"]}`. Names not in the list above are logged as unrecognised and ignored.
 
 ## Toolbar Layout
 
