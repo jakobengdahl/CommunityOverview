@@ -596,6 +596,7 @@ class StagedWrite:
                 return {
                     "success": False,
                     "error": f"Error validating input: {annotation_error}",
+                    "error_code": "validation_error",
                 }
         updated = _doc(
             build_node_update(current, updates, metadata_merge=metadata_merge)

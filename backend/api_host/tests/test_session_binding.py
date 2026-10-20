@@ -288,3 +288,15 @@ def test_staged_sessions_cannot_be_turned_off_once_used(
     off = dataclasses.replace(staged_config, graph_staged_sessions="false")
     with pytest.raises(PersistenceConfigurationError, match="GRAPH_STAGED_SESSIONS"):
         build_persistence_backend(off)
+
+
+def test_an_invalid_staged_patch_is_422_like_a_direct_one(client):
+    sid = _staged(client)
+    _add(client, {})
+    response = client.patch(
+        "/api/nodes/s1",
+        headers={SESSION_ID_HEADER: sid},
+        json={"updates": {"description": "x" * 2001}},
+    )
+    assert response.status_code == 422
+    assert client.app.state.graph_storage.layer_store.load_layer(sid) == []

@@ -293,7 +293,11 @@ def update_node(
                 "current_updated_at": e.current_updated_at.isoformat(),
             }
         except ValueError as e:
-            return {"success": False, "error": f"Error validating input: {e}"}
+            return {
+                "success": False,
+                "error": f"Error validating input: {e}",
+                "error_code": VALIDATION_ERROR_CODE,
+            }
     target_node = storage.get_node(node_id)
     if decision.graph_access.enabled and not access.is_node_visible(
         target_node, decision.graph_access
@@ -638,7 +642,11 @@ def update_edge(
         except EntityRevisionConflict as e:
             return write_error_result(e)
         except ValueError as e:
-            return {"success": False, "message": str(e)}
+            return {
+                "success": False,
+                "message": str(e),
+                "error_code": VALIDATION_ERROR_CODE,
+            }
     if decision.graph_access.enabled and not access.is_edge_visible(
         storage.edges.get(edge_id), storage, decision.graph_access
     ):
