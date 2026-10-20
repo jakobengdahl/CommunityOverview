@@ -19,9 +19,11 @@ logger = logging.getLogger(__name__)
 def check_deep(**startup_diagnostics_kwargs: Any) -> Dict[str, Any]:
     """hc-03: live end-to-end smoke check (config, graph storage, LLM key).
 
-    Re-runs the same checks build_startup_diagnostics performs at startup,
-    but live per-request rather than relying on the value cached in
-    app.state.startup_diagnostics at process start.
+    Re-runs the same checks build_startup_diagnostics performs at startup
+    rather than relying on the value cached in app.state.startup_diagnostics
+    at process start. This function does no caching of its own; the
+    /healthz/deep route wraps it in `_cached_probe`, so a request can see a
+    result up to `_HEALTHZ_CACHE_SECONDS` (5 s) old.
     """
     from backend.api_host.diagnostics import build_startup_diagnostics
 

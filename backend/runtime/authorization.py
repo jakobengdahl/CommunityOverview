@@ -81,7 +81,12 @@ class GraphAuthorizationHook(Protocol):
 
 
 class DefaultGraphAuthorizationHook:
-    """Standalone-safe default hook with optional environment narrowing."""
+    """Standalone-safe default hook, driven only by the authorization mode env var.
+
+    Its only configuration is COMMUNITYOVERVIEW_AUTHORIZATION_MODE (permissive,
+    read-only or deny-all). It never narrows which graphs are visible: the
+    decisions it returns carry the default, disabled GraphAccessNarrowing.
+    """
 
     def evaluate(
         self, context: GraphAuthorizationContext

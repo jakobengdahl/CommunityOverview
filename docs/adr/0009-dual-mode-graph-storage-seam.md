@@ -108,10 +108,7 @@ two different ways. The owner settled it for Option A (see Decision).
   pool on every construction, and once change notification is running — which
   this backend declares, so a server process always starts it — it also holds
   its own listening connection, opened by `start_change_notification` rather
-  than by the constructor. (That document's own sentence attributes both to
-  `__init__`; the arithmetic it draws from them is unaffected, because a
-  server process always starts notification, but the constructor is not where
-  the second connection opens.) Nothing shares either across two of them, so
+  than by the constructor. Nothing shares either across two of them, so
   a process holding N graphs holds N of both. [`PERSISTENCE_BACKENDS.md`](../PERSISTENCE_BACKENDS.md)
   ("Sizing it: what an instance costs") gives the multiplier as
   `instance_count × (pool_size + 1) × graph_count`, which at the default
@@ -420,8 +417,9 @@ owner — who answered it for Option A on 2026-10-14 (see Decision).
    [`PERSISTENCE_BACKENDS.md`](../PERSISTENCE_BACKENDS.md) already says every
    deployment this repository ships holds one graph per process, and
    [`CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md`](../CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md)
-   says a deployment normally serves one graph. But it sits there as an aside inside a capacity-sizing
-   section, next to the arithmetic for a process that holds several. What is
+   says a deployment normally serves one graph. But at proposal time it sat there as an aside inside a
+   capacity-sizing section, next to the arithmetic for a process that holds
+   several. What is
    proposed is elevating it to a stated property of the seam, where a
    third-party backend author reads the contract rather than the sizing notes.
 
@@ -568,8 +566,7 @@ With this proposal accepted:
 - Audit attribution gains no new guarantee, and gains an accurate
   description: an event's `graph_id` is to be read as what the caller
   declared rather than as which graph the write landed in (the recommended
-  default for sub-question 4). This ADR is where that reading is stated; no
-  consumer-facing event or attribution document states it yet. Item 4 explains
+  default for sub-question 4). This ADR and `EVENT_SUBSCRIPTIONS.md` state that reading. Item 4 explains
   why the core cannot currently promise the stronger reading, so a consumer
   of the audit trail is not left inferring it.
 - Nothing changes for an existing standalone deployment. No migration, no new

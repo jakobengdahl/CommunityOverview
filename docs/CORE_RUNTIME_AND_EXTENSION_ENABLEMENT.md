@@ -115,13 +115,13 @@ Target outcomes:
 - clear separation between shared application settings and per-context settings
 - safer loading of context-specific graph, schema, prompt, and auth-related configuration
 - easier automation of context provisioning outside the core
-- support for per-process graph or workspace configuration within a shared hosted environment, not only one-config-per-deployment assumptions
+- support for per-process graph configuration (and workspace context within it) within a shared hosted environment, not only one-config-per-deployment assumptions
 
 Likely core changes:
 - stronger config layering rules
 - explicit context propagation where needed
 - validation for context-scoped configuration inputs
-- boundaries between context metadata, graph selection, and authorization policy
+- boundaries between context metadata, graph context, and authorization policy
 
 ### E. Authentication and authorization seams
 The core should make it easier to integrate stronger access models for embedding systems.
