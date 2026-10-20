@@ -217,6 +217,12 @@ function App() {
       ? urlSession
       : api.generateVisualizationSessionId();
   });
+  const sessionIdRef = useRef(sessionId);
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
+  // The session the page was opened into, for the ?view= load to compare against.
+  const urlSessionIdRef = useRef(sessionId);
   const [drawerOpen, setDrawerOpen] = useState(false);
   // Independent viewport signals (WAVE 0 mobile-shell enabler) — isMobile is a
   // width breakpoint, isCoarsePointer is an input-type signal; neither implies
@@ -1069,6 +1075,8 @@ function App() {
         await loadUrlSavedView({
           name: urlViewName,
           sessionBootstrap: urlSessionBootstrapRef.current,
+          sessionId: urlSessionIdRef.current,
+          getCurrentSessionId: () => sessionIdRef.current,
           getSavedView: api.getSavedView,
           applyView: (result) => {
             const positioned = result.nodes.map((n) =>

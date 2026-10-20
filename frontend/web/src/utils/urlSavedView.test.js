@@ -16,6 +16,7 @@ function deferred() {
   return { promise, release: (v) => release(v), reject: (e) => fail(e) };
 }
 
+let currentSession = 's1';
 const view = { success: true, nodes: [{ id: 'v1' }], edges: [] };
 
 // Models App: the ?session= load paints the canvas when it settles, the view is
@@ -24,11 +25,18 @@ function harness() {
   const canvas = [];
   const getSavedView = vi.fn(async () => view);
   const applyView = vi.fn(() => canvas.push('view'));
-  return { canvas, getSavedView, applyView };
+  return {
+    canvas,
+    getSavedView,
+    applyView,
+    sessionId: 's1',
+    getCurrentSessionId: () => currentSession,
+  };
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
+  currentSession = 's1';
 });
 
 describe('loadUrlSavedView', () => {
@@ -85,5 +93,21 @@ describe('loadUrlSavedView', () => {
     h.getSavedView.mockResolvedValue({ success: false });
     expect(await loadUrlSavedView({ name: 'v', sessionBootstrap: null, ...h })).toBe(false);
     expect(h.applyView).not.toHaveBeenCalled();
+  });
+
+  it('drops the view when the user left the URL session while its bootstrap was pending', async () => {
+    const h = harness();
+    const gate = deferred();
+    const done = loadUrlSavedView({ name: 'v', sessionBootstrap: gate.promise, ...h });
+    currentSession = 's2';
+    gate.release();
+    expect(await done).toBe(false);
+    expect(h.getSavedView).not.toHaveBeenCalled();
+  });
+
+  it('still applies the view when the bootstrap itself resets session-scoped state', async () => {
+    const h = harness();
+    const session = Promise.resolve().then(() => switchSession());
+    expect(await loadUrlSavedView({ name: 'v', sessionBootstrap: session, ...h })).toBe(true);
   });
 });
