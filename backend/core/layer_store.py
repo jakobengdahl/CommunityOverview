@@ -120,6 +120,24 @@ class LayerFull(LayerStoreError):
         )
 
 
+class LayerNotEmpty(LayerStoreError):
+    """`retire(require_empty=True)` met a layer that holds entries (§13:
+    `layer_not_empty`).
+
+    Checked inside the unit that would retire, so an entry staged by anyone
+    up to that moment is seen, and nothing was retired or dropped.
+    """
+
+    code = "layer_not_empty"
+
+    def __init__(self, session_id: str, entries: int):
+        self.session_id = session_id
+        self.entries = entries
+        super().__init__(
+            f"layer of session {session_id!r} holds {entries} staged entries"
+        )
+
+
 class MergeRaced(LayerStoreError):
     """An expectation or check failed inside the merge unit (§11.3).
 
@@ -269,10 +287,12 @@ class LayerStoreBackend(Protocol):
     def staged_status(self, session_id: str) -> str:
         """`active`, `retired` or `none`."""
 
-    def retire(self, session_id: str) -> None:
+    def retire(self, session_id: str, *, require_empty: bool = False) -> None:
         """Drop the layer and mark the record retired, as one unit. Retiring
         an id with no record records it retired, so it can never be created
-        later either."""
+        later either. With `require_empty`, a layer holding entries is
+        refused with LayerNotEmpty inside that unit, and nothing changes -
+        so a delete never drops work staged after its caller looked (I11)."""
 
     def layers_in_use(self) -> List[str]:
         """Ids of the sessions whose layers are not empty."""

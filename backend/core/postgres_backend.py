@@ -2050,10 +2050,20 @@ class PostgresGraphPersistenceBackend:
 
         self._run_layer(work)
 
-    def retire(self, session_id: str) -> None:
+    def retire(self, session_id: str, *, require_empty: bool = False) -> None:
         session_id = layer_store.check_session_id(session_id)
 
         def work(conn):
+            if require_empty:
+                # The record row first, FOR UPDATE, as every layer write
+                # takes it: a stage on another instance has then either
+                # committed, and is counted here, or waits for this unit.
+                status = self._session_status(conn, session_id, lock=True)
+                if status == layer_store.STATUS_RETIRED:
+                    return
+                held = len(self._layer_entries(conn, session_id, False))
+                if held:
+                    raise layer_store.LayerNotEmpty(session_id, held)
             scope_pred, pred_params = self._conflict_scope("graph_staged_sessions")
             row = conn.execute(
                 sql.SQL(

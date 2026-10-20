@@ -319,9 +319,14 @@ class InMemoryGraphPersistenceBackend:
                 return
             self._swap_session(session_id, layer.STATUS_ACTIVE, {})
 
-    def retire(self, session_id):
+    def retire(self, session_id, *, require_empty=False):
         session_id = layer.check_session_id(session_id)
         with self._lock:
+            session = self._store["sessions"].get(session_id)
+            if session is not None and session["status"] == layer.STATUS_RETIRED:
+                return
+            if require_empty and session is not None and session["entries"]:
+                raise layer.LayerNotEmpty(session_id, len(session["entries"]))
             self._swap_session(session_id, layer.STATUS_RETIRED, {})
 
     def stage(self, session_id, entries, removals=(), *, max_entries=None):

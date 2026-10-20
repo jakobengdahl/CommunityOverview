@@ -970,13 +970,15 @@ class FileGraphPersistenceBackend:
                 {session_id: {"status": _layer.STATUS_ACTIVE, "entries": {}}}
             )
 
-    def retire(self, session_id: str) -> None:
+    def retire(self, session_id: str, *, require_empty: bool = False) -> None:
         session_id = _layer.check_session_id(session_id)
         with self._lock:
             self._begin_layer_write_locked()
             session = self._sessions.get(session_id)
             if session is not None and session["status"] == _layer.STATUS_RETIRED:
                 return
+            if require_empty and session is not None and session["entries"]:
+                raise _layer.LayerNotEmpty(session_id, len(session["entries"]))
             self._commit_sessions_locked(
                 {session_id: {"status": _layer.STATUS_RETIRED, "entries": {}}}
             )

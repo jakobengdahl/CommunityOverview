@@ -575,7 +575,7 @@ def load_merge(merge_id) -> dict | None
 def drop_layer(session_id) -> None
 def record_staged(session_id) -> None
 def staged_status(session_id) -> "active" | "retired" | "none"
-def retire(session_id) -> None
+def retire(session_id, *, require_empty=False) -> None
 def layers_in_use() -> list[str]
 ```
 
@@ -590,7 +590,10 @@ def layers_in_use() -> list[str]
   it is `none` or `retired`). `record_staged` is idempotent for an active
   record and raises `StagedSessionRetired` for a retired one; `retire` drops
   the layer and marks the record retired in one unit, and records an unknown
-  id as retired. A retired record is never active again.
+  id as retired. With `require_empty`, a layer holding entries raises
+  `LayerNotEmpty` inside that unit and nothing changes - a session delete
+  uses it so it never drops work staged after it looked. A retired record is
+  never active again.
 - **`stage` is one unit**: upserts and removals land together, a key named
   twice in one op is refused, and with `max_entries` an op that would leave
   the layer holding more raises `LayerFull` and applies nothing.
