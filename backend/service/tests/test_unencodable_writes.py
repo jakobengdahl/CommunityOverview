@@ -358,7 +358,7 @@ class TestDeepMetadata:
             },
         )
 
-        assert response.status_code == 404  # how PATCH reports a validation error
+        assert response.status_code == 422
         assert "nests deeper" in response.json()["detail"]
         assert _restarted(storage, path).nodes["u"].metadata == {"keep": 1}
 
@@ -371,7 +371,7 @@ class TestDeepMetadata:
             {"updates": {"extra": _nested(MAX_METADATA_DEPTH)}},
         )
 
-        assert response.status_code == 404
+        assert response.status_code == 422
         assert storage.nodes["u"].metadata == {}
 
     def test_nesting_through_lists_counts_too(self, client, storage):
@@ -391,7 +391,7 @@ class TestDeepMetadata:
             {"updates": {"metadata": _nested(MAX_METADATA_DEPTH + 1)}},
         )
 
-        assert response.status_code == 404
+        assert response.status_code == 422
         assert storage.edges["e"].metadata == {}
 
     def test_a_whole_graph_import_past_the_cap_is_refused(self, client, storage):
