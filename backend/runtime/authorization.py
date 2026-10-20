@@ -12,6 +12,7 @@ from backend.runtime.request_context import (
     get_request_actor_context,
     get_request_scope_context,
 )
+from backend.runtime.session_context import current_session_id
 
 AUTHORIZATION_MODE_ENV = "COMMUNITYOVERVIEW_AUTHORIZATION_MODE"
 AUTHORIZATION_MODE_PERMISSIVE = "permissive"
@@ -20,6 +21,13 @@ AUTHORIZATION_MODE_DENY_ALL = "deny-all"
 
 GRAPH_ACTION_READ = "read"
 GRAPH_ACTION_MUTATE = "mutate"
+
+# What a `mutate` asked about a staged session does to the graph
+# (docs/SESSION_OVERLAY_CONTRACT.md §14). A hook that treats them like any
+# other write reads neither field.
+GRAPH_OPERATION_STAGE = "stage"
+GRAPH_OPERATION_MERGE = "merge"
+GRAPH_OPERATION_DISCARD = "discard"
 
 _request_authorization_inputs: ContextVar[Dict[str, Any]] = ContextVar(
     "communityoverview_request_authorization_inputs",
@@ -59,6 +67,10 @@ class GraphAuthorizationContext:
     actor: Dict[str, Any]
     scope: Dict[str, Any]
     graph_id: str
+    # §14: `stage`, `merge` or `discard` when the request does one of those,
+    # else empty; and the session the request acts in or concerns, else empty.
+    graph_operation: str = ""
+    session_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -161,9 +173,17 @@ def use_request_authorization(
 
 
 def build_graph_authorization_context(
-    *, action: str, target: str
+    *,
+    action: str,
+    target: str,
+    graph_operation: str = "",
+    session_id: Optional[str] = None,
 ) -> GraphAuthorizationContext:
-    """Build a graph authorization context from request-safe inputs and environment defaults."""
+    """Build a graph authorization context from request-safe inputs and environment defaults.
+
+    ``session_id`` defaults to the session the request acts in (§16.1); a
+    session route passes the session it concerns.
+    """
     inputs = get_current_request_authorization_inputs()
     actor = get_request_actor_context(
         headers=inputs.get("headers"),
@@ -183,4 +203,6 @@ def build_graph_authorization_context(
         actor=actor,
         scope=scope,
         graph_id=scope.get("graph_id", ""),
+        graph_operation=graph_operation,
+        session_id=session_id or current_session_id() or "",
     )

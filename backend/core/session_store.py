@@ -32,7 +32,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, Protocol
+from typing import Any, Callable, Deque, Dict, List, Optional, Protocol
 
 from .session_activity import (
     DEFAULT_ACTIVITY_MAX_AGE_DAYS,
@@ -109,7 +109,14 @@ STATE_OPS = {
     "group_membership_changed",
     "session_renamed",
     "layout_applied",
+    # docs/SESSION_OVERLAY_CONTRACT.md §15. Sequenced and fanned out like any
+    # other op, but emitted only by the server, after the layer store or the
+    # staged-session record has changed - never accepted from a client.
+    "graph_change_staged",
+    "write_mode_changed",
 }
+
+SERVER_ONLY_OPS = frozenset({"graph_change_staged", "write_mode_changed"})
 
 
 def is_valid_session_id(session_id: str) -> bool:
@@ -143,6 +150,19 @@ def _empty_state() -> Dict[str, Any]:
 
 class OpError(ValueError):
     """Raised when an op payload fails validation at the boundary."""
+
+
+class SessionRetired(OpError):
+    """The id belonged to a staged session that was deleted.
+
+    A retired id is never created again, explicitly or implicitly
+    (docs/SESSION_OVERLAY_CONTRACT.md §5.3): not by a stream reconnect, a
+    rename or a share link.
+    """
+
+    def __init__(self, session_id: str) -> None:
+        self.session_id = session_id
+        super().__init__(f"session {session_id!r} was deleted")
 
 
 class AnnotationFieldConflict(Exception):
@@ -210,6 +230,11 @@ class Session:
     updated_at: str = field(default_factory=_now_iso)
     seq: int = 0
     state: Dict[str, Any] = field(default_factory=_empty_state)
+    # A mirror, for display, of the write mode the staged-session record
+    # decides (docs/SESSION_OVERLAY_CONTRACT.md §5.3). Neither graph content
+    # nor layout; a document written before the field existed is direct.
+    write_mode: str = "direct"
+    write_mode_source: str = "inherited"
     # Persistent per-session activity log (annotation/canvas ops with an
     # inverse), see session_activity.py. Newest entries last; bounded by
     # retention applied on every append.
@@ -230,6 +255,8 @@ class Session:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "seq": self.seq,
+            "write_mode": self.write_mode,
+            "write_mode_source": self.write_mode_source,
             "state": self.state,
             "activity_log": self.activity_log,
         }
@@ -241,6 +268,8 @@ class Session:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "seq": self.seq,
+            "write_mode": self.write_mode,
+            "write_mode_source": self.write_mode_source,
         }
 
     @classmethod
@@ -256,6 +285,12 @@ class Session:
             updated_at=data.get("updated_at") or _now_iso(),
             seq=int(data.get("seq") or 0),
             state=merged,
+            write_mode="staged" if data.get("write_mode") == "staged" else "direct",
+            write_mode_source=(
+                "explicit"
+                if data.get("write_mode_source") == "explicit"
+                else "inherited"
+            ),
             activity_log=list(activity_log) if isinstance(activity_log, list) else [],
         )
 
@@ -544,8 +579,13 @@ class SessionStore:
         ring_size: int = _DEFAULT_RING_SIZE,
         max_activity_records: int = DEFAULT_MAX_ACTIVITY_RECORDS,
         activity_max_age_days: float = DEFAULT_ACTIVITY_MAX_AGE_DAYS,
+        staged_status: Optional[Callable[[str], str]] = None,
     ) -> None:
         self._backend = backend
+        # The staged-session status of an id (`active`, `retired`, `none`),
+        # read from the graph backend's layer store (write_modes.py). None:
+        # no session can ever have been staged, so no id is ever retired.
+        self._staged_status = staged_status
         self._max_annotations = max_annotations
         self._ring_size = ring_size
         self._max_activity_records = max_activity_records
@@ -570,13 +610,46 @@ class SessionStore:
             if (
                 candidate not in self._sessions
                 and self._backend.load(candidate) is None
+                # A staged-session record, active or retired, is an id taken
+                # on the graph whether or not a document exists for it.
+                and (
+                    self._staged_status is None
+                    or self._staged_status(candidate) == "none"
+                )
             ):
                 return candidate
         raise RuntimeError("could not allocate a free session id")
 
-    def create(self, name: Optional[str] = None) -> Session:
+    def _refuse_retired(self, session_id: str) -> None:
+        if self._staged_status is not None and self._staged_status(session_id) == (
+            "retired"
+        ):
+            raise SessionRetired(session_id)
+
+    def create(
+        self,
+        name: Optional[str] = None,
+        *,
+        write_mode: str = "direct",
+        write_mode_source: str = "inherited",
+        on_allocate: Optional[Callable[[str], None]] = None,
+    ) -> Session:
+        """Create a session under a fresh id.
+
+        ``on_allocate`` runs with the id before the document is saved - the
+        staged-session record is written there, so a document never names a
+        staged session the graph backend has no record of. If it raises,
+        nothing is saved.
+        """
         with self._lock:
-            session = Session(id=self._new_id(), name=name)
+            session = Session(
+                id=self._new_id(),
+                name=name,
+                write_mode=write_mode,
+                write_mode_source=write_mode_source,
+            )
+            if on_allocate is not None:
+                on_allocate(session.id)
             self._sessions[session.id] = session
             self._rings[session.id] = deque(maxlen=self._ring_size)
             self._backend.save(session.to_dict())
@@ -594,6 +667,7 @@ class SessionStore:
         existing = self.get(session_id)
         if existing is not None:
             return existing, False
+        self._refuse_retired(session_id)
         with self._lock:
             existing = self._sessions.get(session_id)
             if existing is not None:
@@ -1134,6 +1208,18 @@ class SessionStore:
             if name is not None and not isinstance(name, str):
                 raise OpError("session_renamed 'name' must be a string or null")
             session.name = name
+        elif op_type == "graph_change_staged":
+            # The layer itself lives in the graph backend; the op carries
+            # what changed in it, for every participant's composed view.
+            if not isinstance(op.get("entries"), list) or not isinstance(
+                op.get("removals"), list
+            ):
+                raise OpError("graph_change_staged carries entries and removals")
+        elif op_type == "write_mode_changed":
+            if op.get("write_mode") != "staged":
+                raise OpError("write_mode_changed only ever moves to staged")
+            session.write_mode = "staged"
+            session.write_mode_source = "explicit"
         elif op_type == "layout_applied":
             positions = op.get("positions")
             if not isinstance(positions, dict):

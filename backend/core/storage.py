@@ -118,6 +118,128 @@ def _apply_metadata_patch(
     return result
 
 
+# A node update may set these; "metadata" is handled apart, and any key in
+# neither set nor _NODE_UPDATE_RESERVED folds into metadata.
+_NODE_UPDATE_FIELDS = frozenset(
+    {"name", "description", "summary", "tags", "subtypes", "aliases", "metadata"}
+)
+# "archived" is reserved so a generic update can neither set it directly nor
+# fold it into metadata — archiving goes through set_nodes_archived.
+# "revision" is server-owned (§4.1): dropped, never folded into metadata.
+_NODE_UPDATE_RESERVED = frozenset(
+    {"id", "type", "embedding", "created_at", "updated_at", "archived", "revision"}
+)
+EDGE_UPDATE_FIELDS = frozenset({"type", "label", "metadata"})
+
+
+def build_node_update(
+    current: Dict[str, Any], updates: Dict[str, Any], *, metadata_merge: bool
+) -> Node:
+    """The node ``current`` (a ``to_dict()``) becomes under ``updates``, validated.
+
+    Raises ValueError for an update the model or the metadata depth limit
+    refuses. Shared by a direct update and a staged one, which must be
+    validated exactly alike (docs/SESSION_OVERLAY_CONTRACT.md §6.3).
+    """
+    # Build the candidate state and validate it through the model BEFORE
+    # mutating the live node. setattr on a pydantic model does not re-run
+    # field validators, so without this an over-limit field (e.g. a
+    # description longer than 2000 chars, or oversized tags/aliases) would
+    # silently bypass the model's limits on write and only fail at the next
+    # graph load — bricking startup. Validating a candidate first means an
+    # invalid update is rejected here, atomically, with the live node untouched.
+    candidate = dict(current)
+    for key, value in updates.items():
+        if key in _NODE_UPDATE_FIELDS and key != "metadata":
+            candidate[key] = value
+
+    # Schema-defined extra fields (anything outside the base model) fold
+    # into metadata, same as an explicit `metadata` update.
+    extra = {
+        k: v
+        for k, v in updates.items()
+        if k not in _NODE_UPDATE_FIELDS and k not in _NODE_UPDATE_RESERVED
+    }
+
+    if metadata_merge:
+        # Opt-in field-level merge: patch existing metadata top-level.
+        merged = dict(candidate.get("metadata") or {})
+        if "metadata" in updates:
+            meta_update = updates["metadata"] or {}
+            if not isinstance(meta_update, dict):
+                raise ValueError(
+                    "metadata must be an object when metadata_merge is set"
+                )
+            merged = _apply_metadata_patch(merged, meta_update)
+        if extra:
+            merged = _apply_metadata_patch(merged, extra)
+        candidate["metadata"] = merged
+    else:
+        # Legacy/default: an explicit `metadata` replaces it wholesale.
+        # Assign the value as-is (no None->{} coercion) so a bad
+        # metadata=None with no extra fields is rejected by model
+        # validation below, exactly as before merge mode existed. When an
+        # extra field is present the fold step normalizes None to {},
+        # also matching the prior behaviour.
+        if "metadata" in updates:
+            candidate["metadata"] = updates["metadata"]
+        if extra:
+            meta = dict(candidate.get("metadata") or {})
+            meta.update(extra)
+            candidate["metadata"] = meta
+
+    try:
+        validated = Node.from_dict(candidate)
+    except Exception as exc:
+        raise ValueError(f"Invalid node update: {exc}") from exc
+    # Only when metadata is written: a node that already holds deeper
+    # metadata keeps taking updates to its other fields.
+    if "metadata" in updates or extra:
+        depth_error = metadata_depth_error(validated.metadata)
+        if depth_error:
+            raise ValueError(f"Invalid node update: {depth_error}")
+    return validated
+
+
+def build_edge_update(current: Dict[str, Any], updates: Dict[str, Any]) -> Edge:
+    """The edge ``current`` (a ``to_dict()``) becomes under ``updates``,
+    validated; applicability against its endpoints is the caller's check."""
+    candidate = dict(current)
+    for key, value in updates.items():
+        if key in EDGE_UPDATE_FIELDS:
+            if key == "type" and (value is None or value == ""):
+                value = "RELATES_TO"
+            candidate[key] = value
+
+    validated_edge = Edge.from_dict(candidate)
+    if "metadata" in updates:
+        depth_error = metadata_depth_error(validated_edge.metadata)
+        if depth_error:
+            raise ValueError(f"Invalid edge update: {depth_error}")
+    return validated_edge
+
+
+def edge_applicability_error(
+    edge_type: str, source_node: Optional[Node], target_node: Optional[Node]
+) -> Optional[str]:
+    """Why the schema refuses ``edge_type`` between the two nodes, or None."""
+    if source_node is None or target_node is None:
+        return None
+
+    from backend.config import config_loader
+
+    decision = config_loader.relationship_type_allows_node_types(
+        edge_type,
+        source_node.type_str,
+        target_node.type_str,
+        source_node.subtypes,
+        target_node.subtypes,
+    )
+    if not decision.get("allowed"):
+        return decision.get("message") or "Relationship type not allowed"
+    return None
+
+
 # How many reports may be held while the first load runs before the buffer is
 # abandoned for a whole-graph reload. The reload is correct at any size, so
 # this trades a bounded amount of memory against the cost of reloading; a boot
@@ -561,6 +683,14 @@ class GraphStorage:
         if self._embedding_sidecar is None:
             return None
         return self._embedding_sidecar.path
+
+    @property
+    def layer_store(self) -> Optional[GraphPersistenceBackend]:
+        """The backend, as the layer store of staged sessions, when it declares
+        `staged_sessions` (docs/SESSION_OVERLAY_CONTRACT.md §7); else None."""
+        if self._backend_capabilities.staged_sessions:
+            return self._persistence_backend
+        return None
 
     def _init_history_store(self) -> Optional["GraphHistoryStore"]:
         """Create the append-only history sidecar for file-backed standalone mode."""
@@ -2650,22 +2780,11 @@ class GraphStorage:
         return list(self.edges.values())
 
     def _validate_edge_applicability(self, edge: Edge) -> None:
-        source_node = self.nodes.get(edge.source)
-        target_node = self.nodes.get(edge.target)
-        if source_node is None or target_node is None:
-            return
-
-        from backend.config import config_loader
-
-        decision = config_loader.relationship_type_allows_node_types(
-            edge.type_str,
-            source_node.type_str,
-            target_node.type_str,
-            source_node.subtypes,
-            target_node.subtypes,
+        error = edge_applicability_error(
+            edge.type_str, self.nodes.get(edge.source), self.nodes.get(edge.target)
         )
-        if not decision.get("allowed"):
-            raise ValueError(decision.get("message") or "Relationship type not allowed")
+        if error:
+            raise ValueError(error)
 
     def audit_relationship_applicability(self) -> List[Dict[str, Any]]:
         """Return existing edges that violate configured relationship applicability."""
@@ -3595,87 +3714,10 @@ class GraphStorage:
             # Capture before state for events
             before_state = node.to_dict()
 
-            # Update allowed fields
-            allowed_fields = {
-                "name",
-                "description",
-                "summary",
-                "tags",
-                "subtypes",
-                "aliases",
-                "metadata",
-            }
-            # "archived" is reserved so a generic update can neither set it directly
-            # nor fold it into metadata — archiving goes through set_nodes_archived.
-            # "revision" is server-owned (§4.1): dropped, never folded into
-            # metadata.
-            reserved_fields = {
-                "id",
-                "type",
-                "embedding",
-                "created_at",
-                "updated_at",
-                "archived",
-                "revision",
-            }
-
-            # Build the candidate state and validate it through the model BEFORE
-            # mutating the live node. setattr on a pydantic model does not re-run
-            # field validators, so without this an over-limit field (e.g. a
-            # description longer than 2000 chars, or oversized tags/aliases) would
-            # silently bypass the model's limits on write and only fail at the next
-            # graph load — bricking startup. Validating a candidate first means an
-            # invalid update is rejected here, atomically, with the live node untouched.
-            candidate = node.to_dict()
-            for key, value in updates.items():
-                if key in allowed_fields and key != "metadata":
-                    candidate[key] = value
-
-            # Schema-defined extra fields (anything outside the base model) fold
-            # into metadata, same as an explicit `metadata` update.
-            extra = {
-                k: v
-                for k, v in updates.items()
-                if k not in allowed_fields and k not in reserved_fields
-            }
-
-            if metadata_merge:
-                # Opt-in field-level merge: patch existing metadata top-level.
-                merged = dict(candidate.get("metadata") or {})
-                if "metadata" in updates:
-                    meta_update = updates["metadata"] or {}
-                    if not isinstance(meta_update, dict):
-                        raise ValueError(
-                            "metadata must be an object when metadata_merge is set"
-                        )
-                    merged = _apply_metadata_patch(merged, meta_update)
-                if extra:
-                    merged = _apply_metadata_patch(merged, extra)
-                candidate["metadata"] = merged
-            else:
-                # Legacy/default: an explicit `metadata` replaces it wholesale.
-                # Assign the value as-is (no None->{} coercion) so a bad
-                # metadata=None with no extra fields is rejected by model
-                # validation below, exactly as before merge mode existed. When an
-                # extra field is present the fold step normalizes None to {},
-                # also matching the prior behaviour.
-                if "metadata" in updates:
-                    candidate["metadata"] = updates["metadata"]
-                if extra:
-                    meta = dict(candidate.get("metadata") or {})
-                    meta.update(extra)
-                    candidate["metadata"] = meta
-
-            try:
-                validated = Node.from_dict(candidate)
-            except Exception as exc:
-                raise ValueError(f"Invalid node update: {exc}") from exc
-            # Only when metadata is written: a node that already holds deeper
-            # metadata keeps taking updates to its other fields.
-            if "metadata" in updates or extra:
-                depth_error = metadata_depth_error(validated.metadata)
-                if depth_error:
-                    raise ValueError(f"Invalid node update: {depth_error}")
+            validated = build_node_update(
+                node.to_dict(), updates, metadata_merge=metadata_merge
+            )
+            allowed_fields = _NODE_UPDATE_FIELDS
 
             undo = self._capture(node_ids=[node_id])
 
@@ -4077,20 +4119,8 @@ class GraphStorage:
             edge = self.edges[edge_id]
             before_state = edge.to_dict()
 
-            # Update allowed fields
-            allowed_fields = {"type", "label", "metadata"}
-            candidate = edge.to_dict()
-            for key, value in updates.items():
-                if key in allowed_fields:
-                    if key == "type" and (value is None or value == ""):
-                        value = "RELATES_TO"
-                    candidate[key] = value
-
-            validated_edge = Edge.from_dict(candidate)
-            if "metadata" in updates:
-                depth_error = metadata_depth_error(validated_edge.metadata)
-                if depth_error:
-                    raise ValueError(f"Invalid edge update: {depth_error}")
+            allowed_fields = EDGE_UPDATE_FIELDS
+            validated_edge = build_edge_update(edge.to_dict(), updates)
             self._validate_edge_applicability(validated_edge)
 
             undo = self._capture(edge_ids=[edge_id])
