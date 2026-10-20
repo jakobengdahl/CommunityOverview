@@ -1314,8 +1314,10 @@ class TestDeepNesting:
         for _ in range(sys.getrecursionlimit() + 100):
             cursor["k"] = {}
             cursor = cursor["k"]
-        # Python 3.11's C JSON encoder counts nesting against the recursion
-        # limit (refused); 3.12+ bounds it by C stack instead (planned).
+        # Nesting past MAX_METADATA_DEPTH must never be planned as an add. Where
+        # the interpreter recurses out first (3.11) the whole request is
+        # refused; where it does not (3.12+) the depth guard rejects the node
+        # in the report.
         try:
             plan = _plan(
                 storage, [{"id": "n", "type": "Actor", "name": "N", "metadata": nested}]
@@ -1323,7 +1325,9 @@ class TestDeepNesting:
         except MergeRequestError as exc:
             assert exc.error_code == "validation_failed"
         else:
-            assert plan.report["adds"]["nodes"]["ids"] == ["n"]
+            assert plan.report["adds"]["nodes"]["ids"] == []
+            assert plan.report["rejected"]["count"] == 1
+            assert plan.report["committable"] is False
 
     def test_a_recursion_error_while_planning_is_a_refusal(self, storage, monkeypatch):
         def _too_deep(raw):
