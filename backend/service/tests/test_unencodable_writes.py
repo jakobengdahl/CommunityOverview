@@ -31,6 +31,8 @@ from backend.agents.execution import InMemoryExecutionStore
 from backend.core import Edge, GraphStorage, Node, NodeType
 from backend.core.embedding_sidecar import parse_sidecar_bytes, serialize_sidecar_bytes
 from backend.core.models import MAX_METADATA_DEPTH
+from backend.federation.config import FederationFileConfig
+from backend.federation.manager import FederationManager
 from backend.service import GraphService, create_rest_router, import_service
 
 SURROGATE = "\ud800"
@@ -284,6 +286,32 @@ class TestDeepMetadata:
 
         assert _restarted(storage, path).nodes["d"].metadata == metadata
 
+    def test_the_cap_is_800_levels_exactly(self, client, storage):
+        # Literal numbers, so raising the cap fails here and not only the
+        # tests that are written relative to MAX_METADATA_DEPTH.
+        assert MAX_METADATA_DEPTH == 800
+        assert _add(client, _actor("ok", metadata=_nested(800))).status_code == 200
+
+        refused = _add(client, _actor("no", metadata=_nested(801)))
+
+        assert refused.status_code == 400
+        assert "no" not in storage.nodes
+
+    def test_history_and_edge_at_the_cap_survive_a_restart(self, client, storage, path):
+        metadata = _nested(MAX_METADATA_DEPTH)
+        edge = {"id": "e", "source": "d", "target": "o", "metadata": metadata}
+        assert (
+            _add(client, _actor("d", metadata=metadata), _actor("o"), edges=[edge])
+        ).status_code == 200
+
+        restarted = _restarted(storage, path)
+
+        # History appends swallow failures, so check they actually landed.
+        history = restarted.get_node_history("d")
+        assert [entry["after"]["metadata"] for entry in history] == [metadata]
+        assert restarted.edges["e"].metadata == metadata
+        assert restarted.get_edge_history("e")
+
     def test_an_add_past_the_cap_is_refused_and_adds_nothing(self, client, storage):
         edge = {"id": "e", "source": "ok", "target": "deep"}
         response = _add(
@@ -435,6 +463,57 @@ class TestDeepMetadata:
         assert response.status_code == 422
         assert response.json()["detail"]["error_code"] == "import_merge_blocked"
         assert "d" not in storage.nodes
+
+
+class TestFederatedAdoptDepth:
+    def _service(self, tmp_path, depth: int) -> GraphService:
+        graph_file = tmp_path / "adopt.json"
+        graph_file.write_text(json.dumps({"nodes": [], "edges": []}), encoding="utf-8")
+        local = GraphStorage(str(graph_file))
+        config = FederationFileConfig.model_validate(
+            {
+                "federation": {
+                    "enabled": True,
+                    "graphs": [
+                        {
+                            "graph_id": "remote",
+                            "display_name": "Remote",
+                            "trust_level": "partner",
+                            "capabilities": {"allow_adopt": True},
+                            "endpoints": {"graph_json_url": "https://r.example/g.json"},
+                        }
+                    ],
+                }
+            }
+        )
+        manager = FederationManager(config)
+        remote = {
+            "id": "r1",
+            "type": "Actor",
+            "name": "Remote",
+            "metadata": _nested(depth),
+        }
+        cache_nodes, _ = manager._build_cache(config.federation.graphs[0], [remote], [])
+        manager._cache["remote"].nodes = cache_nodes
+        manager._cache["remote"].status = "healthy"
+        return GraphService(local, federation_manager=manager)
+
+    def test_a_node_nesting_past_the_cap_is_refused_and_adds_nothing(self, tmp_path):
+        service = self._service(tmp_path, MAX_METADATA_DEPTH + 1)
+
+        result = service.adopt_federated_node("federated::remote::r1")
+
+        assert result["success"] is False
+        assert "Error validating input" in result["message"]
+        assert result["added_node_ids"] == [] and result["added_edge_ids"] == []
+        assert not service._storage.nodes
+
+    def test_a_node_nesting_to_the_cap_is_adopted(self, tmp_path):
+        service = self._service(tmp_path, MAX_METADATA_DEPTH)
+
+        result = service.adopt_federated_node("federated::remote::r1")
+
+        assert result["success"] is True, result.get("message")
 
 
 class TestStoredDeepMetadataStaysUsable:

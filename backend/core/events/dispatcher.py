@@ -8,6 +8,7 @@ Responsibilities:
 - Enqueue events for delivery
 """
 
+import copy
 import logging
 from typing import List, Dict, Any, Optional, Callable, TYPE_CHECKING
 from datetime import datetime, timezone
@@ -27,6 +28,46 @@ if TYPE_CHECKING:
     from ..storage import GraphStorage
 
 logger = logging.getLogger(__name__)
+
+
+def _copy_payload(value: Any) -> Any:
+    """Deep-copy nested dicts and lists without recursing once per level.
+
+    copy.deepcopy raises RecursionError near 500 levels, while writes accept
+    metadata nested up to MAX_METADATA_DEPTH. Containers are copied with an
+    explicit stack; anything else is a leaf and goes through copy.deepcopy.
+    """
+    if not isinstance(value, (dict, list)):
+        return copy.deepcopy(value)
+    root = {} if isinstance(value, dict) else []
+    stack = [(value, root)]
+    while stack:
+        source, target = stack.pop()
+        items = source.items() if isinstance(source, dict) else enumerate(source)
+        for key, item in items:
+            if isinstance(item, (dict, list)):
+                child = {} if isinstance(item, dict) else []
+                stack.append((item, child))
+            else:
+                child = copy.deepcopy(item)
+            if isinstance(target, dict):
+                target[key] = child
+            else:
+                target.append(child)
+    return root
+
+
+def _copy_event(event: Event) -> Event:
+    """Per-subscriber copy: subscribers may mutate theirs without affecting others."""
+    entity = event.entity.model_copy(
+        update={
+            field: _copy_payload(getattr(event.entity, field))
+            for field in ("before", "after", "patch")
+        }
+    )
+    return event.model_copy(
+        update={"entity": entity, "origin": event.origin.model_copy(deep=True)}
+    )
 
 
 class EventDispatcher:
@@ -211,7 +252,7 @@ class EventDispatcher:
                     continue
 
                 # Create event copy with subscription info
-                event_copy = event.model_copy(deep=True)
+                event_copy = _copy_event(event)
                 event_copy.subscription = SubscriptionInfo(
                     id=sub["id"],
                     name=sub["name"],

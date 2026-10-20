@@ -464,3 +464,71 @@ class TestFederationFilterMatching:
         dispatcher.dispatch(event_too_far)
 
         assert len(delivered) == 1
+
+
+def _nested(levels: int) -> dict:
+    root: dict = {}
+    current = root
+    for _ in range(levels):
+        current["a"] = {}
+        current = current["a"]
+    return root
+
+
+class TestDeepMetadataDelivery:
+    """Writes accept metadata nested up to MAX_METADATA_DEPTH levels."""
+
+    def test_an_event_at_the_write_depth_cap_reaches_the_subscriber(self):
+        from backend.core.models import MAX_METADATA_DEPTH
+
+        storage = MockStorage([create_subscription_node("sub-1", "All")])
+        dispatcher = EventDispatcher(storage)
+        delivered = []
+        dispatcher.set_delivery_callback(lambda e, u: delivered.append(e))
+        deep = _nested(MAX_METADATA_DEPTH)
+
+        event = create_event(
+            after={"name": "Deep", "metadata": deep}, before={"metadata": deep}
+        )
+
+        assert dispatcher.dispatch(event) == 1
+        assert delivered[0].entity.after["metadata"] == deep
+        assert delivered[0].entity.before["metadata"] == deep
+
+    def test_a_subscriber_mutating_its_copy_does_not_affect_another(self):
+        storage = MockStorage(
+            [
+                create_subscription_node("sub-1", "One", webhook_url="https://a.com"),
+                create_subscription_node("sub-2", "Two", webhook_url="https://b.com"),
+            ]
+        )
+        dispatcher = EventDispatcher(storage)
+        delivered = []
+
+        def deliver(event, url):
+            event.entity.after["metadata"]["a"]["a"].append("mutated")
+            event.entity.after["tags"].append("mutated")
+            delivered.append(event)
+
+        dispatcher.set_delivery_callback(deliver)
+        original = {"metadata": {"a": {"a": []}}, "tags": []}
+        event = create_event(after=original)
+
+        dispatcher.dispatch(event)
+
+        assert len(delivered) == 2
+        assert delivered[0].entity.after is not delivered[1].entity.after
+        assert delivered[0].entity.after["metadata"]["a"]["a"] == ["mutated"]
+        assert delivered[1].entity.after["tags"] == ["mutated"]
+        assert event.entity.after == {"metadata": {"a": {"a": []}}, "tags": []}
+
+    def test_list_nesting_and_scalars_are_preserved(self):
+        storage = MockStorage([create_subscription_node("sub-1", "All")])
+        dispatcher = EventDispatcher(storage)
+        delivered = []
+        dispatcher.set_delivery_callback(lambda e, u: delivered.append(e))
+        after = {"m": {"l": [1, "x", None, [True, {"k": 2.5}]]}}
+
+        dispatcher.dispatch(create_event(after=after))
+
+        assert delivered[0].entity.after == after
