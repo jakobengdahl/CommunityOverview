@@ -346,6 +346,17 @@ class GraphHistoryStore:
             f = self._open_append_handle()
             try:
                 _lock_file(f, exclusive=True)
+                if not self._handle_is_current():
+                    # Another process's compaction renamed over the sidecar
+                    # while this one waited for the lock (or between the
+                    # identity check in _open_append_handle and the lock):
+                    # the held handle is an unlinked inode and a write to it
+                    # would be lost. Follow the live file, once.
+                    with contextlib.suppress(OSError, ValueError):
+                        _unlock_file(f)
+                    self._close_append_handle()
+                    f = self._open_append_handle()
+                    _lock_file(f, exclusive=True)
                 guard = None
                 try:
                     # Checked under the OS lock so another process cannot
@@ -362,6 +373,8 @@ class GraphHistoryStore:
                     # A dup keeps the lock held across the close and lets it
                     # be released explicitly: closing alone would not release
                     # it while a forked child shares the open file description.
+                    # If the dup itself fails (fd limit) the lock is released by
+                    # the close alone, which such a child would outlast.
                     with contextlib.suppress(OSError, ValueError):
                         guard = os.dup(f.fileno())
                     self._close_append_handle()
