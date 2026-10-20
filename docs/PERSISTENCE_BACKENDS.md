@@ -642,9 +642,15 @@ migrating transaction and behind the same catalog guard as the others:
 `(session_id, kind, entity_id)`) and `graph_merge_records` (keyed
 `merge_id`). Each carries `scope_id` from birth and, where a scope is
 configured, the same row-level security policy as the graph tables, so a
-layer is as isolated as the rows it would change; a scoped instance cannot
-see, stage into, retire or reuse the session id or merge id of another
-scope (`CrossScopeWriteRefused`, `MergeIdTaken`). Every operation is one
+layer is as isolated as the rows it would change (a role that may not create
+the policies needs them provisioned; the statements are under *Keeping
+scopes apart*). The application's own predicate on these tables is stricter
+than on the graph tables: `scope_id IS NOT DISTINCT FROM` the instance's
+scope, so a session belongs to exactly the scope that recorded it — no
+scope being one — and an unscoped session is not shared with scoped
+instances the way an unscoped graph row is. A scoped instance cannot see,
+stage into, retire or reuse the session id or merge id of another scope
+(`CrossScopeWriteRefused`, `MergeIdTaken`). Every operation is one
 `READ COMMITTED` transaction that locks the session's record row first, so
 the operations on one session are serialised across instances. A merge also
 takes a per-merge-id advisory lock (two instances retrying one merge apply
@@ -1321,6 +1327,16 @@ ALTER TABLE <schema>.graph_nodes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE <schema>.graph_nodes FORCE ROW LEVEL SECURITY;
 ALTER TABLE <schema>.graph_edges ENABLE ROW LEVEL SECURITY;
 ALTER TABLE <schema>.graph_edges FORCE ROW LEVEL SECURITY;
+
+-- With staged sessions, the same for each layer table (see "The layer
+-- store"): graph_staged_sessions, graph_layer_entries, graph_merge_records.
+CREATE POLICY graph_layer_entries_scope_policy ON <schema>.graph_layer_entries
+  FOR ALL USING (scope_id IS NULL
+                 OR scope_id = current_setting('app.graph_scope', true));
+ALTER TABLE <schema>.graph_layer_entries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE <schema>.graph_layer_entries FORCE ROW LEVEL SECURITY;
+-- ...and likewise graph_staged_sessions_scope_policy and
+-- graph_merge_records_scope_policy on the other two.
 ```
 
 **What the upgrade itself costs.** The first boot after this change runs

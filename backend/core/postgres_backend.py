@@ -1882,14 +1882,19 @@ class PostgresGraphPersistenceBackend:
         self._ensure_schema()
 
     def _layer_scope(self) -> Tuple[sql.Composed, Tuple]:
-        """` AND <predicate>` for a layer table.
+        """` AND <predicate>` for a layer table: this instance's scope, exactly.
 
-        Always issued: the layer tables carry the scope column from birth. An
-        unscoped instance passes NULL and sees exactly the unscoped rows, as
-        on the graph tables.
+        Stricter than the graph tables' predicate on purpose. There a row
+        carrying no scope is shared by every scope, because it predates the
+        column; a layer row has no such past. A session belongs to the one
+        scope that recorded it - NULL being one - and every entry and merge
+        record of it carries that same scope, so a scoped instance cannot
+        stage into an unscoped session (leaving entries its owner cannot see
+        and `retire` would not drop) or the other way round. The server's
+        policy stays the graph tables' own, the outer bound.
         """
         return (
-            sql.SQL(" AND ({col} IS NULL OR {col} = %s)").format(
+            sql.SQL(" AND {col} IS NOT DISTINCT FROM %s").format(
                 col=sql.Identifier(SCOPE_COLUMN)
             ),
             (self._scope,),
@@ -1903,7 +1908,7 @@ class PostgresGraphPersistenceBackend:
         RETURNING row is how the caller learns that.
         """
         return (
-            sql.SQL(" WHERE ({t}.{col} IS NULL OR {t}.{col} = %s)").format(
+            sql.SQL(" WHERE {t}.{col} IS NOT DISTINCT FROM %s").format(
                 t=sql.Identifier(table), col=sql.Identifier(SCOPE_COLUMN)
             ),
             (self._scope,),

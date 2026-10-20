@@ -104,6 +104,68 @@ class TestPostgresScopedLayerStoreContract(LayerStoreContract):
         return lambda: make(scope="scope-a")
 
 
+@pytest.fixture
+def owner():
+    """A non-superuser role owning a schema of its own.
+
+    The suite's own DSN is a superuser, and a superuser bypasses row-level
+    security even when it is FORCED, so a clause run through it says nothing
+    about what the policy does to a layer statement. This is the role a
+    self-provisioning deployment runs as: it owns its tables, so FORCE is
+    what puts it under the policy.
+    """
+    suffix = uuid.uuid4().hex[:12]
+    name, schema = f"co_lown_{suffix}", f"co_lown_{suffix}_sch"
+    password = secrets.token_hex(16)
+    ident = psycopg.sql.Identifier
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        try:
+            conn.execute(
+                psycopg.sql.SQL("CREATE ROLE {} LOGIN NOSUPERUSER PASSWORD {}").format(
+                    ident(name), psycopg.sql.Literal(password)
+                )
+            )
+        except psycopg.errors.InsufficientPrivilege:
+            pytest.skip("the test role may not create roles")
+        conn.execute(
+            psycopg.sql.SQL("CREATE SCHEMA {} AUTHORIZATION {}").format(
+                ident(schema), ident(name)
+            )
+        )
+    try:
+        yield _dsn_as_role(name, password), schema
+    finally:
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    ident(schema)
+                )
+            )
+            conn.execute(psycopg.sql.SQL("DROP OWNED BY {}").format(ident(name)))
+            conn.execute(psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(ident(name)))
+
+
+@pytest.fixture
+def make_as_owner(owner, backends):
+    dsn, schema = owner
+
+    def build(**kwargs):
+        kwargs.setdefault("staged_sessions", True)
+        backend = PostgresGraphPersistenceBackend(dsn, schema=schema, **kwargs)
+        backends.append(backend)
+        return backend
+
+    return build
+
+
+class TestPostgresScopedLayerStoreContractUnderTheServersPolicy(LayerStoreContract):
+    """The contract once more, scoped, as a role the FORCED policy binds."""
+
+    @pytest.fixture
+    def factory(self, make_as_owner):
+        return lambda: make_as_owner(scope="scope-a")
+
+
 class TestTheLayerTablesAreOptIn:
     def test_a_backend_without_staged_sessions_creates_no_layer_table(
         self, make, schema
@@ -155,14 +217,18 @@ class TestTheLayerTablesAreOptIn:
 
 
 class TestScopesKeepLayersApart:
+    """Run as a role the FORCED policy binds, so the server's half of the
+    isolation is exercised on every write, not only the application's."""
+
     @pytest.fixture
-    def pair(self, make):
-        first = make(scope="scope-a")
-        second = make(scope="scope-b")
+    def pair(self, make_as_owner):
+        first = make_as_owner(scope="scope-a")
+        second = make_as_owner(scope="scope-b")
         first.save_graph_data(snapshot([node_payload("a", revision=1)]))
         return first, second
 
-    def test_the_policy_covers_every_layer_table(self, pair, schema):
+    def test_the_policy_covers_every_layer_table(self, pair, owner):
+        _, schema = owner
         with psycopg.connect(DSN) as conn:
             for table in LAYER_TABLES:
                 row = conn.execute(
@@ -213,10 +279,41 @@ class TestScopesKeepLayersApart:
             second.merge(B, "m", [], [], [("node", "b")], {})
         assert [e["entity_id"] for e in second.load_layer(B)] == ["b"]
 
+    @pytest.mark.parametrize(
+        "first_scope,second_scope", [(None, "scope-a"), ("scope-a", None)]
+    )
+    def test_a_session_belongs_to_the_one_scope_that_recorded_it(
+        self, make_as_owner, first_scope, second_scope
+    ):
+        """No scope is a scope of its own here. Shared with every scope the
+        way an unscoped graph row is, a session would let a scoped instance
+        stage entries its unscoped owner cannot see and `retire` would leave
+        behind."""
+        owner = make_as_owner(scope=first_scope)
+        other = make_as_owner(scope=second_scope)
+        owner.save_graph_data(snapshot([node_payload("a", revision=1)]))
+        owner.record_staged(A)
+        owner.stage(A, [entry("node", "q")])
+        assert other.staged_status(A) == ls.STATUS_NONE
+        assert other.load_layer(A) == [] and other.layers_in_use() == []
+        with pytest.raises(ls.StagedSessionNotActive):
+            other.stage(A, [entry("node", "z")])
+        with pytest.raises(ls.StagedSessionNotActive):
+            other.merge(A, "m", [], [], [("node", "q")], {})
+        with pytest.raises(CrossScopeWriteRefused):
+            other.record_staged(A)
+        with pytest.raises(CrossScopeWriteRefused):
+            other.retire(A)
+        other.drop_layer(A)
+        assert [e["entity_id"] for e in owner.load_layer(A)] == ["q"]
+        owner.retire(A)
+        assert owner.layers_in_use() == [] and other.layers_in_use() == []
+
     def test_the_server_refuses_another_scopes_rows_without_the_predicate(
-        self, pair, schema
+        self, pair, owner
     ):
         """The policy, not only the application's own predicate."""
+        _, schema = owner
         first, _ = pair
         first.record_staged(A)
         first.stage(A, [entry("node", "a")])
