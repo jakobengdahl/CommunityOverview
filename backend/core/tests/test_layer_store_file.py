@@ -246,6 +246,66 @@ class TestTheWriteAheadMerge:
         result = merge_a(staged)
         assert staged.load_merge("m1") == result.record
 
+    def test_a_failed_layers_write_changes_nothing(self, staged, path, monkeypatch):
+        def broken(sessions):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(staged, "_write_layers_file", broken)
+        for call in (
+            lambda: staged.stage(A, [entry("node", "c")]),
+            lambda: staged.discard(A),
+            lambda: staged.retire(A),
+            lambda: staged.record_staged("9999-9999-9999-9999"),
+        ):
+            with pytest.raises(OSError):
+                call()
+        assert staged_keys(staged) == [("node", "a"), ("node", "b")]
+        assert staged.staged_status(A) == ls.STATUS_ACTIVE
+        assert staged.staged_status("9999-9999-9999-9999") == ls.STATUS_NONE
+
+    @pytest.mark.parametrize("then", ["save", "stage"])
+    def test_a_pending_merge_settles_before_the_next_write(
+        self, staged, path, monkeypatch, then
+    ):
+        """Before a whole-graph save replaces the graph it is judged against,
+        and before a layer write."""
+        real = staged._append_merge_log_locked
+        calls = {"n": 0}
+
+        def mark_fails(line):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise OSError("disk full")
+            return real(line)
+
+        monkeypatch.setattr(staged, "_append_merge_log_locked", mark_fails)
+        merge_a(staged)
+        assert staged._pending_merge is not None
+        if then == "save":
+            staged.save_graph_data(snapshot([node_payload("other", revision=9)]))
+        else:
+            staged.stage(A, [entry("node", "c")])
+        assert staged._pending_merge is None
+        assert reopen(path).load_merge("m1")["status"] == ls.MERGE_APPLIED
+
+    def test_two_pending_merges_in_the_log_stop_the_load(self, staged, path):
+        line = json.dumps(
+            {
+                "merge_id": "x",
+                "status": "pending",
+                "session_id": A,
+                "journal_id": None,
+                "operations": [],
+                "removals": [],
+                "record": {},
+            }
+        )
+        staged.merge_log_path.write_text(
+            line + "\n" + line.replace('"x"', '"y"') + "\n"
+        )
+        with pytest.raises(GraphJournalError, match="two merges pending"):
+            reopen(path).load_graph_data()
+
     def test_a_write_waits_for_a_pending_merge_to_settle(
         self, staged, path, monkeypatch
     ):
@@ -391,6 +451,17 @@ class TestStagedSessionsAreOptIn:
         backend.save_graph_data(snapshot([node_payload("a")]))
         with pytest.raises(RuntimeError, match="staged_sessions"):
             backend.record_staged(A)
+
+    def test_without_it_a_save_reads_nothing_first(self, path):
+        """A whole-graph save over a graph.json that cannot be read - which a
+        save exists to replace - succeeds as it always has."""
+        path.write_text("{not json")
+        backend = FileGraphPersistenceBackend(path)
+        backend.save_graph_data(snapshot([node_payload("a")]))
+        assert [
+            n["id"]
+            for n in FileGraphPersistenceBackend(path).load_graph_data()["nodes"]
+        ] == ["a"]
 
     def test_with_it_the_sidecars_appear_only_when_used(self, path):
         backend = FileGraphPersistenceBackend(path, staged_sessions=True)

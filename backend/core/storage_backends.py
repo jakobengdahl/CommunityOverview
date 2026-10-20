@@ -1247,12 +1247,28 @@ class FileGraphPersistenceBackend:
         kept = 0
         last = len(lines) - 1
         for index, line in enumerate(lines):
+            # Only a line a crash could have left - unterminated or not
+            # parseable - is dropped, and only as the last one. A complete,
+            # well-formed line that does not fit the sequence is damage
+            # wherever it is.
             try:
                 if index == last and not complete:
                     raise ValueError("incomplete line")
                 parsed = json.loads(line)
                 merge_id = parsed["merge_id"]
                 status = parsed["status"]
+            except (ValueError, KeyError, TypeError) as exc:
+                if index == last:
+                    logger.warning(
+                        f"dropping the incomplete last record of "
+                        f"{self.merge_log_path} (interrupted write): {exc}"
+                    )
+                    break
+                raise GraphJournalError(
+                    f"{self.merge_log_path} line {index + 1} cannot be read "
+                    f"({exc}); the graph was not loaded"
+                ) from exc
+            try:
                 if status == _layer.MERGE_PENDING:
                     if pending is not None:
                         raise ValueError("two merges pending at once")
@@ -1266,15 +1282,9 @@ class FileGraphPersistenceBackend:
                 else:
                     raise ValueError(f"unknown status {status!r}")
             except (ValueError, KeyError, TypeError) as exc:
-                if index == last:
-                    logger.warning(
-                        f"dropping the incomplete last record of "
-                        f"{self.merge_log_path} (interrupted write): {exc}"
-                    )
-                    break
                 raise GraphJournalError(
-                    f"{self.merge_log_path} line {index + 1} cannot be read "
-                    f"({exc}); the graph was not loaded"
+                    f"{self.merge_log_path} line {index + 1} does not fit the "
+                    f"log ({exc}); the graph was not loaded"
                 ) from exc
             kept += len(line) + 1
         if kept < len(raw):

@@ -200,6 +200,9 @@ class LayerStoreContract:
             ([entry("node", "a", staged={"v": float("nan")})], []),
             ([entry("node", "a", staged={"v": {1, 2}})], []),
             ([entry("node", "a", staged={"v": "nul\x00inside"})], []),
+            ([entry("node", "a", staged={"v": "\udc00"})], []),
+            ([entry("node", "a", staged={"k\x00": 1})], []),
+            ([entry("node", "x" * 513)], []),
             (["not an object"], []),
         ],
         ids=[
@@ -213,6 +216,9 @@ class LayerStoreContract:
             "nan",
             "set",
             "nul-in-value",
+            "surrogate-in-value",
+            "nul-in-key",
+            "id-too-long",
             "not-a-mapping",
         ],
     )
@@ -415,11 +421,20 @@ class LayerStoreContract:
 
     def _assert_raced_and_untouched(self, seeded, factory, *merge_args):
         before = self.graph(seeded)
+        layer_here = sorted(
+            seeded.load_layer(A), key=lambda e: (e["kind"], e["entity_id"])
+        )
         layer_before = sorted(
             factory().load_layer(A), key=lambda e: (e["kind"], e["entity_id"])
         )
         with pytest.raises(ls.MergeRaced):
             seeded.merge(A, "raced", *merge_args)
+        # The instance that refused it holds nothing of it either.
+        assert self.graph(seeded) == before
+        assert (
+            sorted(seeded.load_layer(A), key=lambda e: (e["kind"], e["entity_id"]))
+            == layer_here
+        )
         reopened = factory()
         assert self.graph(reopened) == before
         assert (
@@ -683,6 +698,8 @@ class LayerStoreContract:
             ([], [], [("node", "a"), ("node", "a")], {}),
             ([], [], [], "not a record"),
             ([], [], [], {"t": float("inf")}),
+            ([], [], [], {"note": "\x00"}),
+            ([], [MergeCheck.incident_edges("a", ["e\x00"])], [], {}),
         ],
         ids=[
             "id-mismatch",
@@ -695,6 +712,8 @@ class LayerStoreContract:
             "removal-twice",
             "record-not-a-mapping",
             "record-not-json",
+            "nul-in-record",
+            "nul-in-check-edge-id",
         ],
     )
     def test_a_malformed_merge_is_refused_before_anything_is_read(
@@ -703,6 +722,8 @@ class LayerStoreContract:
         before = self.graph(seeded)
         with pytest.raises(ls.InvalidLayerRequest):
             seeded.merge(A, "bad", operations, checks, removals, record)
+        with pytest.raises(ls.InvalidLayerRequest):
+            seeded.merge(A, "bad\x00id", [], [], [], {})
         assert self.graph(factory()) == before
         assert factory().load_merge("bad") is None
 
