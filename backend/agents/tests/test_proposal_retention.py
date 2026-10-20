@@ -3,6 +3,7 @@
 import json
 import logging
 import sqlite3
+import threading
 from datetime import timedelta
 from unittest.mock import MagicMock
 
@@ -559,7 +560,21 @@ class TestPhaseIsolation:
 
     def test_run_history_only_sweep_with_redaction_does_not_flag_proposals(self):
         runs = InMemoryExecutionStore(retry_policy=RetryPolicy(max_attempts=1))
+        # Older than the redaction cutoff (7 days) but inside retention (30).
+        runs.enqueue(
+            ExecutionJob(
+                agent_id="a1",
+                kind=ExecutionKind.EVENT,
+                idempotency_key="redactable",
+                payload={},
+                state=ExecutionState.SUCCEEDED,
+                finished_at=T0 - timedelta(days=10),
+                created_at=T0 - timedelta(days=11),
+                updated_at=T0 - timedelta(days=10),
+            )
+        )
         report = sweep(runs, POLICY, now=T0, proposal_store=None)
+        assert report.redacted == 1
         assert (report.proposals_failed, report.run_history_failed) == (False, False)
 
     def test_cli_closes_the_run_store_when_opening_the_proposal_store_raises(
@@ -610,6 +625,31 @@ class TestPhaseIsolation:
         with pytest.raises(RuntimeError, match="escaped"):
             main([])
         assert len(closed) == 2
+
+    def test_cli_closes_the_proposal_store_when_the_run_store_close_raises(
+        self, tmp_path, monkeypatch
+    ):
+        gov, runs_db = tmp_path / "governance.db", tmp_path / "runs.db"
+        SqliteProposalStore(gov).close()
+        SqliteExecutionStore(runs_db).close()
+        closed = []
+        real = SqliteProposalStore.close
+        monkeypatch.setattr(
+            SqliteProposalStore,
+            "close",
+            lambda self: (closed.append(self), real(self)),
+        )
+
+        def broken_close(self):
+            raise RuntimeError("close failed")
+
+        monkeypatch.setattr(SqliteExecutionStore, "close", broken_close)
+        monkeypatch.setenv("AGENTS_RUN_HISTORY_DB", str(runs_db))
+        monkeypatch.setenv("AGENTS_GOVERNANCE_DB", str(gov))
+        monkeypatch.setenv("AGENTS_RUN_HISTORY_RETENTION_DAYS", "30")
+        with pytest.raises(RuntimeError, match="close failed"):
+            main([])
+        assert len(closed) == 1
 
 
 class TestDryRunIsReadOnly:
@@ -665,6 +705,33 @@ class TestDryRunIsReadOnly:
         ro = SqliteExecutionStore(db, read_only=True)
         try:
             with pytest.raises(sqlite3.OperationalError):
-                ro._conn.execute("DELETE FROM execution_jobs")
+                ro.purge(["any-id"])
         finally:
             ro.close()
+
+    def test_read_only_stores_keep_busy_timeout_and_cross_thread_use(self, tmp_path):
+        gov, runs = tmp_path / "governance.db", tmp_path / "runs.db"
+        SqliteProposalStore(gov).close()
+        SqliteExecutionStore(runs).close()
+        ro_gov = SqliteProposalStore(gov, read_only=True)
+        ro_runs = SqliteExecutionStore(runs, read_only=True)
+        try:
+            for ro in (ro_gov, ro_runs):
+                assert ro._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+            # check_same_thread=False: a worker thread may read through them.
+            errors = []
+
+            def read():
+                try:
+                    ro_gov.get("missing")
+                    ro_runs.list_terminal_older_than(T0)
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(exc)
+
+            t = threading.Thread(target=read)
+            t.start()
+            t.join()
+            assert errors == []
+        finally:
+            ro_gov.close()
+            ro_runs.close()
