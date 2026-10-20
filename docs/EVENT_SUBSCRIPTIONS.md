@@ -139,7 +139,7 @@ Events are delivered as JSON POST requests:
 }
 ```
 
-Where an event carries attribution, its `attribution.scope.graph_id` is whatever the
+Where an event carries attribution, its `origin.attribution.scope.graph_id` is whatever the
 caller declared for the request. It is not checked against the store the write
 landed in, so read it as "the graph the caller said it was addressing", not as
 proof of which graph changed

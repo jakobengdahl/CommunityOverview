@@ -1383,15 +1383,15 @@ is how the listening thread reads its channel while still noticing a stop.
 
 ### Sizing it: what an instance costs
 
-One instance costs **`pool_size + 1`** server connections *per graph it
-holds* while notification is running — the pool, plus the listening
+One instance costs **`pool_size + 1`** server connections *per backend it
+holds* — one, since a core process holds one graph — while notification is running — the pool, plus the listening
 connection that cannot go back to a pool and still be listening.
 `PostgresGraphPersistenceBackend.__init__` builds its own `ConnectionPool`,
 and `start_change_notification` opens its own listening connection; nothing
 here pools or shares either across two instances of the class, so a process
 holding N backends (N schemas) would hold N of both. The arithmetic below
-counts both from construction, which is the budget an instance has to be
-sized for once notification is running.
+counts both, which is the budget an instance has to be sized for once
+notification is running.
 
 Every deployment this repository ships holds one graph per process: the
 running server calls `build_persistence_backend`
@@ -1458,9 +1458,9 @@ half of this — several instances sharing one graph — against a running
 server, so that part of the number above is measured rather than argued. The
 per-graph multiplier is not exercised by that test, or by any acceptance run
 in this repository: it follows directly from
-`PostgresGraphPersistenceBackend.__init__` (`backend/core/postgres_backend.py`)
-opening an independent pool and listening connection on every construction,
-with no pooling or sharing across instances of the class — not from a
+`PostgresGraphPersistenceBackend` (`backend/core/postgres_backend.py`)
+building an independent pool in `__init__` and opening an independent
+listening connection in `start_change_notification`, with no pooling or sharing across instances of the class — not from a
 multi-graph deployment this repository runs or tests today. How many graphs
 share a database is the hosting layer's choice; the core does not change the
 arithmetic, because under ADR 0009 it never holds more than one graph per

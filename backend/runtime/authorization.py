@@ -84,7 +84,7 @@ class DefaultGraphAuthorizationHook:
     """Standalone-safe default hook, driven only by the authorization mode env var.
 
     Its only configuration is COMMUNITYOVERVIEW_AUTHORIZATION_MODE (permissive,
-    read_only or deny_all). It never narrows which graphs are visible: the
+    read-only or deny-all). It never narrows which graphs are visible: the
     decisions it returns carry the default, disabled GraphAccessNarrowing.
     """
 
