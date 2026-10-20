@@ -6,10 +6,14 @@ session's writes never reach the graph.
 from __future__ import annotations
 
 import dataclasses
+import json
+import uuid
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from backend.agents.governance.models import AutonomyLevel, Proposal
 from backend.agents.governance.store import SqliteProposalStore
@@ -18,8 +22,12 @@ from backend.api_host.persistence import (
     build_session_settings,
 )
 from backend.api_host.server import create_app
-from backend.runtime.session_context import SESSION_ID_HEADER
-from backend.service import access
+from backend.runtime.session_context import (
+    SESSION_ID_HEADER,
+    SessionRefused,
+    bind_session,
+)
+from backend.service import access, mcp_tools
 
 UNKNOWN = "1111-2222-3333-4444"
 
@@ -578,3 +586,174 @@ def test_the_widget_tool_refuses_a_session_header_per_message(transport):
         3,
     )
     assert "session_not_supported" not in answered.text
+
+
+# -- the per-message MCP helpers, authorization and boot -------------------
+
+
+def _request(*values):
+    raw = [(SESSION_ID_HEADER.encode(), v.encode()) for v in values]
+    return Request({"type": "http", "headers": raw, "method": "POST", "path": "/"})
+
+
+def test_message_session_two_distinct_headers_is_a_mismatch():
+    with pytest.raises(SessionRefused) as exc:
+        mcp_tools._message_session(
+            _request("1111-2222-3333-4444", "5555-6666-7777-8888")
+        )
+    assert exc.value.code == "session_mismatch"
+
+
+def test_message_session_empty_header_is_not_found_not_none():
+    with pytest.raises(SessionRefused) as exc:
+        mcp_tools._message_session(_request(""))
+    assert exc.value.code == "session_not_found"
+
+
+def test_message_session_strips_and_dedupes_equal_values():
+    sid = "1111-2222-3333-4444"
+    assert mcp_tools._message_session(_request(sid, f" {sid} ")) == sid
+
+
+def test_message_request_outside_a_request_context_is_not_a_message():
+    fake = SimpleNamespace(
+        get_context=lambda: SimpleNamespace(request_context=SimpleNamespace())
+    )
+    assert mcp_tools._message_request(fake) == (False, None)
+
+
+def test_a_read_tool_pushing_to_a_staged_session_is_refused(client):
+    sid = _staged(client)
+    result = client.app.state.tools_map["search_graph"](
+        query="x", visualization_session_id=sid
+    )
+    assert result["error"] == "session_not_supported"
+
+
+def test_a_bound_header_naming_an_unknown_session_is_not_a_push(client):
+    with bind_session(UNKNOWN):
+        result = client.app.state.tools_map["search_graph"](
+            query="x", visualization_session_id=UNKNOWN
+        )
+    assert result["error"] == "session_not_found"
+
+
+@pytest.mark.parametrize("falsy", [0, False, [], {}])
+def test_a_falsy_non_string_session_argument_is_not_read_as_none(client, falsy):
+    result = client.app.state.tools_map["add_nodes"](
+        nodes=[{"id": "z", "type": "Actor", "name": "z"}],
+        edges=[],
+        visualization_session_id=falsy,
+    )
+    assert result["error"] == "session_not_found"
+    assert client.app.state.graph_storage.get_node("z") is None
+
+
+def test_check_session_seq_on_an_unknown_session_raises():
+    from backend.core.session_manager import SessionManager, SessionNotFound
+    from backend.core.session_store import (
+        InMemorySessionPersistenceBackend,
+        SessionStore,
+    )
+
+    manager = SessionManager(SessionStore(InMemorySessionPersistenceBackend()))
+    with pytest.raises(SessionNotFound):
+        manager.check_session_seq("1111-2222-3333-4444", None)
+
+
+def _call(client, mcp_session, name, arguments, rpc_id, headers=None):
+    response = _rpc(
+        client,
+        mcp_session,
+        "tools/call",
+        {"name": name, "arguments": arguments},
+        rpc_id,
+        headers,
+    )
+    text = response.text
+    for line in text.splitlines():
+        if line.startswith("data:"):
+            text = line[5:]
+            break
+    return json.loads(text)
+
+
+def test_each_mcp_message_carries_its_own_authorization_headers(
+    staged_config, mock_llm_provider
+):
+    with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
+        with TestClient(create_app(staged_config)) as c:
+            seen = []
+
+            class Spy:
+                def evaluate(self, context):
+                    seen.append(context.scope.get("workspace_id", ""))
+                    from backend.runtime.authorization import (
+                        GraphAuthorizationDecision,
+                    )
+
+                    return GraphAuthorizationDecision(allowed=True)
+
+            c.app.state.graph_service._authorization_hook = Spy()
+            mcp_session = _open_mcp(
+                c, {"x-communityoverview-workspace-id": "opened-with"}
+            )
+            args = {"nodes": [{"id": "q1", "type": "Actor", "name": "q"}], "edges": []}
+            _call(
+                c,
+                mcp_session,
+                "add_nodes",
+                args,
+                2,
+                {"x-communityoverview-workspace-id": "ws-per-message"},
+            )
+            args2 = {"nodes": [{"id": "q2", "type": "Actor", "name": "q"}], "edges": []}
+            _call(c, mcp_session, "add_nodes", args2, 3)
+    assert seen[0] == "ws-per-message"
+    assert seen[-1] == ""
+
+
+def test_postgres_boot_refuses_staging_off_over_staged_records():
+    from backend.api_host.config import AppConfig
+    from backend.api_host.persistence import (
+        PersistenceConfigurationError,
+        build_persistence_backend,
+    )
+    from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+    from backend.core.tests.test_persistence_contract_postgres import (
+        DSN,
+        _server_reachable,
+        psycopg,
+    )
+
+    if not _server_reachable():
+        pytest.skip("no PostgreSQL server")
+    schema = f"co_bootr2_{uuid.uuid4().hex[:12]}"
+    try:
+        on = PostgresGraphPersistenceBackend(DSN, schema=schema, staged_sessions=True)
+        on.record_staged("1234-5678-1234-5678")
+        on.close()
+        config = AppConfig(
+            graph_file="graph.json",
+            graph_backend="postgres",
+            graph_postgres_dsn=DSN,
+            graph_postgres_schema=schema,
+            graph_postgres_pool_size=1,
+        )
+        with pytest.raises(PersistenceConfigurationError) as exc:
+            build_persistence_backend(config)
+        assert "GRAPH_STAGED_SESSIONS" in str(exc.value)
+    finally:
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+
+
+def test_a_retired_path_answers_exactly_like_an_unknown_one(client):
+    sid = _staged(client)
+    client.delete(f"/api/sessions/{sid}")
+    retired = client.get(f"/api/sessions/{sid}")
+    unknown = client.get(f"/api/sessions/{UNKNOWN}")
+    assert (retired.status_code, retired.json()) == (
+        unknown.status_code,
+        unknown.json(),
+    )

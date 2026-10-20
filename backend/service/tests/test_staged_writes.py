@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.core import GraphStorage, layer_store
+from backend.core import Edge, GraphStorage, Node, layer_store
 from backend.core.session_manager import (
     GRAPH_STAGING_CLIENT_ID,
     SessionManager,
@@ -32,6 +32,7 @@ from backend.core.tests.test_persistence_contract_postgres import (
 from backend.core.write_modes import WriteModeRefused, WriteModes
 from backend.runtime.authorization import (
     DefaultGraphAuthorizationHook,
+    GraphAccessNarrowing,
     GraphAuthorizationDecision,
 )
 from backend.runtime.session_context import bind_session
@@ -808,3 +809,165 @@ def test_staging_while_a_batch_holds_the_session_lock_is_busy(world):
         loop.close()
     assert result["error"] == "busy"
     assert world.layer(sid) == {}
+
+
+# -- narrowing, saved views, adoption and the guards ------------------------
+
+
+class Narrow:
+    """Only nodes whose origin_graph_id is g1 are visible; local ones are not."""
+
+    def evaluate(self, context):
+        return GraphAuthorizationDecision(
+            allowed=True,
+            graph_access=GraphAccessNarrowing(
+                enabled=True, allow_local_graph=False, include_graph_ids=("g1",)
+            ),
+        )
+
+
+def _narrowed(world):
+    world.storage.add_nodes(
+        [
+            Node(id="v", type="Actor", name="Vis", metadata={"origin_graph_id": "g1"}),
+            Node(id="w", type="Actor", name="Vis2", metadata={"origin_graph_id": "g1"}),
+        ],
+        [Edge(id="vw", source="v", target="w", type="RELATES_TO")],
+    )
+    sid = world.staged_session()
+    world.service._authorization_hook = Narrow()
+    return sid
+
+
+def test_staged_update_of_a_node_outside_the_narrowing_is_not_found(world):
+    sid = _narrowed(world)
+    with bind_session(sid):
+        result = world.service.update_node("a", {"name": "X"})
+    assert result["success"] is False
+    assert world.layer(sid) == {}
+
+
+def test_staged_delete_of_a_node_outside_the_narrowing_stages_nothing(world):
+    sid = _narrowed(world)
+    with bind_session(sid):
+        world.service.delete_nodes(["a"], confirmed=True)
+    assert world.layer(sid) == {}
+
+
+def test_staged_archive_of_a_node_outside_the_narrowing_stages_nothing(world):
+    sid = _narrowed(world)
+    with bind_session(sid):
+        world.service.archive_nodes(["a"])
+    assert world.layer(sid) == {}
+
+
+def test_staged_edge_to_a_node_outside_the_narrowing_is_refused(world):
+    sid = _narrowed(world)
+    with bind_session(sid):
+        result = world.service.add_edge("v", "a", type="RELATES_TO")
+    assert result["success"] is False
+    assert world.layer(sid) == {}
+
+
+def test_staged_edge_update_or_delete_of_an_invisible_edge_stages_nothing(world):
+    sid = _narrowed(world)
+    with bind_session(sid):
+        world.service.update_edge("ab", {"label": "x"})
+        world.service.delete_edges(["ab"], confirmed=True)
+        world.service.archive_edges(["ab"])
+    assert world.layer(sid) == {}
+
+
+def test_staged_add_nodes_with_an_edge_to_an_invisible_node_is_refused(world):
+    sid = _narrowed(world)
+    with bind_session(sid):
+        result = world.service.add_nodes(
+            [
+                {
+                    "id": "n",
+                    "type": "Actor",
+                    "name": "N",
+                    "metadata": {"origin_graph_id": "g1"},
+                }
+            ],
+            [{"source": "n", "target": "a", "type": "RELATES_TO"}],
+        )
+    assert result["success"] is False
+    assert world.layer(sid) == {}
+
+
+def test_saved_view_annotation_validation_applies_to_a_staged_update(world):
+    world.storage.add_nodes(
+        [Node(id="sv", type="SavedView", name="View", metadata={})], []
+    )
+    sid = world.staged_session()
+    with bind_session(sid):
+        result = world.service.update_node(
+            "sv",
+            {
+                "metadata": {
+                    "annotations": [
+                        {
+                            "id": "i1",
+                            "type": "image",
+                            "image": {"url": "http://example.invalid/x.png"},
+                        }
+                    ]
+                }
+            },
+        )
+    assert result["success"] is False
+    assert world.layer(sid) == {}
+
+
+def test_adopting_twice_in_a_staged_session_finds_the_layer_copy(world, tmp_path):
+    from backend.service.tests.test_federated_adoption import (
+        _service_with_cached_federated_node,
+    )
+
+    (tmp_path / "fed").mkdir()
+    fed = _service_with_cached_federated_node(tmp_path / "fed")
+    world.service._federation_manager = fed._federation_manager
+    sid = world.staged_session()
+    with bind_session(sid):
+        first = world.service.adopt_federated_node("federated::esam-main::remote-1")
+        second = world.service.adopt_federated_node("federated::esam-main::remote-1")
+    assert first["success"] is True
+    assert "already adopted" in second["message"]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"default_mode": "bogus"},
+        {"default_mode": "staged"},
+        {"max_entries": True},
+        {"max_entries": 0},
+        {"max_entries": "5"},
+    ],
+)
+def test_write_modes_constructor_guards(kwargs):
+    with pytest.raises(ValueError):
+        WriteModes(None, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "op",
+    [
+        {"op": "write_mode_changed", "write_mode": "direct"},
+        {"op": "graph_change_staged", "entries": [], "removals": "x"},
+        {"op": "graph_change_staged", "entries": "x", "removals": []},
+        {"op": "graph_change_staged", "entries": []},
+    ],
+)
+def test_session_store_validates_server_only_ops(op):
+    from backend.core.session_store import (
+        InMemorySessionPersistenceBackend,
+        OpError,
+        SessionStore,
+    )
+
+    store = SessionStore(InMemorySessionPersistenceBackend())
+    session = store.create("s", write_mode="staged")
+    with pytest.raises(OpError):
+        store.apply_state_op(session, op)
