@@ -11,12 +11,15 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.agents.governance.models import AutonomyLevel, Proposal
+from backend.agents.governance.store import SqliteProposalStore
 from backend.api_host.persistence import (
     PersistenceConfigurationError,
     build_session_settings,
 )
 from backend.api_host.server import create_app
 from backend.runtime.session_context import SESSION_ID_HEADER
+from backend.service import access
 
 UNKNOWN = "1111-2222-3333-4444"
 
@@ -384,3 +387,154 @@ def test_over_the_mcp_transport_each_call_acts_in_its_own_header_session(
                 3,
             )
             assert _node(client, "p2") is not None
+
+
+# -- session routes and tools ask the hook; more refusals ---------------------
+
+
+@pytest.fixture
+def asked(monkeypatch):
+    calls = []
+    original = access.authorize_graph_access
+
+    def spy(hook, **kwargs):
+        calls.append(kwargs)
+        return original(hook, **kwargs)
+
+    monkeypatch.setattr(access, "authorize_graph_access", spy)
+    return calls
+
+
+def test_the_archive_route_stages_in_a_staged_session(client):
+    sid = _staged(client)
+    _add(client, {})
+    response = client.post(
+        "/api/nodes/archive",
+        headers={SESSION_ID_HEADER: sid},
+        json={"node_ids": ["s1"], "archived": True},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["staged"] is True
+    assert _node(client, "s1").archived is False
+
+
+def test_layer_full_is_422_over_rest(staged_config, mock_llm_provider):
+    config = dataclasses.replace(staged_config, session_layer_max_entries="1")
+    with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
+        c = TestClient(create_app(config))
+    sid = _staged(c)
+    _add(c, {SESSION_ID_HEADER: sid}, "s1")
+    response = _add(c, {SESSION_ID_HEADER: sid}, "s2")
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"] == "layer_full"
+
+
+def test_rest_staged_delete_and_mode_switch_ask_the_hook(client, asked):
+    sid = _staged(client)
+    plain = client.post("/api/sessions", json={"name": "p"}).json()["id"]
+    asked.clear()
+    client.patch(f"/api/sessions/{plain}", json={"write_mode": "staged"})
+    assert any(c["target"] == "set_session_write_mode" for c in asked)
+    asked.clear()
+    client.delete(f"/api/sessions/{sid}?discard_staged=true")
+    seen = [c for c in asked if c["target"] == "delete_visualization_session"]
+    assert seen and seen[0]["graph_operation"] == "discard"
+    assert seen[0]["session_id"] == sid
+
+
+def test_mcp_session_tools_ask_the_hook_and_forward_discard(client, asked):
+    tools = client.app.state.tools_map
+    created = tools["create_visualization_session"](name="m", write_mode="staged")
+    sid = created["session"]["session_id"]
+    assert created["session"]["write_mode"] == "staged"
+    other = tools["create_visualization_session"](name="n")["session"]["session_id"]
+    asked.clear()
+    tools["set_session_write_mode"](session_id=other, write_mode="staged")
+    assert any(c["target"] == "set_session_write_mode" for c in asked)
+    tools["add_nodes"](
+        nodes=[{"id": "m1", "type": "Actor", "name": "m1"}],
+        edges=[],
+        visualization_session_id=sid,
+    )
+    asked.clear()
+    refused = tools["delete_visualization_session"](session_id=sid, confirm=True)
+    assert refused["error"] == "layer_not_empty"
+    done = tools["delete_visualization_session"](
+        session_id=sid, confirm=True, discard_staged=True
+    )
+    assert done["success"] is True
+    assert any(c.get("graph_operation") == "discard" for c in asked)
+    gone = tools["get_visualization_session"](session_id=sid)
+    assert gone["error"] == "session_not_found"
+
+
+def test_proposal_session_id_survives_a_reopen(tmp_path):
+    db = tmp_path / "gov.db"
+    store = SqliteProposalStore(db)
+    p = Proposal(
+        agent_id="a", tool="t", input_args={}, autonomy_level=AutonomyLevel.PROPOSE
+    )
+    p.session_id = "1111-2222-3333-4444"
+    store.create(p)
+    store.close()
+    assert SqliteProposalStore(db).get(p.id).session_id == "1111-2222-3333-4444"
+
+
+def test_read_only_hook_refuses_mcp_mode_switch(client, monkeypatch):
+    tools = client.app.state.tools_map
+    sid = tools["create_visualization_session"](name="m")["session"]["session_id"]
+    monkeypatch.setenv("COMMUNITYOVERVIEW_AUTHORIZATION_MODE", "read-only")
+    result = tools["set_session_write_mode"](session_id=sid, write_mode="staged")
+    assert result["success"] is False
+    assert client.get(f"/api/sessions/{sid}").json()["write_mode"] == "direct"
+
+
+def test_an_unknown_write_mode_is_refused_not_read_as_direct(client):
+    response = client.post("/api/sessions", json={"write_mode": "bogus"})
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"] == "invalid_write_mode"
+    assert client.get("/api/sessions").json()["sessions"] == []
+
+
+def test_a_stale_expected_session_seq_is_409_over_rest(client):
+    sid = _staged(client)
+    _add(client, {SESSION_ID_HEADER: sid}, "s1")
+    response = client.post(
+        "/api/nodes",
+        headers={SESSION_ID_HEADER: sid},
+        json={
+            "nodes": [{"id": "s2", "type": "Actor", "name": "s2"}],
+            "edges": [],
+            "expected_session_seq": 0,
+        },
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "session_seq_conflict"
+
+
+@pytest.mark.parametrize("recorded", ["other", None])
+def test_approving_a_proposal_from_another_session_is_a_mismatch(client, recorded):
+    sid = _staged(client)
+    registry = client.app.state.agent_registry
+    proposal = Proposal(
+        agent_id="a",
+        tool="update_node",
+        input_args={},
+        autonomy_level=AutonomyLevel.ACT_AFTER_APPROVAL,
+    )
+    proposal.session_id = _staged(client) if recorded else None
+    registry._governance.store.create(proposal)
+    response = client.post(
+        f"/agents/proposals/{proposal.id}/approve", headers={SESSION_ID_HEADER: sid}
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"] == "session_mismatch"
+    assert registry.get_proposal(proposal.id)["status"] == "pending"
+
+
+def test_a_session_known_only_by_its_push_channel_writes_directly(client):
+    sid = "2222-3333-4444-5555"
+    client.app.state.session_registry.get_or_create(sid)
+    response = _add(client, {SESSION_ID_HEADER: sid})
+    assert response.status_code == 200 and "staged" not in response.json()
+    assert _node(client, "s1") is not None

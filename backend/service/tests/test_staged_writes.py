@@ -660,3 +660,151 @@ def test_postgres_refuses_to_boot_with_staging_off_over_staged_sessions():
     finally:
         with psycopg.connect(DSN, autocommit=True) as conn:
             conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+
+
+# -- entry contents, expectations and refusals on every write kind ---------------
+
+
+def test_archive_stages_the_flag_and_names_resolve_through_the_layer(world):
+    sid = world.staged_session()
+    with bind_session(sid):
+        world.service.archive_nodes(["b"])
+        world.service.update_node("a", {"name": "Alpha2"})
+        stale = world.service.add_edge("Alpha", "b", type="RELATES_TO")
+        fresh = world.service.add_edge("Alpha2", "b", type="RELATES_TO")
+    assert world.layer(sid)[("node", "b")]["staged"] == {"archived": True}
+    assert stale["success"] is False
+    assert fresh["success"] is True
+
+
+def test_update_over_create_keeps_every_field_and_merges_metadata(world):
+    sid = world.staged_session()
+    with bind_session(sid):
+        world.service.add_nodes(
+            [{"id": "c", "type": "Actor", "name": "C", "description": "d"}], []
+        )
+        world.service.update_node("c", {"name": "C2", "description": "d2"})
+        world.service.update_node("a", {"metadata": {"p": 1}}, metadata_merge=True)
+        world.service.update_node("a", {"metadata": {"q": 2}}, metadata_merge=True)
+    assert world.layer(sid)[("node", "c")]["staged"]["description"] == "d2"
+    assert world.layer(sid)[("node", "a")]["staged"]["metadata"] == {"p": 1, "q": 2}
+
+
+def test_expectations_on_delete_and_edge_writes(world):
+    sid = world.staged_session()
+    rev = world.storage.get_node("a").revision
+    erev = world.storage.edges["ab"].revision
+    with bind_session(sid):
+        r1 = world.service.delete_nodes(
+            ["a"], confirmed=True, expected_revisions={"a": rev + 7}
+        )
+        r2 = world.service.update_edge("ab", {"label": "x"}, expected_revision=erev + 7)
+        r3 = world.service.delete_edge("ab", expected_revision=erev + 7)
+        r4 = world.service.add_nodes(
+            [{"id": "a", "type": "Actor", "name": "Z"}], [], expect_absent=True
+        )
+        r5 = world.service.add_nodes([{"id": "a", "type": "Actor", "name": "Z"}], [])
+        r6 = world.service.add_nodes(
+            [],
+            [{"id": "ab", "source": "a", "target": "b", "type": "RELATES_TO"}],
+            expect_absent=True,
+        )
+    assert r1["error"] == "entity_revision_conflict"
+    assert r2["error"] == "entity_revision_conflict"
+    assert r3["error"] == "entity_revision_conflict"
+    assert r4["error"] == "entity_revision_conflict"
+    assert r5["success"] is False and "already exists" in r5["message"]
+    assert r6["error"] == "entity_revision_conflict"
+    assert world.layer(sid) == {}
+
+
+def test_inapplicable_edges_are_refused(world, monkeypatch):
+    monkeypatch.setattr(
+        "backend.service.staging.edge_applicability_error", lambda *a: "inapplicable"
+    )
+    sid = world.staged_session()
+    with bind_session(sid):
+        r1 = world.service.add_nodes(
+            [{"id": "c", "type": "Actor", "name": "C"}],
+            [{"id": "ca", "source": "c", "target": "a", "type": "RELATES_TO"}],
+        )
+        r2 = world.service.add_edge("b", "a", type="RELATES_TO")
+    assert r1["success"] is False and r2["success"] is False
+    with bind_session(sid):
+        r3 = world.service.update_edge("ab", {"label": "y"})
+    assert r3["success"] is False
+    assert world.layer(sid) == {}
+
+
+def test_noop_update_stages_nothing_and_takes_no_seq(world):
+    sid = world.staged_session()
+    seq = world.manager.get_session(sid).seq
+    world.published.clear()
+    with bind_session(sid):
+        result = world.service.update_node("a", {"name": "Alpha"})
+    assert result["session_seq"] == seq
+    assert result["entries"] == []
+    assert world.manager.get_session(sid).seq == seq
+    assert world.published == []
+
+
+def test_stale_expected_updated_at_conflicts(world):
+    sid = world.staged_session()
+    with bind_session(sid):
+        result = world.service.update_node(
+            "a", {"name": "N"}, expected_updated_at="2001-01-01T00:00:00+00:00"
+        )
+    assert result.get("conflict") is True
+    assert world.layer(sid) == {}
+
+
+def test_actor_is_recorded(world):
+    sid = world.staged_session()
+    with bind_session(sid):
+        world.service.update_node("a", {"name": "N"})
+    assert world.layer(sid)[("node", "a")]["staged_by"] == "anonymous"
+
+
+def test_commit_into_a_retired_layer_is_session_not_found(world, monkeypatch):
+    sid = world.staged_session()
+
+    def boom(*a, **k):
+        raise layer_store.StagedSessionNotActive(sid, "retired")
+
+    monkeypatch.setattr(world.storage.layer_store, "stage", boom)
+    with bind_session(sid):
+        result = world.service.update_node("a", {"name": "N"})
+    assert result["error"] == "session_not_found"
+
+
+def test_direct_named_session_seq_conflict(world):
+    sid = world.manager.create_session("d", "direct").id
+    with bind_session(sid):
+        result = world.service.update_node("a", {"name": "N"}, expected_session_seq=99)
+    assert result["error"] == "session_seq_conflict"
+    assert world.storage.get_node("a").name == "Alpha"
+
+
+def test_delete_nodes_limits_when_staged(world):
+    sid = world.staged_session()
+    with bind_session(sid):
+        many = world.service.delete_nodes([f"n{i}" for i in range(11)], confirmed=True)
+        unconfirmed = world.service.delete_nodes(["a"])
+    assert many["success"] is False and unconfirmed["success"] is False
+    assert world.layer(sid) == {}
+
+
+def test_staging_while_a_batch_holds_the_session_lock_is_busy(world):
+    import asyncio
+
+    sid = world.staged_session()
+    loop = asyncio.new_event_loop()
+    loop.run_until_complete(world.manager._lock(sid).acquire())
+    try:
+        with bind_session(sid):
+            result = world.service.update_node("a", {"name": "N"})
+    finally:
+        world.manager._lock(sid).release()
+        loop.close()
+    assert result["error"] == "busy"
+    assert world.layer(sid) == {}
