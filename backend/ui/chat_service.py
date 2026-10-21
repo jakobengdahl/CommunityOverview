@@ -1069,6 +1069,14 @@ Respond with ONLY a JSON array of extracted entities, no other text. Example for
                 similar_results = self._graph_service.find_similar_nodes_batch(
                     names=names, node_type=node_type, threshold=0.7, limit=3
                 )
+                if similar_results.get("success") is False:
+                    # A denied duplicate check is reported, never read as
+                    # "nothing similar exists".
+                    return {
+                        **similar_results,
+                        "proposed_nodes": [],
+                        "similar_existing": {},
+                    }
             else:
                 similar_results = {"results": {}}
 

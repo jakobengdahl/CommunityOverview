@@ -138,7 +138,7 @@ _UNDELIVERED_PUSH_REMEDY = (
 
 # How a tool treats the session a request acts in (docs/SESSION_OVERLAY_CONTRACT
 # .md §16.1). A graph write stages in a staged session; a graph read composes
-# in one (refused until composed reads exist). Both take the session as
+# in one (§8). Both take the session as
 # `visualization_session_id`. A session tool names its own session; any other
 # tool refuses a session with `session_not_supported`.
 _STAGING_TOOLS = frozenset(
@@ -164,6 +164,15 @@ _COMPOSING_TOOLS = frozenset(
         "get_subtypes",
         "audit_relationship_applicability",
         "get_saved_view",
+        "list_saved_views",
+        "show_graph_widget",
+    }
+)
+# The refusals a session tool passes on rather than reading the main graph.
+_SESSION_REFUSALS = frozenset(
+    {
+        session_context.SESSION_NOT_FOUND,
+        session_context.STAGED_UNSUPPORTED,
     }
 )
 # The read tools whose `visualization_session_id` was a push target first.
@@ -667,6 +676,7 @@ def register_mcp_tools(
         query: str,
         node_types: Optional[List[str]] = None,
         limit: int = 50,
+        visualization_session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Show matching nodes as an interactive graph the user can explore in the
@@ -725,8 +735,9 @@ def register_mcp_tools(
             node_id: ID of the node
             visualization_session_id: Optional. The session to read in; one
                 that does not exist is refused with session_not_found, and a
-                staged session (whose composed view is not readable yet) with
-                session_not_supported.
+                staged session is read as composed: the graph with the
+                session's staged changes applied, each entity marked with its
+                staged_state.
 
         Returns:
             Dict with the node and its incident edges (``edges``, visible ones
@@ -797,8 +808,9 @@ def register_mcp_tools(
             limit: Max number of results (default 5)
             visualization_session_id: Optional. The session to read in; one
                 that does not exist is refused with session_not_found, and a
-                staged session (whose composed view is not readable yet) with
-                session_not_supported.
+                staged session is read as composed: the graph with the
+                session's staged changes applied, each entity marked with its
+                staged_state.
 
         Returns:
             Dict with similar nodes and similarity scores
@@ -829,8 +841,9 @@ def register_mcp_tools(
             limit: Max number of results per name (default 5)
             visualization_session_id: Optional. The session to read in; one
                 that does not exist is refused with session_not_found, and a
-                staged session (whose composed view is not readable yet) with
-                session_not_supported.
+                staged session is read as composed: the graph with the
+                session's staged changes applied, each entity marked with its
+                staged_state.
 
         Returns:
             Dict with results for each name
@@ -1205,8 +1218,9 @@ def register_mcp_tools(
         Args:
             visualization_session_id: Optional. The session to read in; one
                 that does not exist is refused with session_not_found, and a
-                staged session (whose composed view is not readable yet) with
-                session_not_supported.
+                staged session is read as composed: the graph with the
+                session's staged changes applied, each entity marked with its
+                staged_state.
 
         Returns:
             Dict with statistics (total_nodes, total_edges, nodes_by_type, edges_by_type)
@@ -1277,8 +1291,9 @@ def register_mcp_tools(
             node_type: Optional filter for a specific node type (e.g. 'Actor')
             visualization_session_id: Optional. The session to read in; one
                 that does not exist is refused with session_not_found, and a
-                staged session (whose composed view is not readable yet) with
-                session_not_supported.
+                staged session is read as composed: the graph with the
+                session's staged changes applied, each entity marked with its
+                staged_state.
 
         Returns:
             Dict with subtypes grouped by node type
@@ -1307,8 +1322,9 @@ def register_mcp_tools(
         Args:
             visualization_session_id: Optional. The session to read in; one
                 that does not exist is refused with session_not_found, and a
-                staged session (whose composed view is not readable yet) with
-                session_not_supported.
+                staged session is read as composed: the graph with the
+                session's staged changes applied, each entity marked with its
+                staged_state.
         """
         return service.audit_relationship_applicability()
 
@@ -1463,13 +1479,21 @@ def register_mcp_tools(
         return result
 
     @register_tool
-    def list_saved_views() -> Dict[str, Any]:
+    def list_saved_views(
+        visualization_session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         List all saved views.
 
         Returns a list of all saved view snapshots stored in the graph.
         These are NOT the current visualization - they are saved snapshots
         that can be loaded to restore a specific graph view.
+
+        Args:
+            visualization_session_id: Optional. The session to read in; one
+                that does not exist is refused with session_not_found, and a
+                staged session is read as composed: the graph with the
+                session's staged changes applied.
 
         Returns:
             List of all SavedView nodes with their names and summaries
@@ -1989,14 +2013,17 @@ def register_mcp_tools(
         # helper. It matters here because the projection's denial is swallowed
         # into {} below — a narrowing meant for some other target would silently
         # report every node as type/status None rather than erroring.
-        semantics = (
-            service.resolve_session_node_semantics(
+        with service.reading_in(session_id):
+            resolved = service.resolve_session_node_semantics(
                 node_refs,
                 action=GRAPH_ACTION_READ,
                 target="get_visualization_layout",
-            ).get("nodes")
-            or {}
-        )
+            )
+        if resolved.get("error") in _SESSION_REFUSALS:
+            # A staged session this instance cannot read is refused, never
+            # laid out from the main graph.
+            return resolved
+        semantics = resolved.get("nodes") or {}
         nodes = []
         for node_id in node_refs:
             pos = positions.get(node_id)
@@ -2010,6 +2037,11 @@ def register_mcp_tools(
                     "dimmed": node_id in dimmed,
                     "type": meaning.get("type"),
                     "status": meaning.get("status"),
+                    **(
+                        {"staged_state": meaning["staged_state"]}
+                        if "staged_state" in meaning
+                        else {}
+                    ),
                 }
             )
         return {
@@ -2349,9 +2381,10 @@ def register_mcp_tools(
         # An id that no longer exists drops out here too. Same target as the gate
         # above, so a target-aware hook is asked about this tool twice rather
         # than about a helper it has never heard of.
-        resolved = service.resolve_session_node_semantics(
-            unique_ids, action=GRAPH_ACTION_MUTATE, target="add_nodes_to_session"
-        )
+        with service.reading_in(session_id):
+            resolved = service.resolve_session_node_semantics(
+                unique_ids, action=GRAPH_ACTION_MUTATE, target="add_nodes_to_session"
+            )
         if not resolved.get("success"):
             return resolved
         known = resolved.get("nodes") or {}

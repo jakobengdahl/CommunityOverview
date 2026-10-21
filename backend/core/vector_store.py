@@ -301,6 +301,18 @@ class VectorStore:
         embedding = self.model.encode(text)
         return embedding.tolist()
 
+    def embed_query(self, query_text: str) -> Optional[Any]:
+        """The vector of ``query_text`` as ``search`` embeds it, or None where
+        it cannot be embedded (the ML-free base install)."""
+        try:
+            self._load_model()
+            return self.model.encode(query_text)
+        except ImportError as e:
+            logger.warning(
+                f"semantic search unavailable (embedding model not installed): {e}"
+            )
+            return None
+
     def update_node_embedding(self, node: Node):
         """Generate and store the embedding for a node."""
         self._absorb({node.id: self.generate_embedding(node)})

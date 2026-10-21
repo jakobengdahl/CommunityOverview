@@ -651,7 +651,12 @@ _WRITE_ERROR_STATUS = {
 
 # The refusals of a request naming a session it cannot act in (§16.3).
 _SESSION_REFUSALS = frozenset(
-    {"session_not_found", "session_not_supported", "session_mismatch"}
+    {
+        "session_not_found",
+        "session_not_supported",
+        "session_mismatch",
+        "staged_unsupported",
+    }
 )
 
 
@@ -801,28 +806,32 @@ def _register_search_endpoints(router: APIRouter, service: GraphService) -> None
 
 def _register_similarity_endpoints(router: APIRouter, service: GraphService) -> None:
     @router.post("/similar")
-    async def find_similar_nodes(request: SimilarNodesRequest) -> Dict[str, Any]:
+    async def find_similar_nodes(
+        request: SimilarNodesRequest, http_request: Request
+    ) -> Dict[str, Any]:
         """Find similar nodes based on name (for duplicate detection)."""
-        result = service.find_similar_nodes(
-            name=request.name,
-            node_type=request.node_type,
-            threshold=request.threshold,
-            limit=request.limit,
-        )
+        with use_request_authorization(headers=http_request.headers):
+            result = service.find_similar_nodes(
+                name=request.name,
+                node_type=request.node_type,
+                threshold=request.threshold,
+                limit=request.limit,
+            )
         _raise_for_access_denied(result)
         return result
 
     @router.post("/similar/batch")
     async def find_similar_nodes_batch(
-        request: SimilarNodesBatchRequest,
+        request: SimilarNodesBatchRequest, http_request: Request
     ) -> Dict[str, Any]:
         """Find similar nodes for multiple names at once."""
-        result = service.find_similar_nodes_batch(
-            names=request.names,
-            node_type=request.node_type,
-            threshold=request.threshold,
-            limit=request.limit,
-        )
+        with use_request_authorization(headers=http_request.headers):
+            result = service.find_similar_nodes_batch(
+                names=request.names,
+                node_type=request.node_type,
+                threshold=request.threshold,
+                limit=request.limit,
+            )
         _raise_for_access_denied(result)
         return result
 
@@ -1101,18 +1110,21 @@ def _register_metadata_endpoints(router: APIRouter, service: GraphService) -> No
         return service.list_relationship_types()
 
     @router.get("/meta/relationship-applicability/audit")
-    async def audit_relationship_applicability() -> Dict[str, Any]:
+    async def audit_relationship_applicability(request: Request) -> Dict[str, Any]:
         """Report existing edges that violate relationship applicability rules."""
-        result = service.audit_relationship_applicability()
+        with use_request_authorization(headers=request.headers):
+            result = service.audit_relationship_applicability()
         _raise_for_access_denied(result)
         return result
 
     @router.get("/meta/subtypes")
     async def get_subtypes(
+        request: Request,
         node_type: Optional[str] = Query(None, description="Filter by node type"),
     ) -> Dict[str, Any]:
         """Get existing subtypes used in the graph, grouped by node type."""
-        result = service.get_subtypes(node_type)
+        with use_request_authorization(headers=request.headers):
+            result = service.get_subtypes(node_type)
         _raise_for_access_denied(result)
         return result
 
@@ -1251,11 +1263,21 @@ def _register_session_endpoints(
         except RateLimited:
             raise HTTPException(status_code=429, detail="rate limit exceeded")
 
-    def _session_payload(session, *, resolve: bool, manager) -> Dict[str, Any]:
+    def _session_payload(
+        session, *, resolve: bool, manager, http_request: Optional[Request] = None
+    ) -> Dict[str, Any]:
         payload = manager.describe(session)
         payload["roster"] = manager.roster(session.id)
         if resolve:
-            resolved = service.resolve_session_nodes(session.state.get("node_refs", []))
+            authorization = (
+                use_request_authorization(headers=http_request.headers)
+                if http_request is not None
+                else use_request_authorization()
+            )
+            with authorization, service.reading_in(session.id):
+                resolved = service.resolve_session_nodes(
+                    session.state.get("node_refs", [])
+                )
             if resolved.get("error") in _SESSION_REFUSALS:
                 _raise_for_access_denied(resolved)
             payload["resolved"] = {
@@ -1302,7 +1324,12 @@ def _register_session_endpoints(
         session = session_manager.get_session(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="session not found")
-        return _session_payload(session, resolve=resolve, manager=session_manager)
+        return _session_payload(
+            session,
+            resolve=resolve,
+            manager=session_manager,
+            http_request=http_request,
+        )
 
     @router.patch("/sessions/{session_id}")
     async def rename_session(

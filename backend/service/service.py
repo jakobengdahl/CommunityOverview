@@ -11,12 +11,14 @@ Callers (rest_api.py, mcp_tools.py, …) continue to use this class unchanged;
 public method signatures are preserved exactly.
 """
 
+from contextlib import contextmanager
 from typing import (
     TYPE_CHECKING,
     Any,
     AsyncIterator,
     Callable,
     Dict,
+    Iterator,
     List,
     Optional,
     Union,
@@ -30,9 +32,11 @@ from backend.runtime.authorization import (
     GraphAuthorizationHook,
 )
 from backend.federation import FederationManager
+from backend.runtime import session_context
 
-from . import attachments, queries, mutations, views, import_service
+from . import access, attachments, queries, mutations, views, import_service
 from .attachments import AttachmentSettings
+from .composed import annotate_staged_state
 from .staging import SessionGate, StagedWrite, refusal_result
 
 import logging
@@ -96,6 +100,22 @@ class GraphService:
     def session_gate(self) -> SessionGate:
         return self._session_gate
 
+    @contextmanager
+    def reading_in(self, session_id: Optional[str]) -> Iterator[None]:
+        """Resolve node ids for ``session_id``'s own canvas in its composed
+        view, when it is a staged session (§8.2); otherwise as before. For the
+        session tools and routes, which name their session rather than act in
+        one; a request already acting in another session was refused before."""
+        if (
+            session_id
+            and session_context.current_session_id() is None
+            and self._session_gate.is_staged(session_id)
+        ):
+            with session_context.bind_session(session_id):
+                yield
+        else:
+            yield
+
     def _write(
         self,
         target: str,
@@ -127,17 +147,45 @@ class GraphService:
             return refused
 
     def _read(
-        self, target: str, run: Callable[[], Dict[str, Any]], **defaults: Any
+        self,
+        target: str,
+        run: Callable[[Any], Dict[str, Any]],
+        *,
+        action: str = GRAPH_ACTION_READ,
+        **defaults: Any,
     ) -> Dict[str, Any]:
-        """Run a read that composes in a staged session (§8.2)."""
+        """Run a read against the graph, or, in a staged session, against the
+        session's composed view (§8.2), with every entity it returns marked
+        with its ``staged_state``.
+
+        ``action`` and ``target`` are what the read asks the hook: the view
+        leaves out every layer entry that narrowing does not wholly cover. The
+        read still asks the hook itself, and is refused as it would be on the
+        graph.
+        """
         try:
-            self._session_gate.check_read(target)
+            session_id = self._session_gate.read_session()
         except Exception as exc:
             refused = refusal_result(exc, **defaults)
             if refused is None:
                 raise
             return refused
-        return run()
+        if session_id is None:
+            return run(self._storage)
+        decision = access.evaluate_graph_access(
+            self._authorization_hook, action=action, target=target
+        )
+        if not decision.allowed:
+            # Refused by the read itself, which reads nothing first.
+            return run(self._storage)
+        try:
+            composed = self._session_gate.compose(session_id, decision.graph_access)
+        except Exception as exc:
+            refused = refusal_result(exc, **defaults)
+            if refused is None:
+                raise
+            return refused
+        return annotate_staged_state(run(composed), composed)
 
     @property
     def storage(self) -> GraphStorage:
@@ -236,8 +284,8 @@ class GraphService:
     ) -> Dict[str, Any]:
         return self._read(
             "search_graph",
-            lambda: queries.search_graph(
-                self._storage,
+            lambda storage: queries.search_graph(
+                storage,
                 self._federation_manager,
                 self._authorization_hook,
                 query,
@@ -260,8 +308,8 @@ class GraphService:
     def get_node_details(self, node_id: str) -> Dict[str, Any]:
         return self._read(
             "get_node_details",
-            lambda: queries.get_node_details(
-                self._storage, self._authorization_hook, node_id
+            lambda storage: queries.get_node_details(
+                storage, self._authorization_hook, node_id
             ),
         )
 
@@ -274,8 +322,8 @@ class GraphService:
     ) -> Dict[str, Any]:
         return self._read(
             "get_related_nodes",
-            lambda: queries.get_related_nodes(
-                self._storage,
+            lambda storage: queries.get_related_nodes(
+                storage,
                 self._authorization_hook,
                 node_id,
                 relationship_types=relationship_types,
@@ -296,9 +344,9 @@ class GraphService:
         include_archived: bool = False,
     ) -> Dict[str, Any]:
         return self._read(
-            "list_typed_nodes",
-            lambda: queries.list_typed_nodes(
-                self._storage,
+            f"list_typed_nodes:{node_type}",
+            lambda storage: queries.list_typed_nodes(
+                storage,
                 self._authorization_hook,
                 node_type=node_type,
                 tags_all=tags_all,
@@ -319,9 +367,9 @@ class GraphService:
         include_archived: bool = False,
     ) -> Dict[str, Any]:
         return self._read(
-            "list_typed_edges",
-            lambda: queries.list_typed_edges(
-                self._storage,
+            f"list_typed_edges:{edge_type}",
+            lambda storage: queries.list_typed_edges(
+                storage,
                 self._authorization_hook,
                 edge_type=edge_type,
                 tags_all=tags_all,
@@ -343,8 +391,9 @@ class GraphService:
     ) -> Dict[str, Any]:
         return self._read(
             "find_similar_nodes",
-            lambda: queries.find_similar_nodes(
-                self._storage,
+            lambda storage: queries.find_similar_nodes(
+                storage,
+                self._authorization_hook,
                 name,
                 node_type=node_type,
                 threshold=threshold,
@@ -361,8 +410,9 @@ class GraphService:
     ) -> Dict[str, Any]:
         return self._read(
             "find_similar_nodes_batch",
-            lambda: queries.find_similar_nodes_batch(
-                self._storage,
+            lambda storage: queries.find_similar_nodes_batch(
+                storage,
+                self._authorization_hook,
                 names,
                 node_type=node_type,
                 threshold=threshold,
@@ -752,8 +802,8 @@ class GraphService:
     def get_graph_stats(self) -> Dict[str, Any]:
         return self._read(
             "get_graph_stats",
-            lambda: queries.get_graph_stats(
-                self._storage, self._federation_manager, self._authorization_hook
+            lambda storage: queries.get_graph_stats(
+                storage, self._federation_manager, self._authorization_hook
             ),
         )
 
@@ -784,7 +834,9 @@ class GraphService:
     def get_subtypes(self, node_type: str = None) -> Dict[str, Any]:
         return self._read(
             "get_subtypes",
-            lambda: queries.get_subtypes(self._storage, node_type=node_type),
+            lambda storage: queries.get_subtypes(
+                storage, self._authorization_hook, node_type=node_type
+            ),
         )
 
     def list_relationship_types(self) -> Dict[str, Any]:
@@ -793,7 +845,9 @@ class GraphService:
     def audit_relationship_applicability(self) -> Dict[str, Any]:
         return self._read(
             "audit_relationship_applicability",
-            lambda: queries.audit_relationship_applicability(self._storage),
+            lambda storage: queries.audit_relationship_applicability(
+                storage, self._authorization_hook
+            ),
         )
 
     def get_schema(self) -> Dict[str, Any]:
@@ -867,8 +921,8 @@ class GraphService:
     def resolve_session_nodes(self, node_ids: List[str]) -> Dict[str, Any]:
         return self._read(
             "resolve_session_nodes",
-            lambda: views.resolve_session_nodes(
-                self._storage, self._authorization_hook, node_ids
+            lambda storage: views.resolve_session_nodes(
+                storage, self._authorization_hook, node_ids
             ),
             nodes=[],
             edges=[],
@@ -892,8 +946,9 @@ class GraphService:
         """
         return self._read(
             target,
-            lambda: views.resolve_session_node_semantics(
-                self._storage,
+            action=action,
+            run=lambda storage: views.resolve_session_node_semantics(
+                storage,
                 self._authorization_hook,
                 node_ids,
                 action=action,
@@ -904,13 +959,15 @@ class GraphService:
     def get_saved_view(self, name: str) -> Dict[str, Any]:
         return self._read(
             "get_saved_view",
-            lambda: views.get_saved_view(self._storage, self._authorization_hook, name),
+            lambda storage: views.get_saved_view(
+                storage, self._authorization_hook, name
+            ),
         )
 
     def list_saved_views(self) -> Dict[str, Any]:
         return self._read(
             "list_saved_views",
-            lambda: views.list_saved_views(self._storage, self._authorization_hook),
+            lambda storage: views.list_saved_views(storage, self._authorization_hook),
         )
 
     # ==================== Export ====================
@@ -918,7 +975,7 @@ class GraphService:
     def export_graph(self) -> Dict[str, Any]:
         return self._read(
             "export_graph",
-            lambda: views.export_graph(self._storage, self._authorization_hook),
+            lambda storage: views.export_graph(storage, self._authorization_hook),
         )
 
     def export_graph_archive(self) -> Dict[str, Any]:

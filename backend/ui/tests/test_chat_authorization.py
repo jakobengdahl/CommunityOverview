@@ -256,8 +256,8 @@ def test_upload_analysis_write_by_read_only_actor_is_denied(hooked_client):
 
 
 def test_propose_nodes_runs_with_the_callers_request_bound(hooked_client):
-    # The similarity lookup behind /propose-nodes does not consult the hook, so
-    # assert the binding the service layer would read instead.
+    # Assert the binding the service layer reads; the similarity lookup behind
+    # /propose-nodes asks the hook with it (see the denial test below).
     client, _, _, _ = hooked_client
     chat_svc = client.app.state.chat_service
     seen = []
@@ -275,6 +275,34 @@ def test_propose_nodes_runs_with_the_callers_request_bound(hooked_client):
 
     assert response.status_code == 200
     assert seen and seen[0]["headers"][ACTOR_ID_HEADER] == "outsider"
+
+
+def test_a_denied_duplicate_check_is_reported_not_read_as_no_duplicates(
+    hooked_client,
+):
+    from types import SimpleNamespace
+
+    from backend.runtime.authorization import use_request_authorization
+
+    client, _, _, _ = hooked_client
+    chat_svc = client.app.state.chat_service
+    extracted = '[{"type": "Actor", "name": "Example Agency"}]'
+    provider = SimpleNamespace(
+        create_completion=lambda **_: SimpleNamespace(
+            content=[{"type": "text", "text": extracted}]
+        )
+    )
+    with patch.object(
+        chat_svc._processor, "_resolve_llm_provider", return_value=(provider, None)
+    ):
+        with use_request_authorization(headers={ACTOR_ID_HEADER: "outsider"}):
+            denied = chat_svc.propose_nodes_from_text("Example Agency runs it.")
+        allowed = chat_svc.propose_nodes_from_text("Example Agency runs it.")
+    assert denied["success"] is False and denied["error_code"] == "access_denied"
+    assert denied["similar_existing"] == {}
+    assert (
+        allowed["success"] is True and "Example Agency" in allowed["similar_existing"]
+    )
 
 
 def test_info_graph_stats_are_evaluated_as_the_caller(hooked_client):

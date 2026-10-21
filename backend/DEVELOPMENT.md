@@ -856,17 +856,46 @@ MCP the header is read per message; an MCP connection opened with the header
 stays in that session, so a later message naming another session, or none, is
 refused with `session_mismatch`.
 
-Reads in a staged session, which compose the main graph with the layer, are not
-built yet: the reads that will compose answer such a request with
-`400 session_not_supported`, so a staged session is never shown as if it were
-the graph. Any other route or tool refuses the header (or argument) the same
-way. A write may carry `expected_session_seq`; it holds while the session's
-sequence number equals it.
+A read in a staged session answers from the **composed view**: the main graph
+with the session's layer applied. A staged create is there, a staged update
+shows over the main entity as it is now (or over its base, when main has
+deleted it since), a staged delete hides the entity and every edge to it, and
+everything else is the main graph unchanged. Each entity such a read returns
+carries `staged_state`: `created`, `updated`, `orphaned` (an update of an
+entity main no longer holds) or `none`; `revision` is main's, or `0` for
+`created` and `orphaned`. The reads that compose are `POST /api/search`
+(lexical and semantic), `GET /api/nodes/{id}`, `POST /api/nodes/{id}/related`,
+`POST /api/similar` and `/api/similar/batch`, `GET /api/stats`,
+`GET /api/meta/subtypes`, `GET /api/meta/relationship-applicability/audit`,
+`GET /api/views` and `/api/views/{name}`, `GET /api/export` and `/export_graph`,
+the config-driven typed interfaces, their MCP tools (`list_saved_views` and
+`show_graph_widget` included) and the chat assistant's graph tools. A session's
+own canvas resolves its node ids in its composed view too:
+`GET /api/sessions/{id}?resolve=true`, `add_nodes_to_session` (which accepts a
+staged create) and `get_visualization_layout`. History, event subscriptions,
+agents, federation peers and diagnostics never see a layer. Without a session,
+or in a direct one, every read answers as before.
+
+A layer entry is part of a reader's composed view only when the reader's
+graph-access narrowing covers the composed entity, the main entity it stands
+over and its base (for an edge: its endpoints, and the main edge's and the
+base's endpoints): it carries content of all three. Semantic search drops the
+main vector of every entity with an entry and scores staged creates and
+updates by vectors of their own, embedded in the background when staged
+(where the optional ML stack is installed) and on demand at the first semantic
+read that finds one missing; those vectors live in memory on the instance and
+are never written to the main index. `search_graph`, `get_related_nodes` and
+`get_saved_view` still treat a `visualization_session_id` naming no staged
+session as a push target only.
+
+Any other route or tool refuses the header (or argument) with
+`400 session_not_supported`. A write may carry `expected_session_seq`; it holds
+while the session's sequence number equals it.
 
 | `error` | HTTP | Meaning |
 |---|---|---|
 | `session_not_found` | 404 | the session does not exist, or was a staged session that has been deleted |
-| `session_not_supported` | 400 | the route or tool does not act in a session (or does not yet read a staged one) |
+| `session_not_supported` | 400 | the route or tool neither stages nor composes |
 | `session_mismatch` | 400 | the request names two different sessions (header vs. path, argument or proposal) |
 | `session_seq_conflict` | 409 | `expected_session_seq` did not hold; carries `expected_session_seq` and `session_seq` |
 | `layer_full` | 422 | the write would take the layer past `SESSION_LAYER_MAX_ENTRIES`; carries `limit`. Nothing was staged |
@@ -877,7 +906,8 @@ sequence number equals it.
 
 The authorization hook is asked about a staged write as the same `mutate` it
 would ask a direct one, with `graph_operation="stage"` and `session_id` in the
-context.
+context, and about a composing read as the same `read` it would ask without the
+session, with `session_id` in the context.
 
 ### Custom REST Interfaces (config-driven)
 
@@ -1668,9 +1698,9 @@ own.
 The routes that reach the graph (`/ui/chat`, `/ui/chat/simple`,
 `/ui/propose-nodes`, `/ui/upload`, `/ui/info`) bind the caller's request
 authorization exactly like the REST graph routes, so the service authorization
-hook evaluates the assistant's tool calls as the caller. As on the REST and MCP
-surfaces, `find_similar_nodes`, `find_similar_nodes_batch` and `get_subtypes`
-do not consult the hook. A denied tool call comes back to the model as an
+hook evaluates the assistant's tool calls as the caller, `find_similar_nodes`,
+`find_similar_nodes_batch` and `get_subtypes` included, which narrow to the
+caller's visible graphs as `search_graph` does. A denied tool call comes back to the model as an
 `access_denied` tool result and nothing is written. A collection-mode chat
 whose collection lookup is denied runs with every write denied; a collection
 outside the caller's visible graphs counts as missing, so the chat runs without

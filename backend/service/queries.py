@@ -7,12 +7,13 @@ and the federation manager as explicit parameters.
 
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from backend.core import NodeType, RelationshipType
+from backend.core import NodeType, RelationshipType, storage_search
 from backend.core.storage_search import MATCH_MODE_SUBSTRING, validate_match_mode
 from backend.federation import teleport
 from backend.runtime.authorization import GRAPH_ACTION_READ
 
 from . import access
+from .composed import applicability_violations, subtypes_by_node_type
 from .serializers import (
     serialize_edges,
     serialize_graph_stats,
@@ -713,17 +714,72 @@ def list_typed_edges(
     }
 
 
+class _NarrowedVectors:
+    """A vector index answering only for ``visible`` ids: it asks the index
+    for as many more hits as there are hidden nodes, so hidden ones never
+    take a visible one's place, and drops them."""
+
+    def __init__(self, vector_store: Any, visible: Dict[str, Any], hidden: int):
+        self._vector_store = vector_store
+        self._visible = visible
+        self._hidden = hidden
+
+    def search(self, query_text=None, query_node=None, limit=5, threshold=0.0):
+        if limit <= 0:
+            return []
+        hits = self._vector_store.search(
+            query_text=query_text,
+            query_node=query_node,
+            limit=limit + self._hidden,
+            threshold=threshold,
+        )
+        return [hit for hit in hits if hit[0] in self._visible][:limit]
+
+
+def _similarity_scope(storage: "GraphStorage", hook: "GraphAuthorizationHook", target):
+    """``(decision, nodes, vectors)`` a similarity read scores against: the
+    whole graph, or under graph-access narrowing only the nodes the caller may
+    see - as ``search_graph`` narrows - so a hidden node never shows up, nor
+    takes the place of a visible one, nor lends its score."""
+    decision = access.evaluate_graph_access(
+        hook, action=GRAPH_ACTION_READ, target=target
+    )
+    if not decision.allowed or not decision.graph_access.enabled:
+        return decision, None, None
+    all_nodes = storage.get_all_nodes()
+    visible = {
+        node.id: node
+        for node in all_nodes
+        if access.is_node_visible(node, decision.graph_access)
+    }
+    vectors = _NarrowedVectors(
+        storage.vector_store, visible, len(all_nodes) - len(visible)
+    )
+    return decision, visible, vectors
+
+
 def find_similar_nodes(
     storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
     name: str,
     node_type: Optional[str] = None,
     threshold: float = 0.7,
     limit: int = 5,
 ) -> Dict[str, Any]:
+    decision, visible, vectors = _similarity_scope(storage, hook, "find_similar_nodes")
+    if not decision.allowed:
+        return access.build_access_denied_result(
+            action=GRAPH_ACTION_READ, target="find_similar_nodes", decision=decision
+        )
     type_filter = NodeType.from_string(node_type) if node_type else None
-    similar = storage.find_similar_nodes(
-        name=name, node_type=type_filter, threshold=threshold, limit=limit
-    )
+    if visible is None:
+        similar = storage.find_similar_nodes(
+            name=name, node_type=type_filter, threshold=threshold, limit=limit
+        )
+    else:
+        similar = storage_search.find_similar_nodes(
+            visible, vectors, name, type_filter, threshold, limit
+        )
     return {
         "similar_nodes": serialize_similar_nodes(similar),
         "total": len(similar),
@@ -733,15 +789,30 @@ def find_similar_nodes(
 
 def find_similar_nodes_batch(
     storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
     names: List[str],
     node_type: Optional[str] = None,
     threshold: float = 0.7,
     limit: int = 5,
 ) -> Dict[str, Any]:
-    type_filter = NodeType.from_string(node_type) if node_type else None
-    results = storage.find_similar_nodes_batch(
-        names=names, node_type=type_filter, threshold=threshold, limit=limit
+    decision, visible, vectors = _similarity_scope(
+        storage, hook, "find_similar_nodes_batch"
     )
+    if not decision.allowed:
+        return access.build_access_denied_result(
+            action=GRAPH_ACTION_READ,
+            target="find_similar_nodes_batch",
+            decision=decision,
+        )
+    type_filter = NodeType.from_string(node_type) if node_type else None
+    if visible is None:
+        results = storage.find_similar_nodes_batch(
+            names=names, node_type=type_filter, threshold=threshold, limit=limit
+        )
+    else:
+        results = storage_search.find_similar_nodes_batch(
+            visible, vectors, names, type_filter, threshold, limit
+        )
     formatted: Dict[str, Any] = {}
     for name, similar_list in results.items():
         formatted[name] = {
@@ -896,9 +967,25 @@ def list_node_types() -> Dict[str, Any]:
 
 
 def get_subtypes(
-    storage: "GraphStorage", node_type: Optional[str] = None
+    storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
+    node_type: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return {"subtypes": storage.get_subtypes_by_node_type(node_type)}
+    decision = access.evaluate_graph_access(
+        hook, action=GRAPH_ACTION_READ, target="get_subtypes"
+    )
+    if not decision.allowed:
+        return access.build_access_denied_result(
+            action=GRAPH_ACTION_READ, target="get_subtypes", decision=decision
+        )
+    if not decision.graph_access.enabled:
+        return {"subtypes": storage.get_subtypes_by_node_type(node_type)}
+    visible = [
+        node
+        for node in storage.get_all_nodes()
+        if access.is_node_visible(node, decision.graph_access)
+    ]
+    return {"subtypes": subtypes_by_node_type(visible, node_type)}
 
 
 def list_relationship_types() -> Dict[str, Any]:
@@ -918,8 +1005,34 @@ def list_relationship_types() -> Dict[str, Any]:
     return {"relationship_types": relationship_types}
 
 
-def audit_relationship_applicability(storage: "GraphStorage") -> Dict[str, Any]:
-    violations = storage.audit_relationship_applicability()
+def audit_relationship_applicability(
+    storage: "GraphStorage", hook: "GraphAuthorizationHook"
+) -> Dict[str, Any]:
+    target = "audit_relationship_applicability"
+    decision = access.evaluate_graph_access(
+        hook, action=GRAPH_ACTION_READ, target=target
+    )
+    if not decision.allowed:
+        return access.build_access_denied_result(
+            action=GRAPH_ACTION_READ, target=target, decision=decision
+        )
+    if not decision.graph_access.enabled:
+        violations = storage.audit_relationship_applicability()
+    else:
+        # Only edges between nodes the caller may see; an edge to a node
+        # missing from the graph has no endpoint to judge and is left out.
+        def get_visible(node_id: str):
+            node = storage.get_node(node_id)
+            return node if access.is_node_visible(node, decision.graph_access) else None
+
+        violations = applicability_violations(
+            [
+                edge
+                for edge in storage.get_all_edges()
+                if get_visible(edge.source) and get_visible(edge.target)
+            ],
+            get_visible,
+        )
     return {
         "success": True,
         "violation_count": len(violations),

@@ -225,15 +225,6 @@ def test_a_session_that_does_not_resolve_is_refused_and_nothing_lands(world, how
     assert world.main() == before
 
 
-def test_a_composing_read_in_a_staged_session_is_refused_not_answered_from_main(
-    world,
-):
-    sid = world.staged_session()
-    with bind_session(sid):
-        result = world.service.get_node_details("a")
-    assert result["success"] is False and result["error"] == "session_not_supported"
-
-
 # -- §6.2 collapsing ---------------------------------------------------------------
 
 

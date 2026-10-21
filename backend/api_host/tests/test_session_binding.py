@@ -139,13 +139,20 @@ def test_a_session_route_takes_only_its_own_session_in_the_header(client):
     assert same.status_code == 200
 
 
-def test_a_composing_read_in_a_staged_session_is_refused(client):
+def test_a_composing_read_in_a_staged_session_answers_from_the_composed_view(
+    client,
+):
     sid = _staged(client)
-    response = client.post(
-        "/api/search", headers={SESSION_ID_HEADER: sid}, json={"query": "x"}
+    _add(client, {SESSION_ID_HEADER: sid}, node_id="staged-only")
+    composed = client.post(
+        "/api/search", headers={SESSION_ID_HEADER: sid}, json={"query": "staged-only"}
     )
-    assert response.status_code == 400
-    assert response.json()["detail"]["error"] == "session_not_supported"
+    plain = client.post("/api/search", json={"query": "staged-only"})
+    assert composed.status_code == 200
+    assert [(n["id"], n["staged_state"]) for n in composed.json()["nodes"]] == [
+        ("staged-only", "created")
+    ]
+    assert plain.json()["nodes"] == []
 
 
 def test_a_direct_session_header_changes_nothing(client):
@@ -567,7 +574,7 @@ def test_a_session_known_only_by_its_push_channel_writes_directly(client):
     assert _node(client, "s1") is not None
 
 
-def test_the_widget_tool_refuses_a_session_header_per_message(transport):
+def test_the_widget_tool_composes_in_a_session_header_per_message(transport):
     staged = _staged(transport)
     mcp_session = _open_mcp(transport)
     refused = _rpc(
@@ -578,7 +585,8 @@ def test_the_widget_tool_refuses_a_session_header_per_message(transport):
         2,
         {SESSION_ID_HEADER: staged},
     )
-    assert "session_not_supported" in refused.text
+    assert "session_not_supported" not in refused.text
+    assert '"staged_state"' in refused.text
     answered = _rpc(
         transport,
         mcp_session,
@@ -624,12 +632,15 @@ def test_message_request_outside_a_request_context_is_not_a_message():
     assert mcp_tools._message_request(fake) == (False, None)
 
 
-def test_a_read_tool_pushing_to_a_staged_session_is_refused(client):
+def test_a_read_tool_naming_a_staged_session_composes_in_it(client):
     sid = _staged(client)
+    _add(client, {SESSION_ID_HEADER: sid}, node_id="staged-only")
     result = client.app.state.tools_map["search_graph"](
-        query="x", visualization_session_id=sid
+        query="staged-only", visualization_session_id=sid
     )
-    assert result["error"] == "session_not_supported"
+    assert [(n["id"], n["staged_state"]) for n in result["nodes"]] == [
+        ("staged-only", "created")
+    ]
 
 
 def test_a_bound_header_naming_an_unknown_session_is_not_a_push(client):
@@ -852,3 +863,119 @@ def test_create_app_hands_the_storage_check_to_the_write_modes(
     with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
         client = TestClient(create_app(app_config))
     assert client.app.state.write_modes.store_holds_unreadable_records() is True
+
+
+# -- composed reads over HTTP and MCP (§8.2) -------------------------------
+
+
+def test_a_staged_sessions_own_canvas_resolves_its_staged_nodes(client):
+    sid = _staged(client)
+    _add(client, {SESSION_ID_HEADER: sid}, node_id="staged-only")
+    tools = client.app.state.tools_map
+    added = tools["add_nodes_to_session"](session_id=sid, node_ids=["staged-only"])
+    assert added["success"] is True, added
+    layout = tools["get_visualization_layout"](session_id=sid)
+    assert [(n["id"], n["type"], n["staged_state"]) for n in layout["nodes"]] == [
+        ("staged-only", "Actor", "created")
+    ]
+    resolved = client.get(f"/api/sessions/{sid}", params={"resolve": "true"}).json()
+    assert [(n["id"], n["staged_state"]) for n in resolved["resolved"]["nodes"]] == [
+        ("staged-only", "created")
+    ]
+
+
+def test_similarity_and_subtypes_compose_over_rest(client):
+    sid = _staged(client)
+    client.post(
+        "/api/nodes",
+        headers={SESSION_ID_HEADER: sid},
+        json={
+            "nodes": [
+                {"id": "n1", "type": "Actor", "name": "Zyxwv", "subtypes": ["Zed"]}
+            ],
+            "edges": [],
+        },
+    )
+    headers = {SESSION_ID_HEADER: sid}
+    similar = client.post(
+        "/api/similar", headers=headers, json={"name": "Zyxwv", "threshold": 0.9}
+    )
+    subtypes = client.get("/api/meta/subtypes", headers=headers)
+    assert similar.status_code == 200
+    assert [s["node"]["id"] for s in similar.json()["similar_nodes"]][:1] == ["n1"]
+    assert "Zed" in subtypes.json()["subtypes"].get("Actor", [])
+    plain = client.get("/api/meta/subtypes").json()["subtypes"]
+    assert "Zed" not in plain.get("Actor", [])
+
+
+def _typed_app(routes):
+    from fastapi import FastAPI
+
+    from backend.api_host.session_binding import add_session_binding_middleware
+    from backend.runtime.session_context import current_session_id
+
+    app = FastAPI()
+    add_session_binding_middleware(app, api_prefix="/api", is_retired=lambda s: False)
+    for path, name in routes:
+
+        def endpoint():
+            return {"session": current_session_id()}
+
+        app.add_api_route(path, endpoint, methods=["GET"], name=name)
+    return TestClient(app)
+
+
+def test_a_typed_interface_route_takes_the_session_header():
+    typed = _typed_app(
+        [
+            ("/api/schema", "get_schema"),
+            ("/api/actors", "custom_interface_actors"),
+            # Shadowed by the fixed route above, which does not compose.
+            ("/api/schema", "custom_interface_schema"),
+        ]
+    )
+    headers = {SESSION_ID_HEADER: UNKNOWN}
+    assert typed.get("/api/actors", headers=headers).json() == {"session": UNKNOWN}
+    shadowed = typed.get("/api/schema", headers=headers)
+    assert shadowed.status_code == 400
+    assert shadowed.json()["detail"]["error"] == "session_not_supported"
+
+
+def test_session_resolve_asks_the_hook_as_the_requesting_caller(client):
+    sid = _staged(client)
+    _add(client, {SESSION_ID_HEADER: sid}, node_id="staged-only")
+    client.app.state.tools_map["add_nodes_to_session"](
+        session_id=sid, node_ids=["staged-only"]
+    )
+    seen = []
+    hook = client.app.state.graph_service.authorization_hook
+    original = hook.evaluate
+
+    def evaluate(context):
+        seen.append(context.actor)
+        return original(context)
+
+    with patch.object(hook, "evaluate", evaluate):
+        client.get(
+            f"/api/sessions/{sid}",
+            params={"resolve": "true"},
+            headers={"x-communityoverview-actor-id": "caller-7"},
+        )
+    assert seen and all(actor.get("actor_id") == "caller-7" for actor in seen)
+
+
+def test_composing_tools_take_the_session_argument(client):
+    sid = _staged(client)
+    _add(client, {SESSION_ID_HEADER: sid}, node_id="staged-only")
+    tools = client.app.state.tools_map
+    listed = tools["list_saved_views"](visualization_session_id=sid)
+    assert listed["success"] is True
+    unknown = tools["list_saved_views"](visualization_session_id=UNKNOWN)
+    assert unknown["error"] == "session_not_found"
+
+
+def test_a_typed_interface_path_takes_the_header_only_on_get():
+    typed = _typed_app([("/api/actors", "custom_interface_actors")])
+    response = typed.post("/api/actors", headers={SESSION_ID_HEADER: UNKNOWN})
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"] == "session_not_supported"
