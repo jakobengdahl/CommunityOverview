@@ -269,3 +269,17 @@ class TestReportedIssueCap:
             _doc([_node("n1"), _node("n2")], [_edge("e1", "n1", "n2")])
         )
         assert len(result.errors[0].message) <= 600
+
+
+class TestInvalidEdgeMessage:
+    def test_an_edge_with_many_bad_fields_gets_a_bounded_message(self):
+        bad = [1] * 5
+        edge = _edge("e1")
+        edge.update({f: bad for f in ("label", "metadata", "archived", "created_at")})
+        edge["revision"] = bad
+        result = graph_import.validate_import_document(
+            _doc([_node("n1"), _node("n2")], [edge])
+        )
+        message = result.errors[0].message
+        assert message.startswith("invalid edge: 5 validation errors")
+        assert len(message) <= 520
