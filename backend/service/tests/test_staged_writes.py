@@ -1495,3 +1495,52 @@ def test_a_staged_adopt_under_a_federated_only_view_stages_like_a_direct_one(
         staged = world.service.adopt_federated_node("federated::esam-main::remote-1")
     assert staged["success"] is True, staged
     assert staged["staged"] is True
+
+
+def test_an_edge_main_since_deleted_is_judged_by_its_base_endpoints(world):
+    world.storage.add_nodes(
+        [Node(id="h", type="Actor", name="H", metadata={"origin_graph_id": "g2"})],
+        [
+            Edge(
+                id="hb",
+                source="h",
+                target="b",
+                type="RELATES_TO",
+                label="SECRET-LABEL",
+                metadata={"secret_key": "s3cr3t"},
+            )
+        ],
+    )
+    sid = world.staged_session()
+    with bind_session(sid):
+        world.service.archive_edges(["hb"])
+    world.storage.delete_nodes(["h"], confirmed=True)
+
+    class LocalAndG1:
+        def evaluate(self, context):
+            return GraphAuthorizationDecision(
+                allowed=True,
+                graph_access=GraphAccessNarrowing(
+                    enabled=True, allow_local_graph=True, include_graph_ids=("g1",)
+                ),
+            )
+
+    world.service._authorization_hook = LocalAndG1()
+    with bind_session(sid):
+        world.service.add_nodes(
+            [
+                {
+                    "id": "h",
+                    "type": "Actor",
+                    "name": "mine",
+                    "metadata": {"origin_graph_id": "g1"},
+                }
+            ],
+            [],
+        )
+        answers = [
+            world.service.unarchive_edges(["hb"]),
+            world.service.update_edge("hb", {"label": "x"}),
+        ]
+    for answer in answers:
+        assert "SECRET" not in json.dumps(answer) and "s3cr3t" not in json.dumps(answer)
