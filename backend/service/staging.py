@@ -488,6 +488,18 @@ class StagedWrite:
     def _visible(doc: Optional[Dict[str, Any]], graph_access: GraphAccessNarrowing):
         return doc is not None and access.is_node_visible(_node(doc), graph_access)
 
+    def _shown(
+        self, layer: Layer, node_id: str, graph_access: GraphAccessNarrowing
+    ) -> bool:
+        """Whether the writer's view holds node ``node_id``: the composed node,
+        and the main node it composes over, if any. A staged change cannot
+        keep in view a main node that has left it (its origin, say), since
+        answers carry the composed node and so the main node's content."""
+        main = layer.main_node(node_id)
+        return self._visible(layer.node(node_id), graph_access) and (
+            main is None or self._visible(main, graph_access)
+        )
+
     def _hides_tombstone(
         self,
         layer: Layer,
@@ -511,14 +523,18 @@ class StagedWrite:
                 doc is not None and not self._visible(doc, graph_access)
                 for doc in snapshots
             )
+        # An endpoint main no longer holds hides nothing; one it holds out of
+        # the writer's view does.
         snapshots = [existing.get("base"), layer.main_edge(entity_id)]
-        return any(
-            doc is not None
-            and not all(
-                self._visible(layer.main_node(doc.get(end) or ""), graph_access)
-                for end in ("source", "target")
-            )
+        endpoints = [
+            layer.main_node(doc.get(end) or "")
             for doc in snapshots
+            if doc is not None
+            for end in ("source", "target")
+        ]
+        return any(
+            node is not None and not self._visible(node, graph_access)
+            for node in endpoints
         )
 
     # -- the writes (§9.1) ----------------------------------------------------------
@@ -565,7 +581,7 @@ class StagedWrite:
                 endpoints.append(value)
             edge.source, edge.target = endpoints
             if graph_access.enabled and not all(
-                self._visible(layer.node(nid), graph_access) for nid in endpoints
+                self._shown(layer, nid, graph_access) for nid in endpoints
             ):
                 return {
                     **failure,
@@ -626,7 +642,7 @@ class StagedWrite:
     ) -> Dict[str, Any]:
         layer = self._load()
         current = layer.node(node_id)
-        if graph_access.enabled and not self._visible(current, graph_access):
+        if graph_access.enabled and not self._shown(layer, node_id, graph_access):
             current = None
         if expected_revision is not None:
             self._expect_revision("node", node_id, current, expected_revision)
@@ -681,9 +697,7 @@ class StagedWrite:
             nid
             for nid in dict.fromkeys(node_ids)
             if layer.node(nid) is not None
-            and (
-                not graph_access.enabled or self._visible(layer.node(nid), graph_access)
-            )
+            and (not graph_access.enabled or self._shown(layer, nid, graph_access))
         ]
         for node_id, expected in (expected_revisions or {}).items():
             self._expect_revision(
@@ -721,7 +735,7 @@ class StagedWrite:
         for node_id in dict.fromkeys(node_ids):
             current = layer.node(node_id)
             if current is None or (
-                graph_access.enabled and not self._visible(current, graph_access)
+                graph_access.enabled and not self._shown(layer, node_id, graph_access)
             ):
                 continue
             found.append(node_id)
@@ -757,9 +771,7 @@ class StagedWrite:
                 if value not in names:
                     return not_found
                 value = names[value]
-            if graph_access.enabled and not self._visible(
-                layer.node(value), graph_access
-            ):
+            if graph_access.enabled and not self._shown(layer, value, graph_access):
                 return not_found
             endpoints.append(value)
         edge.source, edge.target = endpoints
@@ -795,8 +807,8 @@ class StagedWrite:
         doc = layer.edge(edge_id)
         if doc is None or not graph_access.enabled:
             return doc
-        if self._visible(layer.node(doc["source"]), graph_access) and self._visible(
-            layer.node(doc["target"]), graph_access
+        if self._shown(layer, doc["source"], graph_access) and self._shown(
+            layer, doc["target"], graph_access
         ):
             return doc
         return None

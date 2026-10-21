@@ -680,11 +680,42 @@ def test_an_instance_without_staging_refuses_sessions_once_the_store_holds_recor
         assert len(asked) == 1  # sticky once seen
     else:
         assert storage.get_node("a").name == "A2"
-        assert len(asked) == 2
+        assert len(asked) == 1  # trusted for the re-check interval
     # Without a session the instance writes as before, and asks nothing.
     asked.clear()
     assert service.update_node("b", {"name": "B1"})["success"] is True
     assert asked == []
+
+
+def test_the_store_is_asked_again_after_the_interval_and_a_failed_check_keeps_the_answer(
+    monkeypatch,
+):
+    import backend.core.write_modes as wm
+
+    answers = iter([False, RuntimeError("store down"), True])
+    asked = []
+
+    def records():
+        asked.append(1)
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    clock = [1000.0]
+    monkeypatch.setattr(wm.time, "monotonic", lambda: clock[0])
+    write_modes = WriteModes(None, unreadable_records=records)
+    assert write_modes.store_holds_unreadable_records() is False
+    clock[0] += wm.UNREADABLE_RECORDS_RECHECK_SECONDS - 1
+    assert write_modes.store_holds_unreadable_records() is False
+    assert len(asked) == 1
+    clock[0] += 2
+    assert write_modes.store_holds_unreadable_records() is False  # failed check
+    clock[0] += wm.UNREADABLE_RECORDS_RECHECK_SECONDS
+    assert write_modes.store_holds_unreadable_records() is True
+    clock[0] += wm.UNREADABLE_RECORDS_RECHECK_SECONDS
+    assert write_modes.store_holds_unreadable_records() is True
+    assert len(asked) == 3
 
 
 def test_a_staged_session_whose_record_was_lost_is_never_written_directly(world):
@@ -1000,6 +1031,60 @@ def test_re_creating_a_tombstoned_node_outside_the_narrowing_is_refused(world):
     assert result["success"] is False
     assert "keep" not in json.dumps(result)
     assert world.layer(sid)[("node", "a")]["action"] == "delete"
+
+
+def test_re_creating_an_edge_whose_old_endpoint_main_since_deleted_is_staged(world):
+    sid = _narrowed(world)
+    world.storage.add_nodes(
+        [Node(id="x", type="Actor", name="X", metadata={"origin_graph_id": "g1"})],
+        [Edge(id="xw", source="x", target="w", type="RELATES_TO")],
+    )
+    with bind_session(sid):
+        world.service.delete_edges(["xw"], confirmed=True)
+    world.storage.delete_nodes(["x"], confirmed=True)
+    with bind_session(sid):
+        result = world.service.add_nodes(
+            [], [{"id": "xw", "source": "v", "target": "w", "type": "RELATES_TO"}]
+        )
+    assert result["success"] is True, result
+    assert world.layer(sid)[("edge", "xw")]["staged"]["source"] == "v"
+
+
+def test_a_staged_change_cannot_keep_a_main_node_that_left_the_view_in_it(world):
+    sid = world.staged_session()
+    world.storage.add_nodes(
+        [Node(id="v", type="Actor", name="V", metadata={"origin_graph_id": "g1"})], []
+    )
+    with bind_session(sid):
+        world.service.update_node("v", {"metadata": {}})  # stages origin -> null
+    world.storage.update_node(
+        "v",
+        {
+            "description": "SECRET-DESC",
+            "metadata": {"origin_graph_id": "g2", "secret_key": "s3cr3t"},
+        },
+    )
+
+    class LocalAndG1:
+        def evaluate(self, context):
+            return GraphAuthorizationDecision(
+                allowed=True,
+                graph_access=GraphAccessNarrowing(
+                    enabled=True, allow_local_graph=True, include_graph_ids=("g1",)
+                ),
+            )
+
+    world.service._authorization_hook = LocalAndG1()
+    before = world.layer(sid)
+    with bind_session(sid):
+        answers = [
+            world.service.archive_nodes(["v"]),
+            world.service.update_node("v", {"tags": ["t"]}),
+            world.service.add_edge("v", "b", type="RELATES_TO"),
+        ]
+    for answer in answers:
+        assert "SECRET" not in json.dumps(answer) and "s3cr3t" not in json.dumps(answer)
+    assert world.layer(sid) == before
 
 
 def test_re_creating_a_node_that_has_since_left_the_narrowing_is_refused(world):

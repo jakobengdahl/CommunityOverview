@@ -29,6 +29,7 @@ import json
 import re
 from typing import Callable, Optional, Pattern, Sequence, Tuple
 
+from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import Headers
 
 from backend.runtime import session_context
@@ -128,7 +129,7 @@ class SessionBindingMiddleware:
         if (
             (path_session is not None or values)
             and method != "OPTIONS"
-            and self._sessions_unreadable()
+            and await run_in_threadpool(self._sessions_unreadable)
         ):
             # Asked only for a request naming a session, so others cost nothing.
             await _refuse(send, session_context.sessions_unreadable())
