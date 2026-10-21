@@ -357,6 +357,10 @@
     "metamodel_explorer_hint": "Interaktiv skrivskyddad vy över nodtyper, relationer och deras konfigurerade regler."
   },
   "metamodel": {
+    "error_title": "Fel i metamodellutforskaren",
+    "error_message": "Metamodellutforskaren kunde inte visas. Resten av appen påverkas inte.",
+    "error_retry": "Försök igen",
+    "error_close": "Stäng",
     "title": "Metamodellutforskare",
     "close": "Stäng metamodellutforskaren",
     "readonly_note": "Skrivskyddad vy över den här driftsättningens konfigurerade schema. Redigering av metamodellen görs inte här.",

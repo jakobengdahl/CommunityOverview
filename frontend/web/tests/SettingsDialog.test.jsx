@@ -84,7 +84,10 @@ describe('SettingsDialog', () => {
     const onClose = vi.fn();
     render(
       <I18nProvider>
-        <SettingsDialog stats={null} onClose={onClose} />
+        <SettingsDialog
+          stats={{ total_nodes: 1, total_edges: 0, nodes_by_type: { Actor: 1 } }}
+          onClose={onClose}
+        />
       </I18nProvider>
     );
 
@@ -130,5 +133,35 @@ describe('SettingsDialog', () => {
     expect(screen.getByText('Relationship types')).toBeInTheDocument();
     expect(screen.getByText('IMPLEMENTS')).toBeInTheDocument();
     expect(screen.getByText('Initiative -> Legislation')).toBeInTheDocument();
+  });
+
+  it('contains an explorer render error in a fallback and closes only the explorer', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // A non-array `fields` makes the detail panel throw once a node type is selected.
+    useGraphStore.setState({
+      schema: { node_types: { Actor: { fields: 5 } }, relationship_types: {} },
+    });
+    const onClose = vi.fn();
+
+    render(
+      <I18nProvider>
+        <SettingsDialog
+          stats={{ total_nodes: 1, total_edges: 0, nodes_by_type: { Actor: 1 } }}
+          onClose={onClose}
+        />
+      </I18nProvider>
+    );
+    fireEvent.click(screen.getByRole('button', { name: /Explore metamodel/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Actor/ }));
+
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+    expect(screen.getByText('Metamodel explorer error')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Minimap|minimap/ })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
   });
 });
