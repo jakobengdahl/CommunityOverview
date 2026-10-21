@@ -91,7 +91,7 @@ const rightDown = { button: 2, clientX: 100, clientY: 100 };
 function rightGesture(testId, { moveBy = 0 } = {}) {
   const el = screen.getByTestId(testId);
   fireEvent.mouseDown(el, rightDown);
-  fireEvent.contextMenu(el, { clientX: 100 + moveBy, clientY: 100 });
+  fireEvent.contextMenu(el, { button: 2, clientX: 100 + moveBy, clientY: 100 });
 }
 
 // Every menu variant (node, edge, pane, selection) renders .graph-context-menu.
@@ -129,6 +129,14 @@ describe('GraphCanvas right-drag pan does not open a context menu', () => {
     const el = screen.getByTestId('node-node-1');
     fireEvent.mouseDown(el, { button: 0, clientX: 100, clientY: 100 });
     fireEvent.contextMenu(el, { clientX: 300, clientY: 300 });
+    expect(menuOpen()).toBe(true);
+  });
+
+  it('does not let a stale right-press suppress a later non-right contextmenu', () => {
+    fireEvent.mouseDown(screen.getByTestId('pane'), rightDown);
+    const node = screen.getByTestId('node-node-1');
+    // Ctrl+click / the keyboard menu key: contextmenu with no preceding right press.
+    fireEvent.contextMenu(node, { button: 0, clientX: 600, clientY: 400 });
     expect(menuOpen()).toBe(true);
   });
 });

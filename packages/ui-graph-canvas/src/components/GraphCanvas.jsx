@@ -3188,9 +3188,11 @@ function GraphCanvasInner({
   // A right-drag pans (panOnDrag includes button 2) and the browser still fires
   // `contextmenu` on release. True when the pointer moved beyond the click
   // tolerance since the right button went down; resets the tracker either way.
-  // Synthetic touch long-press events carry no `type`, so they are never gated.
+  // Only a real button-2 `contextmenu` is gated: synthetic touch long-press
+  // events carry no `type`, and a Ctrl+click or keyboard menu key reports
+  // another button, so none of them may read a stale right-press position.
   const consumeRightDrag = useCallback((event) => {
-    if (event.type !== 'contextmenu') return false;
+    if (event.type !== 'contextmenu' || event.button !== 2) return false;
     const start = rightDragStart.current;
     rightDragStart.current = { x: 0, y: 0, time: null };
     return (
@@ -5277,9 +5279,10 @@ function GraphCanvasInner({
           // Capture phase: nodes and edges stop mousedown propagation, so a
           // bubbling listener would only ever see presses on the bare pane.
           onMouseDownCapture={(event) => {
-            if (event.button === 2) {
-              rightDragStart.current = { x: event.clientX, y: event.clientY, time: Date.now() };
-            }
+            rightDragStart.current =
+              event.button === 2
+                ? { x: event.clientX, y: event.clientY, time: Date.now() }
+                : { x: 0, y: 0, time: null };
           }}
           style={{
             width: '100%',
