@@ -383,4 +383,22 @@ describe('MetamodelExplorerDialog', () => {
 
     expect(capture).toHaveBeenCalledWith(1);
   });
+
+  it('does not capture the pointer for sub-threshold jitter', () => {
+    const { container } = render(
+      <MetamodelExplorerDialog schema={SCHEMA} stats={STATS} onClose={() => {}} />
+    );
+    const svg = container.querySelector('.mme-svg');
+    const capture = vi.fn();
+    svg.setPointerCapture = capture;
+
+    svg.dispatchEvent(pointerLikeEvent('pointerdown', { pointerId: 1, clientX: 10, clientY: 10 }));
+    act(() => {
+      svg.dispatchEvent(
+        pointerLikeEvent('pointermove', { pointerId: 1, clientX: 12, clientY: 11 })
+      );
+    });
+
+    expect(capture).not.toHaveBeenCalled();
+  });
 });

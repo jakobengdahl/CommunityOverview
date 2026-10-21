@@ -33,6 +33,7 @@ describe('MetamodelExplorerBoundary', () => {
     );
     expect(screen.getByText('rest of app')).not.toBeNull();
     expect(screen.getByRole('alertdialog')).not.toBeNull();
+    expect(screen.getByText('metamodel.error_title')).not.toBeNull();
     expect(screen.getByText('metamodel.error_message')).not.toBeNull();
   });
 
