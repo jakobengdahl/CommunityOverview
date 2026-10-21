@@ -552,11 +552,11 @@ changing this design.
   records and their blobs to `<namespace_key>/.quarantine/` and logs a
   warning. A create call that fails part-way keeps the nodes that landed
   before the failure, and their leftovers are quarantined too.
-  - A create that is refused moves nothing: the id is taken locally, or, with
-    `expect_absent`, in a store that enforces revisions (perhaps by a node
-    this instance has not seen yet). Without `expect_absent`, such a store
-    lets the create replace the node it has not seen, and that node's files
-    are then quarantined as the earlier node's.
+  - A create that is refused moves nothing: the id is taken locally, or in a
+    store that enforces revisions (perhaps by a node this instance has not
+    seen yet). Such a store refuses every create over an id it holds, with or
+    without `expect_absent`, so a create never replaces a node it has not
+    seen and never quarantines that node's files.
   - A file uploaded to the new node after the snapshot is not in it, so it
     stays.
   - Nothing is deleted: a quarantined file may still be wanted, and only an

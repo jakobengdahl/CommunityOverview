@@ -521,9 +521,11 @@ the journal: they are a condition of a write, not part of it.
   each operation's `expected_revision` / `expect_absent` in that same
   statement, and returns the stored revisions in operation order (`None` for
   a delete). An expectation that does not hold raises
-  `EntityRevisionConflict` and rolls the whole batch back. Every entity the
-  batch writes stores `write_token`, which is server-internal and never part
-  of an entity a read returns.
+  `EntityRevisionConflict` and rolls the whole batch back. `GraphStorage`
+  sends every create with `expect_absent`, whether or not its caller asked,
+  so a create never replaces an entity another instance created. Every
+  entity the batch writes stores `write_token`, which is server-internal and
+  never part of an entity a read returns.
 - `read_write_evidence(keys)` returns, for each `(kind, id)`, the stored
   revision and write token, or `None` when the entity is absent — read in one
   snapshot.
