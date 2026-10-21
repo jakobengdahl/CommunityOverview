@@ -156,7 +156,8 @@ class GraphService:
             return run(None)
         for attempt in range(self.STAGING_ATTEMPTS):
             try:
-                return run(staging)
+                with self._storage.write_lock:
+                    return run(staging)
             except layer_store.LayerRaced:
                 # Another op changed an entry this one read: decided again on
                 # the layer as it is now, so neither change is lost. Nothing

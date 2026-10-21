@@ -3667,6 +3667,14 @@ class GraphStorage:
                 revisions=revisions, events=len(changes), generation=self._generation
             )
 
+    @property
+    def write_lock(self) -> "threading.RLock":
+        """The lock every write to this instance's graph holds - a session
+        merge from its plan until memory and events follow the store. A
+        staged write holds it too, so it never reads main between a merge's
+        commit and memory catching up."""
+        return self._lock
+
     # The fields a node's embedding text is built from: a write that changes
     # one of them re-embeds the node, as update_node does.
     _EMBEDDED_FIELDS = ("name", "description", "summary", "tags", "aliases")

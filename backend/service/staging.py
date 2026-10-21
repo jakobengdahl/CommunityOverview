@@ -102,24 +102,10 @@ _NODE_FIELDS = frozenset(Node.model_fields) | {"revision"}
 
 
 def sent_metadata_keys(updates: Dict[str, Any]) -> set:
-    """The metadata keys an update sends: its `metadata` patch, and every key
-    outside it, which is folded into metadata (as mutations judges a direct
-    update)."""
-    model = {
-        "id",
-        "type",
-        "name",
-        "description",
-        "summary",
-        "tags",
-        "subtypes",
-        "aliases",
-        "metadata",
-        "embedding",
-        "created_at",
-        "updated_at",
-    }
-    sent = {k for k in updates if k not in model}
+    """The metadata keys a node update sends - its `metadata` patch, and
+    every other key that is not a node field, which is folded into metadata -
+    judged by the saved-view rule however they arrive, direct or staged."""
+    sent = {k for k in updates if k not in _NODE_FIELDS}
     if isinstance(updates.get("metadata"), dict):
         sent |= set(updates["metadata"])
     return sent

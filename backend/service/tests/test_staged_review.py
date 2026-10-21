@@ -523,9 +523,9 @@ def test_an_entry_restaged_after_the_plan_fails_the_merge_whole(world, monkeypat
     original = store.merge
 
     def restage_then_merge(*args, **kwargs):
-        _stage(
-            world, sid, ("update_node", ("a",), {"updates": {"description": "later"}})
-        )
+        # Another participant's restage, through the store: on this instance
+        # a staged write waits for the merge to finish.
+        _restage_as_another_instance(world, sid, "a", {"description": "later"})
         return original(*args, **kwargs)
 
     monkeypatch.setattr(store, "merge", restage_then_merge)
@@ -1057,17 +1057,26 @@ def test_an_edge_staged_to_a_node_while_it_is_merged_as_new_fails_the_merge(
     original = store.merge
 
     def follower_first(*args, **kwargs):
-        _stage(
-            world,
+        # Staged by another instance, through the store: on this instance a
+        # staged write waits for the merge to finish.
+        edge = {"id": "bt", "source": "b", "target": "t", "type": "RELATES_TO"}
+        store.stage(
             sid,
-            (
-                "add_nodes",
-                (
-                    [],
-                    [{"id": "bt", "source": "b", "target": "t", "type": "RELATES_TO"}],
-                ),
-                {},
-            ),
+            [
+                {
+                    "session_id": sid,
+                    "kind": "edge",
+                    "entity_id": "bt",
+                    "action": "create",
+                    "base_revision": None,
+                    "base": None,
+                    "staged": {**edge, "label": "", "metadata": {}, "revision": 0},
+                    "staged_by": "other",
+                    "staged_at": "2026-10-21T00:00:00+00:00",
+                    "session_seq": 99,
+                    "stage_token": "other-instance",
+                }
+            ],
         )
         return original(*args, **kwargs)
 
@@ -1292,3 +1301,57 @@ def test_a_list_annotation_document_stored_before_the_rule_is_sanitised_on_read(
 
     cleaned = sanitize_saved_view_metadata({"annotation_document": _REMOTE_IMAGE})
     assert "url" not in (cleaned["annotation_document"][0].get("image") or {})
+
+
+# -- review round 8 regressions -----------------------------------------------------------
+
+
+def test_the_diff_sanitises_a_saved_views_annotations_on_every_side(world):
+    """As every read of a saved view does; conflicts are still judged on
+    what is stored."""
+    _legacy_view(world)
+    sid = world.staged_session()
+    _stage(
+        world,
+        sid,
+        ("update_node", ("v",), {"updates": {"metadata": {"annotations": []}}}),
+    )
+    field = _items(world.service.get_staged_changes(sid))[("node", "v")]["fields"][
+        "metadata.annotations"
+    ]
+    for side in ("base", "main"):
+        assert "url" not in (field[side][0].get("image") or {}), side
+    assert field["staged"] == []
+
+
+def test_a_staged_write_during_a_merge_reads_main_as_the_merge_left_it(
+    world, monkeypatch
+):
+    """A merge holds the write lock until memory follows the store; a staged
+    write waits for it rather than basing an entry on the node before."""
+    import threading
+
+    svc, sid = world.service, world.staged_session()
+    _stage(world, sid, ("update_node", ("a",), {"updates": {"description": "merged"}}))
+    store = world.storage.layer_store
+    original = store.merge
+    stager = []
+
+    def stage_meanwhile(*args, **kwargs):
+        def run():
+            with bind_session(sid):
+                svc.update_node("a", {"summary": "after"})
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        stager.append(thread)
+        thread.join(0.3)
+        assert thread.is_alive()  # waiting for the merge
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "merge", stage_meanwhile)
+    assert svc.merge_staged_changes(sid, "m")["success"] is True
+    stager[0].join(10)
+    entry = world.layer(sid)[("node", "a")]
+    assert entry["base"]["description"] == "merged"
+    assert entry["base_revision"] == world.storage.get_node("a").revision

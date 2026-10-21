@@ -27,7 +27,10 @@ from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Set, Tupl
 from backend.core import Edge, Node
 from backend.core.layer_store import MergeCheck, entry_version
 from backend.core.models import metadata_depth_error
-from backend.core.session_annotations import saved_view_write_error
+from backend.core.session_annotations import (
+    sanitize_saved_view_metadata,
+    saved_view_write_error,
+)
 from backend.core.storage import edge_applicability_error
 from backend.core.storage_merge import SessionMergePlan, SessionMergeWrite
 from backend.runtime.authorization import GraphAccessNarrowing
@@ -64,6 +67,10 @@ _NOT_CONTENT = frozenset({"id", "revision", "created_at", "updated_at", "embeddi
 _DELETE_IGNORED = frozenset({"revision", "updated_at", "embedding"})
 
 _METADATA_PREFIX = "metadata."
+
+_SAVED_VIEW_TYPES = frozenset({"SavedView", "VisualizationView"})
+# The fields a saved view's annotations live in, as the diff names them.
+_ANNOTATION_FIELDS = ("metadata.annotations", "metadata.annotation_document")
 
 
 class ReviewRefused(Exception):
@@ -320,6 +327,28 @@ class Review:
             return STATUS_CONFLICT
         return STATUS_CLEAN
 
+    def shown_fields(self, key: LayerKey) -> Dict[str, Dict[str, Any]]:
+        """``field_diff`` as answered: a saved view's annotations sanitised
+        on every side, as every read of a saved view is. Conflicts are judged
+        on the stored values."""
+        fields = self.field_diff(key)
+        doc = self.composed(key) or self.main[key] or self.entries[key].get("base")
+        if (doc or {}).get("type") not in _SAVED_VIEW_TYPES:
+            return fields
+        for name in _ANNOTATION_FIELDS:
+            if name not in fields:
+                continue
+            key_name = name[len(_METADATA_PREFIX) :]
+            fields[name] = {
+                side: (
+                    sanitize_saved_view_metadata({key_name: value})[key_name]
+                    if side != "conflict" and value is not None
+                    else value
+                )
+                for side, value in fields[name].items()
+            }
+        return fields
+
     def item(self, key: LayerKey, status: str) -> Dict[str, Any]:
         entry = self.entries[key]
         main = self.main[key]
@@ -329,7 +358,7 @@ class Review:
             "action": entry["action"],
             "base_revision": entry.get("base_revision"),
             "main_revision": _revision(main),
-            "fields": self.field_diff(key),
+            "fields": self.shown_fields(key),
             "status": status,
             "depends_on": [
                 {"kind": dep[0], "entity_id": dep[1]} for dep in self.depends_on[key]
