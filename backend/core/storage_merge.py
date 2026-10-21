@@ -68,3 +68,48 @@ class MergeApplied:
     revisions: Dict[Tuple[str, str], int]
     events: int
     generation: int
+
+
+# --- session merges (docs/SESSION_OVERLAY_CONTRACT.md §11) --------------------
+
+
+@dataclass(frozen=True)
+class SessionMergeWrite:
+    """One graph write of a session merge, in the order the unit applies it.
+
+    ``payload`` is the whole entity for an upsert (the storage stamps its
+    revision); None for a delete. A create expects its id absent; an update
+    or a delete expects the revision the plan read. ``staged_by`` is who
+    staged the change, for the event the write fires.
+    """
+
+    kind: str
+    action: str
+    entity_id: str
+    payload: Any = None
+    expected_revision: Any = None
+    expect_absent: bool = False
+    staged_by: Any = None
+
+
+@dataclass
+class SessionMergePlan:
+    """Everything one session merge hands the layer store's merge unit: the
+    writes, the checks the decision depended on, the entries it removes and
+    the record it stores (§7, §11.3)."""
+
+    writes: List[SessionMergeWrite] = field(default_factory=list)
+    checks: List[Any] = field(default_factory=list)
+    removals: List[Tuple[str, str]] = field(default_factory=list)
+    record: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SessionMergeLanded:
+    """A merge's stored record, and whether this call only replayed it (I9).
+    ``revisions`` maps ("node" | "edge", id) to the revision each write
+    produced, None for a delete; empty for a replay."""
+
+    record: Dict[str, Any]
+    replayed: bool
+    revisions: Dict[Tuple[str, str], Any] = field(default_factory=dict)

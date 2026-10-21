@@ -34,6 +34,14 @@ Every mutation can include context for tracking and loop prevention:
 - `event_session_id`: Unique session identifier
 - `event_correlation_id`: For chaining related events
 
+A write that a staged session's merge applies to the graph
+(docs/SESSION_OVERLAY_CONTRACT.md §11.5) fires the same event a direct write
+of it would, once the merge has committed, with `event_origin`
+`session-merge`, `event_correlation_id` set to the merge id, `attribution` of
+the merging actor, and one more key in `origin`: `staged_by`, the actor who
+staged the change. No other event carries `staged_by`. Staging and discarding
+fire no graph event.
+
 ## Event Types
 
 The system generates events for:

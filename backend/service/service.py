@@ -24,10 +24,14 @@ from typing import (
     Union,
 )
 
-from backend.core import GraphStorage
+from backend.core import GraphStorage, layer_store
+from backend.core.session_manager import LayoutBusy
 from backend.core.storage_search import MATCH_MODE_SUBSTRING
 from backend.runtime.authorization import (
+    GRAPH_ACTION_MUTATE,
     GRAPH_ACTION_READ,
+    GRAPH_OPERATION_DISCARD,
+    GRAPH_OPERATION_MERGE,
     DefaultGraphAuthorizationHook,
     GraphAuthorizationHook,
 )
@@ -35,6 +39,7 @@ from backend.federation import FederationManager
 from backend.runtime import session_context
 
 from . import access, attachments, queries, mutations, views, import_service
+from . import staged_review
 from .attachments import AttachmentSettings
 from .composed import annotate_staged_state
 from .staging import SessionGate, StagedWrite, refusal_result
@@ -46,6 +51,13 @@ if TYPE_CHECKING:
     from backend.core.session_manager import SessionManager
 
 logger = logging.getLogger(__name__)
+
+# A merge or discard named a direct session: it holds no staged changes.
+SESSION_NOT_STAGED = "session_not_staged"
+# A merge id already used by another session's merge (I9 holds per session).
+MERGE_ID_TAKEN = "merge_id_taken"
+# The origin of every graph event a session merge fires (§11.5).
+MERGE_EVENT_ORIGIN = "session-merge"
 
 
 class GraphService:
@@ -62,6 +74,10 @@ class GraphService:
     This class does NOT make any LLM calls - it only handles
     requests from clients and LLMs through various protocols.
     """
+
+    # How often a staged write is decided again when another op changed an
+    # entry it read before it could land (``layer_store.LayerRaced``).
+    STAGING_ATTEMPTS = 3
 
     def __init__(
         self,
@@ -138,13 +154,22 @@ class GraphService:
             return refused
         if staging is None:
             return run(None)
-        try:
-            return run(staging)
-        except Exception as exc:
-            refused = refusal_result(exc, **defaults)
-            if refused is None:
-                raise
-            return refused
+        for attempt in range(self.STAGING_ATTEMPTS):
+            try:
+                with self._storage.write_lock:
+                    return run(staging)
+            except layer_store.LayerRaced:
+                # Another op changed an entry this one read: decided again on
+                # the layer as it is now, so neither change is lost. Nothing
+                # was staged or fanned out by the refused attempt.
+                if attempt + 1 == self.STAGING_ATTEMPTS:
+                    return refusal_result(LayoutBusy(), **defaults)
+            except Exception as exc:
+                refused = refusal_result(exc, **defaults)
+                if refused is None:
+                    raise
+                return refused
+        raise AssertionError("unreachable")  # pragma: no cover
 
     def _read(
         self,
@@ -186,6 +211,340 @@ class GraphService:
                 raise
             return refused
         return annotate_staged_state(run(composed), composed)
+
+    # ==================== Staged changes (§10-§12) ====================
+
+    def _layer_session(
+        self, session_id: str, *, action: str, target: str, operation: str = ""
+    ):
+        """Ask the hook, then resolve ``session_id``: returns the hook's
+        decision and the session's write mode, or a refusal result. The hook
+        comes first, so a refused caller learns nothing about the session."""
+        decision = access.evaluate_graph_access(
+            self._authorization_hook,
+            action=action,
+            target=target,
+            graph_operation=operation,
+            session_id=session_id,
+        )
+        if not decision.allowed:
+            return None, access.build_access_denied_result(
+                action=action, target=target, decision=decision
+            )
+        try:
+            mode = self._session_gate.named_mode(session_id)
+        except Exception as exc:
+            refused = refusal_result(exc)
+            if refused is None:
+                raise
+            return None, refused
+        return decision, mode
+
+    def _load_review(self, session_id: str, graph_access) -> staged_review.Review:
+        manager = self._session_gate.session_manager
+        entries = manager.write_modes.layer_store.load_layer(session_id)
+        if manager.write_modes.staged_status(session_id) != layer_store.STATUS_ACTIVE:
+            # Retired since it was resolved: refused, never read as empty.
+            raise session_context.not_found(session_id)
+        return staged_review.Review(self._storage, entries, graph_access)
+
+    @staticmethod
+    def _not_staged(session_id: str) -> Dict[str, Any]:
+        return {
+            "success": False,
+            "error": SESSION_NOT_STAGED,
+            "message": f"session {session_id!r} is direct; it holds no staged changes",
+        }
+
+    def get_staged_changes(self, session_id: str) -> Dict[str, Any]:
+        """The diff of a staged session's layer (§10), one item per entry the
+        caller's view wholly covers. A direct session has none."""
+        decision, mode = self._layer_session(
+            session_id, action=GRAPH_ACTION_READ, target="get_staged_changes"
+        )
+        if decision is None:
+            return mode
+        if mode != "staged":
+            return {
+                "success": True,
+                "session_id": session_id,
+                "write_mode": mode,
+                "items": [],
+                "count": 0,
+            }
+        try:
+            review = self._load_review(session_id, decision.graph_access)
+        except Exception as exc:
+            refused = refusal_result(exc)
+            if refused is None:
+                raise
+            return refused
+        items = review.items()
+        return {
+            "success": True,
+            "session_id": session_id,
+            "write_mode": mode,
+            "items": items,
+            "count": len(items),
+        }
+
+    def merge_staged_changes(
+        self,
+        session_id: str,
+        merge_id: Any,
+        entries: Any = "all",
+        resolutions: Any = None,
+    ) -> Dict[str, Any]:
+        """Merge staged entries into the graph as one unit (§11).
+
+        ``entries`` is ``all`` or a list of ``{kind, entity_id}``;
+        ``resolutions`` a list of ``{kind, entity_id, choice, values?}``;
+        ``merge_id`` the caller's id for the merge, which makes a repeat
+        return the first result (I9). Graph events fire as for direct
+        writes, with ``event_origin`` ``session-merge`` and the merge id as
+        correlation id."""
+        decision, mode = self._layer_session(
+            session_id,
+            action=GRAPH_ACTION_MUTATE,
+            target="merge_staged_changes",
+            operation=GRAPH_OPERATION_MERGE,
+        )
+        if decision is None:
+            return mode
+        try:
+            layer_store.check_merge_id(merge_id)
+        except layer_store.InvalidLayerRequest as exc:
+            return {
+                "success": False,
+                "error": staged_review.INVALID_MERGE_REQUEST,
+                "message": f"merge_id: {exc}",
+            }
+        if mode != "staged":
+            return self._not_staged(session_id)
+        manager = self._session_gate.session_manager
+        graph_access = decision.graph_access
+        planned: Dict[str, Any] = {}
+
+        def prepare():
+            review = self._load_review(session_id, graph_access)
+            selected = staged_review.normalise_selection(review, entries)
+            chosen = staged_review.normalise_resolutions(resolutions, selected)
+            plan, results = staged_review.plan_merge(
+                review,
+                selected,
+                chosen,
+                actor=access.build_mutation_actor_id(target="merge_staged_changes"),
+                merge_id=merge_id,
+            )
+            planned["results"] = results
+            planned["plan"] = plan
+            planned["leftovers"] = attachments.leftover_attachments_of_absent_nodes(
+                self._storage,
+                self._attachment_settings,
+                [
+                    w.entity_id
+                    for w in plan.writes
+                    if w.kind == "node" and w.expect_absent
+                ],
+            )
+            return plan
+
+        event_context = access.build_event_context(
+            target="merge_staged_changes",
+            event_origin=MERGE_EVENT_ORIGIN,
+            event_correlation_id=merge_id,
+        )
+        try:
+            manager.check_layer_op(session_id)
+            landed = self._storage.apply_session_merge(
+                session_id, merge_id, prepare, event_context
+            )
+        except staged_review.ReviewRefused as exc:
+            return exc.to_result()
+        except layer_store.MergeRaced as exc:
+            return {
+                "success": False,
+                "error": exc.code,
+                "message": "the graph or the layer changed since the merge was "
+                "decided; read the diff again",
+            }
+        except layer_store.MergeIdTaken:
+            return {
+                "success": False,
+                "error": MERGE_ID_TAKEN,
+                "message": "this merge id is already used; choose another",
+            }
+        except mutations._WRITE_ERRORS as exc:
+            return mutations.write_error_result(exc)
+        except ValueError as exc:
+            if isinstance(exc, layer_store.InvalidLayerRequest):
+                refused = refusal_result(exc)
+                if refused is not None:
+                    return refused
+            return {
+                "success": False,
+                "error": "validation_error",
+                "message": f"Error validating input: {exc}",
+            }
+        except Exception as exc:
+            refused = refusal_result(exc)
+            if refused is None:
+                raise
+            return refused
+
+        if landed.replayed:
+            return {
+                "success": True,
+                "session_id": session_id,
+                "merge_id": merge_id,
+                "replayed": True,
+                "merged": self._replayed_items(landed.record, graph_access),
+            }
+        plan = planned["plan"]
+        results = planned["results"]
+        for item in results:
+            target = item.get("new_entity_id") or item["entity_id"]
+            item["revision"] = landed.revisions.get((item["kind"], target))
+        deleted_nodes = [
+            w.entity_id
+            for w in plan.writes
+            if w.kind == "node" and w.action == "delete"
+        ]
+        created_nodes = [
+            w.entity_id for w in plan.writes if w.kind == "node" and w.expect_absent
+        ]
+        attachments.quarantine_leftover_attachments(
+            self._attachment_settings, planned["leftovers"], created_nodes
+        )
+        attachments.delete_attachments_of_nodes(
+            self._attachment_settings, deleted_nodes
+        )
+        applied = None
+        if plan.removals:
+            applied = manager.announce_layer_change(
+                session_id,
+                {
+                    "op": "graph_changes_merged",
+                    "merge_id": merge_id,
+                    "removals": [list(key) for key in plan.removals],
+                },
+            )
+        return access.attach_mutation_attribution(
+            {
+                "success": True,
+                "session_id": session_id,
+                "merge_id": merge_id,
+                "replayed": False,
+                "merged": results,
+                "removed_entries": [list(key) for key in plan.removals],
+                "session_seq": None if applied is None else applied["seq"],
+            },
+            event_context,
+        )
+
+    def _replayed_items(self, record: Dict[str, Any], graph_access) -> List[Dict]:
+        """A replayed merge's items, as far as the caller's view covers them
+        now: an entity it cannot see, or one that no longer exists, is left
+        out rather than named."""
+        revisions = {
+            (a.get("kind"), a.get("entity_id")): a.get("revision")
+            for a in record.get("applied") or []
+        }
+        items = []
+        for item in record.get("entries") or []:
+            item = dict(item)
+            target = item.get("new_entity_id") or item.get("entity_id")
+            item["revision"] = revisions.get((item.get("kind"), target))
+            if graph_access.enabled:
+                ids = [target] if item.get("kind") == "node" else []
+                if item.get("kind") == "edge":
+                    edge = self._storage.edges.get(target)
+                    ids = [] if edge is None else [edge.source, edge.target]
+                if not ids or not all(
+                    access.is_node_visible(self._storage.get_node(nid), graph_access)
+                    for nid in ids
+                ):
+                    continue
+            items.append(item)
+        return items
+
+    def discard_staged_changes(
+        self, session_id: str, entries: Any = "all"
+    ) -> Dict[str, Any]:
+        """Remove staged entries from the layer (§12): ``all`` - every entry
+        the caller's view covers - or a list of ``{kind, entity_id}``. The
+        graph does not change and no graph event fires (I10)."""
+        decision, mode = self._layer_session(
+            session_id,
+            action=GRAPH_ACTION_MUTATE,
+            target="discard_staged_changes",
+            operation=GRAPH_OPERATION_DISCARD,
+        )
+        if decision is None:
+            return mode
+        if mode != "staged":
+            return self._not_staged(session_id)
+        manager = self._session_gate.session_manager
+        try:
+            manager.check_layer_op(session_id)
+            removed = self._discard_in_view(session_id, entries, decision.graph_access)
+        except staged_review.ReviewRefused as exc:
+            return exc.to_result()
+        except Exception as exc:
+            refused = refusal_result(exc)
+            if refused is None:
+                raise
+            return refused
+        applied = None
+        if removed:
+            applied = manager.announce_layer_change(
+                session_id,
+                {
+                    "op": "graph_changes_discarded",
+                    "removals": [list(key) for key in removed],
+                },
+            )
+        return {
+            "success": True,
+            "session_id": session_id,
+            "removed_entries": [list(key) for key in removed],
+            "session_seq": None if applied is None else applied["seq"],
+        }
+
+    def _discard_in_view(self, session_id: str, entries: Any, graph_access):
+        """Remove the selected entries the caller's view covers, each only
+        while it is still the entry the caller's review read: one restaged
+        since - possibly out of that view - refuses the discard in the store,
+        and it is decided again on the layer as it is then."""
+        store = self._session_gate.session_manager.write_modes.layer_store
+        for attempt in range(self.STAGING_ATTEMPTS):
+            review = self._load_review(session_id, graph_access)
+            if entries == "all":
+                keys = sorted(review.in_view)
+            else:
+                try:
+                    keys = staged_review.normalise_selection(review, entries)
+                except staged_review.ReviewRefused as exc:
+                    if exc.code != staged_review.MERGE_RACED:
+                        raise
+                    # Gone already, or never the caller's to see: either way
+                    # there is nothing of it to discard.
+                    keys = [
+                        key
+                        for key in staged_review.requested_keys(entries)
+                        if key in review.in_view
+                    ]
+            if not keys:
+                return []
+            expected = {
+                key: layer_store.entry_version(review.entries[key]) for key in keys
+            }
+            try:
+                return store.discard(session_id, keys, expected=expected)
+            except layer_store.LayerRaced:
+                if attempt + 1 == self.STAGING_ATTEMPTS:
+                    raise LayoutBusy()
+        raise AssertionError("unreachable")  # pragma: no cover
 
     @property
     def storage(self) -> GraphStorage:

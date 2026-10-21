@@ -2930,6 +2930,88 @@ def register_mcp_tools(
             return {"success": False, "error": f"Session '{session_id}' not found."}
         return {"success": True, "deleted": True, "session_id": session_id}
 
+    # ==================== Staged changes (§10-§12) ====================
+
+    @register_tool
+    def get_staged_changes(session_id: str) -> Dict[str, Any]:
+        """
+        Review a staged session's pending changes: the diff of its layer.
+
+        One item per staged entry: kind, entity_id, action (create | update |
+        delete), base_revision and main_revision, per field its base, staged
+        and current main value with a conflict flag, status (clean |
+        conflict | orphaned | id_taken | dangling) and depends_on. A direct
+        session has no staged changes.
+
+        Args:
+            session_id: The session ID (e.g. "8244-1742-3391-0057").
+
+        Returns:
+            Dict with success, write_mode, items and count, or an error:
+            session_not_found, staged_unsupported, access denied.
+        """
+        if not is_valid_session_id(session_id):
+            return {"success": False, "error": _INVALID_SESSION_ID_ERROR}
+        return service.get_staged_changes(session_id)
+
+    @register_tool
+    def merge_staged_changes(
+        session_id: str,
+        merge_id: str,
+        entries: Any = "all",
+        resolutions: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Merge a staged session's changes into the graph, all or nothing.
+
+        Read the diff first (get_staged_changes). Every selected entry that is
+        not clean needs a resolution, or nothing is merged (merge_blocked).
+
+        Args:
+            session_id: The session ID.
+            merge_id: An id you choose for this merge. Repeating a merge with
+                the same id returns the first result and writes nothing more.
+            entries: "all", or a list of {"kind": "node" | "edge",
+                "entity_id": ...}. The selection must include every entry
+                listed in a selected entry's depends_on (merge_incomplete).
+            resolutions: Optional list of {"kind", "entity_id", "choice"}:
+                take_session (the session's version wins), keep_main (drop
+                the entry, keep the graph's version), as_new (nodes only: the
+                session's version becomes a new node), manual (updates only:
+                add "values": {field: final value} for every conflicting
+                field).
+
+        Returns:
+            Dict with success, merged (per entry: outcome, resolution,
+            resulting revision) and removed_entries, or an error:
+            merge_blocked (with the blocking items), merge_raced (read the
+            diff again), merge_incomplete (with missing), merge_id_taken,
+            invalid_merge_request, session_not_staged, session_not_found.
+        """
+        if not is_valid_session_id(session_id):
+            return {"success": False, "error": _INVALID_SESSION_ID_ERROR}
+        return service.merge_staged_changes(
+            session_id, merge_id, entries=entries, resolutions=resolutions
+        )
+
+    @register_tool
+    def discard_staged_changes(session_id: str, entries: Any = "all") -> Dict[str, Any]:
+        """
+        Discard a staged session's changes. The graph is not changed.
+
+        Args:
+            session_id: The session ID.
+            entries: "all", or a list of {"kind": "node" | "edge",
+                "entity_id": ...}.
+
+        Returns:
+            Dict with success and removed_entries, or an error:
+            session_not_staged, session_not_found.
+        """
+        if not is_valid_session_id(session_id):
+            return {"success": False, "error": _INVALID_SESSION_ID_ERROR}
+        return service.discard_staged_changes(session_id, entries=entries)
+
     # ==================== Sticky Note Annotations ====================
     #
     # These tools let an assistant read and edit sticky-note annotations in an

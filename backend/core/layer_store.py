@@ -34,6 +34,7 @@ from typing import (
     Protocol,
     Sequence,
     Tuple,
+    Union,
     runtime_checkable,
 )
 
@@ -138,6 +139,26 @@ class LayerNotEmpty(LayerStoreError):
         )
 
 
+class LayerRaced(LayerStoreError):
+    """A staging op's expectation about the layer failed inside its unit.
+
+    The op read the layer, decided, and expected each entry it changes to
+    be as it read it - the same version (`entry_version`), or still absent. Another op
+    changed one in between, so applying this one would overwrite that change
+    with a decision made without it. Nothing was applied; the caller reads
+    the layer again and decides again.
+    """
+
+    code = "layer_raced"
+
+    def __init__(self, session_id: str, key: "LayerKey"):
+        self.session_id = session_id
+        self.key = key
+        super().__init__(
+            f"the staged entry for {key[0]} {key[1]!r} changed while the op ran"
+        )
+
+
 class MergeRaced(LayerStoreError):
     """An expectation or check failed inside the merge unit (§11.3).
 
@@ -184,18 +205,25 @@ class MergeCheck:
       edges incident to the node in the store are exactly `edge_ids` - the
       ones the merge deletes with it. An edge added since the diff was read
       fails it.
-    - `entry_unchanged(kind, entity_id, session_seq)`: the layer still holds
-      the entry the decision was made on, as last changed by the op with
-      that session sequence number. A participant restaging the entity
-      between the diff and the merge fails it, so the merge cannot apply the
-      older value and drop the newer one.
+    - `entry_unchanged(kind, entity_id, version)`: the layer still holds
+      the entry the decision was made on: its `entry_version` is `version`
+      (a string), or, for an int, its `session_seq` is that number. A
+      participant restaging the entity between the diff and the merge fails
+      it, so the merge cannot apply the older value and drop the newer one.
+    - `layer_holds_only(keys)`: the layer holds no entry outside `keys`. For
+      a decision that rested on what the whole layer holds - a node merged
+      as new, whose staged edge creates must move with it - together with
+      `entry_unchanged` on each of those keys.
     """
 
-    check: Literal["node_exists", "incident_edges", "entry_unchanged"]
+    check: Literal[
+        "node_exists", "incident_edges", "entry_unchanged", "layer_holds_only"
+    ]
     entity_id: str
     kind: str = "node"
     edge_ids: Tuple[str, ...] = ()
-    session_seq: Optional[int] = None
+    session_seq: Optional[Union[int, str]] = None
+    keys: Tuple[LayerKey, ...] = ()
 
     @classmethod
     def node_exists(cls, node_id: str) -> "MergeCheck":
@@ -207,9 +235,13 @@ class MergeCheck:
 
     @classmethod
     def entry_unchanged(
-        cls, kind: str, entity_id: str, session_seq: Optional[int]
+        cls, kind: str, entity_id: str, session_seq: Optional[Union[int, str]]
     ) -> "MergeCheck":
         return cls("entry_unchanged", entity_id, kind=kind, session_seq=session_seq)
+
+    @classmethod
+    def layer_holds_only(cls, keys: Iterable[LayerKey]) -> "MergeCheck":
+        return cls("layer_holds_only", "*", keys=tuple(sorted(set(keys))))
 
 
 @dataclass(frozen=True)
@@ -251,11 +283,17 @@ class LayerStoreBackend(Protocol):
         removals: Sequence[LayerKey] = (),
         *,
         max_entries: Optional[int] = None,
+        expected: Optional[Mapping[LayerKey, Optional[int]]] = None,
+        exact: bool = False,
     ) -> None:
         """Upsert `entries` and remove `removals`, atomically. Refused with
         StagedSessionNotActive unless the session is active, and with
         LayerFull, applying nothing, when the layer would end up holding more
-        than `max_entries`."""
+        than `max_entries`. `expected` maps keys to the version of the entry
+        the caller read (`entry_version`), None for one it found absent; any that no
+        longer holds refuses the op with LayerRaced, applying nothing. With
+        `exact`, the op read the whole layer: it must also hold no entry
+        `expected` does not name."""
 
     def merge(
         self,
@@ -269,10 +307,16 @@ class LayerStoreBackend(Protocol):
         """Verify, apply, remove and record as one unit (§7, §11.3, §11.6)."""
 
     def discard(
-        self, session_id: str, removals: Optional[Sequence[LayerKey]] = None
+        self,
+        session_id: str,
+        removals: Optional[Sequence[LayerKey]] = None,
+        *,
+        expected: Optional[Mapping[LayerKey, Optional[int]]] = None,
     ) -> List[LayerKey]:
         """Remove the given entries, or every entry when `removals` is None.
-        Returns the keys actually removed. Touches nothing else (I10)."""
+        Returns the keys actually removed. Touches nothing else (I10).
+        `expected` is checked as `stage` checks it: an entry changed since the
+        caller read it refuses the discard with LayerRaced."""
 
     def load_merge(self, merge_id: str) -> Optional[Dict[str, Any]]:
         """The stored merge record, or None."""
@@ -362,6 +406,13 @@ def _as_json(value: Any, what: str) -> Any:
         raise InvalidLayerRequest(f"{what} is not JSON: {exc}") from None
 
 
+def json_copy(value: Any) -> Any:
+    """A deep copy of a JSON value the store holds. Not ``copy.deepcopy``,
+    which spends several interpreter frames per level of nesting and gives up
+    on metadata a direct write stores without complaint."""
+    return json.loads(json.dumps(value))
+
+
 def _check_text_values(value: Any, what: str) -> None:
     """Refuse strings no store can hold: a NUL, a lone surrogate."""
     if isinstance(value, str):
@@ -410,6 +461,65 @@ def check_entries(
     return by_key, removed
 
 
+def entry_version(entry: Mapping[str, Any]) -> str:
+    """What identifies one version of an entry: the token the staging op
+    that wrote it stamped (`stage_token`), unique to that op on every
+    instance. An entry from before tokens falls back to its `session_seq`,
+    which instances with separate session documents may reuse."""
+    token = entry.get("stage_token")
+    if isinstance(token, str) and token:
+        return token
+    return f"seq:{entry.get('session_seq')}"
+
+
+def entry_matches(entry: Optional[Mapping[str, Any]], expected: Any) -> bool:
+    """Whether `entry` is the one an expectation names: None - absent; a
+    string - the entry with that `entry_version`; an int - the entry with
+    that `session_seq`."""
+    if expected is None:
+        return entry is None
+    if entry is None:
+        return False
+    if isinstance(expected, str):
+        return entry_version(entry) == expected
+    return entry.get("session_seq") == expected
+
+
+def check_expected(expected: Any) -> Dict[LayerKey, Any]:
+    """A staging op's expectations about the layer, or InvalidLayerRequest."""
+    if expected is None:
+        return {}
+    if not isinstance(expected, Mapping):
+        raise InvalidLayerRequest("expected maps layer keys to entry versions")
+    checked: Dict[LayerKey, Any] = {}
+    for key, version in expected.items():
+        if version is not None and (
+            isinstance(version, bool) or not isinstance(version, (int, str))
+        ):
+            raise InvalidLayerRequest(
+                "an expected entry version is a string, an integer or None"
+            )
+        checked[check_key(key)] = version
+    return checked
+
+
+def verify_expected(
+    session_id: str,
+    layer: Mapping[LayerKey, Mapping[str, Any]],
+    expected: Mapping[LayerKey, Optional[int]],
+    exact: bool = False,
+) -> None:
+    """Raise LayerRaced unless every key is as the op read it, and, with
+    `exact`, the layer holds no key the op did not read."""
+    if exact:
+        for key in sorted(layer):
+            if key not in expected:
+                raise LayerRaced(session_id, key)
+    for key, version in sorted(expected.items()):
+        if not entry_matches(layer.get(key), version):
+            raise LayerRaced(session_id, key)
+
+
 def check_max_entries(max_entries: Any) -> Optional[int]:
     if max_entries is None:
         return None
@@ -418,6 +528,16 @@ def check_max_entries(max_entries: Any) -> Optional[int]:
     if max_entries < 0:
         raise InvalidLayerRequest("max_entries must not be negative")
     return max_entries
+
+
+def verify_layer_holds_only(
+    layer: Mapping[LayerKey, Any], checks: Sequence["MergeCheck"]
+) -> None:
+    """MergeRaced if the layer holds an entry a `layer_holds_only` check
+    does not name."""
+    for check in checks:
+        if check.check == "layer_holds_only" and set(layer) - set(check.keys):
+            raise MergeRaced("the layer gained an entry the merge did not read")
 
 
 def check_merge_request(
@@ -448,9 +568,15 @@ def check_merge_request(
     for check in verified:
         if not isinstance(check, MergeCheck):
             raise InvalidLayerRequest("a merge check is a MergeCheck")
-        if check.check not in ("node_exists", "incident_edges", "entry_unchanged"):
+        if check.check not in (
+            "node_exists",
+            "incident_edges",
+            "entry_unchanged",
+            "layer_holds_only",
+        ):
             raise InvalidLayerRequest(f"unknown merge check {check.check!r}")
         check_key((check.kind, check.entity_id))
+        check_keys(check.keys)
         for edge_id in check.edge_ids:
             _check_id(edge_id, "edge id")
     removed = check_keys(removals)
@@ -506,11 +632,12 @@ def apply_merge_to_model(
     for key in removals:
         if key not in layer:
             raise MergeRaced(f"{key[0]} {key[1]!r} is no longer staged")
+    verify_layer_holds_only(layer, checks)
     for check in checks:
         if check.check != "entry_unchanged":
             continue
         entry = layer.get((check.kind, check.entity_id))
-        if entry is None or entry.get("session_seq") != check.session_seq:
+        if not entry_matches(entry, check.session_seq) or entry is None:
             raise MergeRaced(
                 f"the staged entry for {check.kind} {check.entity_id!r} changed"
             )

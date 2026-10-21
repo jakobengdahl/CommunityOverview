@@ -202,6 +202,100 @@ class LayerStoreContract:
         assert sorted(layer) == [("node", "a"), ("node", "c")]
         assert layer[("node", "a")]["session_seq"] == 2
 
+    def test_an_op_whose_expectations_hold_lands(self, seeded, factory):
+        seeded.stage(A, [entry("node", "a", session_seq=1)])
+        seeded.stage(
+            A,
+            [entry("node", "a", session_seq=2), entry("node", "b", session_seq=2)],
+            expected={("node", "a"): 1, ("node", "b"): None},
+        )
+        layer = {(e["kind"], e["entity_id"]): e for e in factory().load_layer(A)}
+        assert {k: e["session_seq"] for k, e in layer.items()} == {
+            ("node", "a"): 2,
+            ("node", "b"): 2,
+        }
+
+    @pytest.mark.parametrize(
+        "expected",
+        [
+            {("node", "a"): 7},
+            {("node", "a"): None},
+            {("node", "b"): 1},
+        ],
+        ids=["restaged-since", "staged-since", "gone-since"],
+    )
+    def test_an_op_decided_on_a_layer_that_changed_since_lands_nothing(
+        self, seeded, factory, expected
+    ):
+        """Two ops reading the same entry and each writing its own successor
+        would lose the first one's change (§6.2's net change per entity)."""
+        seeded.stage(A, [entry("node", "a", session_seq=1)])
+        before = factory().load_layer(A)
+        with pytest.raises(ls.LayerRaced) as raised:
+            seeded.stage(
+                A,
+                [entry("node", "a", session_seq=9), entry("node", "c")],
+                [("node", "b")],
+                expected=expected,
+            )
+        assert raised.value.key == next(iter(expected))
+        assert factory().load_layer(A) == before
+
+    @pytest.mark.parametrize(
+        "expected", [{("node", "a"): 1.5}, {("node", "a"): True}, {("graph", "a"): 1}]
+    )
+    def test_a_malformed_expectation_is_refused_before_anything(
+        self, seeded, factory, expected
+    ):
+        with pytest.raises(ls.InvalidLayerRequest):
+            seeded.stage(A, [entry("node", "a")], expected=expected)
+        assert factory().load_layer(A) == []
+
+    def test_a_version_token_tells_apart_entries_sharing_a_session_seq(
+        self, seeded, factory
+    ):
+        """Instances with their own session documents may stamp the same
+        session_seq; the token the staging op stamped is what names one
+        version."""
+        seeded.stage(A, [entry("node", "a", session_seq=3, stage_token="t1")])
+        seeded.stage(A, [entry("node", "a", session_seq=3, stage_token="t2")])
+        with pytest.raises(ls.LayerRaced):
+            seeded.stage(A, [entry("node", "a")], expected={("node", "a"): "t1"})
+        with pytest.raises(ls.LayerRaced):
+            seeded.discard(A, [("node", "a")], expected={("node", "a"): "t1"})
+        assert seeded.discard(A, [("node", "a")], expected={("node", "a"): "t2"}) == [
+            ("node", "a")
+        ]
+
+    def test_an_op_that_read_the_whole_layer_is_refused_when_it_grew(
+        self, seeded, factory
+    ):
+        seeded.stage(A, [entry("node", "a", session_seq=1)])
+        seeded.stage(A, [entry("node", "b", session_seq=2)])
+        with pytest.raises(ls.LayerRaced) as raised:
+            seeded.stage(
+                A, [entry("node", "c")], expected={("node", "a"): 1}, exact=True
+            )
+        assert raised.value.key == ("node", "b")
+        seeded.stage(
+            A,
+            [entry("node", "c")],
+            expected={("node", "a"): 1, ("node", "b"): 2},
+            exact=True,
+        )
+        assert len(factory().load_layer(A)) == 3
+
+    def test_a_discard_of_an_entry_changed_since_removes_nothing(self, seeded, factory):
+        seeded.stage(A, [entry("node", "a", session_seq=2), entry("node", "b")])
+        with pytest.raises(ls.LayerRaced):
+            seeded.discard(
+                A, [("node", "a"), ("node", "b")], expected={("node", "a"): 1}
+            )
+        assert len(factory().load_layer(A)) == 2
+        assert seeded.discard(A, [("node", "a")], expected={("node", "a"): 2}) == [
+            ("node", "a")
+        ]
+
     def test_removing_an_entry_that_is_not_there_is_not_an_error(self, seeded):
         seeded.stage(A, [], [("node", "zz")])
         assert seeded.load_layer(A) == []
@@ -528,6 +622,19 @@ class LayerStoreContract:
         self._assert_raced_and_untouched(
             seeded, factory, [self._update_a(seeded)], [], [("node", "a")], {}
         )
+
+    def test_a_layer_that_gained_an_entry_fails_a_merge_that_read_all_of_it(
+        self, seeded, factory
+    ):
+        seeded.stage(A, [entry("node", "a"), entry("node", "b")])
+        check = MergeCheck.layer_holds_only([("node", "a")])
+        with pytest.raises(ls.MergeRaced):
+            seeded.merge(A, "m-holds", [], [check], [("node", "a")], {})
+        assert len(factory().load_layer(A)) == 2
+        assert factory().load_merge("m-holds") is None
+        allowed = MergeCheck.layer_holds_only([("node", "a"), ("node", "b")])
+        seeded.merge(A, "m-holds", [], [allowed], [("node", "a")], {})
+        assert [e["entity_id"] for e in factory().load_layer(A)] == ["b"]
 
     def test_an_entry_restaged_since_the_diff_fails_the_merge(self, seeded, factory):
         seeded.stage(A, [entry("node", "a", session_seq=1)])

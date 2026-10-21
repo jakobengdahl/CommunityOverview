@@ -405,7 +405,8 @@ rewritten entities.
   "staged": { "…": "create: the full entity; update: changed fields only; delete: null" },
   "staged_by": "actor, as resolved for the request",
   "staged_at": "ISO-8601",
-  "session_seq": 42
+  "session_seq": 42,
+  "stage_token": "…"
 }
 ```
 
@@ -417,6 +418,10 @@ rewritten entities.
   value outright.
 - **`session_seq`** is the session sequence number of the op that last changed
   the entry (§15).
+- **`stage_token`** names the version of the entry: a value unique to the
+  staging op that last changed it, on every instance. Expectations about the
+  layer compare it, since instances that keep their own session documents
+  may stamp the same `session_seq`.
 
 ### 6.2 Collapsing repeated edits
 
@@ -663,6 +668,15 @@ Reading a layer's diff returns one item per entry:
 `main` values are read when the diff is produced, and a merge re-checks them
 (§11.3).
 
+A reader the authorization hook narrows sees, selects and discards only the
+entries its view wholly covers - the entity the entry composes to, the main
+entity and the base, and for an edge their endpoints - and whose dependencies
+it covers too, the rule composed reads follow (§8). A node delete is also
+outside that view while main holds an edge to the node the reader cannot see,
+since the merge would delete it. Any other entry is
+answered as if it were not staged: nothing of it, not even its number, is
+shown to that reader.
+
 ## 11. Merge
 
 ### 11.1 Conflicts
@@ -904,7 +918,9 @@ advance the session sequence and fan out on the session event bus, like every
 other session op. The new op kinds are:
 
 - **`graph_change_staged`:** carries the resulting entry, or its removal after
-  collapsing;
+  collapsing. The entry goes without its `base` and `staged_by`: the stream
+  reaches anyone holding the session id, and those are read from the diff,
+  which asks the authorization hook (§10, §14);
 - **`graph_changes_discarded`:** carries the removed keys;
 - **`graph_changes_merged`:** carries the merge id and the merged keys;
 - **`write_mode_changed`:** carries the new mode.
@@ -978,6 +994,9 @@ session-tool code `revision_conflict` is unchanged (§9.2).
 | `merge_blocked` | 409 | an unresolved entry (§11.2) |
 | `merge_raced` | 409 | an expectation or check failing inside the merge unit (§11.3) |
 | `merge_incomplete` | 422 | a selection not closed under dependencies (§11.4) |
+| `merge_id_taken` | 409 | a merge id already used by another session's merge (I9 holds per session) |
+| `invalid_merge_request` | 422 | a malformed selection, resolution or merge id (§11.2, §11.4) |
+| `session_not_staged` | 409 | a merge or discard naming a direct session, which holds no layer |
 | `write_mode_irreversible` | 409 | switching a staged session to direct (§5.2) |
 | `layer_not_empty` | 409 | deleting a session with a non-empty layer (§13) |
 | `layer_full` | 422 | exceeding the layer cap (§6.4) |

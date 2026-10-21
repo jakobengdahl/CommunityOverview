@@ -909,6 +909,45 @@ would ask a direct one, with `graph_operation="stage"` and `session_id` in the
 context, and about a composing read as the same `read` it would ask without the
 session, with `session_id` in the context.
 
+#### Reviewing, merging and discarding staged changes
+
+docs/SESSION_OVERLAY_CONTRACT.md §10–§12. The three routes name their session
+in the path; a header naming another session is `400 session_mismatch`, and an
+unknown or deleted session is `404`. Each asks the hook first, under the name of
+its MCP twin (`get_staged_changes` as `read`; `merge_staged_changes` and
+`discard_staged_changes` as `mutate`, with `graph_operation` `merge` /
+`discard`), so a refused caller learns nothing about the session.
+
+| Method | Path | MCP tool | Description |
+|---|---|---|---|
+| GET | `/api/sessions/{id}/staged` | `get_staged_changes` | The diff: one item per staged entry - `kind`, `entity_id`, `action`, `base_revision`, `main_revision`, `fields` (per field, and per `metadata.<key>`: `base`, `staged`, `main`, `conflict`), `status` (`clean`, `conflict`, `orphaned`, `id_taken`, `dangling`), `depends_on`, `session_seq`, `staged_by`, `staged_at`; a node delete also lists its `unstaged_edges`, the main edges to the node the layer does not tombstone (added since, or missed). A direct session answers an empty list |
+| POST | `/api/sessions/{id}/staged/merge` | `merge_staged_changes` | `{merge_id, entries: "all" \| [{kind, entity_id}], resolutions?: [{kind, entity_id, choice, values?}]}`. Applies the selected entries to the graph and removes them from the layer as one unit, or nothing. `choice` is `take_session`, `keep_main`, `as_new` (nodes) or `manual` (updates; `values` gives the final value of every conflicting field). Repeating a `merge_id` returns the first result (`replayed: true`) and writes nothing. Graph events fire as for direct writes, with `event_origin` `session-merge`, the merge id as correlation id and `staged_by` |
+| POST | `/api/sessions/{id}/staged/discard` | `discard_staged_changes` | `{entries: "all" \| [{kind, entity_id}]}`. Removes entries from the layer; the graph does not change and no graph event fires. Answers the keys actually removed |
+
+Merge and discard fan out on the session stream as `graph_changes_merged`
+(`merge_id`, `removals`) and `graph_changes_discarded` (`removals`) - keys
+only - and record a session activity entry with no inverse. A reader narrowed
+by the hook sees, selects and discards only the entries its view wholly covers
+(the composed entity, the main entity and the base, for an edge their
+endpoints too) and whose dependencies it covers; a node delete is outside it
+too while main holds an edge to the node the reader cannot see. Any other
+entry is answered as if it were not staged. Every write a merge plans is
+validated as a direct write would be - a `manual` value included; an update of
+a saved view checks the annotations it brings, a create all of them - and an
+edge endpoint outside the caller's view is refused exactly as a missing one. A merge applies every write with an expectation and
+the store re-checks every condition inside the unit, so the graph or the layer
+changing in between fails the merge whole.
+
+| `error` | HTTP | Meaning |
+|---|---|---|
+| `merge_blocked` | 409 | a selected entry is not `clean` and has no resolution its status allows; carries `items`, the current diff of the blocking entries |
+| `merge_raced` | 409 | the graph or the layer changed since the merge was decided, or a selected entry is not (or no longer) staged; read the diff again |
+| `merge_incomplete` | 422 | the selection leaves out entries it depends on; carries `missing` |
+| `merge_id_taken` | 409 | the merge id was used by another session's merge. Merge ids are one namespace per graph, so a client should mint unpredictable ones (a UUID): this answer tells that an id is in use somewhere, and nothing else |
+| `invalid_merge_request` | 422 | a malformed selection, resolution or merge id |
+| `session_not_staged` | 409 | merge or discard in a direct session |
+| `write_failed` / `write_outcome_unknown` | 502 / 503 | the store failed; the merge did not land, or could not be confirmed (§4.4) |
+
 ### Custom REST Interfaces (config-driven)
 
 A specific node type or edge type can be exposed as its own dedicated read-only

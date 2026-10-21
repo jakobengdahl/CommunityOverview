@@ -2127,14 +2127,27 @@ class PostgresGraphPersistenceBackend:
         removals: Sequence[Any] = (),
         *,
         max_entries: Optional[int] = None,
+        expected: Optional[Any] = None,
+        exact: bool = False,
     ) -> None:
         session_id = layer_store.check_session_id(session_id)
         by_key, removed = layer_store.check_entries(entries, removals)
         limit = layer_store.check_max_entries(max_entries)
+        expectations = layer_store.check_expected(expected)
 
         def work(conn):
             conflict_pred, pred_params = self._conflict_scope("graph_layer_entries")
+            # The session's record row, locked, orders this op against every
+            # other op on the session's layer, on any instance; the entries
+            # read after it are the ones this op replaces.
             self._lock_active_session(conn, session_id)
+            if expectations or exact:
+                layer_store.verify_expected(
+                    session_id,
+                    self._layer_entries(conn, session_id, lock=False),
+                    expectations,
+                    bool(exact),
+                )
             self._delete_entries(conn, session_id, removed)
             for (kind, entity_id), doc in sorted(by_key.items()):
                 row = conn.execute(
@@ -2174,13 +2187,24 @@ class PostgresGraphPersistenceBackend:
         self._run_layer(work)
 
     def discard(
-        self, session_id: str, removals: Optional[Sequence[Any]] = None
+        self,
+        session_id: str,
+        removals: Optional[Sequence[Any]] = None,
+        *,
+        expected: Optional[Any] = None,
     ) -> List[Tuple[str, str]]:
         session_id = layer_store.check_session_id(session_id)
         keys = None if removals is None else layer_store.check_keys(removals)
+        expectations = layer_store.check_expected(expected)
 
         def work(conn):
             self._lock_active_session(conn, session_id)
+            if expectations:
+                layer_store.verify_expected(
+                    session_id,
+                    self._layer_entries(conn, session_id, lock=False),
+                    expectations,
+                )
             if keys is not None:
                 return self._delete_entries(conn, session_id, keys)
             scope, params = self._layer_scope()
@@ -2317,11 +2341,16 @@ class PostgresGraphPersistenceBackend:
                         raise layer_store.MergeRaced(
                             f"{key[0]} {key[1]!r} is no longer staged"
                         )
+                # The session's record row, locked above, orders this read
+                # against every staging op, so no entry can appear after it.
+                layer_store.verify_layer_holds_only(entries, checks)
                 for check in checks:
                     if check.check != "entry_unchanged":
                         continue
                     entry = entries.get((check.kind, check.entity_id))
-                    if entry is None or entry.get("session_seq") != check.session_seq:
+                    if entry is None or not layer_store.entry_matches(
+                        entry, check.session_seq
+                    ):
                         raise layer_store.MergeRaced(
                             f"the staged entry for {check.kind} "
                             f"{check.entity_id!r} changed"

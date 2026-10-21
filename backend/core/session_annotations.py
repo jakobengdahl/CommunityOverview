@@ -39,7 +39,7 @@ own inverse op — see the function's docstring and ``SessionStore.apply_state_o
 
 from __future__ import annotations
 
-from typing import Any, Dict, FrozenSet, List, Optional
+from typing import Any, Dict, FrozenSet, Iterable, List, Optional
 from urllib.parse import urlsplit
 
 NOTE_TYPE = "note"
@@ -1029,6 +1029,12 @@ def iter_saved_view_annotations(metadata: Dict[str, Any]):
         for annotation in document.get("annotations", []) or []:
             if isinstance(annotation, dict):
                 yield annotation
+    elif isinstance(document, list):
+        # The browser also reads a bare list as the document's annotations
+        # (normalizeAnnotationDocument), so it is held to the same rule.
+        for annotation in document:
+            if isinstance(annotation, dict):
+                yield annotation
     legacy = metadata.get("annotations")
     if isinstance(legacy, list):
         for annotation in legacy:
@@ -1065,6 +1071,41 @@ def saved_view_annotation_error(metadata: Dict[str, Any]) -> Optional[str]:
         if error:
             return error
     return None
+
+
+_SAVED_VIEW_TYPES = frozenset({"SavedView", "VisualizationView"})
+_UNSET = object()
+
+
+def saved_view_write_error(
+    before: Optional[Dict[str, Any]],
+    after: Dict[str, Any],
+    sent: Iterable[str] = (),
+) -> Optional[str]:
+    """Why writing node ``after`` over ``before`` (None: a create) may not be
+    persisted. The one rule every write path applies - direct, staged and a
+    session merge.
+
+    A node that becomes a saved view by the write - created as one, or of
+    another type before - is checked on all of its metadata. A saved view
+    updated in place is checked, at the value it would store, on every
+    metadata key the caller sent (``sent``: its ``metadata`` patch and keys
+    folded into metadata, sent again unchanged or not) and every key whose
+    value the write changes; not on annotations it already held and leaves
+    alone, so a view stored before today's rule still takes an unrelated
+    change.
+    """
+    if after.get("type") not in _SAVED_VIEW_TYPES:
+        return None
+    metadata = after.get("metadata") or {}
+    if before is None or before.get("type") not in _SAVED_VIEW_TYPES:
+        return saved_view_annotation_error(metadata)
+    held = before.get("metadata") or {}
+    judged = {k for k, v in metadata.items() if held.get(k, _UNSET) != v}
+    judged |= set(sent)
+    return saved_view_annotation_error(
+        {k: metadata[k] for k in judged if k in metadata}
+    )
 
 
 def _sanitize_saved_view_annotation(annotation: Dict[str, Any]) -> Dict[str, Any]:
@@ -1127,6 +1168,13 @@ def sanitize_saved_view_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:
                 **document,
                 "annotations": new_annotations,
             }
+    elif isinstance(document, list):
+        new_document = [
+            _sanitize_saved_view_annotation(a) if isinstance(a, dict) else a
+            for a in document
+        ]
+        if new_document != document:
+            sanitized["annotation_document"] = new_document
     legacy = metadata.get("annotations")
     if isinstance(legacy, list):
         new_legacy = [

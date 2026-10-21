@@ -20,7 +20,7 @@ Usage:
 import asyncio
 import json
 import logging
-from typing import TYPE_CHECKING, Annotated, List, Optional, Dict, Any
+from typing import TYPE_CHECKING, Annotated, List, Literal, Optional, Dict, Any, Union
 from urllib.parse import quote
 from fastapi import (
     APIRouter,
@@ -488,6 +488,35 @@ class CreateSessionRequest(BaseModel):
     )
 
 
+class MergeStagedRequest(BaseModel):
+    """Request model for merging a staged session's changes (§11)."""
+
+    merge_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=512,
+        description="Caller-chosen id; repeating it returns the first result",
+    )
+    entries: Union[Literal["all"], List[Dict[str, Any]]] = Field(
+        "all", description="'all', or a list of {kind, entity_id}"
+    )
+    resolutions: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description=(
+            "Per entry: {kind, entity_id, choice: take_session | keep_main | "
+            "as_new | manual, values: {field: value} for manual}"
+        ),
+    )
+
+
+class DiscardStagedRequest(BaseModel):
+    """Request model for discarding a staged session's changes (§12)."""
+
+    entries: Union[Literal["all"], List[Dict[str, Any]]] = Field(
+        "all", description="'all', or a list of {kind, entity_id}"
+    )
+
+
 class RenameSessionRequest(BaseModel):
     """Request model for renaming a shared session."""
 
@@ -647,6 +676,33 @@ _WRITE_ERROR_STATUS = {
     "invalid_entity": 400,
     "busy": 409,
 }
+
+
+# The refusals of the review, merge and discard routes (§16.3), beyond those of
+# a write, and the status each is answered with.
+_STAGED_REFUSAL_STATUS = {
+    **_WRITE_ERROR_STATUS,
+    "session_not_staged": 409,
+    "merge_blocked": 409,
+    "merge_raced": 409,
+    "merge_incomplete": 422,
+    "merge_id_taken": 409,
+    "invalid_merge_request": 422,
+    "validation_error": 422,
+}
+
+
+def _staged_answer(result: Dict[str, Any]) -> Dict[str, Any]:
+    """A staged-changes route's result, or the HTTP refusal it stands for:
+    the code, message and the data needed to act on it, under ``detail``."""
+    _raise_for_access_denied(result)
+    if result.get("success") is False:
+        status = _STAGED_REFUSAL_STATUS.get(result.get("error"), 400)
+        raise HTTPException(
+            status_code=status,
+            detail={k: v for k, v in result.items() if k != "success"},
+        )
+    return result
 
 
 # The refusals of a request naming a session it cannot act in (§16.3).
@@ -1423,6 +1479,39 @@ def _register_session_endpoints(
         if not existed:
             raise HTTPException(status_code=404, detail="session not found")
         return {"deleted": True, "id": session_id}
+
+    @router.get("/sessions/{session_id}/staged")
+    async def get_staged_changes(
+        session_id: str, http_request: Request
+    ) -> Dict[str, Any]:
+        """The diff of a staged session's changes (§10), as far as the
+        caller's view covers them."""
+        with use_request_authorization(headers=http_request.headers):
+            result = service.get_staged_changes(session_id)
+        return _staged_answer(result)
+
+    @router.post("/sessions/{session_id}/staged/merge")
+    async def merge_staged_changes(
+        session_id: str, request: MergeStagedRequest, http_request: Request
+    ) -> Dict[str, Any]:
+        """Merge staged changes into the graph as one unit (§11)."""
+        with use_request_authorization(headers=http_request.headers):
+            result = service.merge_staged_changes(
+                session_id,
+                request.merge_id,
+                entries=request.entries,
+                resolutions=request.resolutions,
+            )
+        return _staged_answer(result)
+
+    @router.post("/sessions/{session_id}/staged/discard")
+    async def discard_staged_changes(
+        session_id: str, request: DiscardStagedRequest, http_request: Request
+    ) -> Dict[str, Any]:
+        """Drop staged changes; the graph does not change (§12)."""
+        with use_request_authorization(headers=http_request.headers):
+            result = service.discard_staged_changes(session_id, entries=request.entries)
+        return _staged_answer(result)
 
     @router.post("/sessions/{session_id}/ops")
     async def apply_session_ops(

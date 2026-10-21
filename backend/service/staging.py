@@ -17,7 +17,8 @@ names the session, and ``composed.ComposedStorage`` is the view it reads.
 
 from __future__ import annotations
 
-import copy
+import json
+import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -25,7 +26,8 @@ from backend.core import Edge, EntityRevisionConflict, Node, StaleUpdateError
 from backend.core import layer_store
 from backend.core.layer_vectors import LayerVectors
 from backend.core.models import _parse_datetime
-from backend.core.session_annotations import saved_view_annotation_error
+from backend.core.session_annotations import saved_view_write_error
+from backend.core.session_store import is_valid_session_id
 from backend.core.session_manager import (
     LayoutBusy,
     SessionNotFound,
@@ -71,7 +73,6 @@ _NODE_RECREATED_FIELDS = ("type",) + _NODE_STAGED_FIELDS
 _EDGE_STAGED_FIELDS = tuple(sorted(EDGE_UPDATE_FIELDS)) + ("archived",)
 _EDGE_RECREATED_FIELDS = ("source", "target") + _EDGE_STAGED_FIELDS
 
-_SAVED_VIEW_NODE_TYPES = frozenset({"SavedView", "VisualizationView"})
 
 SESSION_SEQ_WITHOUT_SESSION = "session_seq_without_session"
 BUSY = "busy"
@@ -97,6 +98,29 @@ class StagingRefused(Exception):
         }
 
 
+_NODE_FIELDS = frozenset(Node.model_fields) | {"revision"}
+
+
+def sent_metadata_keys(updates: Dict[str, Any]) -> set:
+    """The metadata keys a node update sends - its `metadata` patch, and
+    every other key that is not a node field, which is folded into metadata -
+    judged by the saved-view rule however they arrive, direct or staged."""
+    sent = {k for k in updates if k not in _NODE_FIELDS}
+    if isinstance(updates.get("metadata"), dict):
+        sent |= set(updates["metadata"])
+    return sent
+
+
+def json_copy(value: Any) -> Any:
+    """A deep copy of a JSON value, as layer entries and entity documents are.
+
+    Not ``copy.deepcopy``: that spends several interpreter frames per level
+    of nesting and gives up on metadata a direct write stores without
+    complaint (nested up to ``MAX_METADATA_DEPTH``); the JSON codec does not.
+    """
+    return json.loads(json.dumps(value))
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -111,14 +135,14 @@ def _doc(entity: Any) -> Dict[str, Any]:
 def _apply_staged(doc: Dict[str, Any], staged: Dict[str, Any]) -> Dict[str, Any]:
     """``doc`` with an update's staged fields applied (§6.1): `metadata` is a
     merge-patch, every other field replaces the value outright."""
-    result = copy.deepcopy(doc)
+    result = json_copy(doc)
     for field, value in staged.items():
         if field == "metadata":
             result["metadata"] = _apply_metadata_patch(
                 dict(result.get("metadata") or {}), value or {}
             )
         else:
-            result[field] = copy.deepcopy(value)
+            result[field] = json_copy(value)
     return result
 
 
@@ -131,7 +155,7 @@ def compose(
         return main
     action = entry.get("action")
     if action == "create":
-        return copy.deepcopy(entry["staged"])
+        return json_copy(entry["staged"])
     if action == "update":
         if main is not None:
             return _apply_staged(main, entry["staged"])
@@ -163,18 +187,25 @@ class Layer:
             (e["kind"], e["entity_id"]): e for e in entries
         }
         self._changed: Dict[LayerKey, Optional[Dict[str, Any]]] = {}
+        # What the op's decision read of the layer: the keys it looked up, and
+        # whether it scanned every entry. The store refuses the op if any of
+        # that changed before it lands (``expected``).
+        self._read: set = set()
+        self.read_all = False
 
     # -- entries ---------------------------------------------------------------
 
     def entry(self, key: LayerKey) -> Optional[Dict[str, Any]]:
         if key in self._changed:
             return self._changed[key]
+        self._read.add(key)
         return self._loaded.get(key)
 
     def put(self, key: LayerKey, entry: Optional[Dict[str, Any]]) -> None:
         self._changed[key] = entry
 
     def current_entries(self) -> Dict[LayerKey, Dict[str, Any]]:
+        self.read_all = True
         merged = dict(self._loaded)
         for key, entry in self._changed.items():
             if entry is None:
@@ -192,6 +223,24 @@ class Layer:
             for key, entry in self._changed.items()
             if entry is None and key in self._loaded
         ]
+
+    def expected(self) -> Dict[LayerKey, Optional[int]]:
+        """What the op's decision rested on: every entry it looked up or
+        changes, and every entry when it scanned the layer, as the entry's
+        ``session_seq`` - None where it found none. The store refuses the op
+        if any has changed since (``LayerRaced``); with ``read_all``, also if
+        the layer gained an entry."""
+        keys = set(self._read) | set(self._changed)
+        if self.read_all:
+            keys |= set(self._loaded)
+        return {
+            key: (
+                layer_store.entry_version(self._loaded[key])
+                if key in self._loaded
+                else None
+            )
+            for key in keys
+        }
 
     # -- the main graph ---------------------------------------------------------
 
@@ -256,11 +305,11 @@ class Layer:
 
 
 def _node(doc: Dict[str, Any]) -> Node:
-    return Node.from_dict(copy.deepcopy(doc))
+    return Node.from_dict(json_copy(doc))
 
 
 def _edge(doc: Dict[str, Any]) -> Edge:
-    return Edge.from_dict(copy.deepcopy(doc))
+    return Edge.from_dict(json_copy(doc))
 
 
 class StagedWrite:
@@ -310,10 +359,20 @@ class StagedWrite:
         staged_entries: List[Dict[str, Any]] = []
 
         def commit(seq: int) -> Dict[str, Any]:
-            stamped = [{**entry, "session_seq": seq} for entry in upserts]
+            # The token names this op's version of each entry on every
+            # instance; seq alone can repeat across instances' documents.
+            token = uuid.uuid4().hex
+            stamped = [
+                {**entry, "session_seq": seq, "stage_token": token} for entry in upserts
+            ]
             staged_entries.extend(stamped)
             store.stage(
-                self.session_id, stamped, removals, max_entries=self._max_entries
+                self.session_id,
+                stamped,
+                removals,
+                max_entries=self._max_entries,
+                expected=layer.expected(),
+                exact=layer.read_all,
             )
             return {"entries": stamped, "removals": [list(k) for k in removals]}
 
@@ -381,7 +440,7 @@ class StagedWrite:
             fields = (
                 _NODE_RECREATED_FIELDS if kind == "node" else _EDGE_RECREATED_FIELDS
             )
-            staged = {f: copy.deepcopy(doc.get(f)) for f in fields if f != "metadata"}
+            staged = {f: json_copy(doc.get(f)) for f in fields if f != "metadata"}
             staged["metadata"] = _metadata_patch(
                 base.get("metadata") or {}, doc.get("metadata") or {}
             )
@@ -403,7 +462,7 @@ class StagedWrite:
         """
         entity_id = current["id"]
         changes = {
-            f: copy.deepcopy(updated.get(f))
+            f: json_copy(updated.get(f))
             for f in fields
             if f != "metadata" and updated.get(f) != current.get(f)
         }
@@ -674,19 +733,20 @@ class StagedWrite:
                 raise StaleUpdateError(
                     node_id, expected_updated_at, current_node.updated_at
                 )
-        if current.get("type") in _SAVED_VIEW_NODE_TYPES and isinstance(
-            updates.get("metadata"), dict
-        ):
-            annotation_error = saved_view_annotation_error(updates["metadata"])
-            if annotation_error:
-                return {
-                    "success": False,
-                    "error": f"Error validating input: {annotation_error}",
-                    "error_code": "validation_error",
-                }
         updated = _doc(
             build_node_update(current, updates, metadata_merge=metadata_merge)
         )
+        # On the metadata the update changes, however it arrived: a key
+        # outside `metadata` is folded into it too.
+        annotation_error = saved_view_write_error(
+            current, updated, sent_metadata_keys(updates)
+        )
+        if annotation_error:
+            return {
+                "success": False,
+                "error": f"Error validating input: {annotation_error}",
+                "error_code": "validation_error",
+            }
         self._stage_update(layer, "node", current, updated, _NODE_STAGED_FIELDS)
         committed = self._commit(layer)
         node = serialize_node(_node(layer.node(node_id)))
@@ -1041,6 +1101,13 @@ class SessionGate:
             actor=actor,
             on_staged=lambda: self._embed_in_background(session_id),
         )
+
+    def named_mode(self, session_id: str) -> str:
+        """The write mode of a session a session route or tool names, or a
+        refusal as for a session a request acts in (§16.1)."""
+        if not is_valid_session_id(session_id):
+            raise session_context.not_found(session_id)
+        return self._mode(session_id)
 
     def read_session(self) -> Optional[str]:
         """The staged session a read in the current request composes in, or

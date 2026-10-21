@@ -17,7 +17,10 @@ from backend.core import (
     StaleUpdateError,
 )
 from backend.core.models import metadata_depth_error
-from backend.core.session_annotations import saved_view_annotation_error
+from backend.core.session_annotations import (
+    saved_view_annotation_error,
+    saved_view_write_error,
+)
 from backend.runtime.authorization import (
     GRAPH_ACTION_MUTATE,
     GRAPH_OPERATION_STAGE,
@@ -25,6 +28,7 @@ from backend.runtime.authorization import (
 )
 
 from . import access
+from .staging import sent_metadata_keys
 from .serializers import (
     serialize_add_result,
     serialize_delete_edges_result,
@@ -310,17 +314,6 @@ def update_node(
     ):
         return {"success": False, "error": f"Node with ID {node_id} not found"}
 
-    if target_node is not None and target_node.type_str in _SAVED_VIEW_NODE_TYPES:
-        candidate_metadata = updates.get("metadata")
-        if isinstance(candidate_metadata, dict):
-            annotation_error = saved_view_annotation_error(candidate_metadata)
-            if annotation_error:
-                return {
-                    "success": False,
-                    "error": f"Error validating input: {annotation_error}",
-                    "error_code": VALIDATION_ERROR_CODE,
-                }
-
     event_context = access.build_event_context(
         target="update_node",
         event_origin=event_origin,
@@ -336,6 +329,10 @@ def update_node(
             metadata_merge=metadata_merge,
             expected_updated_at=expected_updated_at,
             expected_revision=expected_revision,
+            # Under the storage lock, on the node the update replaces.
+            validate=lambda before, after: saved_view_write_error(
+                before, after, sent_metadata_keys(updates)
+            ),
         )
     except _WRITE_ERRORS as e:
         return write_error_result(e)
