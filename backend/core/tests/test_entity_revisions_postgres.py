@@ -222,6 +222,22 @@ def test_a_plain_edge_create_over_an_id_another_instance_created_is_refused(
     assert "e" not in behind.edges
 
 
+def test_a_batch_that_also_fails_locally_still_reports_the_refusal(instances, schema):
+    # The batch's local failure (an id this instance holds) persists what
+    # landed before it; that write is refused too, and the caller is told so.
+    a = instances()
+    behind = instances(deaf=True)
+    behind.add_nodes([_node("held")], [])
+    a.add_nodes([_node("dup", "first")], [])
+
+    with pytest.raises(EntityRevisionConflict) as refused:
+        behind.add_nodes([_node("fresh"), _node("dup", "second"), _node("held")], [])
+    assert refused.value.entity_id == "dup"
+    assert _stored(schema, "graph_nodes", "dup")["name"] == "first"
+    assert _stored(schema, "graph_nodes", "fresh") is None
+    assert "fresh" not in behind.nodes and "dup" not in behind.nodes
+
+
 def test_a_single_edge_create_over_an_id_another_instance_created_is_refused(
     instances, schema
 ):

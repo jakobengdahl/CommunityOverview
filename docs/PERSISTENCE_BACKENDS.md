@@ -1395,8 +1395,9 @@ node is one row, not a rewrite of every node — and that is what makes
 several writers safe rather than merely orderly: two instances editing
 different parts of the graph touch different rows and do not contend at all,
 where two whole-graph saves had the later one discard the earlier one's work
-whatever it was. Concurrent writes to the *same* entity resolve
-last-writer-wins on the row, which is why the entity path states
+whatever it was. Concurrent writes to the *same* entity without an
+expectation resolve last-writer-wins on the row (a create always carries
+one, so the second create of an id is refused instead), which is why the entity path states
 `READ COMMITTED` as the save does: under `REPEATABLE READ` the second writer
 would abort rather than wait.
 

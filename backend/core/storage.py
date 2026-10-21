@@ -3056,6 +3056,11 @@ class GraphStorage:
                     return
                 try:
                     commit_created(unpersisted_nodes, unpersisted_edges)
+                except EntityRevisionConflict:
+                    # A shared store refused an id another instance created:
+                    # nothing landed, and the caller is owed the refusal
+                    # rather than a local failure that hides why.
+                    raise
                 except Exception as persist_error:
                     # The failure being handled may be the persist itself
                     # (executor shut down); the caller still gets its result.
