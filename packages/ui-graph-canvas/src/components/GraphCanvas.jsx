@@ -5276,8 +5276,8 @@ function GraphCanvasInner({
 
         <div
           ref={reactFlowWrapper}
-          // Capture phase: nodes and edges stop mousedown propagation, so a
-          // bubbling listener would only ever see presses on the bare pane.
+          // Capture phase: d3-zoom stops mousedown propagation for button 2, so a
+          // bubbling listener would never see the press.
           onMouseDownCapture={(event) => {
             rightDragStart.current =
               event.button === 2

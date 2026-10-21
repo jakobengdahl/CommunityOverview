@@ -1,8 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';
 
 const hoisted = vi.hoisted(() => ({ onNodesChange: null, selectionOnChange: null }));
+
+// d3-zoom/d3-drag stop a mousedown from bubbling in real ReactFlow, so the mock does too.
+const stopBubble = (event) => event.stopPropagation();
 
 vi.mock('reactflow', () => {
   const MockReactFlow = ({
@@ -12,14 +15,25 @@ vi.mock('reactflow', () => {
     onEdgeContextMenu,
     onNodeContextMenu,
     onPaneContextMenu,
+    onSelectionContextMenu,
   }) => (
     <div data-testid="react-flow" className="react-flow">
-      <div data-testid="pane" onContextMenu={(event) => onPaneContextMenu?.(event)} />
+      <div
+        data-testid="pane"
+        onMouseDown={stopBubble}
+        onContextMenu={(event) => onPaneContextMenu?.(event)}
+      />
+      <div
+        data-testid="selection"
+        onMouseDown={stopBubble}
+        onContextMenu={(event) => onSelectionContextMenu?.(event)}
+      />
       <div data-testid="nodes">
         {nodes?.map((node) => (
           <div
             key={node.id}
             data-testid={`node-${node.id}`}
+            onMouseDown={stopBubble}
             onContextMenu={(event) => onNodeContextMenu?.(event, node)}
           >
             {node.data?.label}
@@ -31,6 +45,7 @@ vi.mock('reactflow', () => {
           <div
             key={edge.id}
             data-testid={`edge-${edge.id}`}
+            onMouseDown={stopBubble}
             className={`react-flow__edge${edge.className ? ` ${edge.className}` : ''}`}
             data-animated={String(!!edge.animated)}
             data-stroke={edge.style?.stroke ?? ''}
@@ -88,10 +103,10 @@ const edges = [{ id: 'edge-1', source: 'node-1', target: 'node-2', type: 'RELATE
 
 const rightDown = { button: 2, clientX: 100, clientY: 100 };
 
-function rightGesture(testId, { moveBy = 0 } = {}) {
+function rightGesture(testId, { moveBy = 0, moveByY = 0 } = {}) {
   const el = screen.getByTestId(testId);
   fireEvent.mouseDown(el, rightDown);
-  fireEvent.contextMenu(el, { button: 2, clientX: 100 + moveBy, clientY: 100 });
+  fireEvent.contextMenu(el, { button: 2, clientX: 100 + moveBy, clientY: 100 + moveByY });
 }
 
 // Every menu variant (node, edge, pane, selection) renders .graph-context-menu.
@@ -101,9 +116,12 @@ describe('GraphCanvas right-drag pan does not open a context menu', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     render(<GraphCanvas nodes={nodes} edges={edges} />);
+    act(() =>
+      hoisted.selectionOnChange?.({ nodes: [{ id: 'node-1', type: 'custom' }], edges: [] })
+    );
   });
 
-  it.each([['pane'], ['node-node-1'], ['edge-edge-1']])(
+  it.each([['pane'], ['node-node-1'], ['edge-edge-1'], ['selection']])(
     'opens the menu on a right-click without movement (%s)',
     (testId) => {
       rightGesture(testId);
@@ -111,13 +129,24 @@ describe('GraphCanvas right-drag pan does not open a context menu', () => {
     }
   );
 
-  it.each([['pane'], ['node-node-1'], ['edge-edge-1']])(
+  it.each([['pane'], ['node-node-1'], ['edge-edge-1'], ['selection']])(
     'opens no menu when the pointer moved past the tolerance before release (%s)',
     (testId) => {
       rightGesture(testId, { moveBy: 40 });
       expect(menuOpen()).toBe(false);
     }
   );
+
+  it.each([
+    ['5px right (at tolerance)', { moveBy: 5 }, true],
+    ['6px right', { moveBy: 6 }, false],
+    ['6px left', { moveBy: -6 }, false],
+    ['6px down', { moveByY: 6 }, false],
+    ['6px up', { moveByY: -6 }, false],
+  ])('applies the tolerance in every direction (%s)', (_label, move, opens) => {
+    rightGesture('node-node-1', move);
+    expect(menuOpen()).toBe(opens);
+  });
 
   it('does not let a finished drag suppress the next plain right-click', () => {
     rightGesture('node-node-1', { moveBy: 40 });
