@@ -261,16 +261,18 @@ def add_nodes(
 def _saved_view_update_error(
     after: Dict[str, Any], updates: Dict[str, Any]
 ) -> Optional[str]:
-    """Why a direct update of a saved view may not be stored: every
-    annotation the caller sends - its `metadata` patch and any key outside
-    `metadata`, which is folded into it - is held to the saved-view rule.
-    Judged by the storage under its lock, on the node the write replaces."""
+    """Why a direct update of a saved view may not be stored: every metadata
+    key the caller sends - in its `metadata` patch, or outside it, which is
+    folded into metadata - is held to the saved-view rule, judged on the
+    value the update leaves (when a key is sent both ways, the folded one
+    wins). Runs in the storage, under its lock, on the node it replaces."""
     if after.get("type") not in _SAVED_VIEW_NODE_TYPES:
         return None
-    sent = {k: v for k, v in updates.items() if k not in _NODE_MODEL_FIELDS}
+    sent = {k for k in updates if k not in _NODE_MODEL_FIELDS}
     if isinstance(updates.get("metadata"), dict):
-        sent.update(updates["metadata"])
-    return saved_view_annotation_error(sent)
+        sent |= set(updates["metadata"])
+    stored = after.get("metadata") or {}
+    return saved_view_annotation_error({k: stored[k] for k in sent if k in stored})
 
 
 def update_node(

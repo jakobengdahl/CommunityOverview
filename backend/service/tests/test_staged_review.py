@@ -1212,3 +1212,22 @@ def test_metadata_as_deep_as_a_direct_write_stores_stages_and_merges(world):
     assert svc.get_staged_changes(sid)["count"] == 1
     assert svc.merge_staged_changes(sid, "m")["success"] is True
     assert world.storage.get_node("deep") is not None
+
+
+# -- review round 6 regressions -----------------------------------------------------------
+
+
+@pytest.mark.parametrize("metadata_merge", [False, True])
+def test_a_key_sent_both_folded_and_in_metadata_is_judged_as_stored(
+    world, metadata_merge
+):
+    """The folded key wins in the stored node, so it is the one judged."""
+    svc = world.service
+    world.storage.add_nodes([Node(id="v", type="SavedView", name="View")], [])
+    result = svc.update_node(
+        "v",
+        {"metadata": {"annotations": []}, "annotations": _REMOTE_IMAGE},
+        metadata_merge=metadata_merge,
+    )
+    assert result["error_code"] == "validation_error"
+    assert world.storage.get_node("v").metadata == {}
