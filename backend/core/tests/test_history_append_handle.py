@@ -529,6 +529,7 @@ def test_compaction_failure_does_not_fail_the_append(path, monkeypatch):
     store.close()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="os.rename over an existing file raises")
 def test_rename_landing_before_the_lock_is_acquired_does_not_lose_the_record(
     path, monkeypatch
 ):
@@ -557,6 +558,7 @@ def test_rename_landing_before_the_lock_is_acquired_does_not_lose_the_record(
     store.close()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="os.rename over an existing file raises")
 def test_rename_before_the_lock_still_guards_against_a_torn_tail(path, monkeypatch):
     store = GraphHistoryStore(path)
     store.append_record(_rec(0))
@@ -575,6 +577,143 @@ def test_rename_before_the_lock_still_guards_against_a_torn_tail(path, monkeypat
     store.append_record(_rec(1))
     monkeypatch.undo()
     assert [r["event_id"] for r in store.get_recent()] == ["evt-1", "evt-0"]
+    store.close()
+
+
+def _replace_on_first_lock(path, monkeypatch, events=None):
+    """Make the first _lock_file call see another process's rename-over."""
+    real_lock = history_store._lock_file
+    real_unlock = history_store._unlock_file
+    renamed = []
+
+    def lock(f, exclusive=True):
+        if events is not None:
+            events.append(("lock", exclusive))
+        if not renamed:
+            renamed.append(1)
+            replacement = path.with_name("replacement.tmp")
+            replacement.write_text(json.dumps(_rec(0)) + "\n")
+            os.rename(replacement, path)
+        real_lock(f, exclusive=exclusive)
+
+    def unlock(f):
+        if events is not None:
+            events.append(("unlock",))
+        real_unlock(f)
+
+    monkeypatch.setattr(history_store, "_lock_file", lock)
+    monkeypatch.setattr(history_store, "_unlock_file", unlock)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="os.rename over an existing file raises")
+def test_reopened_handle_is_locked_exclusively_before_the_write(path, monkeypatch):
+    store = GraphHistoryStore(path)
+    store.append_record(_rec(0))
+    events = []
+    _replace_on_first_lock(path, monkeypatch, events)
+    store.append_record(_rec(1))
+    monkeypatch.undo()
+    assert [e for e in events if e[0] == "lock"] == [("lock", True), ("lock", True)]
+    store.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="os.rename over an existing file raises")
+def test_stale_handle_is_unlocked_then_closed_before_the_reopen(path, monkeypatch):
+    store = GraphHistoryStore(path)
+    store.append_record(_rec(0))
+    events = []
+    _replace_on_first_lock(path, monkeypatch, events)
+    real_close = GraphHistoryStore._close_append_handle
+    real_open = GraphHistoryStore._open_append_handle
+    monkeypatch.setattr(
+        GraphHistoryStore,
+        "_close_append_handle",
+        lambda self: events.append(("close",)) or real_close(self),
+    )
+    monkeypatch.setattr(
+        GraphHistoryStore,
+        "_open_append_handle",
+        lambda self: events.append(("open",)) or real_open(self),
+    )
+    store.append_record(_rec(1))
+    monkeypatch.undo()
+    # The reopen itself also calls close; only the order up to it matters.
+    assert events[:5] == [
+        ("open",),
+        ("lock", True),
+        ("unlock",),
+        ("close",),
+        ("open",),
+    ]
+    store.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="flock semantics")
+def test_stale_handle_lock_is_released_even_if_the_fd_is_shared(path, monkeypatch):
+    import fcntl
+
+    store = GraphHistoryStore(path)
+    store.append_record(_rec(0))
+    # Keeps the replaced inode reachable so its lock can be probed afterwards.
+    stale_inode = path.with_name("stale.link")
+    os.link(path, stale_inode)
+    # What a forked child holds: another fd on the same open file description.
+    shared = os.dup(store._append_handle.fileno())
+    _replace_on_first_lock(path, monkeypatch)
+    try:
+        store.append_record(_rec(1))
+        monkeypatch.undo()
+        with open(stale_inode, "rb") as probe:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(shared)
+    store.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="os.rename over an existing file raises")
+def test_pre_replacement_handle_is_closed_after_following_the_live_file(
+    path, monkeypatch
+):
+    store = GraphHistoryStore(path)
+    store.append_record(_rec(0))
+    stale = store._append_handle
+    _replace_on_first_lock(path, monkeypatch)
+    store.append_record(_rec(1))
+    monkeypatch.undo()
+    assert stale.closed
+    assert store._append_handle is not stale
+    assert not store._append_handle.closed
+    store.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="os.rename over an existing file raises")
+def test_failing_lock_on_the_retry_drops_the_reopened_handle(path, monkeypatch):
+    store = GraphHistoryStore(path)
+    store.append_record(_rec(0))
+    real_lock = history_store._lock_file
+    calls = []
+    handles = []
+
+    def lock(f, exclusive=True):
+        calls.append(1)
+        handles.append(f)
+        if len(calls) == 1:
+            replacement = path.with_name("replacement.tmp")
+            replacement.write_text(json.dumps(_rec(0)) + "\n")
+            os.rename(replacement, path)
+        elif len(calls) == 2:
+            raise OSError("retry lock failed")
+        real_lock(f, exclusive=exclusive)
+
+    monkeypatch.setattr(history_store, "_lock_file", lock)
+    with pytest.raises(OSError, match="retry lock failed"):
+        store.append_record(_rec(1))
+    monkeypatch.undo()
+    assert len(calls) == 2
+    assert store._append_handle is None
+    assert handles[1].closed
+    store.append_record(_rec(2))
+    assert _ids(path) == ["evt-0", "evt-2"]
     store.close()
 
 
