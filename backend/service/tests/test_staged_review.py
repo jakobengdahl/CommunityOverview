@@ -13,7 +13,7 @@ import pytest
 from backend.core import Edge, Node
 from backend.core.events.models import EventContext
 from backend.runtime.session_context import bind_session
-from backend.service.tests.test_composed_reads import make_world
+from backend.service.tests.test_composed_reads import REMOTE, make_world
 
 
 @pytest.fixture(params=["file", "postgres"])
@@ -1458,3 +1458,75 @@ def test_a_node_recreated_as_another_type_takes_its_edges_or_is_refused(world):
     assert svc.merge_staged_changes(sid, "m2")["success"] is True
     assert world.storage.get_node("l").type_str == "Actor"
     assert "il" not in world.storage.edges
+
+
+# -- post-merge review round 1 regressions ------------------------------------------------
+
+
+def _recreate_legislation_as_actor(world):
+    sid = world.staged_session()
+    world.storage.add_nodes(
+        [
+            Node(id="i", type="Initiative", name="I"),
+            Node(id="l", type="Legislation", name="L"),
+            Node(id="h", type="Initiative", name="H", metadata=dict(REMOTE)),
+        ],
+        [],
+    )
+    _stage(
+        world,
+        sid,
+        ("delete_nodes", (["l"],), {"confirmed": True}),
+        ("add_nodes", ([{"id": "l", "type": "Actor", "name": "L"}], []), {}),
+    )
+    return sid
+
+
+def test_a_retype_is_out_of_view_while_main_holds_an_edge_the_reader_cannot_see(
+    world,
+):
+    """The edges a retype is judged against are the reader's to see, or the
+    refusal would count hidden ones."""
+    svc, sid = world.service, _recreate_legislation_as_actor(world)
+    world.storage.add_edge(Edge(id="hl", source="h", target="l", type="IMPLEMENTS"))
+    world.hook.narrow = True
+    assert ("node", "l") not in _items(svc.get_staged_changes(sid))
+    result = svc.merge_staged_changes(sid, "m")
+    assert "existing edge" not in str(result)
+    assert world.storage.get_node("l").type_str == "Legislation"
+    world.hook.narrow = False
+    assert ("node", "l") in _items(svc.get_staged_changes(sid))
+
+
+def test_an_edge_another_instance_adds_to_a_retyped_node_fails_the_merge(
+    pg_world, monkeypatch
+):
+    """The kept edges of a retyped node are re-checked in the store: an edge
+    another instance added since the plan refuses the unit."""
+    from backend.core import GraphStorage
+    from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+    from backend.core.tests.test_persistence_contract_postgres import DSN
+
+    world = pg_world
+    svc, sid = world.service, _recreate_legislation_as_actor(world)
+    backend = PostgresGraphPersistenceBackend(
+        DSN, schema=world.storage._persistence_backend.schema, staged_sessions=True
+    )
+    other = GraphStorage(persistence_backend=backend)
+    try:
+        store = world.storage.layer_store
+        original = store.merge
+
+        def other_instance_first(*args, **kwargs):
+            # Valid when written: l is still Legislation in the store.
+            other.add_edge(Edge(id="x", source="i", target="l", type="IMPLEMENTS"))
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(store, "merge", other_instance_first)
+        result = svc.merge_staged_changes(sid, "m")
+        assert result["error"] == "merge_raced"
+        assert other.get_node("l").type_str == "Legislation"
+        assert ("node", "l") in world.layer(sid)
+    finally:
+        other.shutdown_events()
+        backend.close()

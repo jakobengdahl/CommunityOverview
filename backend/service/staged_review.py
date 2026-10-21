@@ -220,10 +220,16 @@ class Review:
         base = entry.get("base")
         composed = self.composed(key)
         if key[0] == "node":
-            if entry["action"] == "delete" and main is not None:
-                # A delete also deletes what main added to the node since;
-                # one such edge the reader cannot see keeps the whole entry
-                # out of its view, as a hidden tombstone it depends on does.
+            retyped = (
+                composed is not None
+                and main is not None
+                and composed.get("type") != main.get("type")
+            )
+            if (entry["action"] == "delete" or retyped) and main is not None:
+                # A delete also deletes what main added to the node since, and
+                # a type change in place is judged against those edges; one
+                # such edge the reader cannot see keeps the whole entry out of
+                # its view, as a hidden tombstone it depends on does.
                 if not all(
                     self._edge_shown_now(e) for e in self.unstaged_edges(key[1])
                 ):
@@ -561,6 +567,14 @@ def requested_keys(selection: Any) -> List[LayerKey]:
     return keys
 
 
+def _retyped(review: Review, write: SessionMergeWrite) -> bool:
+    """Whether a node upsert changes the type of the node main holds."""
+    if write.kind != "node" or write.expect_absent:
+        return False
+    main_doc = _main_doc(review.storage, ("node", write.entity_id))
+    return main_doc is not None and main_doc.get("type") != write.payload.get("type")
+
+
 def _validate_writes(
     review: Review,
     node_upserts: List[SessionMergeWrite],
@@ -605,14 +619,12 @@ def _validate_writes(
                 raise refuse(write, annotation_error)
     # A node whose type the merge changes in place keeps the main edges the
     # merge does not delete: each must still fit the type, as a direct edge
-    # create to it would have to. Counted, not named - some may lie outside
-    # the caller's view.
+    # create to it would have to. An entry with such an edge the caller
+    # cannot see is outside its view (``_own_shown``), so every edge counted
+    # here is one the caller can see.
     gone = {w.entity_id for w in edge_deletes} | {w.entity_id for w in edge_upserts}
     for write in node_upserts:
-        main_doc = _main_doc(review.storage, ("node", write.entity_id))
-        if write.expect_absent or main_doc is None:
-            continue
-        if main_doc.get("type") == write.payload.get("type"):
+        if not _retyped(review, write):
             continue
         misfits = 0
         for edge in review.storage.get_edges_for_node(write.entity_id):
@@ -1008,6 +1020,17 @@ def plan_merge(
 
     _validate_writes(
         review, node_upserts, edge_upserts, node_deletes, sent, edge_deletes
+    )
+    # The kept edges of a retyped node were judged against the new type on
+    # what this instance holds; the store refuses the unit if another one
+    # added an edge to the node since, which no direct retype could keep.
+    checks.extend(
+        MergeCheck.incident_edges(
+            w.entity_id,
+            [e.id for e in review.storage.get_edges_for_node(w.entity_id)],
+        )
+        for w in node_upserts
+        if _retyped(review, w)
     )
     writes = node_upserts + edge_deletes + edge_upserts + node_deletes
     if renamed:

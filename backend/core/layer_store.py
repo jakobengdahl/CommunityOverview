@@ -203,8 +203,8 @@ class MergeCheck:
       endpoint, judged on the state the unit leaves.
     - `incident_edges(node_id, edge_ids)`: before the unit's operations, the
       edges incident to the node in the store are exactly `edge_ids` - the
-      ones the merge deletes with it. An edge added since the diff was read
-      fails it.
+      ones the merge deletes with the node, or judged against the new type
+      of a node it retypes. An edge added since the diff was read fails it.
     - `entry_unchanged(kind, entity_id, version)`: the layer still holds
       the entry the decision was made on: its `entry_version` is `version`
       (a string), or, for an int, its `session_seq` is that number. A
