@@ -812,6 +812,11 @@ A `revision` a caller sends is dropped — never stored, never folded into
 | `DELETE /api/nodes`, MCP `delete_nodes` | `expected_revisions` (id → revision) | every listed node still has it |
 | `POST /api/nodes`, MCP `add_nodes` | `expect_absent` | no node or edge in the request exists yet |
 
+On a shared store (PostgreSQL) every create is checked as if `expect_absent`
+were set, at the store: a create over an id another instance created, but
+this one has not applied yet, answers `entity_revision_conflict` instead of
+replacing that node. The file backend is unaffected.
+
 `expected_updated_at` keeps working; when both it and `expected_revision` are
 given, both must hold. A refused or failed write answers with an `error`
 code and a `message`:

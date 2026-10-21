@@ -521,9 +521,11 @@ the journal: they are a condition of a write, not part of it.
   each operation's `expected_revision` / `expect_absent` in that same
   statement, and returns the stored revisions in operation order (`None` for
   a delete). An expectation that does not hold raises
-  `EntityRevisionConflict` and rolls the whole batch back. Every entity the
-  batch writes stores `write_token`, which is server-internal and never part
-  of an entity a read returns.
+  `EntityRevisionConflict` and rolls the whole batch back. `GraphStorage`
+  sends every create with `expect_absent`, whether or not its caller asked,
+  so a create never replaces an entity another instance created. Every
+  entity the batch writes stores `write_token`, which is server-internal and
+  never part of an entity a read returns.
 - `read_write_evidence(keys)` returns, for each `(kind, id)`, the stored
   revision and write token, or `None` when the entity is absent — read in one
   snapshot.
@@ -1393,8 +1395,9 @@ node is one row, not a rewrite of every node — and that is what makes
 several writers safe rather than merely orderly: two instances editing
 different parts of the graph touch different rows and do not contend at all,
 where two whole-graph saves had the later one discard the earlier one's work
-whatever it was. Concurrent writes to the *same* entity resolve
-last-writer-wins on the row, which is why the entity path states
+whatever it was. Concurrent writes to the *same* entity without an
+expectation resolve last-writer-wins on the row (a create always carries
+one, so the second create of an id is refused instead), which is why the entity path states
 `READ COMMITTED` as the save does: under `REPEATABLE READ` the second writer
 would abort rather than wait.
 
