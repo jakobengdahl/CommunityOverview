@@ -207,16 +207,23 @@ class MergeCheck:
       fails it.
     - `entry_unchanged(kind, entity_id, version)`: the layer still holds
       the entry the decision was made on: its `entry_version` is `version`
-      (a string), or, for an int, its `session_seq` is that number. A participant restaging the entity
-      between the diff and the merge fails it, so the merge cannot apply the
-      older value and drop the newer one.
+      (a string), or, for an int, its `session_seq` is that number. A
+      participant restaging the entity between the diff and the merge fails
+      it, so the merge cannot apply the older value and drop the newer one.
+    - `layer_holds_only(keys)`: the layer holds no entry outside `keys`. For
+      a decision that rested on what the whole layer holds - a node merged
+      as new, whose staged edge creates must move with it - together with
+      `entry_unchanged` on each of those keys.
     """
 
-    check: Literal["node_exists", "incident_edges", "entry_unchanged"]
+    check: Literal[
+        "node_exists", "incident_edges", "entry_unchanged", "layer_holds_only"
+    ]
     entity_id: str
     kind: str = "node"
     edge_ids: Tuple[str, ...] = ()
     session_seq: Optional[Union[int, str]] = None
+    keys: Tuple[LayerKey, ...] = ()
 
     @classmethod
     def node_exists(cls, node_id: str) -> "MergeCheck":
@@ -231,6 +238,10 @@ class MergeCheck:
         cls, kind: str, entity_id: str, session_seq: Optional[Union[int, str]]
     ) -> "MergeCheck":
         return cls("entry_unchanged", entity_id, kind=kind, session_seq=session_seq)
+
+    @classmethod
+    def layer_holds_only(cls, keys: Iterable[LayerKey]) -> "MergeCheck":
+        return cls("layer_holds_only", "*", keys=tuple(sorted(set(keys))))
 
 
 @dataclass(frozen=True)
@@ -512,6 +523,16 @@ def check_max_entries(max_entries: Any) -> Optional[int]:
     return max_entries
 
 
+def verify_layer_holds_only(
+    layer: Mapping[LayerKey, Any], checks: Sequence["MergeCheck"]
+) -> None:
+    """MergeRaced if the layer holds an entry a `layer_holds_only` check
+    does not name."""
+    for check in checks:
+        if check.check == "layer_holds_only" and set(layer) - set(check.keys):
+            raise MergeRaced("the layer gained an entry the merge did not read")
+
+
 def check_merge_request(
     operations: Sequence[Any],
     checks: Sequence[Any],
@@ -540,9 +561,15 @@ def check_merge_request(
     for check in verified:
         if not isinstance(check, MergeCheck):
             raise InvalidLayerRequest("a merge check is a MergeCheck")
-        if check.check not in ("node_exists", "incident_edges", "entry_unchanged"):
+        if check.check not in (
+            "node_exists",
+            "incident_edges",
+            "entry_unchanged",
+            "layer_holds_only",
+        ):
             raise InvalidLayerRequest(f"unknown merge check {check.check!r}")
         check_key((check.kind, check.entity_id))
+        check_keys(check.keys)
         for edge_id in check.edge_ids:
             _check_id(edge_id, "edge id")
     removed = check_keys(removals)
@@ -598,6 +625,7 @@ def apply_merge_to_model(
     for key in removals:
         if key not in layer:
             raise MergeRaced(f"{key[0]} {key[1]!r} is no longer staged")
+    verify_layer_holds_only(layer, checks)
     for check in checks:
         if check.check != "entry_unchanged":
             continue

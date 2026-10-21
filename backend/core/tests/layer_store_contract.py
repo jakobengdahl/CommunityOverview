@@ -623,6 +623,19 @@ class LayerStoreContract:
             seeded, factory, [self._update_a(seeded)], [], [("node", "a")], {}
         )
 
+    def test_a_layer_that_gained_an_entry_fails_a_merge_that_read_all_of_it(
+        self, seeded, factory
+    ):
+        seeded.stage(A, [entry("node", "a"), entry("node", "b")])
+        check = MergeCheck.layer_holds_only([("node", "a")])
+        with pytest.raises(ls.MergeRaced):
+            seeded.merge(A, "m-holds", [], [check], [("node", "a")], {})
+        assert len(factory().load_layer(A)) == 2
+        assert factory().load_merge("m-holds") is None
+        allowed = MergeCheck.layer_holds_only([("node", "a"), ("node", "b")])
+        seeded.merge(A, "m-holds", [], [allowed], [("node", "a")], {})
+        assert [e["entity_id"] for e in factory().load_layer(A)] == ["b"]
+
     def test_an_entry_restaged_since_the_diff_fails_the_merge(self, seeded, factory):
         seeded.stage(A, [entry("node", "a", session_seq=1)])
         seeded.stage(A, [entry("node", "a", session_seq=2)])

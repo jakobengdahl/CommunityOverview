@@ -1018,3 +1018,42 @@ def test_a_manual_value_on_a_saved_view_is_held_to_the_annotation_rules(world):
     )
     assert result["error"] == "invalid_merge_request"
     assert world.storage.get_node("v").metadata == {"annotations": [{"id": "m"}]}
+
+
+def test_an_edge_staged_to_a_node_while_it_is_merged_as_new_fails_the_merge(
+    world, monkeypatch
+):
+    """The edges that follow a node merged as new were decided on the whole
+    layer; one staged inside the window must not attach to the old id."""
+    svc, sid = world.service, world.staged_session()
+    _stage(
+        world,
+        sid,
+        ("add_nodes", ([{"id": "t", "type": "Actor", "name": "Mine"}], []), {}),
+    )
+    world.storage.add_nodes([Node(id="t", type="Actor", name="Theirs")], [])
+    store = world.storage.layer_store
+    original = store.merge
+
+    def follower_first(*args, **kwargs):
+        _stage(
+            world,
+            sid,
+            (
+                "add_nodes",
+                (
+                    [],
+                    [{"id": "bt", "source": "b", "target": "t", "type": "RELATES_TO"}],
+                ),
+                {},
+            ),
+        )
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "merge", follower_first)
+    result = svc.merge_staged_changes(
+        sid, "m", resolutions=[{"kind": "node", "entity_id": "t", "choice": "as_new"}]
+    )
+    assert result["error"] == "merge_raced"
+    assert sorted(world.layer(sid)) == [("edge", "bt"), ("node", "t")]
+    assert world.storage.get_node("t").name == "Theirs"

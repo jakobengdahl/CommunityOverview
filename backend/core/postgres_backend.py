@@ -2341,6 +2341,9 @@ class PostgresGraphPersistenceBackend:
                         raise layer_store.MergeRaced(
                             f"{key[0]} {key[1]!r} is no longer staged"
                         )
+                # The session's record row, locked above, orders this read
+                # against every staging op, so no entry can appear after it.
+                layer_store.verify_layer_holds_only(entries, checks)
                 for check in checks:
                     if check.check != "entry_unchanged":
                         continue

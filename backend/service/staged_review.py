@@ -913,6 +913,16 @@ def plan_merge(
 
     _validate_writes(review, node_upserts, edge_upserts, node_deletes)
     writes = node_upserts + edge_deletes + edge_upserts + node_deletes
+    if renamed:
+        # Which staged edge creates follow a node merged as new was decided
+        # on the whole layer, entries outside the selection (and the reader's
+        # view) included: the unit refuses if any of it changed, so an edge
+        # staged meanwhile never attaches to whatever holds the old id.
+        checks.extend(
+            MergeCheck.entry_unchanged(k, i, entry_version(e))
+            for (k, i), e in sorted(review.entries.items())
+        )
+        checks.append(MergeCheck.layer_holds_only(review.entries))
     unique_checks = list(dict.fromkeys(checks))
     record = {
         "actor": actor,
