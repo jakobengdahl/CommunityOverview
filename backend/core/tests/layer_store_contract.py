@@ -242,7 +242,7 @@ class LayerStoreContract:
         assert factory().load_layer(A) == before
 
     @pytest.mark.parametrize(
-        "expected", [{("node", "a"): "1"}, {("node", "a"): True}, {("graph", "a"): 1}]
+        "expected", [{("node", "a"): 1.5}, {("node", "a"): True}, {("graph", "a"): 1}]
     )
     def test_a_malformed_expectation_is_refused_before_anything(
         self, seeded, factory, expected
@@ -250,6 +250,22 @@ class LayerStoreContract:
         with pytest.raises(ls.InvalidLayerRequest):
             seeded.stage(A, [entry("node", "a")], expected=expected)
         assert factory().load_layer(A) == []
+
+    def test_a_version_token_tells_apart_entries_sharing_a_session_seq(
+        self, seeded, factory
+    ):
+        """Instances with their own session documents may stamp the same
+        session_seq; the token the staging op stamped is what names one
+        version."""
+        seeded.stage(A, [entry("node", "a", session_seq=3, stage_token="t1")])
+        seeded.stage(A, [entry("node", "a", session_seq=3, stage_token="t2")])
+        with pytest.raises(ls.LayerRaced):
+            seeded.stage(A, [entry("node", "a")], expected={("node", "a"): "t1"})
+        with pytest.raises(ls.LayerRaced):
+            seeded.discard(A, [("node", "a")], expected={("node", "a"): "t1"})
+        assert seeded.discard(A, [("node", "a")], expected={("node", "a"): "t2"}) == [
+            ("node", "a")
+        ]
 
     def test_an_op_that_read_the_whole_layer_is_refused_when_it_grew(
         self, seeded, factory
