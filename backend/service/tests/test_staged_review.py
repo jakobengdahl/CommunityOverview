@@ -1193,3 +1193,22 @@ def test_a_direct_update_re_sending_unsafe_annotations_is_refused_as_before(worl
     assert world.storage.get_node("v").name == "View"
     # An unrelated change to a view holding them still goes through.
     assert svc.update_node("v", {"name": "Y"})["success"] is True
+
+
+def test_metadata_as_deep_as_a_direct_write_stores_stages_and_merges(world):
+    """Nesting the direct path accepts (up to MAX_METADATA_DEPTH) does not
+    exhaust the interpreter's recursion on the staging and merge paths."""
+    svc, sid = world.service, world.staged_session()
+    deep = current = {}
+    for _ in range(790):
+        current["k"] = {}
+        current = current["k"]
+    with bind_session(sid):
+        staged = svc.add_nodes(
+            [{"id": "deep", "type": "Actor", "name": "Deep", "metadata": {"k": deep}}],
+            [],
+        )
+    assert staged["success"] is True, staged
+    assert svc.get_staged_changes(sid)["count"] == 1
+    assert svc.merge_staged_changes(sid, "m")["success"] is True
+    assert world.storage.get_node("deep") is not None

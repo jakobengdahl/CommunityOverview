@@ -20,7 +20,6 @@ re-checks every condition inside the merge unit (§11.3).
 
 from __future__ import annotations
 
-import copy
 import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Set, Tuple
@@ -34,7 +33,7 @@ from backend.core.storage_merge import SessionMergePlan, SessionMergeWrite
 from backend.runtime.authorization import GraphAccessNarrowing
 
 from .composed import doc_visible, main_endpoint_shown
-from .staging import _apply_staged, _doc, compose
+from .staging import _apply_staged, _doc, compose, json_copy
 
 if TYPE_CHECKING:
     from backend.core import GraphStorage
@@ -483,18 +482,18 @@ class _Outcomes:
 
 
 def _content(doc: Dict[str, Any]) -> Dict[str, Any]:
-    return {k: copy.deepcopy(v) for k, v in doc.items() if k not in _NOT_CONTENT}
+    return {k: json_copy(v) for k, v in doc.items() if k not in _NOT_CONTENT}
 
 
 def _with_manual(
     doc: Dict[str, Any], values: Dict[str, Any], allowed: Iterable[str]
 ) -> Dict[str, Any]:
     """``doc`` with the caller's final values for the given fields (§11.2)."""
-    result = copy.deepcopy(doc)
+    result = json_copy(doc)
     for field in allowed:
         if field not in values:
             continue
-        value = copy.deepcopy(values[field])
+        value = json_copy(values[field])
         if field.startswith(_METADATA_PREFIX):
             metadata = dict(result.get("metadata") or {})
             name = field[len(_METADATA_PREFIX) :]
@@ -572,7 +571,7 @@ def _validate_writes(
     for write in node_upserts + edge_upserts:
         try:
             entity = (Node if write.kind == "node" else Edge).from_dict(
-                copy.deepcopy(write.payload)
+                json_copy(write.payload)
             )
         except ValueError as exc:
             raise refuse(write, str(exc)) from None
@@ -580,10 +579,10 @@ def _validate_writes(
             error = edge_applicability_error(
                 entity.type_str,
                 Node.from_dict(
-                    copy.deepcopy(_endpoint_doc(review, planned, entity.source))
+                    json_copy(_endpoint_doc(review, planned, entity.source))
                 ),
                 Node.from_dict(
-                    copy.deepcopy(_endpoint_doc(review, planned, entity.target))
+                    json_copy(_endpoint_doc(review, planned, entity.target))
                 ),
             )
             if error:
@@ -868,7 +867,7 @@ def plan_merge(
 
         # Creates and updates: the entity the merge writes.
         if entry["action"] == "create":
-            doc = copy.deepcopy(entry["staged"])
+            doc = json_copy(entry["staged"])
             if status == STATUS_ID_TAKEN and effect == "apply":
                 # Replaces the main entity, as an update of every field.
                 doc = {**_content(doc), "id": entity_id}
@@ -932,7 +931,7 @@ def plan_merge(
     record = {
         "actor": actor,
         "merged_at": now,
-        "entries": copy.deepcopy(results),
+        "entries": json_copy(results),
     }
     plan = SessionMergePlan(
         writes=writes,

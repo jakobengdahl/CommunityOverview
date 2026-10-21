@@ -21,7 +21,6 @@ contract a third-party backend has to meet.
 
 from __future__ import annotations
 
-import copy
 import dataclasses
 import json
 import logging
@@ -914,7 +913,7 @@ class FileGraphPersistenceBackend:
             entries = self._settled_entries_locked().get(session_id)
             if not entries:
                 return []
-            return [copy.deepcopy(e) for e in entries.values()]
+            return [_layer.json_copy(e) for e in entries.values()]
 
     def staged_status(self, session_id: str) -> str:
         session_id = _layer.check_session_id(session_id)
@@ -953,9 +952,9 @@ class FileGraphPersistenceBackend:
                     and pending["merge_id"] == merge_id
                     and self._judge_pending_locked() == "landed"
                 ):
-                    return copy.deepcopy(pending["record"])
+                    return _layer.json_copy(pending["record"])
             record = self._merges.get(merge_id)
-            return copy.deepcopy(record) if record is not None else None
+            return _layer.json_copy(record) if record is not None else None
 
     def record_staged(self, session_id: str) -> None:
         session_id = _layer.check_session_id(session_id)
@@ -1131,7 +1130,7 @@ class FileGraphPersistenceBackend:
                 # disk, which settles the pending merge on what is there.
                 landed = self._reload_after_failed_commit_locked(merge_id)
                 if landed is not None:
-                    return _layer.MergeResult(record=copy.deepcopy(landed))
+                    return _layer.MergeResult(record=_layer.json_copy(landed))
                 raise
             except BaseException:
                 # Interrupted with the outcome unknown: memory may lag the
@@ -1147,7 +1146,7 @@ class FileGraphPersistenceBackend:
                     f"merge {merge_id!r} landed; completing its layer removal "
                     f"failed and is retried before the next write: {exc}"
                 )
-            return _layer.MergeResult(record=copy.deepcopy(applied))
+            return _layer.MergeResult(record=_layer.json_copy(applied))
 
     # The pieces the operations above are made of. Every one runs under
     # self._lock.

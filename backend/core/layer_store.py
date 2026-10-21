@@ -406,6 +406,13 @@ def _as_json(value: Any, what: str) -> Any:
         raise InvalidLayerRequest(f"{what} is not JSON: {exc}") from None
 
 
+def json_copy(value: Any) -> Any:
+    """A deep copy of a JSON value the store holds. Not ``copy.deepcopy``,
+    which spends several interpreter frames per level of nesting and gives up
+    on metadata a direct write stores without complaint."""
+    return json.loads(json.dumps(value))
+
+
 def _check_text_values(value: Any, what: str) -> None:
     """Refuse strings no store can hold: a NUL, a lone surrogate."""
     if isinstance(value, str):

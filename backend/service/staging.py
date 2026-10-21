@@ -17,7 +17,7 @@ names the session, and ``composed.ComposedStorage`` is the view it reads.
 
 from __future__ import annotations
 
-import copy
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -98,6 +98,16 @@ class StagingRefused(Exception):
         }
 
 
+def json_copy(value: Any) -> Any:
+    """A deep copy of a JSON value, as layer entries and entity documents are.
+
+    Not ``copy.deepcopy``: that spends several interpreter frames per level
+    of nesting and gives up on metadata a direct write stores without
+    complaint (nested up to ``MAX_METADATA_DEPTH``); the JSON codec does not.
+    """
+    return json.loads(json.dumps(value))
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -112,14 +122,14 @@ def _doc(entity: Any) -> Dict[str, Any]:
 def _apply_staged(doc: Dict[str, Any], staged: Dict[str, Any]) -> Dict[str, Any]:
     """``doc`` with an update's staged fields applied (§6.1): `metadata` is a
     merge-patch, every other field replaces the value outright."""
-    result = copy.deepcopy(doc)
+    result = json_copy(doc)
     for field, value in staged.items():
         if field == "metadata":
             result["metadata"] = _apply_metadata_patch(
                 dict(result.get("metadata") or {}), value or {}
             )
         else:
-            result[field] = copy.deepcopy(value)
+            result[field] = json_copy(value)
     return result
 
 
@@ -132,7 +142,7 @@ def compose(
         return main
     action = entry.get("action")
     if action == "create":
-        return copy.deepcopy(entry["staged"])
+        return json_copy(entry["staged"])
     if action == "update":
         if main is not None:
             return _apply_staged(main, entry["staged"])
@@ -282,11 +292,11 @@ class Layer:
 
 
 def _node(doc: Dict[str, Any]) -> Node:
-    return Node.from_dict(copy.deepcopy(doc))
+    return Node.from_dict(json_copy(doc))
 
 
 def _edge(doc: Dict[str, Any]) -> Edge:
-    return Edge.from_dict(copy.deepcopy(doc))
+    return Edge.from_dict(json_copy(doc))
 
 
 class StagedWrite:
@@ -417,7 +427,7 @@ class StagedWrite:
             fields = (
                 _NODE_RECREATED_FIELDS if kind == "node" else _EDGE_RECREATED_FIELDS
             )
-            staged = {f: copy.deepcopy(doc.get(f)) for f in fields if f != "metadata"}
+            staged = {f: json_copy(doc.get(f)) for f in fields if f != "metadata"}
             staged["metadata"] = _metadata_patch(
                 base.get("metadata") or {}, doc.get("metadata") or {}
             )
@@ -439,7 +449,7 @@ class StagedWrite:
         """
         entity_id = current["id"]
         changes = {
-            f: copy.deepcopy(updated.get(f))
+            f: json_copy(updated.get(f))
             for f in fields
             if f != "metadata" and updated.get(f) != current.get(f)
         }
