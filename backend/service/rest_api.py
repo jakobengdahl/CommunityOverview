@@ -219,6 +219,13 @@ class AddNodesRequest(BaseModel):
     event_correlation_id: Optional[str] = Field(
         None, description="Correlation ID for chaining events"
     )
+    expected_session_seq: Optional[int] = Field(
+        None,
+        description=(
+            "In a session (x-communityoverview-session-id): the session sequence "
+            "number the write expects; a mismatch is session_seq_conflict"
+        ),
+    )
 
 
 class UpdateNodeRequest(BaseModel):
@@ -258,6 +265,13 @@ class UpdateNodeRequest(BaseModel):
     event_correlation_id: Optional[str] = Field(
         None, description="Correlation ID for chaining events"
     )
+    expected_session_seq: Optional[int] = Field(
+        None,
+        description=(
+            "In a session (x-communityoverview-session-id): the session sequence "
+            "number the write expects; a mismatch is session_seq_conflict"
+        ),
+    )
 
 
 class DeleteNodesRequest(BaseModel):
@@ -285,6 +299,13 @@ class DeleteNodesRequest(BaseModel):
     event_correlation_id: Optional[str] = Field(
         None, description="Correlation ID for chaining events"
     )
+    expected_session_seq: Optional[int] = Field(
+        None,
+        description=(
+            "In a session (x-communityoverview-session-id): the session sequence "
+            "number the write expects; a mismatch is session_seq_conflict"
+        ),
+    )
 
 
 class ArchiveNodesRequest(BaseModel):
@@ -301,6 +322,13 @@ class ArchiveNodesRequest(BaseModel):
     event_correlation_id: Optional[str] = Field(
         None, description="Correlation ID for chaining events"
     )
+    expected_session_seq: Optional[int] = Field(
+        None,
+        description=(
+            "In a session (x-communityoverview-session-id): the session sequence "
+            "number the write expects; a mismatch is session_seq_conflict"
+        ),
+    )
 
 
 class ArchiveEdgesRequest(BaseModel):
@@ -316,6 +344,13 @@ class ArchiveEdgesRequest(BaseModel):
     )
     event_correlation_id: Optional[str] = Field(
         None, description="Correlation ID for chaining events"
+    )
+    expected_session_seq: Optional[int] = Field(
+        None,
+        description=(
+            "In a session (x-communityoverview-session-id): the session sequence "
+            "number the write expects; a mismatch is session_seq_conflict"
+        ),
     )
 
 
@@ -334,6 +369,13 @@ class AddEdgeRequest(BaseModel):
     )
     event_correlation_id: Optional[str] = Field(
         None, description="Correlation ID for chaining events"
+    )
+    expected_session_seq: Optional[int] = Field(
+        None,
+        description=(
+            "In a session (x-communityoverview-session-id): the session sequence "
+            "number the write expects; a mismatch is session_seq_conflict"
+        ),
     )
 
 
@@ -355,6 +397,13 @@ class UpdateEdgeRequest(BaseModel):
     event_correlation_id: Optional[str] = Field(
         None, description="Correlation ID for chaining events"
     )
+    expected_session_seq: Optional[int] = Field(
+        None,
+        description=(
+            "In a session (x-communityoverview-session-id): the session sequence "
+            "number the write expects; a mismatch is session_seq_conflict"
+        ),
+    )
 
 
 class DeleteEdgeRequest(BaseModel):
@@ -371,6 +420,13 @@ class DeleteEdgeRequest(BaseModel):
     )
     event_correlation_id: Optional[str] = Field(
         None, description="Correlation ID for chaining events"
+    )
+    expected_session_seq: Optional[int] = Field(
+        None,
+        description=(
+            "In a session (x-communityoverview-session-id): the session sequence "
+            "number the write expects; a mismatch is session_seq_conflict"
+        ),
     )
 
 
@@ -402,6 +458,13 @@ class AdoptFederatedNodeRequest(BaseModel):
     event_correlation_id: Optional[str] = Field(
         None, description="Correlation ID for chaining events"
     )
+    expected_session_seq: Optional[int] = Field(
+        None,
+        description=(
+            "In a session (x-communityoverview-session-id): the session sequence "
+            "number the write expects; a mismatch is session_seq_conflict"
+        ),
+    )
 
 
 class SaveViewRequest(BaseModel):
@@ -416,6 +479,13 @@ class CreateSessionRequest(BaseModel):
     name: Optional[str] = Field(
         None, max_length=200, description="Optional session name"
     )
+    write_mode: Optional[str] = Field(
+        None,
+        description=(
+            "direct or staged; omitted, the session takes the graph default "
+            "(SESSION_WRITE_MODE_DEFAULT)"
+        ),
+    )
 
 
 class RenameSessionRequest(BaseModel):
@@ -428,6 +498,13 @@ class RenameSessionRequest(BaseModel):
         None,
         max_length=100,
         description="Renaming client id (attributes the op; defaults server-side)",
+    )
+    write_mode: Optional[str] = Field(
+        None,
+        description=(
+            "Switch the session to this write mode: only direct -> staged is "
+            "allowed (staged -> direct is write_mode_irreversible)"
+        ),
     )
 
 
@@ -559,7 +636,23 @@ _WRITE_ERROR_STATUS = {
     "entity_revision_conflict": 409,
     "write_failed": 502,
     "write_outcome_unknown": 503,
+    # A write made in a session (§9, §16.3).
+    "session_not_found": 404,
+    "session_not_supported": 400,
+    "session_mismatch": 400,
+    "session_seq_conflict": 409,
+    "session_seq_without_session": 400,
+    "layer_full": 422,
+    "staged_unsupported": 422,
+    "invalid_entity": 400,
+    "busy": 409,
 }
+
+
+# The refusals of a request naming a session it cannot act in (§16.3).
+_SESSION_REFUSALS = frozenset(
+    {"session_not_found", "session_not_supported", "session_mismatch"}
+)
 
 
 def _raise_for_access_denied(result: Dict[str, Any]) -> None:
@@ -579,6 +672,9 @@ def _raise_for_access_denied(result: Dict[str, Any]) -> None:
                 "entity_kind",
                 "entity_id",
                 "current_revision",
+                "expected_session_seq",
+                "session_seq",
+                "limit",
             )
             if key in result
         }
@@ -707,24 +803,28 @@ def _register_similarity_endpoints(router: APIRouter, service: GraphService) -> 
     @router.post("/similar")
     async def find_similar_nodes(request: SimilarNodesRequest) -> Dict[str, Any]:
         """Find similar nodes based on name (for duplicate detection)."""
-        return service.find_similar_nodes(
+        result = service.find_similar_nodes(
             name=request.name,
             node_type=request.node_type,
             threshold=request.threshold,
             limit=request.limit,
         )
+        _raise_for_access_denied(result)
+        return result
 
     @router.post("/similar/batch")
     async def find_similar_nodes_batch(
         request: SimilarNodesBatchRequest,
     ) -> Dict[str, Any]:
         """Find similar nodes for multiple names at once."""
-        return service.find_similar_nodes_batch(
+        result = service.find_similar_nodes_batch(
             names=request.names,
             node_type=request.node_type,
             threshold=request.threshold,
             limit=request.limit,
         )
+        _raise_for_access_denied(result)
+        return result
 
     @router.post("/federation/teleport")
     async def resolve_teleport(
@@ -755,6 +855,7 @@ def _register_similarity_endpoints(router: APIRouter, service: GraphService) -> 
                 event_origin=request.event_origin,
                 event_session_id=request.event_session_id,
                 event_correlation_id=request.event_correlation_id,
+                expected_session_seq=request.expected_session_seq,
             )
         _raise_for_access_denied(result)
         if not result.get("success", True):
@@ -777,6 +878,7 @@ def _register_node_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_origin=request.event_origin,
                 event_session_id=request.event_session_id,
                 event_correlation_id=request.event_correlation_id,
+                expected_session_seq=request.expected_session_seq,
                 expect_absent=request.expect_absent,
             )
         _raise_for_access_denied(result)
@@ -796,6 +898,7 @@ def _register_node_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_origin=request.event_origin,
                 event_session_id=request.event_session_id,
                 event_correlation_id=request.event_correlation_id,
+                expected_session_seq=request.expected_session_seq,
                 metadata_merge=request.metadata_merge,
                 expected_updated_at=request.expected_updated_at,
                 expected_revision=request.expected_revision,
@@ -820,6 +923,7 @@ def _register_node_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_origin=request.event_origin,
                 event_session_id=request.event_session_id,
                 event_correlation_id=request.event_correlation_id,
+                expected_session_seq=request.expected_session_seq,
                 expected_revisions=request.expected_revisions,
             )
         _raise_for_access_denied(result)
@@ -841,6 +945,7 @@ def _register_node_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_origin=request.event_origin,
                 event_session_id=request.event_session_id,
                 event_correlation_id=request.event_correlation_id,
+                expected_session_seq=request.expected_session_seq,
             )
         _raise_for_access_denied(result)
         if not result.get("success", True):
@@ -863,6 +968,7 @@ def _register_edge_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_origin=request.event_origin,
                 event_session_id=request.event_session_id,
                 event_correlation_id=request.event_correlation_id,
+                expected_session_seq=request.expected_session_seq,
             )
         _raise_for_access_denied(result)
         if not result.get("success", True):
@@ -881,6 +987,7 @@ def _register_edge_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_origin=request.event_origin,
                 event_session_id=request.event_session_id,
                 event_correlation_id=request.event_correlation_id,
+                expected_session_seq=request.expected_session_seq,
                 expected_revision=request.expected_revision,
             )
         _raise_for_access_denied(result)
@@ -902,6 +1009,9 @@ def _register_edge_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_origin=request.event_origin if request else None,
                 event_session_id=request.event_session_id if request else None,
                 event_correlation_id=request.event_correlation_id if request else None,
+                expected_session_seq=(
+                    request.expected_session_seq if request else None
+                ),
                 expected_revision=request.expected_revision if request else None,
             )
         _raise_for_access_denied(result)
@@ -923,6 +1033,7 @@ def _register_edge_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_origin=request.event_origin,
                 event_session_id=request.event_session_id,
                 event_correlation_id=request.event_correlation_id,
+                expected_session_seq=request.expected_session_seq,
             )
         _raise_for_access_denied(result)
         if not result.get("success", True):
@@ -992,14 +1103,18 @@ def _register_metadata_endpoints(router: APIRouter, service: GraphService) -> No
     @router.get("/meta/relationship-applicability/audit")
     async def audit_relationship_applicability() -> Dict[str, Any]:
         """Report existing edges that violate relationship applicability rules."""
-        return service.audit_relationship_applicability()
+        result = service.audit_relationship_applicability()
+        _raise_for_access_denied(result)
+        return result
 
     @router.get("/meta/subtypes")
     async def get_subtypes(
         node_type: Optional[str] = Query(None, description="Filter by node type"),
     ) -> Dict[str, Any]:
         """Get existing subtypes used in the graph, grouped by node type."""
-        return service.get_subtypes(node_type)
+        result = service.get_subtypes(node_type)
+        _raise_for_access_denied(result)
+        return result
 
     @router.get("/schema")
     async def get_schema() -> Dict[str, Any]:
@@ -1098,6 +1213,32 @@ def _register_session_endpoints(
         OpError,
         is_valid_session_id,
     )
+    from backend.core.layer_store import LayerNotEmpty, StagedSessionRetired
+    from backend.core.write_modes import WRITE_MODE_STAGED, WriteModeRefused
+    from backend.runtime.authorization import GRAPH_ACTION_MUTATE
+
+    from . import access
+
+    def _session_refusal(code: str, message: str, status: int) -> HTTPException:
+        return HTTPException(
+            status_code=status, detail={"error": code, "message": message}
+        )
+
+    def _authorize_session_change(
+        http_request: Request, target: str, session_id: Optional[str], operation=""
+    ) -> None:
+        """§14: a session route that sets a write mode or changes a layer asks
+        the hook, under the name of its MCP twin."""
+        with use_request_authorization(headers=http_request.headers):
+            denied = access.authorize_graph_access(
+                service.authorization_hook,
+                action=GRAPH_ACTION_MUTATE,
+                target=target,
+                graph_operation=operation,
+                session_id=session_id,
+            )
+        if denied:
+            raise HTTPException(status_code=403, detail=denied.get("message"))
 
     def _rate_limit_lookup(http_request: Request) -> None:
         """Throttle auth-bypassed session-id lookups by client address.
@@ -1111,10 +1252,12 @@ def _register_session_endpoints(
             raise HTTPException(status_code=429, detail="rate limit exceeded")
 
     def _session_payload(session, *, resolve: bool, manager) -> Dict[str, Any]:
-        payload = session.to_dict()
+        payload = manager.describe(session)
         payload["roster"] = manager.roster(session.id)
         if resolve:
             resolved = service.resolve_session_nodes(session.state.get("node_refs", []))
+            if resolved.get("error") in _SESSION_REFUSALS:
+                _raise_for_access_denied(resolved)
             payload["resolved"] = {
                 "nodes": resolved.get("nodes", []),
                 "edges": resolved.get("edges", []),
@@ -1122,11 +1265,23 @@ def _register_session_endpoints(
         return payload
 
     @router.post("/sessions")
-    async def create_session(request: CreateSessionRequest) -> Dict[str, Any]:
+    async def create_session(
+        request: CreateSessionRequest, http_request: Request
+    ) -> Dict[str, Any]:
         try:
-            session = session_manager.create_session(request.name)
+            mode, _source = session_manager.write_modes.choose(request.write_mode)
+        except WriteModeRefused as exc:
+            raise _session_refusal(exc.code, exc.message, exc.status)
+        if mode == WRITE_MODE_STAGED:
+            _authorize_session_change(
+                http_request, "create_visualization_session", None
+            )
+        try:
+            session = session_manager.create_session(request.name, request.write_mode)
         except SessionLimitReached:
             raise HTTPException(status_code=503, detail="too many sessions")
+        except WriteModeRefused as exc:
+            raise _session_refusal(exc.code, exc.message, exc.status)
         return _session_payload(session, resolve=False, manager=session_manager)
 
     @router.get("/sessions")
@@ -1151,10 +1306,29 @@ def _register_session_endpoints(
 
     @router.patch("/sessions/{session_id}")
     async def rename_session(
-        session_id: str, request: RenameSessionRequest
+        session_id: str, request: RenameSessionRequest, http_request: Request
     ) -> Dict[str, Any]:
         if not is_valid_session_id(session_id):
             raise HTTPException(status_code=400, detail="invalid session_id format")
+        if request.write_mode is not None:
+            # The mode first, so a rename riding along never materialises a
+            # session the mode change would then refuse.
+            _authorize_session_change(
+                http_request, "set_session_write_mode", session_id
+            )
+            try:
+                await session_manager.set_write_mode(
+                    session_id, request.write_mode, request.client_id
+                )
+            except WriteModeRefused as exc:
+                raise _session_refusal(exc.code, exc.message, exc.status)
+            except (SessionNotFound, StagedSessionRetired):
+                raise _session_refusal("session_not_found", "session not found", 404)
+            if "name" not in request.model_fields_set:
+                session = session_manager.get_session(session_id)
+                if session is None:
+                    raise HTTPException(status_code=404, detail="session not found")
+                return _session_payload(session, resolve=False, manager=session_manager)
         try:
             # get-or-create (R7): a rename for an id that only exists in the
             # browser's URL/recents (never saved server-side) must materialise
@@ -1180,13 +1354,45 @@ def _register_session_endpoints(
     @router.delete("/sessions/{session_id}")
     async def delete_session(
         session_id: str,
+        http_request: Request,
         client_id: Optional[str] = Query(
             None, description="Deleting client id (for the notice)"
+        ),
+        discard_staged: bool = Query(
+            False,
+            description=(
+                "Staged session only: drop its staged changes with it. Without "
+                "it, a session with staged changes is not deleted (layer_not_empty)"
+            ),
         ),
     ) -> Dict[str, Any]:
         if not is_valid_session_id(session_id):
             raise HTTPException(status_code=400, detail="invalid session_id format")
-        existed = await session_manager.delete_session(session_id, deleted_by=client_id)
+        if session_manager.write_modes.mode_of(session_id) == WRITE_MODE_STAGED:
+            # Retiring a staged session's record, and with discard_staged
+            # dropping its layer, is a change to the layer (§13, §14).
+            _authorize_session_change(
+                http_request,
+                "delete_visualization_session",
+                session_id,
+                "discard" if discard_staged else "",
+            )
+        try:
+            existed = await session_manager.delete_session(
+                session_id, deleted_by=client_id, discard_staged=discard_staged
+            )
+        except LayerNotEmpty as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": exc.code,
+                    "message": (
+                        f"the session holds {exc.entries} staged changes; merge "
+                        "or discard them, or delete with discard_staged=true"
+                    ),
+                    "entries": exc.entries,
+                },
+            )
         if not existed:
             raise HTTPException(status_code=404, detail="session not found")
         return {"deleted": True, "id": session_id}
@@ -1511,6 +1717,9 @@ def _register_session_endpoints(
             session_manager.get_or_create(session_id)
         except SessionLimitReached:
             raise HTTPException(status_code=503, detail="too many sessions")
+        except SessionNotFound:
+            # Retired after the binding middleware looked.
+            raise HTTPException(status_code=404, detail="session not found")
 
         subscription, _member = session_manager.connect(session_id, client_id, name)
 

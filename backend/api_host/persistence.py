@@ -13,6 +13,15 @@ and is imported everywhere; importing a storage backend from it would put
 function for the same reason.
 """
 
+from dataclasses import dataclass
+
+from backend.core.write_modes import (
+    DEFAULT_LAYER_MAX_ENTRIES,
+    WRITE_MODE_DIRECT,
+    WRITE_MODE_STAGED,
+    WRITE_MODES,
+)
+
 from .config import AppConfig
 
 
@@ -28,6 +37,67 @@ class PersistenceConfigurationError(RuntimeError):
     and only then discovers it has nowhere to persist has already accepted
     requests it cannot honour.
     """
+
+
+@dataclass(frozen=True)
+class SessionSettings:
+    """The staged-session settings, validated."""
+
+    staged_sessions: bool = False
+    default_write_mode: str = WRITE_MODE_DIRECT
+    layer_max_entries: int = DEFAULT_LAYER_MAX_ENTRIES
+
+
+_TRUE = ("1", "true", "yes", "on")
+_FALSE = ("", "0", "false", "no", "off")
+
+
+def build_session_settings(config: AppConfig) -> SessionSettings:
+    """The staged-session settings ``config`` asks for, or a boot error.
+
+    A default of `staged` without a backend that can hold layers is refused
+    here, naming both settings (§5.2): a deployment that asked for every
+    session to stage would otherwise run with every session direct.
+    """
+    raw = (config.graph_staged_sessions or "").strip().lower()
+    if raw not in _TRUE + _FALSE:
+        raise PersistenceConfigurationError(
+            f"GRAPH_STAGED_SESSIONS={config.graph_staged_sessions!r} is not a "
+            "boolean; use true or false."
+        )
+    staged = raw in _TRUE
+
+    mode = (config.session_write_mode_default or "").strip().lower() or (
+        WRITE_MODE_DIRECT
+    )
+    if mode not in WRITE_MODES:
+        raise PersistenceConfigurationError(
+            f"SESSION_WRITE_MODE_DEFAULT={config.session_write_mode_default!r} is "
+            f"not a write mode; use {' or '.join(WRITE_MODES)}."
+        )
+    if mode == WRITE_MODE_STAGED and not staged:
+        raise PersistenceConfigurationError(
+            "SESSION_WRITE_MODE_DEFAULT=staged needs a graph backend that can "
+            "hold staged sessions, and GRAPH_STAGED_SESSIONS is not enabled. "
+            "Set GRAPH_STAGED_SESSIONS=true, or unset the default."
+        )
+
+    cap_raw = (config.session_layer_max_entries or "").strip()
+    cap = DEFAULT_LAYER_MAX_ENTRIES
+    if cap_raw:
+        try:
+            cap = int(cap_raw)
+        except ValueError:
+            cap = 0
+        if cap < 1:
+            raise PersistenceConfigurationError(
+                f"SESSION_LAYER_MAX_ENTRIES={config.session_layer_max_entries!r} "
+                "is not usable; it is the most entries one session's layer may "
+                "hold, so it must be a whole number of at least 1."
+            )
+    return SessionSettings(
+        staged_sessions=staged, default_write_mode=mode, layer_max_entries=cap
+    )
 
 
 def build_persistence_backend(config: AppConfig):
@@ -72,8 +142,27 @@ def build_persistence_backend(config: AppConfig):
             f"while the configuration says it has some."
         )
 
+    staged = build_session_settings(config).staged_sessions
+
     if backend == FILE_BACKEND:
-        return None
+        if not staged:
+            layers = config.get_graph_path()
+            layers = layers.with_name(layers.stem + ".layers.json")
+            if layers.exists():
+                # Staged sessions were enabled here: booting without them
+                # would let every staged session be written as direct.
+                raise PersistenceConfigurationError(
+                    f"GRAPH_STAGED_SESSIONS is not enabled, but {layers.name} "
+                    "beside the graph holds staged sessions. Set "
+                    "GRAPH_STAGED_SESSIONS=true; it cannot be turned off once "
+                    "sessions have been staged."
+                )
+            return None
+        from backend.core.storage_backends import FileGraphPersistenceBackend
+
+        return FileGraphPersistenceBackend(
+            config.get_graph_path(), staged_sessions=True
+        )
 
     # Normalised once, then used. Detecting the whitespace without removing
     # it is worse than not looking: libpq treats a string as a URI only when
@@ -118,5 +207,19 @@ def build_persistence_backend(config: AppConfig):
     # layer's to trim.
     if scope is not None:
         kwargs["scope"] = scope
+    if staged:
+        kwargs["staged_sessions"] = True
 
-    return PostgresGraphPersistenceBackend(dsn, **kwargs)
+    built = PostgresGraphPersistenceBackend(dsn, **kwargs)
+    if not staged and built.holds_staged_sessions():
+        built.close()
+        # As for the file backend above: the records decide which sessions
+        # stage, and an instance that cannot read them would write those
+        # sessions as direct.
+        raise PersistenceConfigurationError(
+            "GRAPH_STAGED_SESSIONS is not enabled, but the PostgreSQL graph "
+            "store holds staged sessions. Set GRAPH_STAGED_SESSIONS=true on "
+            "every instance; it cannot be turned off once sessions have been "
+            "staged."
+        )
+    return built

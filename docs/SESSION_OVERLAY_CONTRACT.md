@@ -573,9 +573,12 @@ These read the main graph by definition.
 | Lexical search | Search the main graph and drop every id that has an entry. Score the layer's creates and updates, as composed, with the same scorer. Merge both ranked lists. |
 | Semantic search | Main-graph results with ids that have entries dropped, merged by score with vectors for the layer's creates and updates. |
 
-**Layer vectors** are derived data. They are not persisted. Each instance embeds
-a layer's entries when it first needs them, if embeddings are enabled. It keeps
-them apart from the main index, and replaces them when an entry changes.
+**Layer vectors** are derived data. They are not persisted. When an entry is
+staged, each instance that holds the layer embeds it in the background, if
+embeddings are enabled. A composing semantic read uses the vectors already
+computed and embeds any still missing on demand, so its results never omit a
+staged entry. Vectors are kept apart from the main index; an entry's change
+replaces its vector, and its discard drops it.
 
 **Layer caching.** An instance may cache a layer it has loaded. The cache is
 invalidated by the session op that changes the layer (§15). An instance that
@@ -1050,9 +1053,12 @@ recommendation comes first.
    in PostgreSQL mode.
 4. **Staged-work expiry.** None in the core, consistent with D13. A deployment
    that wants expiry adds it on top.
-5. **Embedding layer entries.** Embed lazily, per instance, when a composing
-   semantic read first needs them (§8.3). This avoids paying for embeddings of
-   work that may be discarded.
+5. **Embedding layer entries.** *Decided:* embed each entry in the background
+   when it is staged, per instance, and embed on demand any a composing
+   semantic read finds still missing (§8.3). Lazy embedding at the first
+   semantic read was the earlier recommendation; it would make that first
+   search after edits noticeably slower. Discarded work costs at most the
+   embeddings already made.
 
 ## 21. Implementation order
 

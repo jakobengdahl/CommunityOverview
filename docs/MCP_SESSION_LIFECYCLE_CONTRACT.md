@@ -51,6 +51,8 @@ their default in the open core; the SaaS layer populates them.
 | `updated_at` | iso8601 | Advances on every applied op and on rename. |
 | `revision` | int | The session `seq` — monotonic op revision, for optimistic concurrency. |
 | `node_count` | int | Number of graph nodes currently referenced by the session. |
+| `write_mode` | enum | `direct`, or `staged`: graph writes made in the session are held in it until merged ([`SESSION_OVERLAY_CONTRACT.md`](SESSION_OVERLAY_CONTRACT.md) §5). Only ever moves from `direct` to `staged`. |
+| `write_mode_source` | enum | `explicit` (asked for) or `inherited` (the graph default when the session was created). |
 | `capabilities` | string[] | What the caller may do on this session given the active authorization decision (e.g. `["read","rename","delete","layout"]`). In the open core all capabilities are granted; the SaaS layer narrows the list per the authorization decision (§7). |
 | `session_url` | string \| null | Canonical direct link (§5). `null` only when no public base URL is configured. |
 
@@ -211,7 +213,9 @@ spent rate budget 429 and the session cap 503. The mapping is not one-to-one.
 REST `DELETE` takes no confirmation, has no rate limit and waits for an in-flight
 write instead of reporting `busy`, and REST rename also waits rather than
 reporting `busy`; the open-core REST session endpoints have no access-denied
-status of their own.
+status of their own, except where they create a staged session, change a
+write mode or delete a staged session, which ask the authorization hook and
+answer 403 when it refuses (SESSION_OVERLAY_CONTRACT.md §14).
 
 ## 9. Versioning & change policy
 

@@ -20,6 +20,7 @@ from backend.core.models import metadata_depth_error
 from backend.core.session_annotations import saved_view_annotation_error
 from backend.runtime.authorization import (
     GRAPH_ACTION_MUTATE,
+    GRAPH_OPERATION_STAGE,
     GraphAuthorizationDecision,
 )
 
@@ -38,6 +39,13 @@ if TYPE_CHECKING:
     from backend.core import GraphStorage
     from backend.federation import FederationManager
     from backend.runtime.authorization import GraphAuthorizationHook
+
+    from .staging import StagedWrite
+
+
+def _operation(staging: Optional["StagedWrite"]) -> str:
+    """What the hook is told the write does (§14): staging, or nothing new."""
+    return GRAPH_OPERATION_STAGE if staging is not None else ""
 
 
 # ---------------------------------------------------------------------------
@@ -112,11 +120,23 @@ def add_nodes(
     event_correlation_id: Optional[str] = None,
     expect_absent: bool = False,
     on_nodes_landed: Optional[Callable[[List[str]], None]] = None,
+    staging: Optional["StagedWrite"] = None,
 ) -> Dict[str, Any]:
     """``on_nodes_landed`` gets the ids of the nodes this call left in the
-    graph, including those a failed call keeps."""
-    denied = access.authorize_graph_access(
-        hook, action=GRAPH_ACTION_MUTATE, target="add_nodes"
+    graph, including those a failed call keeps. With ``staging`` the write
+    goes to that session's layer instead (§9), and nothing lands."""
+    decision = access.evaluate_graph_access(
+        hook,
+        action=GRAPH_ACTION_MUTATE,
+        target="add_nodes",
+        graph_operation=_operation(staging),
+    )
+    denied = (
+        None
+        if decision.allowed
+        else access.build_access_denied_result(
+            action=GRAPH_ACTION_MUTATE, target="add_nodes", decision=decision
+        )
     )
     if denied:
         denied.setdefault("added_node_ids", [])
@@ -167,6 +187,23 @@ def add_nodes(
             "added_node_ids": [],
             "added_edge_ids": [],
         }
+
+    if staging is not None:
+        try:
+            return staging.add_nodes(
+                node_objects,
+                edge_objects,
+                expect_absent=expect_absent,
+                graph_access=decision.graph_access,
+            )
+        except EntityRevisionConflict as e:
+            return write_error_result(
+                EntityRevisionConflict(e.kind, e.entity_id, None, None),
+                message=f"{e.kind} {e.entity_id!r} already exists",
+                current_revision=None,
+                added_node_ids=[],
+                added_edge_ids=[],
+            )
 
     event_context = access.build_event_context(
         target="add_nodes",
@@ -224,14 +261,43 @@ def update_node(
     metadata_merge: bool = False,
     expected_updated_at: Optional[str] = None,
     expected_revision: Optional[int] = None,
+    staging: Optional["StagedWrite"] = None,
 ) -> Dict[str, Any]:
     decision = access.evaluate_graph_access(
-        hook, action=GRAPH_ACTION_MUTATE, target="update_node"
+        hook,
+        action=GRAPH_ACTION_MUTATE,
+        target="update_node",
+        graph_operation=_operation(staging),
     )
     if not decision.allowed:
         return access.build_access_denied_result(
             action=GRAPH_ACTION_MUTATE, target="update_node", decision=decision
         )
+    if staging is not None:
+        try:
+            return staging.update_node(
+                node_id,
+                updates,
+                metadata_merge=metadata_merge,
+                expected_updated_at=expected_updated_at,
+                expected_revision=expected_revision,
+                graph_access=decision.graph_access,
+            )
+        except EntityRevisionConflict as e:
+            return write_error_result(e)
+        except StaleUpdateError as e:
+            return {
+                "success": False,
+                "conflict": True,
+                "error": str(e),
+                "current_updated_at": e.current_updated_at.isoformat(),
+            }
+        except ValueError as e:
+            return {
+                "success": False,
+                "error": f"Error validating input: {e}",
+                "error_code": VALIDATION_ERROR_CODE,
+            }
     target_node = storage.get_node(node_id)
     if decision.graph_access.enabled and not access.is_node_visible(
         target_node, decision.graph_access
@@ -303,9 +369,13 @@ def delete_nodes(
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
     expected_revisions: Optional[Dict[str, int]] = None,
+    staging: Optional["StagedWrite"] = None,
 ) -> Dict[str, Any]:
     decision = access.evaluate_graph_access(
-        hook, action=GRAPH_ACTION_MUTATE, target="delete_nodes"
+        hook,
+        action=GRAPH_ACTION_MUTATE,
+        target="delete_nodes",
+        graph_operation=_operation(staging),
     )
     if not decision.allowed:
         denied = access.build_access_denied_result(
@@ -327,6 +397,31 @@ def delete_nodes(
             "deleted_node_ids": [],
             "affected_edge_ids": [],
         }
+
+    if staging is not None:
+        # The limits a direct delete enforces in the storage, before anything.
+        if len(node_ids) > 10:
+            return {
+                "success": False,
+                "message": "Max 10 nodes can be deleted at a time. Contact admin for bulk deletion.",
+                "deleted_node_ids": [],
+                "affected_edge_ids": [],
+            }
+        if not confirmed:
+            return {
+                "success": False,
+                "message": "Deletion requires confirmed=True parameter",
+                "deleted_node_ids": [],
+                "affected_edge_ids": [],
+            }
+        try:
+            return staging.delete_nodes(
+                node_ids,
+                expected_revisions=expected_revisions,
+                graph_access=decision.graph_access,
+            )
+        except EntityRevisionConflict as e:
+            return write_error_result(e, deleted_node_ids=[], affected_edge_ids=[])
 
     if decision.graph_access.enabled:
         node_ids = [
@@ -377,10 +472,14 @@ def set_nodes_archived(
     event_origin: Optional[str] = None,
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
+    staging: Optional["StagedWrite"] = None,
 ) -> Dict[str, Any]:
     """Archive or unarchive nodes (hide-by-default vs. permanent delete)."""
     decision = access.evaluate_graph_access(
-        hook, action=GRAPH_ACTION_MUTATE, target="archive_nodes"
+        hook,
+        action=GRAPH_ACTION_MUTATE,
+        target="archive_nodes",
+        graph_operation=_operation(staging),
     )
     if not decision.allowed:
         denied = access.build_access_denied_result(
@@ -388,6 +487,10 @@ def set_nodes_archived(
         )
         denied.setdefault("node_ids", [])
         return denied
+    if staging is not None:
+        return staging.set_nodes_archived(
+            node_ids, archived, graph_access=decision.graph_access
+        )
 
     if decision.graph_access.enabled:
         node_ids = [
@@ -436,17 +539,25 @@ def add_edge(
     event_origin: Optional[str] = None,
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
+    staging: Optional["StagedWrite"] = None,
 ) -> Dict[str, Any]:
     decision = access.evaluate_graph_access(
-        hook, action=GRAPH_ACTION_MUTATE, target="add_edge"
+        hook,
+        action=GRAPH_ACTION_MUTATE,
+        target="add_edge",
+        graph_operation=_operation(staging),
     )
     if not decision.allowed:
         return access.build_access_denied_result(
             action=GRAPH_ACTION_MUTATE, target="add_edge", decision=decision
         )
-    if decision.graph_access.enabled and not (
-        access.is_node_visible(storage.get_node(source), decision.graph_access)
-        and access.is_node_visible(storage.get_node(target), decision.graph_access)
+    if (
+        staging is None
+        and decision.graph_access.enabled
+        and not (
+            access.is_node_visible(storage.get_node(source), decision.graph_access)
+            and access.is_node_visible(storage.get_node(target), decision.graph_access)
+        )
     ):
         return {
             "success": False,
@@ -465,6 +576,9 @@ def add_edge(
         edge = EdgeModel(**edge_data)
     except Exception as e:
         return {"success": False, "message": f"Invalid edge data: {str(e)}"}
+
+    if staging is not None:
+        return staging.add_edge(edge, graph_access=decision.graph_access)
 
     event_context = access.build_event_context(
         target="add_edge",
@@ -505,14 +619,34 @@ def update_edge(
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
     expected_revision: Optional[int] = None,
+    staging: Optional["StagedWrite"] = None,
 ) -> Dict[str, Any]:
     decision = access.evaluate_graph_access(
-        hook, action=GRAPH_ACTION_MUTATE, target="update_edge"
+        hook,
+        action=GRAPH_ACTION_MUTATE,
+        target="update_edge",
+        graph_operation=_operation(staging),
     )
     if not decision.allowed:
         return access.build_access_denied_result(
             action=GRAPH_ACTION_MUTATE, target="update_edge", decision=decision
         )
+    if staging is not None:
+        try:
+            return staging.update_edge(
+                edge_id,
+                updates,
+                expected_revision=expected_revision,
+                graph_access=decision.graph_access,
+            )
+        except EntityRevisionConflict as e:
+            return write_error_result(e)
+        except ValueError as e:
+            return {
+                "success": False,
+                "message": str(e),
+                "error_code": VALIDATION_ERROR_CODE,
+            }
     if decision.graph_access.enabled and not access.is_edge_visible(
         storage.edges.get(edge_id), storage, decision.graph_access
     ):
@@ -557,14 +691,27 @@ def delete_edge(
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
     expected_revision: Optional[int] = None,
+    staging: Optional["StagedWrite"] = None,
 ) -> Dict[str, Any]:
     decision = access.evaluate_graph_access(
-        hook, action=GRAPH_ACTION_MUTATE, target="delete_edge"
+        hook,
+        action=GRAPH_ACTION_MUTATE,
+        target="delete_edge",
+        graph_operation=_operation(staging),
     )
     if not decision.allowed:
         return access.build_access_denied_result(
             action=GRAPH_ACTION_MUTATE, target="delete_edge", decision=decision
         )
+    if staging is not None:
+        try:
+            return staging.delete_edge(
+                edge_id,
+                expected_revision=expected_revision,
+                graph_access=decision.graph_access,
+            )
+        except EntityRevisionConflict as e:
+            return write_error_result(e)
     if decision.graph_access.enabled and not access.is_edge_visible(
         storage.edges.get(edge_id), storage, decision.graph_access
     ):
@@ -599,9 +746,13 @@ def delete_edges(
     event_origin: Optional[str] = None,
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
+    staging: Optional["StagedWrite"] = None,
 ) -> Dict[str, Any]:
     decision = access.evaluate_graph_access(
-        hook, action=GRAPH_ACTION_MUTATE, target="delete_edges"
+        hook,
+        action=GRAPH_ACTION_MUTATE,
+        target="delete_edges",
+        graph_operation=_operation(staging),
     )
     if not decision.allowed:
         denied = access.build_access_denied_result(
@@ -623,6 +774,9 @@ def delete_edges(
             "success": False,
             "message": "Deletion requires confirmed=True. Please confirm before proceeding.",
         }
+
+    if staging is not None:
+        return staging.delete_edges(edge_ids, graph_access=decision.graph_access)
 
     if decision.graph_access.enabled:
         edge_ids = [
@@ -657,10 +811,14 @@ def set_edges_archived(
     event_origin: Optional[str] = None,
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
+    staging: Optional["StagedWrite"] = None,
 ) -> Dict[str, Any]:
     """Archive or unarchive edges (hide-by-default vs. permanent delete)."""
     decision = access.evaluate_graph_access(
-        hook, action=GRAPH_ACTION_MUTATE, target="archive_edges"
+        hook,
+        action=GRAPH_ACTION_MUTATE,
+        target="archive_edges",
+        graph_operation=_operation(staging),
     )
     if not decision.allowed:
         denied = access.build_access_denied_result(
@@ -668,6 +826,10 @@ def set_edges_archived(
         )
         denied.setdefault("edge_ids", [])
         return denied
+    if staging is not None:
+        return staging.set_edges_archived(
+            edge_ids, archived, graph_access=decision.graph_access
+        )
 
     if decision.graph_access.enabled:
         edge_ids = [
@@ -738,9 +900,13 @@ def adopt_federated_node(
     event_origin: Optional[str] = None,
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
+    staging: Optional["StagedWrite"] = None,
 ) -> Dict[str, Any]:
     decision = access.evaluate_graph_access(
-        hook, action=GRAPH_ACTION_MUTATE, target="adopt_federated_node"
+        hook,
+        action=GRAPH_ACTION_MUTATE,
+        target="adopt_federated_node",
+        graph_operation=_operation(staging),
     )
     if not decision.allowed:
         denied = access.build_access_denied_result(
@@ -794,7 +960,12 @@ def adopt_federated_node(
         }
 
     if not create_new_copy:
-        for local_node in storage.nodes.values():
+        if staging is not None:
+            already = staging.find_adopted(source_node.id)
+            adopted_nodes = [already] if already is not None else []
+        else:
+            adopted_nodes = list(storage.nodes.values())
+        for local_node in adopted_nodes:
             adopted_from = (local_node.metadata or {}).get("adopted_from") or {}
             if adopted_from.get("federated_node_id") == source_node.id:
                 return {
@@ -891,6 +1062,24 @@ def adopt_federated_node(
     )
 
     nodes_to_add = [local_node]
+    if staging is not None:
+        if not staging.node_exists(source_reference.id):
+            nodes_to_add.append(source_reference)
+        staged = staging.add_nodes(
+            nodes_to_add,
+            [lineage_edge],
+            expect_absent=False,
+            graph_access=decision.graph_access,
+        )
+        if not staged.get("success"):
+            return staged
+        return {
+            **staged,
+            "message": "Federated node adoption staged in the session",
+            "adopted_node": serialize_node(local_node),
+            "source_node": serialize_node(source_node),
+            "lineage_edge": serialize_edge(lineage_edge),
+        }
     if storage.get_node(source_reference.id) is None:
         nodes_to_add.append(source_reference)
 

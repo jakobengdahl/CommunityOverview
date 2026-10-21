@@ -32,8 +32,9 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .image_ingest import (
     DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES,
@@ -51,12 +52,25 @@ from .session_hub import (
     Subscription,
 )
 from .session_store import (
+    SERVER_ONLY_OPS,
     STATE_OPS,
     OpError,
     Session,
+    SessionRetired,
     SessionStore,
     is_valid_session_id,
 )
+from .write_modes import (
+    WRITE_MODE_DIRECT,
+    WRITE_MODE_IRREVERSIBLE,
+    WRITE_MODE_STAGED,
+    WriteModeRefused,
+    WriteModes,
+    check_write_mode,
+)
+from . import layer_store
+
+logger = logging.getLogger(__name__)
 
 # AnnotationFieldConflict is raised by SessionStore.apply_state_op and
 # propagates through this module's write paths unchanged; callers import it
@@ -115,10 +129,31 @@ _DEFAULT_IMAGE_BUCKET_REFILL_PER_SEC = _DEFAULT_LOOKUP_REFILL_PER_SEC
 # genuinely changed server-side state and every *other* client sees it. A
 # distinct marker for this one attribution is required, not optional.
 _UNDO_REPLAY_CLIENT_ID = "undo-replay"
+_STREAM_WITHHELD = frozenset({"base", "staged_by"})
 
 
 class SessionNotFound(Exception):
     pass
+
+
+class SessionSeqConflict(Exception):
+    """``expected_session_seq`` on a graph write did not hold (§9.2:
+    ``session_seq_conflict``). Another participant staged in the session
+    since the caller read it."""
+
+    code = "session_seq_conflict"
+
+    def __init__(self, expected: int, actual: int) -> None:
+        self.expected = expected
+        self.actual = actual
+        super().__init__(
+            f"expected session sequence {expected}, but the session is at {actual}"
+        )
+
+
+# The client id a staged graph change is fanned out under. Distinct from any
+# browser's, so no participant drops it as the echo of its own op.
+GRAPH_STAGING_CLIENT_ID = "graph-staging"
 
 
 class RateLimited(Exception):
@@ -502,8 +537,12 @@ class SessionManager:
         lookup_refill_per_sec: float = _DEFAULT_LOOKUP_REFILL_PER_SEC,
         image_bucket_capacity: float = _DEFAULT_IMAGE_BUCKET_CAPACITY,
         image_refill_per_sec: float = _DEFAULT_IMAGE_BUCKET_REFILL_PER_SEC,
+        write_modes: Optional[WriteModes] = None,
     ) -> None:
         self.store = store
+        # Every session is direct without one (docs/SESSION_OVERLAY_CONTRACT.md
+        # §5): nothing can be staged, nothing is ever retired.
+        self.write_modes = write_modes or WriteModes()
         self.bus = event_bus or InProcessEventBus()
         self.presence = presence or PresenceRegistry()
         self.claims = claims or ClaimMap()
@@ -643,10 +682,26 @@ class SessionManager:
 
     # ---------------- session CRUD ----------------
 
-    def create_session(self, name: Optional[str] = None) -> Session:
+    def create_session(
+        self, name: Optional[str] = None, write_mode: Optional[str] = None
+    ) -> Session:
+        """Create a session in ``write_mode``, else in the graph default (§5.1).
+
+        A staged session's record is written before its document, so no
+        instance ever sees the document of a staged session as direct.
+        Raises WriteModeRefused for a mode this deployment cannot hold.
+        """
+        mode, source = self.write_modes.choose(write_mode)
         if self.store.session_count() >= self._max_sessions:
             raise SessionLimitReached()
-        return self.store.create(name)
+        return self.store.create(
+            name,
+            write_mode=mode,
+            write_mode_source=source,
+            on_allocate=(
+                self.write_modes.record_staged if mode == WRITE_MODE_STAGED else None
+            ),
+        )
 
     def get_or_create(self, session_id: str) -> Tuple[Session, bool]:
         session = self.store.get(session_id)
@@ -654,7 +709,194 @@ class SessionManager:
             return session, False
         if self.store.session_count() >= self._max_sessions:
             raise SessionLimitReached()
-        return self.store.get_or_create(session_id)
+        # Materialising a session the browser already holds is never a create
+        # request, so it is direct whatever the graph default (§5.1): a staged
+        # session is created explicitly, where the hook is asked.
+        try:
+            return self.store.get_or_create(session_id)
+        except SessionRetired:
+            raise SessionNotFound() from None
+
+    def write_mode_of(self, session: Session) -> Dict[str, str]:
+        """The write mode a response describing ``session`` reports (§5.1).
+
+        Read from the staged-session record, which decides; the source comes
+        from the document's mirror.
+        """
+        mode = self.write_modes.mode_of(session.id)
+        source = session.write_mode_source
+        if mode == WRITE_MODE_STAGED and session.write_mode != WRITE_MODE_STAGED:
+            source = "explicit"
+        return {"write_mode": mode, "write_mode_source": source}
+
+    def describe(self, session: Session) -> Dict[str, Any]:
+        """``session.to_dict()`` with the write mode the record decides."""
+        return {**session.to_dict(), **self.write_mode_of(session)}
+
+    # ---------------- write modes ----------------
+
+    async def set_write_mode(
+        self, session_id: str, write_mode: Any, client_id: Optional[str] = None
+    ) -> Session:
+        """Switch a session to ``write_mode`` (§5.2), under the session's lock."""
+        mode = check_write_mode(write_mode)
+        async with self._lock(session_id):
+            return self._set_write_mode(session_id, mode, client_id or "rest")
+
+    def set_write_mode_sync(
+        self,
+        session_id: str,
+        write_mode: Any,
+        client_id: Optional[str] = None,
+        *,
+        rate_limit_label: Optional[str] = None,
+    ) -> Session:
+        """``set_write_mode`` for a synchronous caller (the MCP tool path).
+
+        Like ``apply_layout``, it refuses with ``LayoutBusy`` while an
+        ``apply_ops`` batch holds the session's lock, so the op it emits is
+        never sequenced ahead of a batch that has not broadcast yet. Charges
+        one token to ``_mcp_bucket``, like every other synchronous MCP write.
+        """
+        mode = check_write_mode(write_mode)
+        self._consume_mcp_budget(
+            self._mcp_rate_limit_key(client_id or "rest", rate_limit_label), 1.0
+        )
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+        return self._set_write_mode(session_id, mode, client_id or "rest")
+
+    def _set_write_mode(
+        self, session_id: str, mode: Optional[str], client_id: str
+    ) -> Session:
+        if mode is None:
+            raise WriteModeRefused(
+                "invalid_write_mode", "write_mode must be one of direct, staged"
+            )
+        session = (
+            self.store.get(session_id) if is_valid_session_id(session_id) else None
+        )
+        status = self.write_modes.staged_status(session_id)
+        if session is None or status == layer_store.STATUS_RETIRED:
+            raise SessionNotFound()
+        if status == layer_store.STATUS_ACTIVE:
+            if mode == WRITE_MODE_DIRECT:
+                # Once one participant has merged, another switching to
+                # direct would land the first one's next write in the graph.
+                raise WriteModeRefused(
+                    WRITE_MODE_IRREVERSIBLE,
+                    "a staged session never becomes direct; start a new session "
+                    "to edit the graph directly",
+                )
+            return session
+        if mode == WRITE_MODE_DIRECT:
+            return session
+        # The record first: from that moment every instance stages this
+        # session's writes. The op only mirrors and fans it out.
+        self.write_modes.record_staged(session_id)
+        try:
+            self._apply_op_sync(
+                session,
+                session_id,
+                client_id,
+                {"op": "write_mode_changed", "write_mode": WRITE_MODE_STAGED},
+                record_activity=False,
+            )
+        except Exception:
+            logger.exception(
+                "session %s is staged, but its write_mode_changed op failed",
+                session_id,
+            )
+        return session
+
+    def _retire_for_delete(self, session_id: str, discard_staged: bool) -> str:
+        """Retire a staged session's record before its document goes (§13).
+
+        Returns the write mode the session had. A layer holding entries
+        without ``discard_staged`` raises ``LayerNotEmpty``, judged in the
+        unit that would retire, and nothing is deleted.
+        """
+        if self.write_modes.staged_status(session_id) != layer_store.STATUS_ACTIVE:
+            return WRITE_MODE_DIRECT
+        self.write_modes.retire(session_id, require_empty=not discard_staged)
+        return WRITE_MODE_STAGED
+
+    # ---------------- staged graph changes ----------------
+
+    def check_session_seq(
+        self, session_id: str, expected_session_seq: Optional[int]
+    ) -> int:
+        """The session's sequence number; ``SessionSeqConflict`` when
+        ``expected_session_seq`` is given and differs."""
+        session = (
+            self.store.get(session_id) if is_valid_session_id(session_id) else None
+        )
+        if session is None:
+            raise SessionNotFound()
+        if expected_session_seq is not None and expected_session_seq != session.seq:
+            raise SessionSeqConflict(expected_session_seq, session.seq)
+        return session.seq
+
+    def stage_graph_change(
+        self,
+        session_id: str,
+        *,
+        expected_session_seq: Optional[int],
+        commit: Callable[[int], Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Stage a graph change and fan it out as one session op (§9, §15).
+
+        ``commit(seq)`` writes the layer, stamping each entry with ``seq`` -
+        the sequence number the op takes - and returns the op's payload:
+        ``{"entries": [...], "removals": [...]}``. It is the commit point:
+        if it raises, nothing changed. After it, the op is applied, persisted
+        and broadcast; a failure to persist the session document is logged
+        and does not undo a change the layer already holds.
+
+        Synchronous like ``apply_layout``: refuses with ``LayoutBusy`` while
+        an ``apply_ops`` batch holds the session's lock.
+        """
+        if not is_valid_session_id(session_id):
+            raise SessionNotFound()
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+        session = self.store.get(session_id)
+        if session is None:
+            raise SessionNotFound()
+        if expected_session_seq is not None and expected_session_seq != session.seq:
+            raise SessionSeqConflict(expected_session_seq, session.seq)
+        payload = commit(session.seq + 1)
+        op = {
+            "op": "graph_change_staged",
+            # What changed, not the main-graph snapshot each entry keeps as
+            # its base nor the writer's resolved actor id: the stream reaches
+            # anyone holding the session id, and those are the diff's, read
+            # with authorization.
+            "entries": [
+                {k: v for k, v in entry.items() if k not in _STREAM_WITHHELD}
+                for entry in payload.get("entries", [])
+            ],
+            "removals": payload.get("removals", []),
+            "client_id": GRAPH_STAGING_CLIENT_ID,
+        }
+        applied = self.store.apply_state_op(session, op, record_activity=False)
+        try:
+            self.store.persist(session)
+        except Exception:
+            logger.exception(
+                "staged change in session %s landed; persisting its seq failed",
+                session_id,
+            )
+        self.bus.publish(
+            session_id,
+            {
+                "type": "op",
+                "client_id": GRAPH_STAGING_CLIENT_ID,
+                "op": applied,
+                "seq": applied["seq"],
+            },
+        )
+        return applied
 
     def get_session(self, session_id: str) -> Optional[Session]:
         return self.store.get(session_id)
@@ -691,7 +933,11 @@ class SessionManager:
         return self.store.get(session_id)
 
     async def delete_session(
-        self, session_id: str, deleted_by: Optional[str] = None
+        self,
+        session_id: str,
+        deleted_by: Optional[str] = None,
+        *,
+        discard_staged: bool = False,
     ) -> bool:
         # Same per-session lock apply_ops uses (R10): without it, an in-flight
         # apply_ops batch that already holds a `Session` reference can persist()
@@ -709,12 +955,19 @@ class SessionManager:
         # session_id ever deleted); `max_sessions` already bounds how many
         # sessions can exist at once.
         async with self._lock(session_id):
-            existed = self.store.delete(session_id)
+            write_mode = self._retire_for_delete(session_id, discard_staged)
+            existed = self.store.delete(session_id) or write_mode == WRITE_MODE_STAGED
         if existed:
             # Broadcast before tearing down so connected clients get the notice.
+            # It carries the write mode, so a client leaving a staged session
+            # creates its replacement staged too (§13).
             self.bus.publish(
                 session_id,
-                {"type": "session_deleted", "deleted_by": deleted_by},
+                {
+                    "type": "session_deleted",
+                    "deleted_by": deleted_by,
+                    "write_mode": write_mode,
+                },
             )
         return existed
 
@@ -773,6 +1026,7 @@ class SessionManager:
         deleted_by: Optional[str] = None,
         *,
         rate_limit_label: Optional[str] = None,
+        discard_staged: bool = False,
     ) -> bool:
         """Delete a session **synchronously** (the MCP tool path).
 
@@ -798,11 +1052,16 @@ class SessionManager:
             raise RateLimited()
         if self._lock(session_id).locked():
             raise LayoutBusy()
-        existed = self.store.delete(session_id)
+        write_mode = self._retire_for_delete(session_id, discard_staged)
+        existed = self.store.delete(session_id) or write_mode == WRITE_MODE_STAGED
         if existed:
             self.bus.publish(
                 session_id,
-                {"type": "session_deleted", "deleted_by": deleted_by},
+                {
+                    "type": "session_deleted",
+                    "deleted_by": deleted_by,
+                    "write_mode": write_mode,
+                },
             )
         return existed
 
@@ -894,7 +1153,7 @@ class SessionManager:
             op_type = op.get("op")
             if op_type in CLAIM_OPS or op_type in LEASE_OPS:
                 self._validate_claim_op(op)
-            elif op_type not in STATE_OPS:
+            elif op_type not in STATE_OPS or op_type in SERVER_ONLY_OPS:
                 raise OpError(f"unknown op: {op_type!r}")
 
         async with self._lock(session_id):

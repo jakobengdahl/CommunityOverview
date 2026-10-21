@@ -1881,6 +1881,37 @@ class PostgresGraphPersistenceBackend:
             )
         self._ensure_schema()
 
+    def holds_staged_sessions(self) -> bool:
+        """Whether this scope's store has any staged-session record.
+
+        Read-only, and safe on a backend constructed without staged_sessions:
+        it creates nothing, and a store that never had the tables answers
+        False. An instance must not run with staged sessions off over a store
+        that has them, or it would write those sessions as direct.
+        """
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                self._bind_scope(conn)
+                exists = conn.execute(
+                    "SELECT to_regclass(%s)",
+                    (
+                        sql.Identifier(self.schema, "graph_staged_sessions").as_string(
+                            conn
+                        ),
+                    ),
+                ).fetchone()[0]
+                if exists is None:
+                    return False
+                scope, params = self._layer_scope()
+                return bool(
+                    conn.execute(
+                        sql.SQL("SELECT EXISTS (SELECT 1 FROM {} WHERE true{})").format(
+                            self._table("graph_staged_sessions"), scope
+                        ),
+                        params,
+                    ).fetchone()[0]
+                )
+
     def _layer_scope(self) -> Tuple[sql.Composed, Tuple]:
         """` AND <predicate>` for a layer table: this instance's scope, exactly.
 
@@ -2050,10 +2081,20 @@ class PostgresGraphPersistenceBackend:
 
         self._run_layer(work)
 
-    def retire(self, session_id: str) -> None:
+    def retire(self, session_id: str, *, require_empty: bool = False) -> None:
         session_id = layer_store.check_session_id(session_id)
 
         def work(conn):
+            if require_empty:
+                # The record row first, FOR UPDATE, as every layer write
+                # takes it: a stage on another instance has then either
+                # committed, and is counted here, or waits for this unit.
+                status = self._session_status(conn, session_id, lock=True)
+                if status == layer_store.STATUS_RETIRED:
+                    return
+                held = len(self._layer_entries(conn, session_id, False))
+                if held:
+                    raise layer_store.LayerNotEmpty(session_id, held)
             scope_pred, pred_params = self._conflict_scope("graph_staged_sessions")
             row = conn.execute(
                 sql.SQL(

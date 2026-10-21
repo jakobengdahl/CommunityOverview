@@ -43,6 +43,7 @@ from backend.core.session_auto_add import (
 from backend.core.session_registry import SessionRegistry
 from backend.core.session_store import FileSessionPersistenceBackend, SessionStore
 from backend.core.session_manager import SessionManager
+from backend.core.write_modes import WriteModes
 
 from backend.core import GraphStorage
 from backend.service import GraphService, create_rest_router, register_mcp_tools
@@ -64,7 +65,12 @@ from .logging_config import configure_root_logging
 from .middleware import add_auth_middleware, add_cors_middleware, compute_auth_active
 from .mcp_mount import build_mcp_instructions, mount_mcp
 from .attachments import build_attachment_settings
-from .persistence import build_persistence_backend
+from .persistence import (
+    PersistenceConfigurationError,
+    build_persistence_backend,
+    build_session_settings,
+)
+from .session_binding import add_session_binding_middleware
 from .session_stream import register_session_stream
 from .tool_routes import register_tool_routes
 from .system_routes import register_system_routes
@@ -101,8 +107,20 @@ def create_app(
 
     install_error_handlers(app)
 
-    # Middleware order matters: auth is installed first so CORS (added next)
-    # wraps it as the outermost layer, letting preflight requests through.
+    session_settings = build_session_settings(config)
+
+    # Middleware order matters: the session binding is innermost, so a
+    # request is authenticated before anything about the session it names is
+    # looked at; auth is installed next so CORS (added last) wraps it as the
+    # outermost layer, letting preflight requests through.
+    add_session_binding_middleware(
+        app,
+        api_prefix=config.api_prefix,
+        is_retired=lambda session_id: app.state.write_modes.is_retired(session_id),
+        sessions_unreadable=lambda: (
+            app.state.write_modes.store_holds_unreadable_records()
+        ),
+    )
     _auth_active = compute_auth_active(config)
     add_auth_middleware(app, config)
     add_cors_middleware(app, config)
@@ -222,9 +240,29 @@ def create_app(
     # channel below is kept only to deliver MCP visualization pushes to the browser
     # (design §3.8) — the browser no longer uploads canvas state, MCP tools read it
     # from this store.
+    #
+    # Which sessions stage is decided by the staged-session records the graph
+    # backend keeps (docs/SESSION_OVERLAY_CONTRACT.md §5.3), so the write modes
+    # are built from the graph storage, and the session store asks them before
+    # it hands out or recreates an id.
+    try:
+        write_modes = WriteModes(
+            graph_storage.layer_store,
+            default_mode=session_settings.default_write_mode,
+            max_entries=session_settings.layer_max_entries,
+            unreadable_records=graph_storage.staged_records_check,
+        )
+    except ValueError as exc:
+        raise PersistenceConfigurationError(
+            f"staged sessions cannot be configured: {exc}"
+        ) from exc
+    app.state.write_modes = write_modes
     sessions_dir = str(config.resolve_sessions_dir())
-    session_store = SessionStore(FileSessionPersistenceBackend(sessions_dir))
-    session_manager = SessionManager(session_store)
+    session_store = SessionStore(
+        FileSessionPersistenceBackend(sessions_dir),
+        staged_status=write_modes.staged_status,
+    )
+    session_manager = SessionManager(session_store, write_modes=write_modes)
     app.state.session_store = session_store
     app.state.session_manager = session_manager
 
@@ -292,6 +330,12 @@ def create_app(
     # (registered below) so that sync MCP tools can push commands thread-safely.
     session_registry = SessionRegistry()
     app.state.session_registry = session_registry
+    # A session id resolves when its session is stored, or - for a browser
+    # whose session exists only as a live legacy push channel - when that
+    # channel exists (§16.1).
+    graph_service.attach_sessions(
+        session_manager, push_target_known=session_registry.session_exists
+    )
 
     # Session-scoped auto-add agents: react to node.create events and push each
     # matching new node additively into the bound session's live view (reusing

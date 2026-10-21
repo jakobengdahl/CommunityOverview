@@ -3137,7 +3137,16 @@ class TestRenameDeleteSyncCharges:
 
         assert bucket.calls == [(key, 1.0)]
         assert mgr.get_session(s.id) is None
-        assert published == [(s.id, {"type": "session_deleted", "deleted_by": actor})]
+        assert published == [
+            (
+                s.id,
+                {
+                    "type": "session_deleted",
+                    "deleted_by": actor,
+                    "write_mode": "direct",
+                },
+            )
+        ]
 
     async def test_rename_of_an_invalid_id_charges_nothing(self):
         mgr = _manager()
@@ -3821,6 +3830,9 @@ def _seed_annotations(mgr, sid):
 
 
 _MCP_BUCKET_WRITES = {
+    "set_write_mode_sync": lambda mgr, sid, i, label: mgr.set_write_mode_sync(
+        sid, "direct", "mcp-agent", rate_limit_label=label
+    ),
     "apply_layout": lambda mgr, sid, i, label: mgr.apply_layout(
         sid, "mcp-agent", positions={"n1": {"x": i, "y": i}}, rate_limit_label=label
     ),
@@ -3877,6 +3889,7 @@ _MCP_UNMETERED_CALLS = {
     "get_session",
     "list_sessions",
     "push_command",
+    "write_mode_of",
 }
 
 
@@ -3952,6 +3965,9 @@ _MCP_UNMETERED_RUNS = {
     "get_session": lambda mgr, sid: mgr.get_session(sid),
     "list_sessions": lambda mgr, sid: mgr.list_sessions(),
     "push_command": lambda mgr, sid: mgr.push_command(sid, {"type": "noop"}),
+    "write_mode_of": lambda mgr, sid: mgr.write_mode_of(
+        mgr.get_session(sid) or Session(id=sid)
+    ),
 }
 
 

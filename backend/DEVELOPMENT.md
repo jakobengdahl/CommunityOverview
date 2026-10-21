@@ -203,6 +203,9 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | `GRAPH_POSTGRES_SCHEMA` | `public` | Schema holding the graph tables; one database can serve several graphs |
 | `GRAPH_POSTGRES_POOL_SIZE` | *(backend default)* | Pooled connections per instance, on top of one dedicated `LISTEN` connection; must be at least 1 |
 | `GRAPH_POSTGRES_SCOPE` | *(unset)* | Opaque identifier tagging this instance's rows and narrowing the rows it reads (`postgres` only). Unset keeps no scopes apart; set-but-empty, or set without `GRAPH_BACKEND=postgres`, fails at boot. See [PERSISTENCE_BACKENDS.md](../docs/PERSISTENCE_BACKENDS.md) |
+| `GRAPH_STAGED_SESSIONS` | `false` | `true` lets the graph backend hold staged sessions' layers (see Staged sessions below); without it no session can be staged and no layer file or table is created. A value that is not a boolean fails at boot. Set it on every instance sharing a store: an instance without it refuses to boot over a store holding staged sessions, and refuses every request naming a session once another instance has staged one (it asks the store at most every 30 seconds) |
+| `SESSION_WRITE_MODE_DEFAULT` | `direct` | Write mode of a session created without one: `direct` or `staged`. `staged` without `GRAPH_STAGED_SESSIONS=true`, or any other value, fails at boot |
+| `SESSION_LAYER_MAX_ENTRIES` | `1000` | Most entries one staged session's layer holds; a staging write that would exceed it is refused with `layer_full`. Less than 1 fails at boot |
 | `ATTACHMENT_DIR` | `<graph stem>.attachments` next to the graph | Root of the node attachment store. Required for attachments with `GRAPH_BACKEND=postgres` (every instance serving the schema must share it); without it the attachment routes answer `503 attachments_unavailable` |
 | `ATTACHMENT_NAMESPACE` | graph file stem, or `pg:<GRAPH_POSTGRES_SCHEMA>` | Separates graphs sharing one attachment root; keep it for the graph's life |
 | `ATTACHMENT_BACKEND` | `file` | Attachment store backend; an unrecognised value fails at boot |
@@ -823,6 +826,54 @@ Over MCP the same fields come back with `success: false`. Archive and the
 bulk edge delete accept expectations in `GraphStorage` but not yet over the
 API.
 
+### Staged sessions
+
+A session in **staged** write mode holds the graph writes made in it in a
+layer of its own: nothing reaches the graph, and no graph event fires, until
+the changes are merged
+([`SESSION_OVERLAY_CONTRACT.md`](../docs/SESSION_OVERLAY_CONTRACT.md)). It needs
+`GRAPH_STAGED_SESSIONS=true`. A session gets its mode when it is created and can
+only ever move from `direct` to `staged`; a deleted staged session's id is never
+used again.
+
+A request acts in a session through the `x-communityoverview-session-id`
+header; an MCP graph tool through its `visualization_session_id` argument. The
+writes that stage are `POST/DELETE /api/nodes`, `PATCH /api/nodes/{id}`,
+`POST /api/nodes/archive`, `POST /api/edges`, `PATCH/DELETE /api/edges/{id}`,
+`POST /api/edges/archive`, `POST /api/federation/adopt`, their MCP tools, the
+chat assistant's graph tools and an approved agent proposal made in the session.
+A staged write answers with the direct write's shape plus `staged: true`,
+`session_id`, `session_seq`, `entries` (the resulting layer entries, without
+their `base`, the main-graph snapshot) and `removed_entries`. Each one is a
+`graph_change_staged` session op on the session's stream, carrying the entries
+without `base` or `staged_by`: the stream is reachable with the session id alone. In a direct-mode session the header changes nothing. Over
+MCP the header is read per message; an MCP connection opened with the header
+stays in that session, so a later message naming another session, or none, is
+refused with `session_mismatch`.
+
+Reads in a staged session, which compose the main graph with the layer, are not
+built yet: the reads that will compose answer such a request with
+`400 session_not_supported`, so a staged session is never shown as if it were
+the graph. Any other route or tool refuses the header (or argument) the same
+way. A write may carry `expected_session_seq`; it holds while the session's
+sequence number equals it.
+
+| `error` | HTTP | Meaning |
+|---|---|---|
+| `session_not_found` | 404 | the session does not exist, or was a staged session that has been deleted |
+| `session_not_supported` | 400 | the route or tool does not act in a session (or does not yet read a staged one) |
+| `session_mismatch` | 400 | the request names two different sessions (header vs. path, argument or proposal) |
+| `session_seq_conflict` | 409 | `expected_session_seq` did not hold; carries `expected_session_seq` and `session_seq` |
+| `layer_full` | 422 | the write would take the layer past `SESSION_LAYER_MAX_ENTRIES`; carries `limit`. Nothing was staged |
+| `staged_unsupported` | 422 | staged mode asked for where `GRAPH_STAGED_SESSIONS` is off, or a session named on an instance without it whose store holds staged sessions |
+| `write_mode_irreversible` | 409 | a staged session asked to become direct |
+| `layer_not_empty` | 409 | deleting a staged session that holds staged changes, without `discard_staged` |
+| `busy` | 409 | an op batch was being applied to the session; retry |
+
+The authorization hook is asked about a staged write as the same `mutate` it
+would ask a direct one, with `graph_operation="stage"` and `session_id` in the
+context.
+
 ### Custom REST Interfaces (config-driven)
 
 A specific node type or edge type can be exposed as its own dedicated read-only
@@ -894,11 +945,11 @@ node content is rehydrated from the graph on load via `?resolve=true`.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/api/sessions` | Create a new shared session (server-assigned `DDDD-DDDD-DDDD-DDDD` id) |
+| POST | `/api/sessions` | Create a new shared session (server-assigned `DDDD-DDDD-DDDD-DDDD` id). Optional `write_mode` (`direct`/`staged`; omitted, the graph default). Creating a staged one asks the authorization hook (`mutate`, `create_visualization_session`); `422 staged_unsupported` where staged sessions are not enabled. Every session response carries `write_mode` and `write_mode_source` |
 | GET | `/api/sessions` | List session metadata |
 | GET | `/api/sessions/{id}` | Get a session (meta + state + presence roster); `?resolve=true` also returns rehydrated nodes/edges |
-| PATCH | `/api/sessions/{id}` | Rename a session (`{name, client_id?}`). get-or-create: materialises the session server-side if it only existed client-side. Routed through the op protocol as a `session_renamed` state op, so the rename is sequenced and visible to `since_seq` catch-up, not just a full snapshot — design §8.2 R7/R8 |
-| DELETE | `/api/sessions/{id}` | Delete a session (`?client_id=` names the deleter in the broadcast) |
+| PATCH | `/api/sessions/{id}` | Rename a session (`{name, client_id?}`). get-or-create: materialises the session server-side if it only existed client-side; a session materialised this way (or by joining its stream) is always `direct`, whatever `SESSION_WRITE_MODE_DEFAULT` says. Routed through the op protocol as a `session_renamed` state op, so the rename is sequenced and visible to `since_seq` catch-up, not just a full snapshot — design §8.2 R7/R8. With `write_mode`: switch an existing session `direct` → `staged` (asks the hook as `set_session_write_mode`; fans out as a `write_mode_changed` op); `staged` → `direct` is `409 write_mode_irreversible` |
+| DELETE | `/api/sessions/{id}` | Delete a session (`?client_id=` names the deleter in the broadcast, which carries the session's `write_mode`). A staged session holding staged changes is `409 layer_not_empty` unless `?discard_staged=true`; deleting a staged session retires its id for good (asks the hook as `delete_visualization_session`, with `graph_operation=discard` when discarding) |
 | POST | `/api/sessions/{id}/ops` | Apply an ordered op batch (`{client_id, base_seq, ops}` → `{applied, seq}`); server-ordered LWW, monotonic `seq`. Bounded per batch by op count (≤ 500) **and** body size (≤ 256 KB → `413` — an op carrying a validated embedded image is budgeted separately instead, per "Image annotation tool" below), plus the session's cumulative image/document totals checked after each batch, plus a per-client token bucket (200 burst, 100 ops/s refill → `429`; a batch of more ops than the full burst can never be admitted however long the client waits, so it is refused as `413` without drawing from the bucket; the browser client chunks its queue at that burst so it never sends one) — design §3.9. An op that would update/delete an annotation another client currently holds a live **edit lease** on is rejected whole-batch (`409`, `LeaseConflict`) rather than silently overriding it — this is the browser write path; the synchronous MCP write path checks the same lease at its own mutation boundary too (`task-mcp-annotation-human-edit-guard`), surfaced there as `lease_conflict` rather than an HTTP status — see docs/ANNOTATION_CONTRACT.md's "Operation timing and leases" section. The batch also handles `edit_lease_acquired`/`edit_lease_released` themselves (task-annotation-exclusive-edit-leases): first-actual-editor-wins, unlike the advisory `selection_claimed`/`selection_released` presence pair — see "Edit leases vs. selection claims" below |
 | POST | `/api/sessions/{id}/annotations/image` | Human GUI clipboard-paste / file-upload image ingest (`{client_id, x, y, image_data\|image_url, ...}` → `{annotation, revision}`). Runs the same `image_ingest.py` validate/optimize/embed pipeline and `SessionManager.upsert_image_annotation` budgets as the MCP `create_image_annotation` tool — see "Image annotation tool" below. Body is checked against a pre-parse `Content-Length` cap (2× `DEFAULT_MAX_SOURCE_IMAGE_BYTES` → `413`) before it is buffered, the same reasoning as `POST .../ops` above; `image_ingest.py`'s own checks apply the tight per-image bound once the body is decoded. The response is informational only: the annotation is attributed to a dedicated `human-image-ingest` client id (not the caller's `client_id`) so the pasting browser's own SSE subscription receives and applies the embedded result instead of the echo being dropped as a self-authored op. Replacing an existing image annotation another client holds a live edit lease on is rejected the same way (`409`), checked against the posting browser's real `client_id` before the marker substitution above applies. That pre-check only catches a lease that already existed before the (awaited) fetch/optimize step; the authoritative check inside `SessionManager.upsert_image_annotation` itself catches one acquired by another client during that step too, surfaced as the same `409`/`LeaseConflict` — see docs/ANNOTATION_CONTRACT.md's "Operation timing and leases" section. Because that marker is the same string for every human upload, the `429` token bucket here is keyed on the request source (the spoof-resistant key `GET /api/sessions/{id}` already throttles on) rather than on the marker or on the caller-supplied `client_id` — the former would put every user on the server in one bucket, the latter is a browser-held value a caller could rotate to mint fresh budgets. It is a bucket of its own, not the `/ops` one, so the two keyspaces cannot collide. This depends on `TRUSTED_PROXY_HOPS` being set to match the deployment: left at `0` behind a reverse proxy, every request resolves to the proxy's own address and the per-user separation collapses back into one bucket — the same caveat docs/MULTI_USER_SESSIONS_DESIGN.md records for the lookup throttle |
 | GET | `/api/sessions/{id}/stream` | SSE fan-out: presence, applied ops, selection claims, edit leases, and broadcast MCP commands (`{"type": "command", ...}` — every connected client applies these, not just one browser). Query `client_id`, `name`, `since_seq` (op catch-up or full-snapshot fallback). A slow consumer whose queue overflows is sent a fresh full snapshot rather than diverging. EventSource-opened, so it bypasses Basic Auth (protected by the unguessable session id — design §3.9) |
@@ -998,11 +1049,12 @@ can configure one. See `docs/EVENT_SUBSCRIPTIONS.md`.
 | `get_visualization_layout` | Read every node's model-space position, type and status in an open session, plus the current selection (for an agent to compute a new arrangement) |
 | `apply_visualization_layout` | Move nodes in an open session by absolute positions or deltas; applied atomically, animated on the canvas, and mirrored live to all connected browsers |
 | `add_nodes_to_session` | Put a known set of nodes on a session's canvas by id (additive, skips ids the caller may not add) |
-| `create_visualization_session` | Create a new empty session (optional non-unique name; server assigns a default when omitted) |
+| `create_visualization_session` | Create a new empty session (optional non-unique name; server assigns a default when omitted; optional `write_mode`, see Staged sessions) |
+| `set_session_write_mode` | Switch a session `direct` → `staged` (`write_mode_irreversible` the other way) |
 | `list_visualization_sessions` | List existing sessions, most recently updated first |
 | `get_visualization_session` | Inspect one session's resource metadata (incl. node count) |
 | `rename_visualization_session` | Set or clear a session's display name (draws one unit from a rate budget of its own; `rate_limited` when spent) |
-| `delete_visualization_session` | Permanently delete a session — requires `confirm=true` (a confirmed call draws one unit from a rate budget of its own; `rate_limited` when spent) |
+| `delete_visualization_session` | Permanently delete a session — requires `confirm=true` (a confirmed call draws one unit from a rate budget of its own; `rate_limited` when spent). A staged session with staged changes also needs `discard_staged=true` (`layer_not_empty` otherwise) |
 | `list_sticky_notes` | List every sticky note in a session (id/text/x/y/w/h/color/font_size/rotation/z/locked) |
 | `create_sticky_note` | Create a sticky note at a model-space position, or replace one by id (create/upsert) |
 | `update_sticky_note` | Partially update a sticky note's content, style, position, size, rotation, layer order and/or lock state |

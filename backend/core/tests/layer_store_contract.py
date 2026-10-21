@@ -140,6 +140,25 @@ class LayerStoreContract:
         assert reopened.load_layer(A) == []
         assert A not in reopened.layers_in_use()
 
+    def test_retire_requiring_an_empty_layer_refuses_one_with_entries(
+        self, seeded, factory
+    ):
+        seeded.stage(A, [entry("node", "a")])
+        with pytest.raises(ls.LayerNotEmpty) as raised:
+            seeded.retire(A, require_empty=True)
+        assert raised.value.entries == 1
+        reopened = factory()
+        assert reopened.staged_status(A) == ls.STATUS_ACTIVE
+        assert self.keys(reopened.load_layer(A)) == [("node", "a")]
+
+    def test_retire_requiring_an_empty_layer_retires_an_empty_one(
+        self, seeded, factory
+    ):
+        seeded.retire(A, require_empty=True)
+        assert factory().staged_status(A) == ls.STATUS_RETIRED
+        seeded.retire(A, require_empty=True)
+        assert factory().staged_status(A) == ls.STATUS_RETIRED
+
     # -- staging ----------------------------------------------------------------
 
     def test_an_unknown_session_has_an_empty_layer(self, seeded):
