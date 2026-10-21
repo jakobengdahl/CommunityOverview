@@ -25,6 +25,7 @@ vi.mock('reactflow', () => {
       />
       <div
         data-testid="selection"
+        className="nopan"
         onMouseDown={stopBubble}
         onContextMenu={(event) => onSelectionContextMenu?.(event)}
       />
@@ -33,6 +34,7 @@ vi.mock('reactflow', () => {
           <div
             key={node.id}
             data-testid={`node-${node.id}`}
+            className="nopan"
             onMouseDown={stopBubble}
             onContextMenu={(event) => onNodeContextMenu?.(event, node)}
           >
@@ -46,7 +48,7 @@ vi.mock('reactflow', () => {
             key={edge.id}
             data-testid={`edge-${edge.id}`}
             onMouseDown={stopBubble}
-            className={`react-flow__edge${edge.className ? ` ${edge.className}` : ''}`}
+            className={`nopan react-flow__edge${edge.className ? ` ${edge.className}` : ''}`}
             data-animated={String(!!edge.animated)}
             data-stroke={edge.style?.stroke ?? ''}
             data-stroke-width={String(edge.style?.strokeWidth ?? '')}
@@ -103,9 +105,11 @@ const edges = [{ id: 'edge-1', source: 'node-1', target: 'node-2', type: 'RELATE
 
 const rightDown = { button: 2, clientX: 100, clientY: 100 };
 
-function rightGesture(testId, { moveBy = 0, moveByY = 0 } = {}) {
+// A pan can only start on the pane: nodes, edges and the selection box carry
+// `nopan`, so by default the press lands on the pane and the release on `testId`.
+function rightGesture(testId, { moveBy = 0, moveByY = 0, pressOn = 'pane' } = {}) {
   const el = screen.getByTestId(testId);
-  fireEvent.mouseDown(el, rightDown);
+  fireEvent.mouseDown(screen.getByTestId(pressOn), rightDown);
   fireEvent.contextMenu(el, { button: 2, clientX: 100 + moveBy, clientY: 100 + moveByY });
 }
 
@@ -148,9 +152,17 @@ describe('GraphCanvas right-drag pan does not open a context menu', () => {
     expect(menuOpen()).toBe(opens);
   });
 
+  it.each([['node-node-1'], ['edge-edge-1'], ['selection']])(
+    'still opens the menu when a press on a nopan element drifts, since nothing panned (%s)',
+    (testId) => {
+      rightGesture(testId, { moveBy: 40, pressOn: testId });
+      expect(menuOpen()).toBe(true);
+    }
+  );
+
   it('does not let a finished drag suppress the next plain right-click', () => {
     rightGesture('node-node-1', { moveBy: 40 });
-    rightGesture('node-node-1');
+    rightGesture('node-node-1', { pressOn: 'node-node-1' });
     expect(menuOpen()).toBe(true);
   });
 

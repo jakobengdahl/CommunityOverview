@@ -5279,8 +5279,10 @@ function GraphCanvasInner({
           // Capture phase: d3-zoom stops mousedown propagation for button 2, so a
           // bubbling listener would never see the press.
           onMouseDownCapture={(event) => {
+            // Only a press that can start a pan arms the tracker: nodes, edges and
+            // the selection box carry `nopan`, so a right-press there never pans.
             rightDragStart.current =
-              event.button === 2
+              event.button === 2 && !event.target.closest?.('.nopan')
                 ? { x: event.clientX, y: event.clientY, time: Date.now() }
                 : { x: 0, y: 0, time: null };
           }}
