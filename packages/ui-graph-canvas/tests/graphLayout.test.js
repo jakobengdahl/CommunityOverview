@@ -478,6 +478,12 @@ describe('sort by date', () => {
     expect(new Set([...v.values()].map((p) => p.x)).size).toBe(1);
   });
 
+  it('compares date-only and zoneless date-time values on the same clock', () => {
+    expect(parseIsoDate('2025-12-31T20:00')).toBeLessThan(parseIsoDate('2026-01-01'));
+    expect(parseIsoDate('2026-01-01')).toBeLessThan(parseIsoDate('2026-01-01T00:30'));
+    expect(parseIsoDate('2026-01-01T00:30')).toBeLessThan(parseIsoDate('2026-01-01T01:00:00Z'));
+  });
+
   it('spaces nodes evenly with no overlap', () => {
     const nodes = ['2026-01-01', '2026-01-02', '2026-01-03'].map((d, i) => mk(`n${i}`, `N${i}`, d));
     const xs = [...arrangeNodes(nodes, [], 'dateHorizontal', { dateField: 'start_date' }).values()]

@@ -605,8 +605,14 @@ export function parseIsoDate(value) {
   const probe = new Date(Date.UTC(year, month - 1, day));
   if (probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== day) return null;
   if (m[4] !== undefined && (Number(m[4]) > 23 || Number(m[5]) > 59)) return null;
-  const ms = Date.parse(value.trim().replace(' ', 'T'));
-  return Number.isNaN(ms) ? null : ms;
+  const hasZone = /(?:Z|[+-]\d{2}:?\d{2})$/.test(value.trim()) && m[4] !== undefined;
+  if (hasZone) {
+    const ms = Date.parse(value.trim().replace(' ', 'T'));
+    return Number.isNaN(ms) ? null : ms;
+  }
+  // Zoneless values (date-only or date-time) are read on one clock — UTC — because
+  // Date.parse would otherwise read date-only as UTC but date-time as local time.
+  return Date.UTC(year, month - 1, day, Number(m[4] || 0), Number(m[5] || 0), Number(m[6] || 0));
 }
 
 // Node fields are read from the node's `data` (React Flow shape) or the node itself,
