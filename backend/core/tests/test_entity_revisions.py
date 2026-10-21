@@ -264,6 +264,29 @@ def test_the_journal_never_carries_an_expectation(make_storage):
             assert set(op) == {"kind", "action", "entity_id", "payload"}
 
 
+def test_a_plain_create_on_a_single_writer_store_carries_no_expectation(
+    make_storage,
+):
+    # The shared store's refusal of an unseen id is not this store's: here
+    # the instance's own model is the whole graph, and a plain create stays
+    # the fire-and-forget write it always was.
+    storage = make_storage()
+    sent: List[Any] = []
+    persist = storage._persist
+
+    def spy(operations):
+        sent.append(list(operations))
+        return persist(operations)
+
+    storage._persist = spy  # type: ignore[method-assign]
+    storage.add_nodes([_node("a")], [Edge(id="e", source="a", target="a")])
+    storage.add_nodes([_node("b")], [], expect_absent=True)
+
+    plain, expecting = sent
+    assert [op.expect_absent for op in plain] == [False, False]
+    assert [op.expect_absent for op in expecting] == [True]
+
+
 def test_a_backend_declaring_revision_enforcement_must_implement_it():
     class Declares:
         def capabilities(self) -> BackendCapabilities:
@@ -366,6 +389,40 @@ def test_a_create_conflict_never_reports_the_taken_entitys_revision(make_storage
     assert result["error"] == "entity_revision_conflict"
     assert result["current_revision"] is None
     assert str(storage.nodes["taken"].revision) not in result["message"]
+
+
+def test_a_refused_adoption_never_reports_the_taken_entitys_revision(
+    make_storage, monkeypatch
+):
+    # On a shared store the adoption's create can be refused over an id
+    # another instance created; it answers like any other refused create.
+    class _Federation:
+        enabled = True
+
+        def get_cached_node(self, node_id):
+            return Node(
+                id=node_id,
+                type="Actor",
+                name="remote",
+                metadata={"origin_graph_id": "g", "origin_node_id": "r"},
+            )
+
+        def get_graph_config_for_node(self, node_id):
+            return None
+
+    storage = make_storage()
+
+    def refuse(nodes, edges, **kwargs):
+        raise EntityRevisionConflict("node", nodes[0].id, None, 7)
+
+    monkeypatch.setattr(storage, "add_nodes", refuse)
+    result = mutations.adopt_federated_node(
+        storage, _Federation(), DefaultGraphAuthorizationHook(), "federated::g::r"
+    )
+    assert result["error"] == "entity_revision_conflict"
+    assert result["current_revision"] is None
+    assert result["message"].endswith("already exists")
+    assert result["added_node_ids"] == [] and result["added_edge_ids"] == []
 
 
 def test_an_expectation_on_a_node_the_call_does_not_delete_is_refused(make_storage):

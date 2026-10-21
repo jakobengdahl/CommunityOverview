@@ -3033,11 +3033,22 @@ class GraphStorage:
                     undo.vectors[node.id] = None
                 for edge in created_edges:
                     undo.edges[edge.id] = None
+                store_expectations = expectations
+                if self._store_assigns_revisions:
+                    # Everything here was absent from memory, but on a shared
+                    # store another instance may have created the same id in
+                    # a write this one has not applied yet. Unconditioned, the
+                    # upsert would replace that entity unseen; expecting
+                    # absence makes the store refuse it instead.
+                    store_expectations = {
+                        **{("node", node.id): EXPECT_ABSENT for node in created_nodes},
+                        **{("edge", edge.id): EXPECT_ABSENT for edge in created_edges},
+                    }
                 self._commit(
                     [("node", "upsert", node) for node in created_nodes]
                     + [("edge", "upsert", edge) for edge in created_edges],
                     undo,
-                    expectations,
+                    store_expectations,
                 )
 
             def persist_landed() -> None:
@@ -4419,10 +4430,14 @@ class GraphStorage:
             self.edges[edge.id] = edge
             self.graph.add_edge(edge.source, edge.target, key=edge.id, data=edge)
 
+            # On a shared store the create expects absence whatever the
+            # caller asked - see add_nodes.
             self._commit(
                 [("edge", "upsert", edge)],
                 undo,
-                {("edge", edge.id): EXPECT_ABSENT} if expect_absent else None,
+                {("edge", edge.id): EXPECT_ABSENT}
+                if expect_absent or self._store_assigns_revisions
+                else None,
             )
 
             # Emit create event

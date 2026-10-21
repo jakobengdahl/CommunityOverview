@@ -184,6 +184,100 @@ def test_a_create_expecting_absence_is_refused_when_another_instance_has_it(
     assert _stored(schema, "graph_nodes", "dup")["name"] == "first"
 
 
+def test_a_plain_create_over_an_id_another_instance_created_is_refused(
+    instances, schema
+):
+    # The default create (expect_absent=False) from an instance that has not
+    # applied the other's create yet: its own duplicate check passes, and an
+    # unconditioned upsert would replace the stored node unseen.
+    a = instances()
+    behind = instances(deaf=True)
+    a.add_nodes([_node("dup", "first")], [])
+    events = _events(behind)
+
+    with pytest.raises(EntityRevisionConflict) as refused:
+        behind.add_nodes([_node("dup", "second"), _node("fresh")], [])
+    assert (refused.value.kind, refused.value.entity_id) == ("node", "dup")
+    stored = _stored(schema, "graph_nodes", "dup")
+    assert stored["name"] == "first"
+    assert stored["revision"] == a.nodes["dup"].revision
+    # Atomic: the other node in the batch did not land either.
+    assert _stored(schema, "graph_nodes", "fresh") is None
+    assert "dup" not in behind.nodes and "fresh" not in behind.nodes
+    assert events == []
+
+
+def test_a_plain_edge_create_over_an_id_another_instance_created_is_refused(
+    instances, schema
+):
+    a = instances()
+    behind = instances(deaf=True)
+    a.add_nodes([_node("n")], [])
+    behind.load()
+    a.add_nodes([], [Edge(id="e", source="n", target="n", label="first")])
+
+    with pytest.raises(EntityRevisionConflict):
+        behind.add_nodes([], [Edge(id="e", source="n", target="n", label="second")])
+    assert _stored(schema, "graph_edges", "e")["label"] == "first"
+    assert "e" not in behind.edges
+
+
+def test_a_single_edge_create_over_an_id_another_instance_created_is_refused(
+    instances, schema
+):
+    a = instances()
+    behind = instances(deaf=True)
+    a.add_nodes([_node("n")], [])
+    behind.load()
+    a.add_edge(Edge(id="e", source="n", target="n", label="first"))
+
+    with pytest.raises(EntityRevisionConflict):
+        behind.add_edge(Edge(id="e", source="n", target="n", label="second"))
+    assert _stored(schema, "graph_edges", "e")["label"] == "first"
+    assert "e" not in behind.edges
+
+
+def test_a_plain_create_of_an_id_this_instance_holds_is_still_not_raised(
+    instances, schema
+):
+    a = instances()
+    a.add_nodes([_node("dup", "first")], [])
+
+    result = a.add_nodes([_node("dup", "second")], [])
+    assert result.success is False
+    assert "already exists" in result.message
+    assert _stored(schema, "graph_nodes", "dup")["name"] == "first"
+
+
+def test_a_refused_plain_create_answers_as_a_create_conflict_and_quarantines_nothing(
+    instances, schema, monkeypatch
+):
+    from backend.service import attachments
+    from backend.service.service import GraphService
+
+    quarantined = []
+    monkeypatch.setattr(
+        attachments,
+        "quarantine_leftover_attachments",
+        lambda settings, leftovers, landed: quarantined.append(list(landed)),
+    )
+    a = instances()
+    behind = instances(deaf=True)
+    a.add_nodes([_node("dup", "first")], [])
+
+    result = GraphService(behind).add_nodes(
+        nodes=[{"id": "dup", "type": "Actor", "name": "second"}], edges=[]
+    )
+    assert result["success"] is False
+    assert result["conflict"] is True
+    assert result["entity_id"] == "dup"
+    assert result["current_revision"] is None
+    assert result["message"] == "node 'dup' already exists"
+    # The existing node's files stay its own: the refused create never landed.
+    assert all("dup" not in landed for landed in quarantined)
+    assert _stored(schema, "graph_nodes", "dup")["name"] == "first"
+
+
 def test_the_write_token_never_leaves_the_store(instances, schema):
     a = instances()
     b = instances(deaf=True)
