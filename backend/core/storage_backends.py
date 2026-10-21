@@ -990,13 +990,16 @@ class FileGraphPersistenceBackend:
         removals: Sequence[Any] = (),
         *,
         max_entries: Optional[int] = None,
+        expected: Optional[Any] = None,
     ) -> None:
         session_id = _layer.check_session_id(session_id)
         by_key, removed = _layer.check_entries(entries, removals)
         limit = _layer.check_max_entries(max_entries)
+        expectations = _layer.check_expected(expected)
         with self._lock:
             self._begin_layer_write_locked()
             session = self._active_session_locked(session_id)
+            _layer.verify_expected(session_id, session["entries"], expectations)
             updated = dict(session["entries"])
             for key in removed:
                 updated.pop(key, None)

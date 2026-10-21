@@ -329,12 +329,16 @@ class InMemoryGraphPersistenceBackend:
                 raise layer.LayerNotEmpty(session_id, len(session["entries"]))
             self._swap_session(session_id, layer.STATUS_RETIRED, {})
 
-    def stage(self, session_id, entries, removals=(), *, max_entries=None):
+    def stage(
+        self, session_id, entries, removals=(), *, max_entries=None, expected=None
+    ):
         session_id = layer.check_session_id(session_id)
         by_key, removed = layer.check_entries(entries, removals)
         limit = layer.check_max_entries(max_entries)
+        expectations = layer.check_expected(expected)
         with self._lock:
             session = self._active(session_id)
+            layer.verify_expected(session_id, session["entries"], expectations)
             updated = dict(session["entries"])
             for key in removed:
                 updated.pop(key, None)

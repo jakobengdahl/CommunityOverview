@@ -2127,14 +2127,25 @@ class PostgresGraphPersistenceBackend:
         removals: Sequence[Any] = (),
         *,
         max_entries: Optional[int] = None,
+        expected: Optional[Any] = None,
     ) -> None:
         session_id = layer_store.check_session_id(session_id)
         by_key, removed = layer_store.check_entries(entries, removals)
         limit = layer_store.check_max_entries(max_entries)
+        expectations = layer_store.check_expected(expected)
 
         def work(conn):
             conflict_pred, pred_params = self._conflict_scope("graph_layer_entries")
+            # The session's record row, locked, orders this op against every
+            # other op on the session's layer, on any instance; the entries
+            # read after it are the ones this op replaces.
             self._lock_active_session(conn, session_id)
+            if expectations:
+                layer_store.verify_expected(
+                    session_id,
+                    self._layer_entries(conn, session_id, lock=False),
+                    expectations,
+                )
             self._delete_entries(conn, session_id, removed)
             for (kind, entity_id), doc in sorted(by_key.items()):
                 row = conn.execute(

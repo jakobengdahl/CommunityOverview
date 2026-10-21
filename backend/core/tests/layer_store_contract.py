@@ -202,6 +202,55 @@ class LayerStoreContract:
         assert sorted(layer) == [("node", "a"), ("node", "c")]
         assert layer[("node", "a")]["session_seq"] == 2
 
+    def test_an_op_whose_expectations_hold_lands(self, seeded, factory):
+        seeded.stage(A, [entry("node", "a", session_seq=1)])
+        seeded.stage(
+            A,
+            [entry("node", "a", session_seq=2), entry("node", "b", session_seq=2)],
+            expected={("node", "a"): 1, ("node", "b"): None},
+        )
+        layer = {(e["kind"], e["entity_id"]): e for e in factory().load_layer(A)}
+        assert {k: e["session_seq"] for k, e in layer.items()} == {
+            ("node", "a"): 2,
+            ("node", "b"): 2,
+        }
+
+    @pytest.mark.parametrize(
+        "expected",
+        [
+            {("node", "a"): 7},
+            {("node", "a"): None},
+            {("node", "b"): 1},
+        ],
+        ids=["restaged-since", "staged-since", "gone-since"],
+    )
+    def test_an_op_decided_on_a_layer_that_changed_since_lands_nothing(
+        self, seeded, factory, expected
+    ):
+        """Two ops reading the same entry and each writing its own successor
+        would lose the first one's change (§6.2's net change per entity)."""
+        seeded.stage(A, [entry("node", "a", session_seq=1)])
+        before = factory().load_layer(A)
+        with pytest.raises(ls.LayerRaced) as raised:
+            seeded.stage(
+                A,
+                [entry("node", "a", session_seq=9), entry("node", "c")],
+                [("node", "b")],
+                expected=expected,
+            )
+        assert raised.value.key == next(iter(expected))
+        assert factory().load_layer(A) == before
+
+    @pytest.mark.parametrize(
+        "expected", [{("node", "a"): "1"}, {("node", "a"): True}, {("graph", "a"): 1}]
+    )
+    def test_a_malformed_expectation_is_refused_before_anything(
+        self, seeded, factory, expected
+    ):
+        with pytest.raises(ls.InvalidLayerRequest):
+            seeded.stage(A, [entry("node", "a")], expected=expected)
+        assert factory().load_layer(A) == []
+
     def test_removing_an_entry_that_is_not_there_is_not_an_error(self, seeded):
         seeded.stage(A, [], [("node", "zz")])
         assert seeded.load_layer(A) == []

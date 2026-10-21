@@ -138,6 +138,26 @@ class LayerNotEmpty(LayerStoreError):
         )
 
 
+class LayerRaced(LayerStoreError):
+    """A staging op's expectation about the layer failed inside its unit.
+
+    The op read the layer, decided, and expected each entry it changes to
+    be as it read it - the same `session_seq`, or still absent. Another op
+    changed one in between, so applying this one would overwrite that change
+    with a decision made without it. Nothing was applied; the caller reads
+    the layer again and decides again.
+    """
+
+    code = "layer_raced"
+
+    def __init__(self, session_id: str, key: "LayerKey"):
+        self.session_id = session_id
+        self.key = key
+        super().__init__(
+            f"the staged entry for {key[0]} {key[1]!r} changed while the op ran"
+        )
+
+
 class MergeRaced(LayerStoreError):
     """An expectation or check failed inside the merge unit (§11.3).
 
@@ -251,11 +271,14 @@ class LayerStoreBackend(Protocol):
         removals: Sequence[LayerKey] = (),
         *,
         max_entries: Optional[int] = None,
+        expected: Optional[Mapping[LayerKey, Optional[int]]] = None,
     ) -> None:
         """Upsert `entries` and remove `removals`, atomically. Refused with
         StagedSessionNotActive unless the session is active, and with
         LayerFull, applying nothing, when the layer would end up holding more
-        than `max_entries`."""
+        than `max_entries`. `expected` maps keys to the `session_seq` of the
+        entry the caller read, None for one it found absent; any that no
+        longer holds refuses the op with LayerRaced, applying nothing."""
 
     def merge(
         self,
@@ -408,6 +431,33 @@ def check_entries(
     if len(set(removed)) != len(removed) or set(removed) & set(by_key):
         raise InvalidLayerRequest("a key is named twice in one op")
     return by_key, removed
+
+
+def check_expected(expected: Any) -> Dict[LayerKey, Optional[int]]:
+    """A staging op's expectations about the layer, or InvalidLayerRequest."""
+    if expected is None:
+        return {}
+    if not isinstance(expected, Mapping):
+        raise InvalidLayerRequest("expected maps layer keys to session_seq")
+    checked: Dict[LayerKey, Optional[int]] = {}
+    for key, seq in expected.items():
+        if seq is not None and (isinstance(seq, bool) or not isinstance(seq, int)):
+            raise InvalidLayerRequest("an expected session_seq is an integer or None")
+        checked[check_key(key)] = seq
+    return checked
+
+
+def verify_expected(
+    session_id: str,
+    layer: Mapping[LayerKey, Mapping[str, Any]],
+    expected: Mapping[LayerKey, Optional[int]],
+) -> None:
+    """Raise LayerRaced unless every key is as the op read it."""
+    for key, seq in sorted(expected.items()):
+        entry = layer.get(key)
+        held = None if entry is None else entry.get("session_seq")
+        if (entry is None) != (seq is None) or held != seq:
+            raise LayerRaced(session_id, key)
 
 
 def check_max_entries(max_entries: Any) -> Optional[int]:

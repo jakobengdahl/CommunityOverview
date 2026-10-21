@@ -563,14 +563,15 @@ needs next to the graph: each session's **layer** (at most one entry per
 §5.3) and the **records of merges** applied from it. All three backends here
 implement it, and each only when constructed with `staged_sessions=True`;
 without it a backend declares nothing new, reads and writes nothing new, and
-its layer methods raise. Nothing in the application calls the layer store
-yet: write modes, staged writes and merges are later slices of the contract.
+its layer methods raise. Staged writes (`backend/service/staging.py`) and the
+review, merge and discard of staged changes (`backend/service/staged_review.py`,
+`GraphStorage.apply_session_merge`) are what call it.
 
 The operations are `backend.core.layer_store.LayerStoreBackend`:
 
 ```python
 def load_layer(session_id) -> list[dict]
-def stage(session_id, entries, removals=(), *, max_entries=None) -> None
+def stage(session_id, entries, removals=(), *, max_entries=None, expected=None) -> None
 def merge(session_id, merge_id, operations, checks, removals, record) -> MergeResult
 def discard(session_id, removals=None) -> list[tuple[str, str]]
 def load_merge(merge_id) -> dict | None
@@ -598,7 +599,13 @@ def layers_in_use() -> list[str]
   never active again.
 - **`stage` is one unit**: upserts and removals land together, a key named
   twice in one op is refused, and with `max_entries` an op that would leave
-  the layer holding more raises `LayerFull` and applies nothing.
+  the layer holding more raises `LayerFull` and applies nothing. `expected`
+  maps keys to the `session_seq` of the entry the caller read (None: it
+  found none); checked inside the unit, after the session's record is
+  locked, so an op decided on a layer another op has changed since raises
+  `LayerRaced` and applies nothing. A staged write passes it for every key it
+  changes and is decided again on `LayerRaced`, so two writers staging into
+  one session at once, on any instances, never lose each other's change.
 - **`merge` is one unit** (§7, §11.3). `operations` are `EntityOperation`s,
   one per entity, each with its expectation; `checks` are `MergeCheck`s:
   `node_exists(id)` (judged on the state the operations leave),
