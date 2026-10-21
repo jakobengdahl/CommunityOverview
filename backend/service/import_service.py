@@ -224,7 +224,7 @@ def _validate_backup_replace(
                 "success": False,
                 "error_code": "validation_failed",
                 "message": (
-                    f"{len(validation.errors)} problem(s) found in the import "
+                    f"{validation.error_count} problem(s) found in the import "
                     f"document; the graph was not changed."
                 ),
                 "errors": [issue.to_dict() for issue in validation.errors],
