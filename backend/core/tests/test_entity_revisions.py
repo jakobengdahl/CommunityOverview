@@ -281,10 +281,14 @@ def test_a_plain_create_on_a_single_writer_store_carries_no_expectation(
     storage._persist = spy  # type: ignore[method-assign]
     storage.add_nodes([_node("a")], [Edge(id="e", source="a", target="a")])
     storage.add_nodes([_node("b")], [], expect_absent=True)
+    storage.add_edge(Edge(id="f", source="a", target="b"))
+    storage.add_edge(Edge(id="g", source="b", target="a"), expect_absent=True)
 
-    plain, expecting = sent
+    plain, expecting, plain_edge, expecting_edge = sent
     assert [op.expect_absent for op in plain] == [False, False]
     assert [op.expect_absent for op in expecting] == [True]
+    assert [op.expect_absent for op in plain_edge] == [False]
+    assert [op.expect_absent for op in expecting_edge] == [True]
 
 
 def test_a_backend_declaring_revision_enforcement_must_implement_it():
@@ -423,6 +427,22 @@ def test_a_refused_adoption_never_reports_the_taken_entitys_revision(
     assert result["current_revision"] is None
     assert result["message"].endswith("already exists")
     assert result["added_node_ids"] == [] and result["added_edge_ids"] == []
+
+
+def test_a_refused_edge_create_never_reports_the_taken_entitys_revision(
+    make_storage, monkeypatch
+):
+    storage = make_storage()
+    storage.add_nodes([_node("a")], [])
+
+    def refuse(edge, **kwargs):
+        raise EntityRevisionConflict("edge", edge.id, None, 7)
+
+    monkeypatch.setattr(storage, "add_edge", refuse)
+    result = mutations.add_edge(storage, DefaultGraphAuthorizationHook(), "a", "a")
+    assert result["error"] == "entity_revision_conflict"
+    assert result["current_revision"] is None
+    assert result["message"].endswith("already exists")
 
 
 def test_an_expectation_on_a_node_the_call_does_not_delete_is_refused(make_storage):
