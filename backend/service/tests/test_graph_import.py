@@ -237,6 +237,11 @@ class TestReportedIssueCap:
         assert result.to_dict()["error_count"] == 40
         assert len(result.to_dict()["errors"]) == 5
 
+    def test_a_valid_document_reports_no_problems(self):
+        result = graph_import.validate_import_document(_doc([_node("n1")]))
+        assert result.error_count == 0
+        assert result.to_dict()["error_count"] == 0
+
     def test_a_shape_error_reports_its_own_count(self):
         result = graph_import.validate_import_document({"edges": []})
         assert result.error_count == len(result.errors) == 1

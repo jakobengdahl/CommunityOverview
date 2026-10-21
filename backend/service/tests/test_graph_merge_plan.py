@@ -1375,6 +1375,30 @@ class TestUnconfiguredTypeStrings:
         assert peak < 20 * 1024 * 1024
 
 
+class TestEdgesOfAnUnconfiguredNode:
+    @pytest.mark.parametrize("unconfigured_end", ["source", "target"])
+    def test_they_are_rejected_without_a_second_issue_or_a_write(
+        self, storage, unconfigured_end
+    ):
+        ends = ("big", "a1") if unconfigured_end == "source" else ("a1", "big")
+        plan = _plan(
+            storage,
+            [{"id": "big", "type": "NotAConfiguredType", "name": "n"}],
+            [
+                {
+                    "id": f"x{i}",
+                    "source": ends[0],
+                    "target": ends[1],
+                    "type": "RELATES_TO",
+                }
+                for i in range(20)
+            ],
+        )
+        assert plan.report["rejected"]["count"] == 1
+        assert plan.report["adds"]["edges"]["count"] == 0
+        assert not plan.committable
+
+
 class TestDigestOfLongIds:
     def test_a_long_live_id_named_by_many_edges_is_digested_once(self, storage):
         import tracemalloc
