@@ -543,4 +543,61 @@ describe('sort by date', () => {
     expect(findDateFields(nodes)).toEqual(['start_date']);
     expect(findDateFields([nodes[0], nodes[2]])).toEqual([]);
   });
+
+  it('rejects loose or padded-garbage date strings and accepts surrounding whitespace', () => {
+    for (const bad of ['March 3 2026', '2026/10/21', 'x2026-10-21', '2026-10-21T24:00'])
+      expect(parseIsoDate(bad)).toBeNull();
+    expect(parseIsoDate('  2026-10-21 ')).toBe(parseIsoDate('2026-10-21'));
+  });
+
+  it('breaks date ties by name before id, and by id for identical names', () => {
+    const nodes = [
+      mk('1', 'Zed', '2026-01-01'),
+      mk('2', 'Alpha', '2026-01-01'),
+      mk('9', 'Same', '2026-01-01'),
+      mk('8', 'Same', '2026-01-01'),
+    ];
+    const r = arrangeNodes(nodes, [], 'dateHorizontal', { dateField: 'start_date' });
+    expect(order(r, 'x')).toEqual(['2', '8', '9', '1']);
+  });
+
+  it('spaces vertical rows by at least one cell and centres them on the centroid', () => {
+    const nodes = [
+      mk('a', 'A', '2026-01-01'),
+      mk('b', 'B', '2026-01-02'),
+      mk('c', 'C', '2026-01-03'),
+    ].map((n, i) => ({ ...n, position: { x: 40, y: 100 + i * 100 } }));
+    const r = arrangeNodes(nodes, [], 'dateVertical', { dateField: 'start_date' });
+    const ys = ['a', 'b', 'c'].map((id) => r.get(id).y);
+    expect(ys[1] - ys[0]).toBeGreaterThanOrEqual(100);
+    expect(ys[2] - ys[1]).toBeCloseTo(ys[1] - ys[0]);
+    expect(ys[1]).toBeCloseTo(200);
+    expect(r.get('a').x).toBeCloseTo(40);
+  });
+
+  it('spaces horizontal columns by at least one cell', () => {
+    const nodes = [mk('a', 'A', '2026-01-01'), mk('b', 'B', '2026-01-02')];
+    const r = arrangeNodes(nodes, [], 'dateHorizontal', { dateField: 'start_date' });
+    expect(r.get('b').x - r.get('a').x).toBeGreaterThanOrEqual(150);
+  });
+
+  it('reads metadata dates even when name order contradicts date order, and lists them', () => {
+    const nodes = [
+      mk('a', 'A', undefined, { metadata: { due: '2026-02-01' } }),
+      mk('b', 'B', undefined, { metadata: { due: '2026-01-01' } }),
+    ];
+    expect(findDateFields(nodes)).toEqual(['metadata.due']);
+    const r = arrangeNodes(nodes, [], 'dateHorizontal', { dateField: 'metadata.due' });
+    expect(order(r, 'x')).toEqual(['b', 'a']);
+  });
+
+  it('leaves the existing horizontal and vertical modes in input order', () => {
+    const nodes = ['Z', 'A', 'M'].map((name, i) => ({
+      id: `n${i}`,
+      data: { name },
+      position: { x: 0, y: 0 },
+    }));
+    expect(order(arrangeNodes(nodes, [], 'horizontal'), 'x')).toEqual(['n0', 'n1', 'n2']);
+    expect(order(arrangeNodes(nodes, [], 'vertical'), 'y')).toEqual(['n0', 'n1', 'n2']);
+  });
 });
