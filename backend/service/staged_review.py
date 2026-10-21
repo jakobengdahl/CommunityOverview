@@ -188,7 +188,12 @@ class Review:
                 dep = self.entries.get(("node", end))
                 if dep is not None and dep["action"] == "create":
                     deps.add(("node", end))
-        if kind == "node" and entry["action"] == "delete":
+        # A node delete takes its edges' tombstones with it, and so does a
+        # re-create of the node as another type (an update staging `type`):
+        # the old node's edges are gone in the composed view, and some may
+        # not fit the new type.
+        recreated = entry["action"] == "update" and "type" in (entry["staged"] or {})
+        if kind == "node" and (entry["action"] == "delete" or recreated):
             for edge_key, edge_entry in self.entries.items():
                 if edge_key[0] != "edge" or edge_entry["action"] != "delete":
                     continue
@@ -328,16 +333,20 @@ class Review:
         return STATUS_CLEAN
 
     def shown_fields(self, key: LayerKey) -> Dict[str, Dict[str, Any]]:
-        """``field_diff`` as answered: a saved view's annotations sanitised
-        on every side, as every read of a saved view is. Conflicts are judged
-        on the stored values."""
+        """``field_diff`` as answered: a side whose own entity is a saved view
+        has its annotations sanitised, as every read of a saved view does. The
+        type can differ between base, main and what the session staged, so
+        each side is judged by its own. Conflicts are judged on the stored
+        values."""
         fields = self.field_diff(key)
-        # Any side that is a saved view makes every side one to sanitise: the
-        # type can differ between base, main and what the session staged, and
-        # sanitising a non-view's annotations changes nothing it holds.
-        sides = (self.composed(key), self.main[key], self.entries[key].get("base"))
-        if not any((doc or {}).get("type") in _SAVED_VIEW_TYPES for doc in sides):
-            return fields
+        views = {
+            side: (doc or {}).get("type") in _SAVED_VIEW_TYPES
+            for side, doc in (
+                ("base", self.entries[key].get("base")),
+                ("main", self.main[key]),
+                ("staged", self.composed(key)),
+            )
+        }
         for name in _ANNOTATION_FIELDS:
             if name not in fields:
                 continue
@@ -345,7 +354,7 @@ class Review:
             fields[name] = {
                 side: (
                     sanitize_saved_view_metadata({key_name: value})[key_name]
-                    if side != "conflict" and value is not None
+                    if views.get(side) and value is not None
                     else value
                 )
                 for side, value in fields[name].items()
@@ -558,6 +567,7 @@ def _validate_writes(
     edge_upserts: List[SessionMergeWrite],
     node_deletes: List[SessionMergeWrite],
     sent: Dict[str, Set[str]],
+    edge_deletes: List[SessionMergeWrite] = (),
 ) -> None:
     """Refuse a merge whose writes a direct write would refuse (§6.3): the
     model's own limits, nested metadata depth, a saved view's annotations,
@@ -593,6 +603,39 @@ def _validate_writes(
             )
             if annotation_error:
                 raise refuse(write, annotation_error)
+    # A node whose type the merge changes in place keeps the main edges the
+    # merge does not delete: each must still fit the type, as a direct edge
+    # create to it would have to. Counted, not named - some may lie outside
+    # the caller's view.
+    gone = {w.entity_id for w in edge_deletes} | {w.entity_id for w in edge_upserts}
+    for write in node_upserts:
+        main_doc = _main_doc(review.storage, ("node", write.entity_id))
+        if write.expect_absent or main_doc is None:
+            continue
+        if main_doc.get("type") == write.payload.get("type"):
+            continue
+        misfits = 0
+        for edge in review.storage.get_edges_for_node(write.entity_id):
+            if edge.id in gone:
+                continue
+            source = _endpoint_doc(review, planned, edge.source)
+            target = _endpoint_doc(review, planned, edge.target)
+            if (
+                source is None
+                or target is None
+                or edge_applicability_error(
+                    edge.type_str,
+                    Node.from_dict(json_copy(source)),
+                    Node.from_dict(json_copy(target)),
+                )
+            ):
+                misfits += 1
+        if misfits:
+            raise refuse(
+                write,
+                f"{misfits} existing edge(s) would not fit the new type; "
+                "merge or stage their removal with it",
+            )
     for write in edge_upserts:
         for end in (write.payload.get("source"), write.payload.get("target")):
             doc = planned.get(end)
@@ -963,7 +1006,9 @@ def plan_merge(
                 }
             sent[target_id] = keys
 
-    _validate_writes(review, node_upserts, edge_upserts, node_deletes, sent)
+    _validate_writes(
+        review, node_upserts, edge_upserts, node_deletes, sent, edge_deletes
+    )
     writes = node_upserts + edge_deletes + edge_upserts + node_deletes
     if renamed:
         # Which staged edge creates follow a node merged as new was decided

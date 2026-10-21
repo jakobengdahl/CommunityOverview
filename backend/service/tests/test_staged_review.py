@@ -1390,3 +1390,71 @@ def test_the_diff_sanitises_a_side_that_is_a_saved_view_whatever_the_others_are(
     assert item["status"] == "id_taken"
     main = item["fields"]["metadata.annotations"]["main"]
     assert "url" not in (main[0].get("image") or {})
+
+
+# -- review round 10 regressions ----------------------------------------------------------
+
+
+def test_each_side_of_the_diff_is_sanitised_by_its_own_type(world):
+    """A staged Actor's annotations are what the merge would write, shown as
+    they are; main's saved view is read as a saved view."""
+    sid = world.staged_session()
+    _stage(
+        world,
+        sid,
+        (
+            "add_nodes",
+            (
+                [
+                    {
+                        "id": "v",
+                        "type": "Actor",
+                        "name": "A",
+                        "metadata": {"annotations": _REMOTE_IMAGE},
+                    }
+                ],
+                [],
+            ),
+            {},
+        ),
+    )
+    _legacy_view(world)
+    field = _items(world.service.get_staged_changes(sid))[("node", "v")]["fields"][
+        "metadata.annotations"
+    ]
+    assert field["staged"] == _REMOTE_IMAGE
+    assert "url" not in (field["main"][0].get("image") or {})
+
+
+def test_a_node_recreated_as_another_type_takes_its_edges_or_is_refused(world):
+    """A re-create changing a node's type is an update in place: the old
+    node's edge tombstones go with it, and a main edge that would no longer
+    fit the new type refuses the merge."""
+    svc, sid = world.service, world.staged_session()
+    world.storage.add_nodes(
+        [
+            Node(id="i", type="Initiative", name="I"),
+            Node(id="l", type="Legislation", name="L"),
+        ],
+        [Edge(id="il", source="i", target="l", type="IMPLEMENTS")],
+    )
+    _stage(
+        world,
+        sid,
+        ("delete_nodes", (["l"],), {"confirmed": True}),
+        ("add_nodes", ([{"id": "l", "type": "Actor", "name": "L"}], []), {}),
+    )
+    item = _items(svc.get_staged_changes(sid))[("node", "l")]
+    assert {"kind": "edge", "entity_id": "il"} in item["depends_on"]
+    alone = svc.merge_staged_changes(
+        sid, "m0", entries=[{"kind": "node", "entity_id": "l"}]
+    )
+    assert alone["error"] == "merge_incomplete"
+    world.storage.add_edge(Edge(id="il2", source="i", target="l", type="IMPLEMENTS"))
+    refused = svc.merge_staged_changes(sid, "m1")
+    assert refused["error"] == "invalid_merge_request"
+    assert world.storage.get_node("l").type_str == "Legislation"
+    world.storage.delete_edge("il2")
+    assert svc.merge_staged_changes(sid, "m2")["success"] is True
+    assert world.storage.get_node("l").type_str == "Actor"
+    assert "il" not in world.storage.edges
