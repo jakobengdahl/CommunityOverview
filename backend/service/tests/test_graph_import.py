@@ -4,6 +4,8 @@ whole-document validation pass for graph.json import (REPLACE mode). See
 docs/adr/0006-graph-import-replace-mode.md.
 """
 
+import pytest
+
 from backend.service import graph_import
 
 
@@ -220,3 +222,50 @@ class TestSizeLimits:
             )
         )
         assert not result.valid
+
+
+class TestReportedIssueCap:
+    def test_problems_are_counted_but_only_the_first_are_kept(self, monkeypatch):
+        monkeypatch.setattr(graph_import, "MAX_REPORTED_ISSUES", 5)
+        nodes = [_node("n1"), _node("n2")]
+        edges = [_edge(f"e{i}", "n1", "ghost") for i in range(40)]
+        result = graph_import.validate_import_document(_doc(nodes, edges))
+        assert not result.valid
+        assert result.error_count == 40
+        assert [e.location for e in result.errors] == [f"edges[{i}]" for i in range(5)]
+        assert result.nodes == [] and result.edges == []
+        assert result.to_dict()["error_count"] == 40
+        assert len(result.to_dict()["errors"]) == 5
+
+    def test_a_shape_error_reports_its_own_count(self):
+        result = graph_import.validate_import_document({"edges": []})
+        assert result.error_count == len(result.errors) == 1
+
+    def test_the_default_cap_bounds_a_document_of_bad_edges(self):
+        edges = [_edge(f"e{i}", "n1", "ghost") for i in range(3_000)]
+        result = graph_import.validate_import_document(_doc([_node("n1")], edges))
+        assert result.error_count == 3_000
+        assert len(result.errors) == graph_import.MAX_REPORTED_ISSUES
+
+    @pytest.mark.parametrize("unconfigured_end", ["source", "target"])
+    def test_an_unconfigured_node_type_is_reported_once_not_per_edge(
+        self, unconfigured_end
+    ):
+        long_type = "X" * 100_000
+        nodes = [_node("big", long_type), _node("n2", "Initiative")]
+        ends = ("big", "n2") if unconfigured_end == "source" else ("n2", "big")
+        edges = [_edge(f"e{i}", *ends, "IMPLEMENTS") for i in range(200)]
+        result = graph_import.validate_import_document(_doc(nodes, edges))
+        assert result.error_count == 1
+        assert result.errors[0].location == "nodes[0]"
+
+    def test_an_inapplicable_edge_message_is_cut(self, monkeypatch):
+        monkeypatch.setattr(
+            graph_import.config_loader,
+            "relationship_type_allows_node_types",
+            lambda *args, **kwargs: {"allowed": False, "message": "m" * 100_000},
+        )
+        result = graph_import.validate_import_document(
+            _doc([_node("n1"), _node("n2")], [_edge("e1", "n1", "n2")])
+        )
+        assert len(result.errors[0].message) <= 600

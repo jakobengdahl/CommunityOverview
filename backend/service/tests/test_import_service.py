@@ -135,6 +135,27 @@ class TestImportValidationFailure:
         assert store.list_jobs() == []
 
 
+class TestValidationFailureIsCapped:
+    def test_the_message_counts_every_problem_while_the_list_is_capped(
+        self, empty_storage: GraphStorage
+    ):
+        store = InMemoryExecutionStore()
+        nodes = [
+            {"id": f"n{i}", "type": "NotARealType", "name": "x"} for i in range(1_500)
+        ]
+
+        result = import_service.import_graph(
+            empty_storage,
+            DefaultGraphAuthorizationHook(),
+            store,
+            {"nodes": nodes},
+        )
+
+        assert result["error_code"] == "validation_failed"
+        assert result["message"].startswith("1500 problem(s)")
+        assert len(result["errors"]) == 1_000
+
+
 class TestImportRequiresFullGraphAccess:
     def test_narrowed_access_is_refused_without_touching_the_graph(
         self, empty_storage: GraphStorage

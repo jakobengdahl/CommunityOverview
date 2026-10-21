@@ -39,6 +39,11 @@ from backend.core.models import (
 MAX_IMPORT_NODES = 200_000
 MAX_IMPORT_EDGES = 400_000
 
+# Problems reported back in one response. Every problem is counted; only the
+# first ones are kept, since any one blocks the import and a document of
+# hundreds of thousands of bad edges must not build a list that long.
+MAX_REPORTED_ISSUES = 1_000
+
 
 @dataclass(frozen=True)
 class ImportIssue:
@@ -51,13 +56,33 @@ class ImportIssue:
         return {"location": self.location, "message": self.message}
 
 
+class IssueList(list):
+    """Problems found in a document: every one counted in ``total``, only the
+    first ``cap`` kept."""
+
+    def __init__(self, cap: Optional[int] = None) -> None:
+        super().__init__()
+        self.cap = MAX_REPORTED_ISSUES if cap is None else cap
+        self.total = 0
+
+    def append(self, issue: ImportIssue) -> None:  # type: ignore[override]
+        self.total += 1
+        if len(self) < self.cap:
+            super().append(issue)
+
+
 @dataclass
 class ImportValidationResult:
-    """Outcome of validating a whole graph.json-shaped import document."""
+    """Outcome of validating a whole graph.json-shaped import document.
+
+    ``errors`` holds at most ``MAX_REPORTED_ISSUES`` problems; ``error_count``
+    is how many there were in all.
+    """
 
     errors: List[ImportIssue] = field(default_factory=list)
     nodes: List[Node] = field(default_factory=list)
     edges: List[Edge] = field(default_factory=list)
+    error_count: int = 0
 
     @property
     def valid(self) -> bool:
@@ -67,6 +92,7 @@ class ImportValidationResult:
         return {
             "valid": self.valid,
             "errors": [issue.to_dict() for issue in self.errors],
+            "error_count": self.error_count,
             "node_count": len(self.nodes),
             "edge_count": len(self.edges),
         }
@@ -89,7 +115,12 @@ def describe_invalid(exc: Exception) -> str:
 
 
 def _fail(errors: List[ImportIssue]) -> ImportValidationResult:
-    return ImportValidationResult(errors=errors, nodes=[], edges=[])
+    return ImportValidationResult(
+        errors=errors,
+        nodes=[],
+        edges=[],
+        error_count=getattr(errors, "total", len(errors)),
+    )
 
 
 def read_document_lists(
@@ -304,11 +335,16 @@ def validate_import_document(document: Any) -> ImportValidationResult:
     if shape_errors:
         return _fail(shape_errors)
 
-    errors: List[ImportIssue] = []
+    errors = IssueList()
     built_nodes: List[Node] = []
     node_types: Dict[str, Tuple[str, List[str]]] = {}  # id -> (type_str, subtypes)
+    # Nodes whose type is not configured: already reported once, so no edge
+    # judges (and quotes) that caller-supplied string again.
+    unconfigured_ids: set = set()
     for _index, node in build_document_nodes(raw_nodes, errors):
         node_types[node.id] = (node.type_str, list(node.subtypes))
+        if not is_valid_node_type(node.type_str):
+            unconfigured_ids.add(node.id)
         built_nodes.append(node)
 
     seen_edge_ids: Dict[str, int] = {}
@@ -346,8 +382,10 @@ def validate_import_document(document: Any) -> ImportValidationResult:
         if (
             isinstance(source, str)
             and source in node_types
+            and source not in unconfigured_ids
             and isinstance(target, str)
             and target in node_types
+            and target not in unconfigured_ids
         ):
             source_type, source_subtypes = node_types[source]
             target_type, target_subtypes = node_types[target]
@@ -362,9 +400,14 @@ def validate_import_document(document: Any) -> ImportValidationResult:
                 errors.append(
                     ImportIssue(
                         location,
-                        decision.get("message")
-                        or f"relationship type '{edge.type_str}' is not allowed between "
-                        f"'{source_type}' and '{target_type}'",
+                        describe_invalid(
+                            ValueError(
+                                decision.get("message")
+                                or f"relationship type '{edge.type_str}' is not "
+                                f"allowed between '{source_type}' and "
+                                f"'{target_type}'"
+                            )
+                        ),
                     )
                 )
 
