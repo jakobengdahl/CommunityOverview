@@ -98,6 +98,33 @@ class StagingRefused(Exception):
         }
 
 
+_NODE_FIELDS = frozenset(Node.model_fields) | {"revision"}
+
+
+def sent_metadata_keys(updates: Dict[str, Any]) -> set:
+    """The metadata keys an update sends: its `metadata` patch, and every key
+    outside it, which is folded into metadata (as mutations judges a direct
+    update)."""
+    model = {
+        "id",
+        "type",
+        "name",
+        "description",
+        "summary",
+        "tags",
+        "subtypes",
+        "aliases",
+        "metadata",
+        "embedding",
+        "created_at",
+        "updated_at",
+    }
+    sent = {k for k in updates if k not in model}
+    if isinstance(updates.get("metadata"), dict):
+        sent |= set(updates["metadata"])
+    return sent
+
+
 def json_copy(value: Any) -> Any:
     """A deep copy of a JSON value, as layer entries and entity documents are.
 
@@ -725,7 +752,9 @@ class StagedWrite:
         )
         # On the metadata the update changes, however it arrived: a key
         # outside `metadata` is folded into it too.
-        annotation_error = saved_view_write_error(current, updated)
+        annotation_error = saved_view_write_error(
+            current, updated, sent_metadata_keys(updates)
+        )
         if annotation_error:
             return {
                 "success": False,

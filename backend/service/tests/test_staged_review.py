@@ -1231,3 +1231,64 @@ def test_a_key_sent_both_folded_and_in_metadata_is_judged_as_stored(
     )
     assert result["error_code"] == "validation_error"
     assert world.storage.get_node("v").metadata == {}
+
+
+# -- review round 7 regressions -----------------------------------------------------------
+
+
+def _legacy_view(world):
+    world.storage.add_nodes(
+        [
+            Node(
+                id="v",
+                type="SavedView",
+                name="View",
+                metadata={"annotations": _REMOTE_IMAGE},
+            )
+        ],
+        [],
+    )
+
+
+@pytest.mark.parametrize("staged", [False, True])
+def test_re_sending_a_views_unsafe_annotations_is_refused_direct_and_staged(
+    world, staged
+):
+    """The browser re-posts a view's whole metadata; annotations stored
+    before today's rule are refused when sent again, however they travel."""
+    _legacy_view(world)
+    update = {"metadata": {"annotations": _REMOTE_IMAGE, "title": "t2"}}
+    if staged:
+        with bind_session(world.staged_session()):
+            result = world.service.update_node("v", update)
+    else:
+        result = world.service.update_node("v", update)
+    assert result["error_code"] == "validation_error"
+    assert "title" not in world.storage.get_node("v").metadata
+
+
+@pytest.mark.parametrize("staged", [False, True])
+def test_an_annotation_document_given_as_a_list_is_held_to_the_rule(world, staged):
+    """The browser reads a bare list as the document's annotations."""
+    svc = world.service
+    node = {
+        "id": "v1",
+        "type": "SavedView",
+        "name": "V",
+        "metadata": {"annotation_document": _REMOTE_IMAGE},
+    }
+    if staged:
+        sid = world.staged_session()
+        with bind_session(sid):
+            result = svc.add_nodes([node], [])
+    else:
+        result = svc.add_nodes([node], [])
+    assert result["success"] is False
+    assert world.storage.get_node("v1") is None
+
+
+def test_a_list_annotation_document_stored_before_the_rule_is_sanitised_on_read():
+    from backend.core.session_annotations import sanitize_saved_view_metadata
+
+    cleaned = sanitize_saved_view_metadata({"annotation_document": _REMOTE_IMAGE})
+    assert "url" not in (cleaned["annotation_document"][0].get("image") or {})

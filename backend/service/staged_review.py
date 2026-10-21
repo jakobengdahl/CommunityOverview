@@ -525,6 +525,7 @@ def _validate_writes(
     node_upserts: List[SessionMergeWrite],
     edge_upserts: List[SessionMergeWrite],
     node_deletes: List[SessionMergeWrite],
+    sent: Dict[str, Set[str]],
 ) -> None:
     """Refuse a merge whose writes a direct write would refuse (§6.3): the
     model's own limits, nested metadata depth, a saved view's annotations,
@@ -549,13 +550,14 @@ def _validate_writes(
         if depth_error:
             raise refuse(write, depth_error)
         if write.kind == "node":
-            # As a direct write is judged: on what this write brings over the
-            # node main holds now, all of it when it becomes a saved view.
+            # The rule a direct write is judged by, over the node main holds
+            # now: what the session sent counts as sent, changed or not.
             annotation_error = saved_view_write_error(
                 None
                 if write.expect_absent
                 else _main_doc(review.storage, ("node", write.entity_id)),
                 write.payload,
+                sent.get(write.entity_id, ()),
             )
             if annotation_error:
                 raise refuse(write, annotation_error)
@@ -791,6 +793,8 @@ def plan_merge(
     results: List[Dict[str, Any]] = []
     # An edge added since between two nodes the merge deletes is deleted once.
     deleted_here: Set[str] = set()
+    # Per node updated in place: the metadata keys sent to it.
+    sent: Dict[str, Set[str]] = {}
 
     for key in sorted(selected):
         kind, entity_id = key
@@ -914,8 +918,20 @@ def plan_merge(
             kind, "upsert", target_id, doc, staged_by=staged_by, **expectation
         )
         (node_upserts if kind == "node" else edge_upserts).append(write)
+        if kind == "node" and not write.expect_absent:
+            # The metadata keys the session sent this node, and the caller's
+            # manual metadata values: judged as a direct update judges what
+            # it sends, re-sent unchanged or not.
+            keys = set(((entry["staged"] or {}).get("metadata") or {}))
+            if effect == "apply" and choice == MANUAL:
+                keys |= {
+                    f[len(_METADATA_PREFIX) :]
+                    for f in (resolutions.get(key) or {}).get("values") or {}
+                    if f.startswith(_METADATA_PREFIX)
+                }
+            sent[target_id] = keys
 
-    _validate_writes(review, node_upserts, edge_upserts, node_deletes)
+    _validate_writes(review, node_upserts, edge_upserts, node_deletes, sent)
     writes = node_upserts + edge_deletes + edge_upserts + node_deletes
     if renamed:
         # Which staged edge creates follow a node merged as new was decided

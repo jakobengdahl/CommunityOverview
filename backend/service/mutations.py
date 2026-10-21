@@ -19,6 +19,7 @@ from backend.core import (
 from backend.core.models import metadata_depth_error
 from backend.core.session_annotations import (
     saved_view_annotation_error,
+    saved_view_write_error,
 )
 from backend.runtime.authorization import (
     GRAPH_ACTION_MUTATE,
@@ -27,6 +28,7 @@ from backend.runtime.authorization import (
 )
 
 from . import access
+from .staging import sent_metadata_keys
 from .serializers import (
     serialize_add_result,
     serialize_delete_edges_result,
@@ -258,23 +260,6 @@ def add_nodes(
     return access.attach_mutation_attribution(response, event_context)
 
 
-def _saved_view_update_error(
-    after: Dict[str, Any], updates: Dict[str, Any]
-) -> Optional[str]:
-    """Why a direct update of a saved view may not be stored: every metadata
-    key the caller sends - in its `metadata` patch, or outside it, which is
-    folded into metadata - is held to the saved-view rule, judged on the
-    value the update leaves (when a key is sent both ways, the folded one
-    wins). Runs in the storage, under its lock, on the node it replaces."""
-    if after.get("type") not in _SAVED_VIEW_NODE_TYPES:
-        return None
-    sent = {k for k in updates if k not in _NODE_MODEL_FIELDS}
-    if isinstance(updates.get("metadata"), dict):
-        sent |= set(updates["metadata"])
-    stored = after.get("metadata") or {}
-    return saved_view_annotation_error({k: stored[k] for k in sent if k in stored})
-
-
 def update_node(
     storage: "GraphStorage",
     hook: "GraphAuthorizationHook",
@@ -344,7 +329,10 @@ def update_node(
             metadata_merge=metadata_merge,
             expected_updated_at=expected_updated_at,
             expected_revision=expected_revision,
-            validate=lambda before, after: _saved_view_update_error(after, updates),
+            # Under the storage lock, on the node the update replaces.
+            validate=lambda before, after: saved_view_write_error(
+                before, after, sent_metadata_keys(updates)
+            ),
         )
     except _WRITE_ERRORS as e:
         return write_error_result(e)
