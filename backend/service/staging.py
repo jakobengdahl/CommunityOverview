@@ -18,6 +18,7 @@ names the session, and ``composed.ComposedStorage`` is the view it reads.
 from __future__ import annotations
 
 import copy
+import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -211,7 +212,11 @@ class Layer:
         if self.read_all:
             keys |= set(self._loaded)
         return {
-            key: (self._loaded[key].get("session_seq") if key in self._loaded else None)
+            key: (
+                layer_store.entry_version(self._loaded[key])
+                if key in self._loaded
+                else None
+            )
             for key in keys
         }
 
@@ -332,7 +337,12 @@ class StagedWrite:
         staged_entries: List[Dict[str, Any]] = []
 
         def commit(seq: int) -> Dict[str, Any]:
-            stamped = [{**entry, "session_seq": seq} for entry in upserts]
+            # The token names this op's version of each entry on every
+            # instance; seq alone can repeat across instances' documents.
+            token = uuid.uuid4().hex
+            stamped = [
+                {**entry, "session_seq": seq, "stage_token": token} for entry in upserts
+            ]
             staged_entries.extend(stamped)
             store.stage(
                 self.session_id,

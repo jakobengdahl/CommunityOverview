@@ -25,7 +25,11 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Set, Tuple
 
-from backend.core.layer_store import MergeCheck
+from backend.core import Edge, Node
+from backend.core.layer_store import MergeCheck, entry_version
+from backend.core.models import metadata_depth_error
+from backend.core.session_annotations import saved_view_annotation_error
+from backend.core.storage import edge_applicability_error
 from backend.core.storage_merge import SessionMergePlan, SessionMergeWrite
 from backend.runtime.authorization import GraphAccessNarrowing
 
@@ -61,6 +65,8 @@ _NOT_CONTENT = frozenset({"id", "revision", "created_at", "updated_at", "embeddi
 _DELETE_IGNORED = frozenset({"revision", "updated_at", "embedding"})
 
 _METADATA_PREFIX = "metadata."
+
+_SAVED_VIEW_TYPES = frozenset({"SavedView", "VisualizationView"})
 
 
 class ReviewRefused(Exception):
@@ -517,6 +523,72 @@ def requested_keys(selection: Any) -> List[LayerKey]:
     return keys
 
 
+def _validate_writes(
+    review: Review,
+    node_upserts: List[SessionMergeWrite],
+    edge_upserts: List[SessionMergeWrite],
+    node_deletes: List[SessionMergeWrite],
+) -> None:
+    """Refuse a merge whose writes a direct write would refuse (§6.3): the
+    model's own limits, nested metadata depth, a saved view's annotations,
+    and for an edge, endpoints that exist after the merge, lie in the
+    caller's view and fit the relationship type. A manual resolution's values
+    and main's changes since staging reach the graph only through here. An
+    endpoint the caller cannot see is refused exactly as one that does not
+    exist, so the refusal tells nothing about it."""
+    deleted = {w.entity_id for w in node_deletes}
+    planned = {w.entity_id: w.payload for w in node_upserts}
+
+    def refuse(write: SessionMergeWrite, reason: str) -> ReviewRefused:
+        return ReviewRefused(
+            INVALID_MERGE_REQUEST,
+            f"{write.kind} {write.entity_id!r}: {reason}",
+            422,
+        )
+
+    for write in node_upserts + edge_upserts:
+        metadata = write.payload.get("metadata") or {}
+        depth_error = metadata_depth_error(metadata)
+        if depth_error:
+            raise refuse(write, depth_error)
+        if write.kind == "node" and write.payload.get("type") in _SAVED_VIEW_TYPES:
+            annotation_error = saved_view_annotation_error(metadata)
+            if annotation_error:
+                raise refuse(write, annotation_error)
+    for write in edge_upserts:
+        for end in (write.payload.get("source"), write.payload.get("target")):
+            doc = planned.get(end)
+            if doc is None and end not in deleted:
+                doc = _main_doc(review.storage, ("node", end)) if end else None
+            if doc is None or (
+                review.narrowing.enabled and not doc_visible(doc, review.narrowing)
+            ):
+                raise refuse(write, "an endpoint does not exist")
+    for write in node_upserts + edge_upserts:
+        try:
+            entity = (Node if write.kind == "node" else Edge).from_dict(
+                copy.deepcopy(write.payload)
+            )
+        except ValueError as exc:
+            raise refuse(write, str(exc)) from None
+        if write.kind == "edge":
+            error = edge_applicability_error(
+                entity.type_str,
+                Node.from_dict(
+                    copy.deepcopy(_endpoint_doc(review, planned, entity.source))
+                ),
+                Node.from_dict(
+                    copy.deepcopy(_endpoint_doc(review, planned, entity.target))
+                ),
+            )
+            if error:
+                raise refuse(write, error)
+
+
+def _endpoint_doc(review: Review, planned: Dict[str, Any], node_id: str):
+    return planned.get(node_id) or _main_doc(review.storage, ("node", node_id))
+
+
 def normalise_selection(review: Review, selection: Any) -> List[LayerKey]:
     """The keys a request names: ``all`` - every entry in the reader's view -
     or a list of ``{kind, entity_id}``. A key the reader cannot select is
@@ -598,6 +670,11 @@ def normalise_resolutions(
                     "a manual resolution carries values: {field: final value}",
                     422,
                 )
+            # Before anything copies them: nesting past what metadata may
+            # hold is refused here, as a direct write refuses it.
+            depth_error = metadata_depth_error(values)
+            if depth_error:
+                raise ReviewRefused(INVALID_MERGE_REQUEST, depth_error, 422)
         elif values is not None:
             raise ReviewRefused(
                 INVALID_MERGE_REQUEST, "only a manual resolution carries values", 422
@@ -721,9 +798,7 @@ def plan_merge(
             None if status == STATUS_CLEAN else TAKE_SESSION
         )
         staged_by = entry.get("staged_by")
-        checks.append(
-            MergeCheck.entry_unchanged(kind, entity_id, entry.get("session_seq"))
-        )
+        checks.append(MergeCheck.entry_unchanged(kind, entity_id, entry_version(entry)))
         result = {
             "kind": kind,
             "entity_id": entity_id,
@@ -836,6 +911,7 @@ def plan_merge(
         )
         (node_upserts if kind == "node" else edge_upserts).append(write)
 
+    _validate_writes(review, node_upserts, edge_upserts, node_deletes)
     writes = node_upserts + edge_deletes + edge_upserts + node_deletes
     unique_checks = list(dict.fromkeys(checks))
     record = {

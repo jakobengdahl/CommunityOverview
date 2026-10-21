@@ -535,7 +535,9 @@ class GraphService:
                     ]
             if not keys:
                 return []
-            expected = {key: review.entries[key].get("session_seq") for key in keys}
+            expected = {
+                key: layer_store.entry_version(review.entries[key]) for key in keys
+            }
             try:
                 return store.discard(session_id, keys, expected=expected)
             except layer_store.LayerRaced:

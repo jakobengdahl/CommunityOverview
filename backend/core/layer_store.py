@@ -34,6 +34,7 @@ from typing import (
     Protocol,
     Sequence,
     Tuple,
+    Union,
     runtime_checkable,
 )
 
@@ -204,9 +205,9 @@ class MergeCheck:
       edges incident to the node in the store are exactly `edge_ids` - the
       ones the merge deletes with it. An edge added since the diff was read
       fails it.
-    - `entry_unchanged(kind, entity_id, session_seq)`: the layer still holds
-      the entry the decision was made on, as last changed by the op with
-      that session sequence number. A participant restaging the entity
+    - `entry_unchanged(kind, entity_id, version)`: the layer still holds
+      the entry the decision was made on: its `entry_version` is `version`
+      (a string), or, for an int, its `session_seq` is that number. A participant restaging the entity
       between the diff and the merge fails it, so the merge cannot apply the
       older value and drop the newer one.
     """
@@ -215,7 +216,7 @@ class MergeCheck:
     entity_id: str
     kind: str = "node"
     edge_ids: Tuple[str, ...] = ()
-    session_seq: Optional[int] = None
+    session_seq: Optional[Union[int, str]] = None
 
     @classmethod
     def node_exists(cls, node_id: str) -> "MergeCheck":
@@ -227,7 +228,7 @@ class MergeCheck:
 
     @classmethod
     def entry_unchanged(
-        cls, kind: str, entity_id: str, session_seq: Optional[int]
+        cls, kind: str, entity_id: str, session_seq: Optional[Union[int, str]]
     ) -> "MergeCheck":
         return cls("entry_unchanged", entity_id, kind=kind, session_seq=session_seq)
 
@@ -442,17 +443,45 @@ def check_entries(
     return by_key, removed
 
 
-def check_expected(expected: Any) -> Dict[LayerKey, Optional[int]]:
+def entry_version(entry: Mapping[str, Any]) -> str:
+    """What identifies one version of an entry: the token the staging op
+    that wrote it stamped (`stage_token`), unique to that op on every
+    instance. An entry from before tokens falls back to its `session_seq`,
+    which instances with separate session documents may reuse."""
+    token = entry.get("stage_token")
+    if isinstance(token, str) and token:
+        return token
+    return f"seq:{entry.get('session_seq')}"
+
+
+def entry_matches(entry: Optional[Mapping[str, Any]], expected: Any) -> bool:
+    """Whether `entry` is the one an expectation names: None - absent; a
+    string - the entry with that `entry_version`; an int - the entry with
+    that `session_seq`."""
+    if expected is None:
+        return entry is None
+    if entry is None:
+        return False
+    if isinstance(expected, str):
+        return entry_version(entry) == expected
+    return entry.get("session_seq") == expected
+
+
+def check_expected(expected: Any) -> Dict[LayerKey, Any]:
     """A staging op's expectations about the layer, or InvalidLayerRequest."""
     if expected is None:
         return {}
     if not isinstance(expected, Mapping):
-        raise InvalidLayerRequest("expected maps layer keys to session_seq")
-    checked: Dict[LayerKey, Optional[int]] = {}
-    for key, seq in expected.items():
-        if seq is not None and (isinstance(seq, bool) or not isinstance(seq, int)):
-            raise InvalidLayerRequest("an expected session_seq is an integer or None")
-        checked[check_key(key)] = seq
+        raise InvalidLayerRequest("expected maps layer keys to entry versions")
+    checked: Dict[LayerKey, Any] = {}
+    for key, version in expected.items():
+        if version is not None and (
+            isinstance(version, bool) or not isinstance(version, (int, str))
+        ):
+            raise InvalidLayerRequest(
+                "an expected entry version is a string, an integer or None"
+            )
+        checked[check_key(key)] = version
     return checked
 
 
@@ -468,10 +497,8 @@ def verify_expected(
         for key in sorted(layer):
             if key not in expected:
                 raise LayerRaced(session_id, key)
-    for key, seq in sorted(expected.items()):
-        entry = layer.get(key)
-        held = None if entry is None else entry.get("session_seq")
-        if (entry is None) != (seq is None) or held != seq:
+    for key, version in sorted(expected.items()):
+        if not entry_matches(layer.get(key), version):
             raise LayerRaced(session_id, key)
 
 
@@ -575,7 +602,7 @@ def apply_merge_to_model(
         if check.check != "entry_unchanged":
             continue
         entry = layer.get((check.kind, check.entity_id))
-        if entry is None or entry.get("session_seq") != check.session_seq:
+        if not entry_matches(entry, check.session_seq) or entry is None:
             raise MergeRaced(
                 f"the staged entry for {check.kind} {check.entity_id!r} changed"
             )

@@ -2345,7 +2345,9 @@ class PostgresGraphPersistenceBackend:
                     if check.check != "entry_unchanged":
                         continue
                     entry = entries.get((check.kind, check.entity_id))
-                    if entry is None or entry.get("session_seq") != check.session_seq:
+                    if entry is None or not layer_store.entry_matches(
+                        entry, check.session_seq
+                    ):
                         raise layer_store.MergeRaced(
                             f"the staged entry for {check.kind} "
                             f"{check.entity_id!r} changed"

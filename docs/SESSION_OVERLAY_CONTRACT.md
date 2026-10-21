@@ -666,7 +666,9 @@ Reading a layer's diff returns one item per entry:
 A reader the authorization hook narrows sees, selects and discards only the
 entries its view wholly covers - the entity the entry composes to, the main
 entity and the base, and for an edge their endpoints - and whose dependencies
-it covers too, the rule composed reads follow (§8). Any other entry is
+it covers too, the rule composed reads follow (§8). A node delete is also
+outside that view while main holds an edge to the node the reader cannot see,
+since the merge would delete it. Any other entry is
 answered as if it were not staged: nothing of it, not even its number, is
 shown to that reader.
 

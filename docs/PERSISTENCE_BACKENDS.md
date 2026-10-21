@@ -600,8 +600,11 @@ def layers_in_use() -> list[str]
 - **`stage` is one unit**: upserts and removals land together, a key named
   twice in one op is refused, and with `max_entries` an op that would leave
   the layer holding more raises `LayerFull` and applies nothing. `expected`
-  maps keys to the `session_seq` of the entry the caller read (None: it
-  found none); checked inside the unit, after the session's record is
+  maps keys to the version of the entry the caller read
+  (`layer_store.entry_version`: the `stage_token` the op that wrote it
+  stamped, unique on every instance, where `session_seq` alone can repeat
+  across instances' session documents; an int compares `session_seq`; None:
+  it found none); checked inside the unit, after the session's record is
   locked, so an op decided on a layer another op has changed since raises
   `LayerRaced` and applies nothing; with `exact` (the op scanned the whole
   layer), so does any entry `expected` does not name. A staged write passes

@@ -864,3 +864,157 @@ def test_a_node_delete_meeting_an_edge_the_reader_cannot_see_is_out_of_its_view(
     world.hook.narrow = False
     item = _items(svc.get_staged_changes(sid))[("node", "c")]
     assert (item["status"], item["unstaged_edges"]) == ("conflict", ["cr"])
+
+
+# -- review round 2 regressions -----------------------------------------------------------
+
+
+def _recreated_edge_conflicting_on_target(world, sid):
+    """ab staged as deleted and re-created (an update staging its endpoints),
+    while main moved ab to a -> c: its target conflicts."""
+    _stage(
+        world,
+        sid,
+        ("delete_edges", (["ab"],), {"confirmed": True}),
+        (
+            "add_nodes",
+            ([], [{"id": "ab", "source": "a", "target": "b", "type": "RELATES_TO"}]),
+            {},
+        ),
+    )
+    world.storage.delete_edge("ab")
+    world.storage.add_edge(Edge(id="ab", source="a", target="c", type="RELATES_TO"))
+
+
+@pytest.mark.parametrize("target", ["r", "no-such-node"])
+def test_a_manual_value_cannot_point_an_edge_where_the_caller_cannot(world, target):
+    svc, sid = world.service, world.staged_session()
+    _recreated_edge_conflicting_on_target(world, sid)
+    world.hook.narrow = True
+    manual = [
+        {
+            "kind": "edge",
+            "entity_id": "ab",
+            "choice": "manual",
+            "values": {"target": target},
+        }
+    ]
+    result = svc.merge_staged_changes(sid, "m", resolutions=manual)
+    # A hidden node and a missing one get the same answer.
+    assert result["error"] == "invalid_merge_request"
+    assert result["message"] == "edge 'ab': an endpoint does not exist"
+    assert world.storage.edges["ab"].target == "c"
+
+
+def test_a_manual_value_is_validated_like_a_direct_write(world):
+    svc, sid = world.service, world.staged_session()
+    _stage(world, sid, ("update_node", ("a",), {"updates": {"description": "mine"}}))
+    world.storage.update_node("a", {"description": "theirs"})
+    deep = current = {}
+    for _ in range(900):
+        current["k"] = {}
+        current = current["k"]
+    _stage(
+        world,
+        sid,
+        (
+            "update_node",
+            ("b",),
+            {"updates": {"metadata": {"k": 1}}, "metadata_merge": True},
+        ),
+    )
+    world.storage.update_node("b", {"metadata": {"k": 2}}, metadata_merge=True)
+    result = svc.merge_staged_changes(
+        sid,
+        "m",
+        entries=[{"kind": "node", "entity_id": "b"}],
+        resolutions=[
+            {
+                "kind": "node",
+                "entity_id": "b",
+                "choice": "manual",
+                "values": {"metadata.k": deep},
+            }
+        ],
+    )
+    assert result["error"] == "invalid_merge_request"
+    assert world.storage.get_node("b").metadata == {"k": 2}
+
+
+def test_a_restage_by_another_instance_with_the_same_seq_still_races(
+    world, monkeypatch
+):
+    """Instances with separate session documents can stamp the same
+    session_seq; the stage token tells their entries apart."""
+    svc, sid = world.service, world.staged_session()
+    _stage(world, sid, ("update_node", ("a",), {"updates": {"description": "x"}}))
+    store = world.storage.layer_store
+    original = store.discard
+    entry = world.layer(sid)[("node", "a")]
+
+    def other_instance_restages(*args, **kwargs):
+        store.stage(
+            sid,
+            [
+                {
+                    **entry,
+                    "staged": {"description": "y"},
+                    "stage_token": "other-instance",
+                }
+            ],
+        )
+        monkeypatch.setattr(store, "discard", original)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "discard", other_instance_restages)
+    result = svc.discard_staged_changes(sid)
+    # Decided again on the newer entry, which is then discarded knowingly.
+    assert result["removed_entries"] == [["node", "a"]]
+    raced = world.layer(sid)
+    assert raced == {}
+    _stage(world, sid, ("update_node", ("a",), {"updates": {"description": "x"}}))
+    entry = world.layer(sid)[("node", "a")]
+    store.stage(
+        sid,
+        [{**entry, "staged": {"description": "y"}, "stage_token": "other-instance"}],
+    )
+    check_entry = {**entry}
+    from backend.core import layer_store as ls
+
+    assert not ls.entry_matches(
+        world.layer(sid)[("node", "a")], ls.entry_version(check_entry)
+    )
+
+
+def test_a_manual_value_on_a_saved_view_is_held_to_the_annotation_rules(world):
+    svc, sid = world.service, world.staged_session()
+    world.storage.add_nodes(
+        [Node(id="v", type="SavedView", name="View", metadata={"annotations": []})], []
+    )
+    _stage(
+        world,
+        sid,
+        (
+            "update_node",
+            ("v",),
+            {"updates": {"metadata": {"annotations": [{"id": "s"}]}}},
+        ),
+    )
+    world.storage.update_node("v", {"metadata": {"annotations": [{"id": "m"}]}})
+    remote = [
+        {"id": "x", "type": "image", "image": {"url": "https://example.org/a.png"}}
+    ]
+    result = svc.merge_staged_changes(
+        sid,
+        "m",
+        resolutions=[
+            {
+                "kind": "node",
+                "entity_id": "v",
+                "choice": "manual",
+                "values": {"metadata.annotations": remote},
+            }
+        ],
+    )
+    assert result["error"] == "invalid_merge_request"
+    assert world.storage.get_node("v").metadata == {"annotations": [{"id": "m"}]}
