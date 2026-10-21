@@ -1067,6 +1067,33 @@ def saved_view_annotation_error(metadata: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+_SAVED_VIEW_TYPES = frozenset({"SavedView", "VisualizationView"})
+_UNSET = object()
+
+
+def saved_view_write_error(
+    before: Optional[Dict[str, Any]], after: Dict[str, Any]
+) -> Optional[str]:
+    """Why writing node ``after`` over ``before`` (None: a create) may not be
+    persisted, judged on the annotations the write brings.
+
+    A node that becomes a saved view by the write - created as one, or of
+    another type before - is checked on all of its metadata. A saved view
+    updated in place is checked on the metadata keys whose value the write
+    changes, however they arrived (a ``metadata`` patch, or a key folded into
+    metadata), and not on annotations it already held: a view stored before
+    today's rule still takes an unrelated change.
+    """
+    if after.get("type") not in _SAVED_VIEW_TYPES:
+        return None
+    metadata = after.get("metadata") or {}
+    if before is None or before.get("type") not in _SAVED_VIEW_TYPES:
+        return saved_view_annotation_error(metadata)
+    held = before.get("metadata") or {}
+    brought = {k: v for k, v in metadata.items() if held.get(k, _UNSET) != v}
+    return saved_view_annotation_error(brought)
+
+
 def _sanitize_saved_view_annotation(annotation: Dict[str, Any]) -> Dict[str, Any]:
     if annotation_type_of(annotation) == REFERENCE_TYPE:
         # Same defense-in-depth role as the image branch below, for the same

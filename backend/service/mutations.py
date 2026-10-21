@@ -17,7 +17,11 @@ from backend.core import (
     StaleUpdateError,
 )
 from backend.core.models import metadata_depth_error
-from backend.core.session_annotations import saved_view_annotation_error
+from backend.core.storage import build_node_update
+from backend.core.session_annotations import (
+    saved_view_annotation_error,
+    saved_view_write_error,
+)
 from backend.runtime.authorization import (
     GRAPH_ACTION_MUTATE,
     GRAPH_OPERATION_STAGE,
@@ -311,9 +315,16 @@ def update_node(
         return {"success": False, "error": f"Node with ID {node_id} not found"}
 
     if target_node is not None and target_node.type_str in _SAVED_VIEW_NODE_TYPES:
-        candidate_metadata = updates.get("metadata")
-        if isinstance(candidate_metadata, dict):
-            annotation_error = saved_view_annotation_error(candidate_metadata)
+        # Judged on the metadata the update changes, however it arrived: a
+        # key outside `metadata` is folded into it too.
+        try:
+            candidate = build_node_update(
+                target_node.to_dict(), updates, metadata_merge=metadata_merge
+            ).to_dict()
+        except ValueError:
+            candidate = None  # refused by the storage's own validation below
+        if candidate is not None:
+            annotation_error = saved_view_write_error(target_node.to_dict(), candidate)
             if annotation_error:
                 return {
                     "success": False,

@@ -26,7 +26,7 @@ from backend.core import Edge, EntityRevisionConflict, Node, StaleUpdateError
 from backend.core import layer_store
 from backend.core.layer_vectors import LayerVectors
 from backend.core.models import _parse_datetime
-from backend.core.session_annotations import saved_view_annotation_error
+from backend.core.session_annotations import saved_view_write_error
 from backend.core.session_store import is_valid_session_id
 from backend.core.session_manager import (
     LayoutBusy,
@@ -73,7 +73,6 @@ _NODE_RECREATED_FIELDS = ("type",) + _NODE_STAGED_FIELDS
 _EDGE_STAGED_FIELDS = tuple(sorted(EDGE_UPDATE_FIELDS)) + ("archived",)
 _EDGE_RECREATED_FIELDS = ("source", "target") + _EDGE_STAGED_FIELDS
 
-_SAVED_VIEW_NODE_TYPES = frozenset({"SavedView", "VisualizationView"})
 
 SESSION_SEQ_WITHOUT_SESSION = "session_seq_without_session"
 BUSY = "busy"
@@ -711,19 +710,18 @@ class StagedWrite:
                 raise StaleUpdateError(
                     node_id, expected_updated_at, current_node.updated_at
                 )
-        if current.get("type") in _SAVED_VIEW_NODE_TYPES and isinstance(
-            updates.get("metadata"), dict
-        ):
-            annotation_error = saved_view_annotation_error(updates["metadata"])
-            if annotation_error:
-                return {
-                    "success": False,
-                    "error": f"Error validating input: {annotation_error}",
-                    "error_code": "validation_error",
-                }
         updated = _doc(
             build_node_update(current, updates, metadata_merge=metadata_merge)
         )
+        # On the metadata the update changes, however it arrived: a key
+        # outside `metadata` is folded into it too.
+        annotation_error = saved_view_write_error(current, updated)
+        if annotation_error:
+            return {
+                "success": False,
+                "error": f"Error validating input: {annotation_error}",
+                "error_code": "validation_error",
+            }
         self._stage_update(layer, "node", current, updated, _NODE_STAGED_FIELDS)
         committed = self._commit(layer)
         node = serialize_node(_node(layer.node(node_id)))

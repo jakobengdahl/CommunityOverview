@@ -307,7 +307,7 @@ def test_staging_that_always_races_answers_busy(world, monkeypatch):
     monkeypatch.setattr(world.storage.layer_store, "stage", always)
     with bind_session(sid):
         res = world.service.update_node("a", {"description": "x"})
-    assert res["success"] is False and res["error"] != ""
+    assert (res["success"], res["error"]) == (False, "busy")
 
 
 # SV25 / SV29

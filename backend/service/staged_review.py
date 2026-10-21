@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Set, Tupl
 from backend.core import Edge, Node
 from backend.core.layer_store import MergeCheck, entry_version
 from backend.core.models import metadata_depth_error
-from backend.core.session_annotations import saved_view_annotation_error
+from backend.core.session_annotations import saved_view_write_error
 from backend.core.storage import edge_applicability_error
 from backend.core.storage_merge import SessionMergePlan, SessionMergeWrite
 from backend.runtime.authorization import GraphAccessNarrowing
@@ -65,8 +65,6 @@ _NOT_CONTENT = frozenset({"id", "revision", "created_at", "updated_at", "embeddi
 _DELETE_IGNORED = frozenset({"revision", "updated_at", "embedding"})
 
 _METADATA_PREFIX = "metadata."
-
-_SAVED_VIEW_TYPES = frozenset({"SavedView", "VisualizationView"})
 
 
 class ReviewRefused(Exception):
@@ -528,7 +526,6 @@ def _validate_writes(
     node_upserts: List[SessionMergeWrite],
     edge_upserts: List[SessionMergeWrite],
     node_deletes: List[SessionMergeWrite],
-    introduced: Dict[str, Dict[str, Any]],
 ) -> None:
     """Refuse a merge whose writes a direct write would refuse (§6.3): the
     model's own limits, nested metadata depth, a saved view's annotations,
@@ -552,12 +549,14 @@ def _validate_writes(
         depth_error = metadata_depth_error(metadata)
         if depth_error:
             raise refuse(write, depth_error)
-        if write.kind == "node" and write.payload.get("type") in _SAVED_VIEW_TYPES:
-            # A create is checked whole; an update only on the metadata it
-            # brings, as a direct update is, so a view holding annotations
-            # stored before today's rule still takes an unrelated change.
-            annotation_error = saved_view_annotation_error(
-                metadata if write.expect_absent else introduced.get(write.entity_id, {})
+        if write.kind == "node":
+            # As a direct write is judged: on what this write brings over the
+            # node main holds now, all of it when it becomes a saved view.
+            annotation_error = saved_view_write_error(
+                None
+                if write.expect_absent
+                else _main_doc(review.storage, ("node", write.entity_id)),
+                write.payload,
             )
             if annotation_error:
                 raise refuse(write, annotation_error)
@@ -793,8 +792,6 @@ def plan_merge(
     results: List[Dict[str, Any]] = []
     # An edge added since between two nodes the merge deletes is deleted once.
     deleted_here: Set[str] = set()
-    # Per node the merge updates in place: the metadata it brings.
-    introduced: Dict[str, Dict[str, Any]] = {}
 
     for key in sorted(selected):
         kind, entity_id = key
@@ -918,20 +915,8 @@ def plan_merge(
             kind, "upsert", target_id, doc, staged_by=staged_by, **expectation
         )
         (node_upserts if kind == "node" else edge_upserts).append(write)
-        if kind == "node" and not write.expect_absent:
-            # What the merge brings to an existing node, as a direct update
-            # brings its metadata patch: the staged metadata and the caller's
-            # manual metadata values, not what main already held.
-            brought = dict((entry["staged"] or {}).get("metadata") or {})
-            if effect == "apply" and choice == MANUAL:
-                for field, value in (
-                    (resolutions.get(key) or {}).get("values") or {}
-                ).items():
-                    if field.startswith(_METADATA_PREFIX):
-                        brought[field[len(_METADATA_PREFIX) :]] = value
-            introduced[target_id] = brought
 
-    _validate_writes(review, node_upserts, edge_upserts, node_deletes, introduced)
+    _validate_writes(review, node_upserts, edge_upserts, node_deletes)
     writes = node_upserts + edge_deletes + edge_upserts + node_deletes
     if renamed:
         # Which staged edge creates follow a node merged as new was decided

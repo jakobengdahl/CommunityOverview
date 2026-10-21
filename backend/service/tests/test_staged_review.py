@@ -1078,3 +1078,71 @@ def test_an_edge_staged_to_a_node_while_it_is_merged_as_new_fails_the_merge(
     assert result["error"] == "merge_raced"
     assert sorted(world.layer(sid)) == [("edge", "bt"), ("node", "t")]
     assert world.storage.get_node("t").name == "Theirs"
+
+
+# -- review round 4 regressions -----------------------------------------------------------
+
+_REMOTE_IMAGE = [
+    {"id": "x", "type": "image", "image": {"url": "https://example.org/a.png"}}
+]
+
+
+def test_a_manual_value_never_written_cannot_mask_staged_annotations(world):
+    svc, sid = world.service, world.staged_session()
+    world.storage.add_nodes([Node(id="q", type="Actor", name="Q")], [])
+    _stage(
+        world,
+        sid,
+        (
+            "update_node",
+            ("q",),
+            {"updates": {"name": "B", "metadata": {"annotations": _REMOTE_IMAGE}}},
+        ),
+    )
+    world.storage.delete_nodes(["q"], confirmed=True)
+    world.storage.add_nodes([Node(id="q", type="SavedView", name="C")], [])
+    result = svc.merge_staged_changes(
+        sid,
+        "m",
+        resolutions=[
+            {
+                "kind": "node",
+                "entity_id": "q",
+                "choice": "manual",
+                "values": {"name": "B", "metadata.annotations": []},
+            }
+        ],
+    )
+    assert result["error"] == "invalid_merge_request"
+    assert "annotations" not in world.storage.get_node("q").metadata
+
+
+def test_a_node_recreated_as_a_saved_view_is_checked_on_all_its_metadata(world):
+    svc, sid = world.service, world.staged_session()
+    world.storage.add_nodes([Node(id="q", type="Actor", name="Q")], [])
+    _stage(
+        world,
+        sid,
+        ("delete_nodes", (["q"],), {"confirmed": True}),
+        ("add_nodes", ([{"id": "q", "type": "SavedView", "name": "View"}], []), {}),
+    )
+    world.storage.update_node("q", {"metadata": {"annotations": _REMOTE_IMAGE}})
+    result = svc.merge_staged_changes(sid, "m")
+    assert result["error"] == "invalid_merge_request"
+    assert world.storage.get_node("q").type_str == "Actor"
+
+
+@pytest.mark.parametrize("staged", [False, True])
+def test_annotations_passed_outside_metadata_are_checked_on_a_saved_view(world, staged):
+    """A key outside `metadata` is folded into it: it is held to the same
+    annotation rule, direct and staged alike."""
+    svc = world.service
+    world.storage.add_nodes([Node(id="v", type="SavedView", name="View")], [])
+    if staged:
+        with bind_session(world.staged_session()):
+            result = svc.update_node("v", {"annotations": _REMOTE_IMAGE})
+    else:
+        result = svc.update_node("v", {"annotations": _REMOTE_IMAGE})
+    assert result["success"] is False
+    assert result["error_code"] == "validation_error"
+    assert world.storage.get_node("v").metadata == {}
