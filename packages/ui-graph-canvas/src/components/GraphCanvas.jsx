@@ -3185,6 +3185,8 @@ function GraphCanvasInner({
     [setNodes, onNodePositionChange, getFlowNodes, recordMove, activeFocusRootId, endEditing]
   );
 
+  const panOnDrag = freehandActive || eraserActive ? false : isTouchMode ? true : [0, 2];
+
   // A right-drag pans (panOnDrag includes button 2) and the browser still fires
   // `contextmenu` on release. True when the pointer moved beyond the click
   // tolerance since the right button went down; resets the tracker either way.
@@ -5279,10 +5281,11 @@ function GraphCanvasInner({
           // Capture phase: d3-zoom stops mousedown propagation for button 2, so a
           // bubbling listener would never see the press.
           onMouseDownCapture={(event) => {
-            // Only a press that can start a pan arms the tracker: nodes, edges and
-            // the selection box carry `nopan`, so a right-press there never pans.
+            // Only a press that can start a pan arms the tracker: the right
+            // button must be a pan button, and nodes, edges and the selection
+            // box carry `nopan`, so a right-press there never pans.
             rightDragStart.current =
-              event.button === 2 && !event.target.closest?.('.nopan')
+              Array.isArray(panOnDrag) && event.button === 2 && !event.target.closest?.('.nopan')
                 ? { x: event.clientX, y: event.clientY, time: Date.now() }
                 : { x: 0, y: 0, time: null };
           }}
@@ -5343,7 +5346,7 @@ function GraphCanvasInner({
             // abandons as soon as a second one arrives, which leaves pinch to
             // ReactFlow. Marquee selection IS suppressed: it is what swallowed
             // the press before this gesture existed.
-            panOnDrag={freehandActive || eraserActive ? false : isTouchMode ? true : [0, 2]}
+            panOnDrag={panOnDrag}
             selectionOnDrag={
               freehandActive || eraserActive || placementArmed ? false : !isTouchMode
             }

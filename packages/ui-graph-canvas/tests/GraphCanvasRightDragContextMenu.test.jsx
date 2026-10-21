@@ -181,3 +181,11 @@ describe('GraphCanvas right-drag pan does not open a context menu', () => {
     expect(menuOpen()).toBe(true);
   });
 });
+
+describe('GraphCanvas right-drag gate follows what can actually pan', () => {
+  it('does not suppress menus in touch mode, where the right button never pans', () => {
+    render(<GraphCanvas nodes={nodes} edges={edges} touchMode="on" />);
+    rightGesture('node-node-1', { moveBy: 40 });
+    expect(menuOpen()).toBe(true);
+  });
+});
