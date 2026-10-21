@@ -15,6 +15,8 @@ import { getDisplayName, setDisplayName } from '../services/api';
 import { resolveColor } from './FloatingToolbar';
 import NodeTypeStatsDialog from './NodeTypeStatsDialog';
 import MetamodelExplorerDialog from './MetamodelExplorerDialog';
+import MetamodelExplorerBoundary from './MetamodelExplorerBoundary';
+import { getBuildInfo } from '../buildInfo';
 import './SettingsDialog.css';
 
 const MAX_INLINE_TYPES = 5;
@@ -38,6 +40,7 @@ function SettingsDialog({ stats, onExportGraph, onClose }) {
     resetChatPanelToDefault,
     schema,
   } = useGraphStore();
+  const { version, sha } = getBuildInfo();
   const [statsDialogOpen, setStatsDialogOpen] = useState(false);
   const [metamodelExplorerOpen, setMetamodelExplorerOpen] = useState(false);
   const [displayName, setDisplayNameState] = useState(() => getDisplayName() || '');
@@ -240,6 +243,11 @@ function SettingsDialog({ stats, onExportGraph, onClose }) {
             <BoxArrowRight size={14} />
             <span>{t('menu.logout')}</span>
           </button>
+
+          <div className="settings-dialog-version">
+            {t('settings.version')}:{' '}
+            {version ? (sha ? `${version} (${sha})` : version) : t('settings.version_unknown')}
+          </div>
         </div>
       </div>
 
@@ -256,11 +264,13 @@ function SettingsDialog({ stats, onExportGraph, onClose }) {
 
       {metamodelExplorerOpen &&
         createPortal(
-          <MetamodelExplorerDialog
-            schema={schema}
-            stats={stats}
-            onClose={() => setMetamodelExplorerOpen(false)}
-          />,
+          <MetamodelExplorerBoundary onClose={() => setMetamodelExplorerOpen(false)}>
+            <MetamodelExplorerDialog
+              schema={schema}
+              stats={stats}
+              onClose={() => setMetamodelExplorerOpen(false)}
+            />
+          </MetamodelExplorerBoundary>,
           document.body
         )}
     </div>

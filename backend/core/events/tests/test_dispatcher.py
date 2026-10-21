@@ -11,7 +11,7 @@ from backend.core.events.models import (
     EventContext,
     EntityData,
 )
-from backend.core.events.dispatcher import EventDispatcher
+from backend.core.events.dispatcher import EventDispatcher, _copy_payload
 
 
 class MockNode:
@@ -495,6 +495,24 @@ class TestDeepMetadataDelivery:
         assert delivered[0].entity.after["metadata"] == deep
         assert delivered[0].entity.before["metadata"] == deep
 
+    def test_deeply_nested_tuple_metadata_is_delivered_as_tuples(self):
+        storage = MockStorage([create_subscription_node("sub-1", "All")])
+        dispatcher = EventDispatcher(storage)
+        delivered = []
+        dispatcher.set_delivery_callback(lambda e, u: delivered.append(e))
+        deep = ()
+        for _ in range(800):
+            deep = (deep,)
+
+        event = create_event(after={"metadata": {"t": deep, "l": [deep, "x"]}})
+
+        assert dispatcher.dispatch(event) == 1
+        copied = delivered[0].entity.after["metadata"]
+        assert copied["t"] == deep
+        assert type(copied["t"]) is tuple
+        assert type(copied["l"][0]) is tuple
+        assert copied["l"][0] is not deep
+
     def test_a_subscriber_mutating_its_copy_does_not_affect_another(self):
         storage = MockStorage(
             [
@@ -591,3 +609,34 @@ class TestDeepMetadataDelivery:
 
         after = delivered[0].entity.after
         assert list(after) == ["z", "y"] and list(after["z"]) == ["b", "a"]
+
+
+class TestCopyPayloadTuples:
+    def test_tuples_keep_order_type_and_share_nothing_with_the_source(self):
+        source = ((1, 2), [3], {"k": [4]})
+        for root in (source, {"t": source}, [source]):
+            copied = _copy_payload(root)
+            assert copied == root
+            inner = (
+                copied
+                if isinstance(root, tuple)
+                else next(iter(copied.values() if isinstance(copied, dict) else copied))
+            )
+            assert type(inner) is tuple
+            assert inner[1] is not source[1]
+            assert inner[2] is not source[2]
+            assert inner[2]["k"] is not source[2]["k"]
+
+    def test_tuple_copy_does_not_recurse_per_level(self):
+        import sys
+
+        deep = ()
+        for _ in range(800):
+            deep = (deep,)
+        previous = sys.getrecursionlimit()
+        sys.setrecursionlimit(200)
+        try:
+            copied = _copy_payload({"t": deep})
+        finally:
+            sys.setrecursionlimit(previous)
+        assert copied == {"t": deep}

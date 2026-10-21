@@ -437,7 +437,10 @@ def test_wal_switch_gives_up_after_the_busy_timeout(
     monkeypatch.setattr(sqlite_store, "_BUSY_TIMEOUT_MS", 300)
     with pytest.raises(sqlite3.OperationalError, match="locked"):
         SqliteExecutionStore(tmp_path / "execution.db")
-    slack = max(clock.sleeps, default=0) + attempt_cost + 10 * _VirtualClock.TICK
+    # Slack is bounded on its own, not by the observed sleeps: a loop with a fixed
+    # count of long sleeps would otherwise widen its own allowance. One retry
+    # sleep is at most 0.05 s (see the back-off test).
+    slack = 0.05 + attempt_cost + 10 * _VirtualClock.TICK
     assert 0.3 <= clock.now <= 0.3 + slack, (
         f"gave up at {clock.now:.4f}s virtual time, expected 0.3s plus one "
         f"attempt and one sleep ({len(clock.sleeps)} sleeps)"

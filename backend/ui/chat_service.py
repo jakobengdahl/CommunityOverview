@@ -274,17 +274,40 @@ class ChatService:
           - (None, None, True) when short_name is not found — no enforcement applied.
             Not cached so a collection created after first miss is picked up immediately.
           - ("", {}, True) on exception — fail-closed; enforced tools installed, all
-            writes denied. Not cached so transient errors are retried on the next message.
+            node writes denied. Not cached so transient errors are retried on the next
+            message.
+          - ("", {}, False) when the caller may not read collections — fail-closed as
+            above, and no save_collection_response tool, so the assistant cannot
+            write at all. Not cached.
 
         permissions_dict maps node_type → {"create": bool, "update": bool, "delete": bool}.
-        Successful lookups are cached on this instance to avoid repeated 500-node scans.
+        Successful lookups are cached on this instance to avoid repeated 500-node scans;
+        a cached entry is served only to a caller who may read the collection node.
         """
-        if short_name in self._collection_cache:
-            return self._collection_cache[short_name]
         try:
+            cached = self._collection_cache.get(short_name)
+            if cached is not None:
+                # The cache is shared by every caller: serve it only to a caller
+                # who may read the collection node, else resolve again as them.
+                node_id = self._collection_nodes.get(short_name, {}).get("id")
+                if node_id and (
+                    self._graph_service.get_node_details(node_id).get("success")
+                    is not False
+                ):
+                    return cached
             result = self._graph_service.search_graph(
                 query="", node_types=["ActiveKnowledgeCollection"], limit=500
             )
+            if result.get("success") is False:
+                # The caller may not read collections: fail closed with no
+                # writes at all rather than treating it as "not found", which
+                # would drop the collection's write restrictions.
+                logger.warning(
+                    "AKC short_name %r could not be resolved: %s",
+                    short_name,
+                    result.get("error_code") or result.get("error"),
+                )
+                return ("", {}, False)
             nodes = result.get("nodes", [])
             found = False
             for node in nodes:
@@ -825,10 +848,12 @@ class ChatService:
             # Only applied within an active collection session; None means
             # unrestricted, matching the AIAgent model. Read from the identity
             # cache populated by _resolve_collection above.
-            # Note: on the fail-closed path (resolution error → prefix == ""), the
-            # node metadata could not be read, so the allowlist is unavailable and
-            # stays None here. Fail-closed still blocks all writes via the enforced
-            # tool wrappers; it does not additionally restrict read/action tools.
+            # Note: on the fail-closed path (prefix == "") the allowlist is
+            # whatever _resolve_collection last recorded for this short name, or
+            # None. An allowlist only narrows tools. The enforced wrappers block
+            # every node write on that path; save_collection_response is still
+            # installed when the sentinel reports collect_responses (the
+            # exception path), and its write goes through the authorization hook.
             tool_allowlist = None
             if collection_short_name and effective_prefix is not None:
                 tool_allowlist = (

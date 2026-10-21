@@ -39,6 +39,7 @@ from backend.core.session_annotations import (
 
 from .graph_import import (
     ImportIssue,
+    IssueList,
     describe_invalid,
     build_document_edge,
     build_document_nodes,
@@ -424,21 +425,6 @@ class _Listed:
     target: str
 
 
-class _IssueList(list):
-    """Rejected issues: every one counted, only the first ``PLAN_LIST_CAP``
-    kept. Any one blocks the commit and the response lists no more, so a
-    document of millions of invalid entries holds no more than that."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.total = 0
-
-    def append(self, issue: ImportIssue) -> None:  # type: ignore[override]
-        self.total += 1
-        if len(self) < PLAN_LIST_CAP:
-            super().append(issue)
-
-
 def _applicability_names() -> frozenset:
     """Every node type or subtype name some relationship rule mentions."""
     names = set()
@@ -556,7 +542,7 @@ class _Planner:
         self.params = parameters
         self.view = view
         self.generation = generation
-        self.rejected = _IssueList()
+        self.rejected = IssueList(PLAN_LIST_CAP)
         self.conflicts: List[Dict[str, str]] = []
         # (kind, id) -> live revision, or None when the plan relied on absence.
         self.reads: Dict[Tuple[str, str], Optional[int]] = {}

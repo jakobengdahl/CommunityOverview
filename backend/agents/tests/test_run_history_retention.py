@@ -242,6 +242,18 @@ class TestSweep:
         report = sweep(store, policy, now=T0, dry_run=True)
         assert report.redacted == 0
 
+    def test_dry_run_on_a_read_only_sqlite_store_lists_terminal_jobs(self, tmp_path):
+        policy = RetentionPolicy.from_values(redact_after_days=7)
+        writer = _store("sqlite", tmp_path)
+        _run(writer, "old", finished_days_ago=8)
+        writer.close()
+        ro = SqliteExecutionStore(tmp_path / "runs.db", read_only=True)
+        try:
+            report = sweep(ro, policy, now=T0, dry_run=True)
+        finally:
+            ro.close()
+        assert (report.redacted, report.run_history_failed) == (1, False)
+
     def test_redacts_before_purge_and_keeps_accounting(self, store):
         policy = RetentionPolicy.from_values(retention_days=30, redact_after_days=7)
         mid = _run(store, "mid", finished_days_ago=8)

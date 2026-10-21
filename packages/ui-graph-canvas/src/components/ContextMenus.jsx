@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { findDateFields } from '../utils/graphLayout';
 
 /**
  * Presentational context-menu components for GraphCanvas.
@@ -727,6 +728,41 @@ export function MultiNodeContextMenu({
   );
   const incidentEdgesDimmed =
     incidentEdgeIds.length > 0 && incidentEdgeIds.every((id) => dimmedEdgeIds.includes(id));
+  // Sort-by-date needs at least two selected nodes sharing a parseable date field;
+  // otherwise the pair stays visible but disabled, with the reason as its tooltip.
+  // A field choice is offered only when the selection shares more than one.
+  const dateFields = onOrganize ? findDateFields(actionNodes) : [];
+  const dateItems =
+    dateFields.length === 0
+      ? [
+          {
+            key: 'dateHorizontal',
+            label: cml.organizeDateHorizontal,
+            disabled: true,
+            description: cml.organizeDateUnavailable,
+          },
+          {
+            key: 'dateVertical',
+            label: cml.organizeDateVertical,
+            disabled: true,
+            description: cml.organizeDateUnavailable,
+          },
+        ]
+      : dateFields.flatMap((field) => {
+          const suffix = dateFields.length > 1 ? ` (${field.replace(/^metadata\./, '')})` : '';
+          return [
+            {
+              key: `dateHorizontal:${field}`,
+              label: `${cml.organizeDateHorizontal}${suffix}`,
+              onSelect: () => onOrganize('dateHorizontal', { dateField: field }),
+            },
+            {
+              key: `dateVertical:${field}`,
+              label: `${cml.organizeDateVertical}${suffix}`,
+              onSelect: () => onOrganize('dateVertical', { dateField: field }),
+            },
+          ];
+        });
   const organizeItems = onOrganize
     ? [
         { key: 'tidy', label: cml.autoTidy, onSelect: () => onOrganize('tidy') },
@@ -738,6 +774,7 @@ export function MultiNodeContextMenu({
         },
         { key: 'vertical', label: cml.organizeVertical, onSelect: () => onOrganize('vertical') },
         { key: 'tree', label: cml.organizeTree, onSelect: () => onOrganize('tree') },
+        ...dateItems,
       ]
     : [];
   const alignItems = onAlign

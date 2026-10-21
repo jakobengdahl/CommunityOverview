@@ -594,6 +594,54 @@ class TestSubtypeChangeRejudgesLiveIncidentEdges:
         assert not plan.committable
 
 
+class TestIncidentConflictMessage:
+    def test_the_message_names_neither_the_edge_nor_the_node(
+        self, storage, monkeypatch
+    ):
+        storage.add_nodes(
+            [Node(id="hub-node-id-77", type="Actor", name="H", subtypes=["Agency"])],
+            [
+                Edge(
+                    id="stranded-live-edge-id",
+                    source="hub-node-id-77",
+                    target="i1",
+                    type="RELATES_TO",
+                )
+            ],
+        )
+        monkeypatch.setattr(
+            graph_merge_plan.config_loader,
+            "relationship_type_allows_node_types",
+            lambda rel, s, t, ss=None, ts=None: {
+                "allowed": "Person" not in (ss or ()),
+                "message": "persons cannot",
+            },
+        )
+        monkeypatch.setattr(
+            graph_merge_plan, "_applicability_names", lambda: frozenset({"Person"})
+        )
+        plan = _plan(
+            storage,
+            [
+                {
+                    "id": "hub-node-id-77",
+                    "type": "Actor",
+                    "name": "H",
+                    "subtypes": ["Person"],
+                }
+            ],
+            policy=MergePolicy(default="overwrite"),
+        )
+        stranded = [
+            c
+            for c in plan.report["conflicts"]["items"]
+            if c["reason"] == "incident_edge_inapplicable"
+        ]
+        assert [c["id"] for c in stranded] == ["stranded-live-edge-id"]
+        assert "stranded-live-edge-id" not in stranded[0]["message"]
+        assert "hub-node-id-77" not in stranded[0]["message"]
+
+
 class TestRejudgeOncePerEdge:
     def test_an_edge_between_two_overwritten_nodes_is_reported_once(
         self, storage, monkeypatch
@@ -1171,6 +1219,82 @@ class TestSubtypeReduction:
         )
         assert (("Agency",), ()) in seen
 
+    @pytest.mark.parametrize(
+        "case", ["renamed", "skipped-live", "created", "live-neighbour"]
+    )
+    def test_every_endpoint_kind_carries_only_ruled_subtypes(
+        self, storage, monkeypatch, case
+    ):
+        seen = []
+
+        def _spy(rel, s_type, t_type, s_sub=None, t_sub=None):
+            seen.append((tuple(s_sub or ()), tuple(t_sub or ())))
+            return {"allowed": True, "message": ""}
+
+        monkeypatch.setattr(
+            graph_merge_plan.config_loader, "relationship_type_allows_node_types", _spy
+        )
+        monkeypatch.setattr(
+            graph_merge_plan, "_applicability_names", lambda: frozenset({"Agency"})
+        )
+        noisy = ["noise", "Agency"]
+        edge = {"id": "x1", "source": "a1", "target": "i1", "type": "RELATES_TO"}
+        if case == "renamed":
+            nodes = [{"id": "a1", "type": "Actor", "name": "A", "subtypes": noisy}]
+            policy = MergePolicy(default="rename")
+        elif case == "skipped-live":
+            storage.update_node("a1", {"subtypes": noisy})
+            nodes = [{"id": "a1", "type": "Actor", "name": "A"}]
+            policy = MergePolicy(default="skip")
+        elif case == "created":
+            nodes = [{"id": "n9", "type": "Actor", "name": "N", "subtypes": noisy}]
+            edge = {**edge, "source": "n9"}
+            policy = MergePolicy()
+        else:
+            # a1's overwrite re-judges its live edge e1 against i1's live state.
+            storage.update_node("i1", {"subtypes": noisy})
+            nodes = [{"id": "a1", "type": "Actor", "name": "A", "subtypes": ["x"]}]
+            edge = None
+            policy = MergePolicy(default="overwrite")
+        _plan(storage, nodes, [edge] if edge else [], policy=policy)
+        assert any("Agency" in pair[0] + pair[1] for pair in seen)
+        assert all(
+            set(source) <= {"Agency"} and set(target) <= {"Agency"}
+            for source, target in seen
+        )
+
+    def test_a_live_neighbour_is_read_once_however_many_nodes_re_judge_it(
+        self, storage
+    ):
+        class _View(StorageGraphView):
+            reads = 0
+
+            def get_node(self, node_id):
+                if node_id == "i1":
+                    self.reads += 1
+                return super().get_node(node_id)
+
+        storage.add_nodes(
+            [Node(id=f"b{i}", type="Actor", name="B") for i in range(50)],
+            [
+                Edge(id=f"be{i}", source=f"b{i}", target="i1", type="RELATES_TO")
+                for i in range(50)
+            ],
+        )
+        view = _View(storage)
+        compute_merge_plan(
+            {
+                "nodes": [
+                    {"id": f"b{i}", "type": "Actor", "name": "B", "subtypes": ["P"]}
+                    for i in range(50)
+                ],
+                "edges": [],
+            },
+            MergeParameters(policy=MergePolicy(default="overwrite")),
+            view,
+        )
+        assert view.reads == 1
+
     def test_a_live_node_is_read_once_however_many_edges_name_it(self, storage):
         class _View(StorageGraphView):
             reads = 0
@@ -1251,6 +1375,30 @@ class TestUnconfiguredTypeStrings:
         assert peak < 20 * 1024 * 1024
 
 
+class TestEdgesOfAnUnconfiguredNode:
+    @pytest.mark.parametrize("unconfigured_end", ["source", "target"])
+    def test_they_are_rejected_without_a_second_issue_or_a_write(
+        self, storage, unconfigured_end
+    ):
+        ends = ("big", "a1") if unconfigured_end == "source" else ("a1", "big")
+        plan = _plan(
+            storage,
+            [{"id": "big", "type": "NotAConfiguredType", "name": "n"}],
+            [
+                {
+                    "id": f"x{i}",
+                    "source": ends[0],
+                    "target": ends[1],
+                    "type": "RELATES_TO",
+                }
+                for i in range(20)
+            ],
+        )
+        assert plan.report["rejected"]["count"] == 1
+        assert plan.report["adds"]["edges"]["count"] == 0
+        assert not plan.committable
+
+
 class TestDigestOfLongIds:
     def test_a_long_live_id_named_by_many_edges_is_digested_once(self, storage):
         import tracemalloc
@@ -1294,6 +1442,16 @@ class TestDescribeInvalid:
         plan = _plan(storage, [], [bad])
         message = plan.report["rejected"]["items"][0]["message"]
         assert message.startswith("invalid edge: ")
+        assert len(message) <= 520
+
+    def test_an_edge_with_many_bad_fields_gets_a_bounded_message(self, storage):
+        bad = [1] * 5
+        edge = {"id": "x", "source": "a1", "target": "i1"}
+        edge.update({f: bad for f in ("label", "metadata", "archived", "created_at")})
+        edge["revision"] = bad
+        plan = _plan(storage, [], [edge])
+        message = plan.report["rejected"]["items"][0]["message"]
+        assert message.startswith("invalid edge: 5 validation errors")
         assert len(message) <= 520
 
     def test_edges_after_the_issue_cap_are_still_planned(self, storage, monkeypatch):
@@ -1365,6 +1523,51 @@ class TestEntryHash:
         assert graph_merge_plan._entry_hash(
             {"id": "a", "name": "b"}
         ) == graph_merge_plan._entry_hash({"name": "b", "id": "a"})
+
+
+class TestPinnedForms:
+    def test_an_entry_hashes_as_its_compact_sorted_utf8_json(self):
+        import hashlib
+
+        entry = {"s": "é", "a": [1, 2], "n": None}
+        canonical = b'{"a":[1,2],"n":null,"s":"\xc3\xa9"}'
+        assert (
+            graph_merge_plan._entry_hash(entry) == hashlib.sha256(canonical).hexdigest()
+        )
+
+    def test_a_value_json_cannot_encode_hashes_as_its_text(self):
+        import datetime
+
+        assert graph_merge_plan._entry_hash(
+            {"d": datetime.date(2020, 1, 2)}
+        ) == graph_merge_plan._entry_hash({"d": "2020-01-02"})
+
+    def test_the_digest_of_a_fixed_plan_is_pinned(self, storage):
+        # A change to the digest's canonical form must bump DIGEST_VERSION
+        # and update this value: an outstanding preview digest would
+        # otherwise compare equal across two different canonical forms.
+        plan = _plan(
+            storage,
+            [
+                {
+                    "id": "a1",
+                    "type": "Actor",
+                    "name": "Alice 2",
+                    "subtypes": ["Agency"],
+                },
+                {"id": "n9", "type": "Actor", "name": "Nine", "description": "é"},
+            ],
+            [
+                {"id": "x1", "source": "n9", "target": "i1", "type": "BELONGS_TO"},
+                {"id": "e1", "source": "a1", "target": "i1", "type": "BELONGS_TO"},
+            ],
+            policy=MergePolicy(default="overwrite"),
+        )
+        assert plan.committable
+        assert (
+            plan.digest
+            == "sha256:e66774ecf9863db0fba5bb7b462b0e3a3f341b78040d2b2ca08c8afe8675c49d"
+        )
 
 
 class TestDigestOfOneLargeEntry:
