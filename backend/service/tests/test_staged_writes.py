@@ -1544,3 +1544,110 @@ def test_an_edge_main_since_deleted_is_judged_by_its_base_endpoints(world):
         ]
     for answer in answers:
         assert "SECRET" not in json.dumps(answer) and "s3cr3t" not in json.dumps(answer)
+
+
+def _tombstone_then_recreate(world, sid, edge_id, source, target):
+    with bind_session(sid):
+        assert world.service.delete_edges([edge_id], confirmed=True)["success"]
+        r = world.service.add_nodes(
+            [],
+            [{"id": edge_id, "source": source, "target": target, "type": "RELATES_TO"}],
+        )
+        assert r["success"] is True, r
+
+
+def test_a_node_a_staged_update_moved_out_of_view_is_no_longer_shown(world):
+    sid = _narrowed(world)
+    with bind_session(sid):
+        moved = world.service.update_node("v", {"metadata": {"origin_graph_id": "g2"}})
+    assert moved["success"] is True, moved
+    before = world.layer(sid)
+    with bind_session(sid):
+        again = world.service.update_node("v", {"name": "X"})
+    assert again["success"] is False
+    assert world.layer(sid) == before
+
+
+# endpoints; an endpoint main moved out of view hides it.
+@pytest.mark.parametrize("moved", ["v", "w"])
+def test_a_staged_edge_with_an_endpoint_main_moved_out_of_view_is_hidden(world, moved):
+    sid = _narrowed(world)
+    with bind_session(sid):
+        r = world.service.add_nodes(
+            [], [{"id": "new", "source": "v", "target": "w", "type": "RELATES_TO"}]
+        )
+        assert r["success"] is True, r
+    world.storage.update_node(moved, {"metadata": {"origin_graph_id": "g2"}})
+    before = world.layer(sid)
+    with bind_session(sid):
+        answers = [
+            world.service.update_edge("new", {"label": "x"}),
+            world.service.delete_edges(["new"], confirmed=True),
+            world.service.archive_edges(["new"]),
+        ]
+    assert world.layer(sid) == before
+    assert answers[0].get("success") is not True, answers[0]
+
+
+def test_a_staged_created_edge_in_view_can_be_updated(world):
+    sid = _narrowed(world)
+    with bind_session(sid):
+        assert world.service.add_nodes(
+            [], [{"id": "new", "source": "v", "target": "w", "type": "RELATES_TO"}]
+        )["success"]
+        result = world.service.update_edge("new", {"label": "x"})
+    assert result["success"] is True, result
+
+
+# endpoints, either of them, even when the entry's base was in view.
+@pytest.mark.parametrize("hidden_end", ["source", "target"])
+def test_a_re_created_edge_over_a_main_edge_now_ending_outside_the_view_is_hidden(
+    world, hidden_end
+):
+    sid = _narrowed(world)
+    _tombstone_then_recreate(world, sid, "vw", "v", "w")  # base: v-w, all in view
+    world.storage.delete_edges(["vw"])
+    world.storage.add_edge(
+        Edge(
+            id="vw",
+            source="a" if hidden_end == "source" else "v",
+            target="a" if hidden_end == "target" else "w",
+            type="RELATES_TO",
+            metadata={"secret_key": "s3cr3t"},
+        )
+    )
+    before = world.layer(sid)
+    with bind_session(sid):
+        answers = [
+            world.service.update_edge("vw", {"label": "x"}),
+            world.service.delete_edges(["vw"], confirmed=True),
+            world.service.archive_edges(["vw"]),
+        ]
+    assert world.layer(sid) == before
+    for a in answers:
+        assert "s3cr3t" not in json.dumps(a)
+    assert answers[0].get("success") is not True, answers[0]
+
+
+def test_an_unknown_edge_under_narrowing_is_not_found(world):
+    sid = _narrowed(world)
+    with bind_session(sid):
+        r = world.service.update_edge("nope", {"label": "x"})
+        d = world.service.delete_edges(["nope"], confirmed=True)
+    assert r["success"] is False
+    assert world.layer(sid) == {}
+    assert d is not None
+
+
+def test_an_unnarrowed_edge_over_a_base_whose_endpoint_left_main_stays_editable(world):
+    sid = world.staged_session()
+    with bind_session(sid):
+        assert world.service.delete_edges(["ab"], confirmed=True)["success"]
+    world.storage.delete_nodes(["b"], confirmed=True)
+    with bind_session(sid):
+        r = world.service.add_nodes(
+            [], [{"id": "ab", "source": "a", "target": "a", "type": "RELATES_TO"}]
+        )
+        assert r["success"] is True, r
+        result = world.service.update_edge("ab", {"label": "x"})
+    assert result["success"] is True, result
