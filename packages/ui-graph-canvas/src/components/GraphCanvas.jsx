@@ -3185,6 +3185,20 @@ function GraphCanvasInner({
     [setNodes, onNodePositionChange, getFlowNodes, recordMove, activeFocusRootId, endEditing]
   );
 
+  // A right-drag pans (panOnDrag includes button 2) and the browser still fires
+  // `contextmenu` on release. True when the pointer moved beyond the click
+  // tolerance since the right button went down; resets the tracker either way.
+  // Synthetic touch long-press events carry no `type`, so they are never gated.
+  const consumeRightDrag = useCallback((event) => {
+    if (event.type !== 'contextmenu') return false;
+    const start = rightDragStart.current;
+    rightDragStart.current = { x: 0, y: 0, time: null };
+    return (
+      start.time != null &&
+      (Math.abs(event.clientX - start.x) > 5 || Math.abs(event.clientY - start.y) > 5)
+    );
+  }, []);
+
   // Right-click on empty background. A plain right-click opens the annotation
   // creation menu (add note/label/arrow); a right-drag is a pan (panOnDrag
   // includes button 2), so in that case keep the legacy clear-only behaviour.
@@ -3199,11 +3213,7 @@ function GraphCanvasInner({
         closeAllMenus();
         return;
       }
-      const start = rightDragStart.current;
-      const movedFar =
-        start.time != null &&
-        (Math.abs(event.clientX - start.x) > 5 || Math.abs(event.clientY - start.y) > 5);
-      rightDragStart.current = { x: 0, y: 0, time: null };
+      const movedFar = consumeRightDrag(event);
       if (movedFar) {
         closeAllMenus();
         clearSelection();
@@ -3215,7 +3225,7 @@ function GraphCanvasInner({
       const flowPosition = screenToFlowPosition({ x: event.clientX, y: event.clientY });
       setPaneContextMenu({ x: event.clientX, y: event.clientY, flowPosition });
     },
-    [closeAllMenus, clearSelection, screenToFlowPosition, activeFocusRootId]
+    [closeAllMenus, clearSelection, screenToFlowPosition, activeFocusRootId, consumeRightDrag]
   );
 
   // Right-click on the selection box (multi-node selection)
@@ -3223,6 +3233,7 @@ function GraphCanvasInner({
     (event) => {
       event.preventDefault();
       event.stopPropagation();
+      if (consumeRightDrag(event)) return;
 
       if (selectedNodes.length > 0) {
         const graphActionNodes = selectedNodes.filter((n) => !ANNOTATION_TYPES.has(n.type));
@@ -3236,7 +3247,7 @@ function GraphCanvasInner({
         });
       }
     },
-    [selectedNodes]
+    [selectedNodes, consumeRightDrag]
   );
 
   const handleAddGroup = useCallback(() => {
@@ -3335,6 +3346,7 @@ function GraphCanvasInner({
 
       // Annotation overlays render their own context menu (colour/delete).
       if (OVERLAY_TYPES.has(node.type)) return;
+      if (consumeRightDrag(event)) return;
 
       const isNodeSelected = selectedNodes.some((n) => n.id === node.id);
       const hasMultipleSelected = selectedNodes.length > 1;
@@ -3359,7 +3371,7 @@ function GraphCanvasInner({
         });
       }
     },
-    [selectedNodes]
+    [selectedNodes, consumeRightDrag]
   );
 
   // Double-click on node handler
@@ -3384,6 +3396,7 @@ function GraphCanvasInner({
     (event, edge) => {
       event.preventDefault();
       event.stopPropagation();
+      if (consumeRightDrag(event)) return;
       setNodeContextMenu(null);
       setMultiNodeContextMenu(null);
       const isMultiSelected =
@@ -3395,7 +3408,7 @@ function GraphCanvasInner({
         edgeIds: isMultiSelected ? selectedEdges.map((e) => e.id) : [edge.id],
       });
     },
-    [selectedEdges]
+    [selectedEdges, consumeRightDrag]
   );
 
   // Reuses the same context-menu handlers a desktop right-click calls,
@@ -5261,6 +5274,13 @@ function GraphCanvasInner({
 
         <div
           ref={reactFlowWrapper}
+          // Capture phase: nodes and edges stop mousedown propagation, so a
+          // bubbling listener would only ever see presses on the bare pane.
+          onMouseDownCapture={(event) => {
+            if (event.button === 2) {
+              rightDragStart.current = { x: event.clientX, y: event.clientY, time: Date.now() };
+            }
+          }}
           style={{
             width: '100%',
             height: '100%',
@@ -5296,15 +5316,6 @@ function GraphCanvasInner({
             onPaneClick={handlePaneClick}
             onDragOver={onDragOver}
             onDrop={onDrop}
-            onPaneMouseDown={(event) => {
-              if (event.button === 2) {
-                rightDragStart.current = {
-                  x: event.clientX,
-                  y: event.clientY,
-                  time: Date.now(),
-                };
-              }
-            }}
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
             fitView
