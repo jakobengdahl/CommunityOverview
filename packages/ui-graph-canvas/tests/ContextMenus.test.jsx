@@ -25,6 +25,9 @@ const labels = {
   organizeHorizontal: 'List horizontally',
   organizeVertical: 'List vertically',
   organizeTree: 'Arrange as tree',
+  organizeDateHorizontal: 'Sort by date – horizontal',
+  organizeDateVertical: 'Sort by date – vertical',
+  organizeDateUnavailable: 'Select nodes with dates',
   align: 'Align',
   alignLeft: 'Align left',
   alignCenterHorizontal: 'Align horizontal centers',
@@ -623,6 +626,84 @@ describe('MultiNodeContextMenu', () => {
     openOrganize();
     fireEvent.click(screen.getByRole('button', { name: /arrange as tree/i }));
     expect(onOrganize).toHaveBeenNthCalledWith(5, 'tree');
+  });
+
+  it('offers sort-by-date for the shared date field and disables it without two dated nodes', () => {
+    const onOrganize = vi.fn();
+    const dated = [
+      { id: 'a', data: { name: 'A', start_date: '2026-01-01' } },
+      { id: 'b', data: { name: 'B', start_date: '2026-02-01' } },
+    ];
+    const { unmount } = render(
+      <MultiNodeContextMenu
+        menu={{ x: 0, y: 0, nodes: dated }}
+        labels={labels}
+        onOrganize={onOrganize}
+        onClose={vi.fn()}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /^organize$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /sort by date – vertical/i }));
+    expect(onOrganize).toHaveBeenCalledWith('dateVertical', { dateField: 'start_date' });
+    unmount();
+    render(
+      <MultiNodeContextMenu
+        menu={{ x: 0, y: 0, nodes: [dated[0], { id: 'c', data: { name: 'C' } }] }}
+        labels={labels}
+        onOrganize={onOrganize}
+        onClose={vi.fn()}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /^organize$/i }));
+    const btn = screen.getByRole('button', { name: /sort by date – horizontal/i });
+    expect(btn.getAttribute('aria-disabled')).toBe('true');
+    expect(btn.getAttribute('title')).toBe('Select nodes with dates');
+  });
+
+  it('offers one pair per shared date field, labelled without the metadata prefix', () => {
+    const onOrganize = vi.fn();
+    const dated = [
+      { id: 'a', data: { name: 'A', start_date: '2026-01-01', metadata: { due: '2026-03-01' } } },
+      { id: 'b', data: { name: 'B', start_date: '2026-02-01', metadata: { due: '2026-04-01' } } },
+    ];
+    render(
+      <MultiNodeContextMenu
+        menu={{ x: 0, y: 0, nodes: dated }}
+        labels={labels}
+        onOrganize={onOrganize}
+        onClose={vi.fn()}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /^organize$/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by date – horizontal (due)' }));
+    expect(onOrganize).toHaveBeenLastCalledWith('dateHorizontal', { dateField: 'metadata.due' });
+    fireEvent.click(screen.getByRole('button', { name: /^organize$/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by date – vertical (start_date)' }));
+    expect(onOrganize).toHaveBeenLastCalledWith('dateVertical', { dateField: 'start_date' });
+  });
+
+  it('disables both date entries, with the explanation, when fewer than two nodes are dated', () => {
+    render(
+      <MultiNodeContextMenu
+        menu={{
+          x: 0,
+          y: 0,
+          nodes: [
+            { id: 'a', data: { name: 'A' } },
+            { id: 'b', data: { name: 'B' } },
+          ],
+        }}
+        labels={labels}
+        onOrganize={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /^organize$/i }));
+    for (const re of [/sort by date – horizontal/i, /sort by date – vertical/i]) {
+      const btn = screen.getByRole('button', { name: re });
+      expect(btn.getAttribute('aria-disabled')).toBe('true');
+      expect(btn.getAttribute('title')).toBe('Select nodes with dates');
+    }
   });
 
   it('returns focus to the Organize trigger after picking an action, instead of stranding it on <body>', () => {

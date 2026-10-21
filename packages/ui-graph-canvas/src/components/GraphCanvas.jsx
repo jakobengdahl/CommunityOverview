@@ -551,6 +551,9 @@ function GraphCanvasInner({
     organizeHorizontal: 'List horizontally',
     organizeVertical: 'List vertically',
     organizeTree: 'Arrange as tree',
+    organizeDateHorizontal: 'Sort by date – horizontal',
+    organizeDateVertical: 'Sort by date – vertical',
+    organizeDateUnavailable: 'Select two or more nodes with a date value to sort by date',
     organizeHint: 'Organize: A auto-tidy · C cluster · H horizontal · V vertical · T tree',
     align: 'Align',
     alignLeft: 'Align left',
@@ -1876,7 +1879,7 @@ function GraphCanvasInner({
   // Re-arrange the currently selected graph nodes into a chosen structure
   // (cluster / horizontal / vertical / tree), centred on where they already are.
   const organizeSelection = useCallback(
-    (mode) => {
+    (mode, options) => {
       const selIds = new Set(
         selectedNodes.filter((n) => !ANNOTATION_TYPES.has(n.type)).map((n) => n.id)
       );
@@ -1894,7 +1897,7 @@ function GraphCanvasInner({
       const targets = nodes
         .filter((n) => selIds.has(n.id))
         .map((n) => ({ ...n, position: toAbsolute(n) }));
-      const posById = arrangeNodes(targets, edges, mode);
+      const posById = arrangeNodes(targets, edges, mode, options);
       if (posById.size === 0) return;
       // Convert the arranged absolute positions back to the parent-relative form
       // ReactFlow stores for grouped nodes. Compute once and use for both the
