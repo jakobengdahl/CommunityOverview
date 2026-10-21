@@ -686,17 +686,30 @@ def test_a_narrowed_reader_never_sees_an_edge_staged_while_its_endpoint_was_hidd
 
 def test_a_narrowed_export_counts_hidden_layer_entries_as_omitted(world):
     world.hook.narrow = True
-    direct = world.service.export_graph()["export_boundary"]
+    direct = world.service.export_graph()["export_boundary"]["counts"]
     sid = world.staged_session()
     world.hook.narrow = False
     with bind_session(sid):
         world.service.update_node("r", {"description": "staged"})
+        world.service.add_nodes(
+            [{"id": "h", "type": "Actor", "name": "H", "metadata": dict(REMOTE)}], []
+        )
     world.hook.narrow = True
     with bind_session(sid):
-        staged = world.service.export_graph()["export_boundary"]
-    assert {k: v for k, v in staged.items() if "omitted" in k or "total" in k} == {
-        k: v for k, v in direct.items() if "omitted" in k or "total" in k
-    }
+        staged = world.service.export_graph()["export_boundary"]["counts"]
+    assert (direct["omitted_nodes"], direct["omitted_edges"]) == (1, 1)
+    # r and the staged h, both outside the view, are counted as omitted.
+    assert (staged["omitted_nodes"], staged["omitted_edges"]) == (2, 1)
+
+
+def test_a_hidden_edge_entry_lends_no_staged_state(world):
+    sid = world.staged_session()
+    with bind_session(sid):
+        world.service.update_edge("ar", {"label": "x"})
+    composed = world.service.session_gate.compose(
+        sid, GraphAccessNarrowing(enabled=True)
+    )
+    assert composed.state("edge", "ar") == "none"
 
 
 def test_a_hidden_entry_lends_no_staged_state(world):

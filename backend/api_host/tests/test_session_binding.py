@@ -875,7 +875,9 @@ def test_a_staged_sessions_own_canvas_resolves_its_staged_nodes(client):
     added = tools["add_nodes_to_session"](session_id=sid, node_ids=["staged-only"])
     assert added["success"] is True, added
     layout = tools["get_visualization_layout"](session_id=sid)
-    assert [(n["id"], n["type"]) for n in layout["nodes"]] == [("staged-only", "Actor")]
+    assert [(n["id"], n["type"], n["staged_state"]) for n in layout["nodes"]] == [
+        ("staged-only", "Actor", "created")
+    ]
     resolved = client.get(f"/api/sessions/{sid}", params={"resolve": "true"}).json()
     assert [(n["id"], n["staged_state"]) for n in resolved["resolved"]["nodes"]] == [
         ("staged-only", "created")
