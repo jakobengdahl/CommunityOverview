@@ -31,30 +31,45 @@ logger = logging.getLogger(__name__)
 
 
 def _copy_payload(value: Any) -> Any:
-    """Deep-copy nested dicts and lists without recursing once per level.
+    """Deep-copy nested dicts, lists and tuples without recursing once per level.
 
     copy.deepcopy raises RecursionError near 500 levels, while writes accept
-    metadata nested up to MAX_METADATA_DEPTH. Containers are copied with an
-    explicit stack; anything else is a leaf and goes through copy.deepcopy.
+    metadata nested up to MAX_METADATA_DEPTH (tuples count toward it). Containers
+    are copied with an explicit stack; anything else is a leaf and goes through
+    copy.deepcopy. A tuple is filled as a list and frozen afterwards, deepest
+    first, so every tuple is built from already-finished children.
     """
-    if not isinstance(value, (dict, list)):
+    containers = (dict, list, tuple)
+    if not isinstance(value, containers):
         return copy.deepcopy(value)
     root = {} if isinstance(value, dict) else []
     stack = [(value, root)]
+    # (parent, key, filled list) for each tuple, in creation order
+    tuples = []
     while stack:
         source, target = stack.pop()
         items = source.items() if isinstance(source, dict) else enumerate(source)
         for key, item in items:
-            if isinstance(item, (dict, list)):
+            if isinstance(item, containers):
                 child = {} if isinstance(item, dict) else []
                 stack.append((item, child))
+                if isinstance(item, tuple):
+                    tuples.append(
+                        (
+                            target,
+                            key if isinstance(target, dict) else len(target),
+                            child,
+                        )
+                    )
             else:
                 child = copy.deepcopy(item)
             if isinstance(target, dict):
                 target[key] = child
             else:
                 target.append(child)
-    return root
+    for parent, key, filled in reversed(tuples):
+        parent[key] = tuple(filled)
+    return tuple(root) if isinstance(value, tuple) else root
 
 
 def _copy_event(event: Event) -> Event:
