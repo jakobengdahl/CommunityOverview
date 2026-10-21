@@ -3185,6 +3185,24 @@ function GraphCanvasInner({
     [setNodes, onNodePositionChange, getFlowNodes, recordMove, activeFocusRootId, endEditing]
   );
 
+  const panOnDrag = freehandActive || eraserActive ? false : isTouchMode ? true : [0, 2];
+
+  // A right-drag pans (panOnDrag includes button 2) and the browser still fires
+  // `contextmenu` on release. True when the pointer moved beyond the click
+  // tolerance since the right button went down; resets the tracker either way.
+  // Only a real button-2 `contextmenu` is gated: synthetic touch long-press
+  // events carry no `type`, and a Ctrl+click or keyboard menu key reports
+  // another button, so none of them may read a stale right-press position.
+  const consumeRightDrag = useCallback((event) => {
+    if (event.type !== 'contextmenu' || event.button !== 2) return false;
+    const start = rightDragStart.current;
+    rightDragStart.current = { x: 0, y: 0, time: null };
+    return (
+      start.time != null &&
+      (Math.abs(event.clientX - start.x) > 5 || Math.abs(event.clientY - start.y) > 5)
+    );
+  }, []);
+
   // Right-click on empty background. A plain right-click opens the annotation
   // creation menu (add note/label/arrow); a right-drag is a pan (panOnDrag
   // includes button 2), so in that case keep the legacy clear-only behaviour.
@@ -3199,11 +3217,7 @@ function GraphCanvasInner({
         closeAllMenus();
         return;
       }
-      const start = rightDragStart.current;
-      const movedFar =
-        start.time != null &&
-        (Math.abs(event.clientX - start.x) > 5 || Math.abs(event.clientY - start.y) > 5);
-      rightDragStart.current = { x: 0, y: 0, time: null };
+      const movedFar = consumeRightDrag(event);
       if (movedFar) {
         closeAllMenus();
         clearSelection();
@@ -3215,7 +3229,7 @@ function GraphCanvasInner({
       const flowPosition = screenToFlowPosition({ x: event.clientX, y: event.clientY });
       setPaneContextMenu({ x: event.clientX, y: event.clientY, flowPosition });
     },
-    [closeAllMenus, clearSelection, screenToFlowPosition, activeFocusRootId]
+    [closeAllMenus, clearSelection, screenToFlowPosition, activeFocusRootId, consumeRightDrag]
   );
 
   // Right-click on the selection box (multi-node selection)
@@ -3223,6 +3237,7 @@ function GraphCanvasInner({
     (event) => {
       event.preventDefault();
       event.stopPropagation();
+      if (consumeRightDrag(event)) return;
 
       if (selectedNodes.length > 0) {
         const graphActionNodes = selectedNodes.filter((n) => !ANNOTATION_TYPES.has(n.type));
@@ -3236,7 +3251,7 @@ function GraphCanvasInner({
         });
       }
     },
-    [selectedNodes]
+    [selectedNodes, consumeRightDrag]
   );
 
   const handleAddGroup = useCallback(() => {
@@ -3335,6 +3350,7 @@ function GraphCanvasInner({
 
       // Annotation overlays render their own context menu (colour/delete).
       if (OVERLAY_TYPES.has(node.type)) return;
+      if (consumeRightDrag(event)) return;
 
       const isNodeSelected = selectedNodes.some((n) => n.id === node.id);
       const hasMultipleSelected = selectedNodes.length > 1;
@@ -3359,7 +3375,7 @@ function GraphCanvasInner({
         });
       }
     },
-    [selectedNodes]
+    [selectedNodes, consumeRightDrag]
   );
 
   // Double-click on node handler
@@ -3384,6 +3400,7 @@ function GraphCanvasInner({
     (event, edge) => {
       event.preventDefault();
       event.stopPropagation();
+      if (consumeRightDrag(event)) return;
       setNodeContextMenu(null);
       setMultiNodeContextMenu(null);
       const isMultiSelected =
@@ -3395,7 +3412,7 @@ function GraphCanvasInner({
         edgeIds: isMultiSelected ? selectedEdges.map((e) => e.id) : [edge.id],
       });
     },
-    [selectedEdges]
+    [selectedEdges, consumeRightDrag]
   );
 
   // Reuses the same context-menu handlers a desktop right-click calls,
@@ -5261,6 +5278,17 @@ function GraphCanvasInner({
 
         <div
           ref={reactFlowWrapper}
+          // Capture phase: d3-zoom stops mousedown propagation for button 2, so a
+          // bubbling listener would never see the press.
+          onMouseDownCapture={(event) => {
+            // Only a press that can start a pan arms the tracker: the right
+            // button must be a pan button, and nodes, edges and the selection
+            // box carry `nopan`, so a right-press there never pans.
+            rightDragStart.current =
+              Array.isArray(panOnDrag) && event.button === 2 && !event.target.closest?.('.nopan')
+                ? { x: event.clientX, y: event.clientY, time: Date.now() }
+                : { x: 0, y: 0, time: null };
+          }}
           style={{
             width: '100%',
             height: '100%',
@@ -5296,15 +5324,6 @@ function GraphCanvasInner({
             onPaneClick={handlePaneClick}
             onDragOver={onDragOver}
             onDrop={onDrop}
-            onPaneMouseDown={(event) => {
-              if (event.button === 2) {
-                rightDragStart.current = {
-                  x: event.clientX,
-                  y: event.clientY,
-                  time: Date.now(),
-                };
-              }
-            }}
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
             fitView
@@ -5327,7 +5346,7 @@ function GraphCanvasInner({
             // abandons as soon as a second one arrives, which leaves pinch to
             // ReactFlow. Marquee selection IS suppressed: it is what swallowed
             // the press before this gesture existed.
-            panOnDrag={freehandActive || eraserActive ? false : isTouchMode ? true : [0, 2]}
+            panOnDrag={panOnDrag}
             selectionOnDrag={
               freehandActive || eraserActive || placementArmed ? false : !isTouchMode
             }
