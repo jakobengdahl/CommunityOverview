@@ -99,6 +99,21 @@ def write_error_result(exc: Exception, **extra: Any) -> Dict[str, Any]:
     return result
 
 
+def _create_conflict_result(
+    conflict: EntityRevisionConflict, **extra: Any
+) -> Dict[str, Any]:
+    """A refused create: the caller needs only to know the id is taken. The
+    taken entity may be one this caller cannot see - another instance's
+    create on a shared store it has not applied yet - so nothing about it,
+    its revision included, goes back."""
+    return write_error_result(
+        EntityRevisionConflict(conflict.kind, conflict.entity_id, None, None),
+        message=f"{conflict.kind} {conflict.entity_id!r} already exists",
+        current_revision=None,
+        **extra,
+    )
+
+
 # add_nodes/update_node are the only write paths a SavedView's
 # annotation_document/annotations ever go through (there is no dedicated
 # "save view" mutation — the frontend posts a plain node through add_nodes).
@@ -220,16 +235,7 @@ def add_nodes(
             expect_absent=expect_absent,
         )
     except EntityRevisionConflict as e:
-        # A create expecting absence needs only to know the id is taken. The
-        # taken entity may be one this caller cannot see, so nothing about it
-        # - its revision included - goes back.
-        return write_error_result(
-            EntityRevisionConflict(e.kind, e.entity_id, None, None),
-            message=f"{e.kind} {e.entity_id!r} already exists",
-            current_revision=None,
-            added_node_ids=[],
-            added_edge_ids=[],
-        )
+        return _create_conflict_result(e, added_node_ids=[], added_edge_ids=[])
     except _WRITE_ERRORS as e:
         return write_error_result(e, added_node_ids=[], added_edge_ids=[])
     if on_nodes_landed is not None:
@@ -589,6 +595,8 @@ def add_edge(
 
     try:
         edge_id = storage.add_edge(edge, event_context=event_context)
+    except EntityRevisionConflict as e:
+        return _create_conflict_result(e)
     except _WRITE_ERRORS as e:
         return write_error_result(e)
     except ValueError as e:
@@ -1087,6 +1095,8 @@ def adopt_federated_node(
         result = storage.add_nodes(
             nodes_to_add, [lineage_edge], event_context=event_context
         )
+    except EntityRevisionConflict as e:
+        return _create_conflict_result(e, added_node_ids=[], added_edge_ids=[])
     except _WRITE_ERRORS as e:
         return write_error_result(e, added_node_ids=[], added_edge_ids=[])
 

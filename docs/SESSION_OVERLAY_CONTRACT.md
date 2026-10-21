@@ -223,8 +223,11 @@ with or without an expectation, and merges.
   - the revision is the next value of the store's revision counter, a database
     sequence in PostgreSQL;
   - the expectation is checked there, as a condition of the write: an update or
-    delete applies only when the stored revision matches, and a create with
-    `expect_absent` only when no row with that id exists.
+    delete applies only when the stored revision matches, and a create only
+    when no row with that id exists. A create carries `expect_absent` to the
+    store whether or not the caller set it: its id is absent from this
+    instance's model, but another instance may have created it in a write not
+    applied here yet, and the store refuses rather than replace that entity.
 - After the store commits, the instance updates its in-memory model with the
   revision the store returned. Then the event fires, carrying that revision,
   and the call returns.
