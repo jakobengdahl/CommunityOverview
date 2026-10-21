@@ -178,7 +178,13 @@ class GraphService:
         if not decision.allowed:
             # Refused by the read itself, which reads nothing first.
             return run(self._storage)
-        composed = self._session_gate.compose(session_id, decision.graph_access)
+        try:
+            composed = self._session_gate.compose(session_id, decision.graph_access)
+        except Exception as exc:
+            refused = refusal_result(exc, **defaults)
+            if refused is None:
+                raise
+            return refused
         return annotate_staged_state(run(composed), composed)
 
     @property

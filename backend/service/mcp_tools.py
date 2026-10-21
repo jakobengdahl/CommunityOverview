@@ -168,6 +168,13 @@ _COMPOSING_TOOLS = frozenset(
         "show_graph_widget",
     }
 )
+# The refusals a session tool passes on rather than reading the main graph.
+_SESSION_REFUSALS = frozenset(
+    {
+        session_context.SESSION_NOT_FOUND,
+        session_context.STAGED_UNSUPPORTED,
+    }
+)
 # The read tools whose `visualization_session_id` was a push target first.
 _PUSHING_TOOLS = frozenset({"search_graph", "get_related_nodes", "get_saved_view"})
 
@@ -669,6 +676,7 @@ def register_mcp_tools(
         query: str,
         node_types: Optional[List[str]] = None,
         limit: int = 50,
+        visualization_session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Show matching nodes as an interactive graph the user can explore in the
@@ -1471,13 +1479,21 @@ def register_mcp_tools(
         return result
 
     @register_tool
-    def list_saved_views() -> Dict[str, Any]:
+    def list_saved_views(
+        visualization_session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         List all saved views.
 
         Returns a list of all saved view snapshots stored in the graph.
         These are NOT the current visualization - they are saved snapshots
         that can be loaded to restore a specific graph view.
+
+        Args:
+            visualization_session_id: Optional. The session to read in; one
+                that does not exist is refused with session_not_found, and a
+                staged session is read as composed: the graph with the
+                session's staged changes applied.
 
         Returns:
             List of all SavedView nodes with their names and summaries
@@ -1998,14 +2014,16 @@ def register_mcp_tools(
         # into {} below — a narrowing meant for some other target would silently
         # report every node as type/status None rather than erroring.
         with service.reading_in(session_id):
-            semantics = (
-                service.resolve_session_node_semantics(
-                    node_refs,
-                    action=GRAPH_ACTION_READ,
-                    target="get_visualization_layout",
-                ).get("nodes")
-                or {}
+            resolved = service.resolve_session_node_semantics(
+                node_refs,
+                action=GRAPH_ACTION_READ,
+                target="get_visualization_layout",
             )
+        if resolved.get("error") in _SESSION_REFUSALS:
+            # A staged session this instance cannot read is refused, never
+            # laid out from the main graph.
+            return resolved
+        semantics = resolved.get("nodes") or {}
         nodes = []
         for node_id in node_refs:
             pos = positions.get(node_id)
@@ -2019,6 +2037,11 @@ def register_mcp_tools(
                     "dimmed": node_id in dimmed,
                     "type": meaning.get("type"),
                     "status": meaning.get("status"),
+                    **(
+                        {"staged_state": meaning["staged_state"]}
+                        if "staged_state" in meaning
+                        else {}
+                    ),
                 }
             )
         return {

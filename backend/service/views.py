@@ -388,6 +388,12 @@ def export_graph(
 
     source_nodes = storage.get_all_nodes()
     source_edges = storage.get_all_edges()
+    # In a staged session the view leaves out layer entries the narrowing
+    # does not cover; the boundary counts them as omitted, as on the graph.
+    unnarrowed = getattr(storage, "unnarrowed", None)
+    counted = unnarrowed() if unnarrowed is not None else None
+    total_nodes = len(counted.get_all_nodes() if counted else source_nodes)
+    total_edges = len(counted.get_all_edges() if counted else source_edges)
     visible_nodes, visible_edges = access.filter_nodes_and_edges(
         nodes=source_nodes,
         edges=source_edges,
@@ -400,8 +406,8 @@ def export_graph(
         decision=decision,
         visible_nodes=visible_nodes,
         visible_edges=visible_edges,
-        total_nodes=len(source_nodes),
-        total_edges=len(source_edges),
+        total_nodes=total_nodes,
+        total_edges=total_edges,
     )
 
     return {

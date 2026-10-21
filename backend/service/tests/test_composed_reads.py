@@ -504,7 +504,9 @@ def test_session_canvas_resolution_reads_the_sessions_own_composed_view(world):
         resolved = world.service.resolve_session_nodes(["a", "n"])
         semantics = world.service.resolve_session_node_semantics(["n"])
     assert _states(resolved["nodes"]) == {"a": "none", "n": "created"}
-    assert semantics["nodes"] == {"n": {"type": "Actor", "status": None}}
+    assert semantics["nodes"] == {
+        "n": {"type": "Actor", "status": None, "staged_state": "created"}
+    }
     direct = world.manager.create_session("plain").id
     with world.service.reading_in(direct):
         assert _ids(world.service.resolve_session_nodes(["a", "n"])["nodes"]) == ["a"]
@@ -649,3 +651,97 @@ def test_a_narrowed_audit_reports_no_edge_with_a_hidden_endpoint(world):
     world.hook.narrow = False
     violations = world.service.audit_relationship_applicability()["violations"]
     assert [v["edge_id"] for v in violations] == ["ar"]
+
+
+def test_a_narrowed_reader_never_sees_an_edge_staged_while_its_endpoint_was_hidden(
+    world,
+):
+    """ar is staged while r is outside the narrowed view; main then deletes
+    ar and moves r into the view. The orphaned edge composes from a base the
+    reader never could see, and the staged change was made to a hidden edge."""
+    svc = world.service
+    sid = world.staged_session()
+    with bind_session(sid):
+        svc.update_edge("ar", {"label": "staged-secret"})
+    world.storage.delete_edge("ar")
+    world.storage.update_node(
+        "r", {"metadata": {"origin_graph_id": None}}, metadata_merge=True
+    )
+    world.hook.narrow = True
+    with bind_session(sid):
+        details = svc.get_node_details("a")
+        search = svc.search_graph("")
+    assert "ar" not in _ids(details["edges"]) and "ar" not in _ids(search["edges"])
+    world.hook.narrow = False
+    with bind_session(sid):
+        edges = {e["id"]: e for e in svc.get_node_details("a")["edges"]}
+    assert edges["ar"]["staged_state"] == "orphaned"
+
+
+def test_a_narrowed_export_counts_hidden_layer_entries_as_omitted(world):
+    world.hook.narrow = True
+    direct = world.service.export_graph()["export_boundary"]
+    sid = world.staged_session()
+    world.hook.narrow = False
+    with bind_session(sid):
+        world.service.update_node("r", {"description": "staged"})
+    world.hook.narrow = True
+    with bind_session(sid):
+        staged = world.service.export_graph()["export_boundary"]
+    assert {k: v for k, v in staged.items() if "omitted" in k or "total" in k} == {
+        k: v for k, v in direct.items() if "omitted" in k or "total" in k
+    }
+
+
+def test_a_hidden_entry_lends_no_staged_state(world):
+    sid = world.staged_session()
+    with bind_session(sid):
+        world.service.update_node("r", {"description": "staged"})
+    world.hook.narrow = True
+    with bind_session(sid):
+        composed = world.service.session_gate.compose(
+            sid, GraphAccessNarrowing(enabled=True)
+        )
+    assert composed.state("node", "r") == "none"
+
+
+def test_a_session_retired_before_its_layer_is_read_is_refused(world, monkeypatch):
+    sid = world.staged_session()
+    gate = world.service.session_gate
+    original = gate.read_session
+
+    def retire_after_check():
+        found = original()
+        world.write_modes.retire(sid, require_empty=False)
+        return found
+
+    monkeypatch.setattr(gate, "read_session", retire_after_check)
+    with bind_session(sid):
+        result = world.service.search_graph("Alpha")
+    assert result["error"] == "session_not_found" and result["nodes"] == []
+
+
+def test_canvas_resolution_of_a_staged_session_without_its_record_is_refused(
+    world,
+):
+    sid = world.staged_session()
+    # The record is lost while the document still says staged.
+    monkeypatch_status = world.write_modes.staged_status
+    world.write_modes.staged_status = lambda s: (
+        "none" if s == sid else monkeypatch_status(s)
+    )
+    with world.service.reading_in(sid):
+        result = world.service.resolve_session_nodes(["a"])
+    assert result["success"] is False and result["error"] == "session_not_found"
+
+
+def test_a_layout_projection_carries_staged_state(world):
+    sid = world.staged_session()
+    with bind_session(sid):
+        world.service.add_nodes([{"id": "n", "type": "Actor", "name": "New"}], [])
+    with world.service.reading_in(sid):
+        semantics = world.service.resolve_session_node_semantics(["a", "n"])
+    assert {k: v["staged_state"] for k, v in semantics["nodes"].items()} == {
+        "a": "none",
+        "n": "created",
+    }

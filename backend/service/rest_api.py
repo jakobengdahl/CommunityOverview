@@ -651,7 +651,12 @@ _WRITE_ERROR_STATUS = {
 
 # The refusals of a request naming a session it cannot act in (§16.3).
 _SESSION_REFUSALS = frozenset(
-    {"session_not_found", "session_not_supported", "session_mismatch"}
+    {
+        "session_not_found",
+        "session_not_supported",
+        "session_mismatch",
+        "staged_unsupported",
+    }
 )
 
 
@@ -1258,11 +1263,18 @@ def _register_session_endpoints(
         except RateLimited:
             raise HTTPException(status_code=429, detail="rate limit exceeded")
 
-    def _session_payload(session, *, resolve: bool, manager) -> Dict[str, Any]:
+    def _session_payload(
+        session, *, resolve: bool, manager, http_request: Optional[Request] = None
+    ) -> Dict[str, Any]:
         payload = manager.describe(session)
         payload["roster"] = manager.roster(session.id)
         if resolve:
-            with service.reading_in(session.id):
+            authorization = (
+                use_request_authorization(headers=http_request.headers)
+                if http_request is not None
+                else use_request_authorization()
+            )
+            with authorization, service.reading_in(session.id):
                 resolved = service.resolve_session_nodes(
                     session.state.get("node_refs", [])
                 )
@@ -1312,7 +1324,12 @@ def _register_session_endpoints(
         session = session_manager.get_session(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="session not found")
-        return _session_payload(session, resolve=resolve, manager=session_manager)
+        return _session_payload(
+            session,
+            resolve=resolve,
+            manager=session_manager,
+            http_request=http_request,
+        )
 
     @router.patch("/sessions/{session_id}")
     async def rename_session(

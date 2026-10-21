@@ -1052,11 +1052,18 @@ class SessionGate:
         return session_id if self._mode(session_id) == WRITE_MODE_STAGED else None
 
     def is_staged(self, session_id: str) -> bool:
-        """Whether ``session_id`` names an active staged session."""
-        if self._manager is None or not self._manager.write_modes.supports_staged:
+        """Whether ``session_id`` names a staged session: one with a
+        staged-session record, active or retired, or one whose document says
+        staged. A read bound to it composes, or is refused as ``_mode``
+        refuses it - never answered from the main graph alone (I2)."""
+        if self._manager is None:
             return False
-        status = self._manager.write_modes.staged_status(session_id)
-        return status == layer_store.STATUS_ACTIVE
+        if self._manager.write_modes.supports_staged:
+            status = self._manager.write_modes.staged_status(session_id)
+            if status != layer_store.STATUS_NONE:
+                return True
+        session = self._manager.get_session(session_id)
+        return session is not None and session.write_mode == WRITE_MODE_STAGED
 
     def compose(
         self,
@@ -1069,9 +1076,18 @@ class SessionGate:
         from .composed import ComposedStorage
 
         store = self._manager.write_modes.layer_store
+        entries = store.load_layer(session_id)
+        # A layer reads as empty for a session that is not (or no longer)
+        # staged: one retired since read_session is refused, not answered
+        # from the main graph.
+        if (
+            self._manager.write_modes.staged_status(session_id)
+            != layer_store.STATUS_ACTIVE
+        ):
+            raise session_context.not_found(session_id)
         return ComposedStorage(
             self._storage,
-            store.load_layer(session_id),
+            entries,
             session_id=session_id,
             graph_access=graph_access,
             layer_vectors=self.layer_vectors,

@@ -281,6 +281,7 @@ class ComposedStorage:
         layer_vectors: Optional["LayerVectors"] = None,
     ):
         self._main = storage
+        self._entries = entries
         self.session_id = session_id
         self.layer_vectors = layer_vectors
         narrowing = graph_access or GraphAccessNarrowing()
@@ -302,42 +303,50 @@ class ComposedStorage:
             main_node = storage.get_node(node_id)
             main_doc = None if main_node is None else _doc(main_node)
             doc = compose(entry, main_doc)
-            self._states[("node", node_id)] = _state(entry, main_doc)
             if doc is not None and narrowing.enabled:
                 snapshots = (doc, main_doc, entry.get("base"))
                 if not all(visible(s) for s in snapshots if s is not None):
                     doc = None
+            if doc is not None:
+                # Only for what the reader is shown: a state is itself news
+                # of an entry.
+                self._states[("node", node_id)] = _state(entry, main_doc)
             over_nodes[node_id] = None if doc is None else Node.from_dict(doc)
         self._over_nodes = over_nodes
         self.nodes = _OverlayMap(storage.nodes, over_nodes)
 
-        def main_node_visible(node_id: Any) -> bool:
-            return visible(
-                None
-                if not isinstance(node_id, str) or storage.get_node(node_id) is None
-                else _doc(storage.get_node(node_id))
-            )
+        def endpoint_shown(node_id: Any, since: Optional[int]) -> bool:
+            """Whether a main edge's or a base's endpoint is in the reader's
+            view, and was when the base was taken. Neither the main edge nor
+            the base keeps a copy of its endpoints, so one main no longer
+            holds counts as hidden, and so does one written after the base:
+            it may have entered the view since (revisions are graph-wide)."""
+            node = storage.get_node(node_id) if isinstance(node_id, str) else None
+            if node is None or not visible(_doc(node)):
+                return False
+            return since is None or int(node.revision or 0) <= since
 
         over_edges: Dict[str, Optional[Edge]] = {}
         for edge_id, entry in edge_entries.items():
             main_edge = storage.edges.get(edge_id)
             main_doc = None if main_edge is None else _doc(main_edge)
             doc = compose(entry, main_doc)
-            self._states[("edge", edge_id)] = _state(entry, main_doc)
             if doc is not None and (
                 doc["source"] not in self.nodes or doc["target"] not in self.nodes
             ):
                 doc = None
             if doc is not None and narrowing.enabled:
-                # The main edge and the base keep no copy of a vanished
-                # endpoint, so one main no longer holds counts as hidden.
-                for snapshot in (main_doc, entry.get("base")):
+                base = entry.get("base")
+                since = None if base is None else int(entry.get("base_revision") or 0)
+                for snapshot in (main_doc, base):
                     if snapshot is not None and not all(
-                        main_node_visible(snapshot.get(end))
+                        endpoint_shown(snapshot.get(end), since)
                         for end in ("source", "target")
                     ):
                         doc = None
                         break
+            if doc is not None:
+                self._states[("edge", edge_id)] = _state(entry, main_doc)
             over_edges[edge_id] = None if doc is None else Edge.from_dict(doc)
         self._over_edges = over_edges
         self.edges = _OverlayMap(
@@ -363,6 +372,11 @@ class ComposedStorage:
             self._type_searchable_text,
         )
         self.vector_store = _ComposedVectorStore(self, storage.vector_store)
+
+    def unnarrowed(self) -> "ComposedStorage":
+        """This session's composed view with no narrowing: what a boundary
+        counts the reader's view against, as it counts the main graph."""
+        return ComposedStorage(self._main, self._entries, session_id=self.session_id)
 
     # -- what the layer holds ---------------------------------------------------
 
@@ -579,6 +593,11 @@ def annotate_staged_state(result: Any, composed: ComposedStorage) -> Any:
         if isinstance(result.get(key), list):
             for node in result[key]:
                 mark("node", node)
+        elif isinstance(result.get(key), dict):
+            # A projection keyed by node id (resolve_session_node_semantics).
+            for node_id, node in result[key].items():
+                if isinstance(node, dict) and isinstance(node_id, str):
+                    node["staged_state"] = composed.state("node", node_id)
     for key in _EDGE_LISTS:
         if isinstance(result.get(key), list):
             for edge in result[key]:
