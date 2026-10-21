@@ -801,28 +801,32 @@ def _register_search_endpoints(router: APIRouter, service: GraphService) -> None
 
 def _register_similarity_endpoints(router: APIRouter, service: GraphService) -> None:
     @router.post("/similar")
-    async def find_similar_nodes(request: SimilarNodesRequest) -> Dict[str, Any]:
+    async def find_similar_nodes(
+        request: SimilarNodesRequest, http_request: Request
+    ) -> Dict[str, Any]:
         """Find similar nodes based on name (for duplicate detection)."""
-        result = service.find_similar_nodes(
-            name=request.name,
-            node_type=request.node_type,
-            threshold=request.threshold,
-            limit=request.limit,
-        )
+        with use_request_authorization(headers=http_request.headers):
+            result = service.find_similar_nodes(
+                name=request.name,
+                node_type=request.node_type,
+                threshold=request.threshold,
+                limit=request.limit,
+            )
         _raise_for_access_denied(result)
         return result
 
     @router.post("/similar/batch")
     async def find_similar_nodes_batch(
-        request: SimilarNodesBatchRequest,
+        request: SimilarNodesBatchRequest, http_request: Request
     ) -> Dict[str, Any]:
         """Find similar nodes for multiple names at once."""
-        result = service.find_similar_nodes_batch(
-            names=request.names,
-            node_type=request.node_type,
-            threshold=request.threshold,
-            limit=request.limit,
-        )
+        with use_request_authorization(headers=http_request.headers):
+            result = service.find_similar_nodes_batch(
+                names=request.names,
+                node_type=request.node_type,
+                threshold=request.threshold,
+                limit=request.limit,
+            )
         _raise_for_access_denied(result)
         return result
 
@@ -1101,18 +1105,21 @@ def _register_metadata_endpoints(router: APIRouter, service: GraphService) -> No
         return service.list_relationship_types()
 
     @router.get("/meta/relationship-applicability/audit")
-    async def audit_relationship_applicability() -> Dict[str, Any]:
+    async def audit_relationship_applicability(request: Request) -> Dict[str, Any]:
         """Report existing edges that violate relationship applicability rules."""
-        result = service.audit_relationship_applicability()
+        with use_request_authorization(headers=request.headers):
+            result = service.audit_relationship_applicability()
         _raise_for_access_denied(result)
         return result
 
     @router.get("/meta/subtypes")
     async def get_subtypes(
+        request: Request,
         node_type: Optional[str] = Query(None, description="Filter by node type"),
     ) -> Dict[str, Any]:
         """Get existing subtypes used in the graph, grouped by node type."""
-        result = service.get_subtypes(node_type)
+        with use_request_authorization(headers=request.headers):
+            result = service.get_subtypes(node_type)
         _raise_for_access_denied(result)
         return result
 
@@ -1255,7 +1262,10 @@ def _register_session_endpoints(
         payload = manager.describe(session)
         payload["roster"] = manager.roster(session.id)
         if resolve:
-            resolved = service.resolve_session_nodes(session.state.get("node_refs", []))
+            with service.reading_in(session.id):
+                resolved = service.resolve_session_nodes(
+                    session.state.get("node_refs", [])
+                )
             if resolved.get("error") in _SESSION_REFUSALS:
                 _raise_for_access_denied(resolved)
             payload["resolved"] = {

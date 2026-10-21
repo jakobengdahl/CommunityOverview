@@ -11,9 +11,8 @@ one session op (§15): it advances the session sequence and fans out as
 ``SessionGate`` decides, per call, whether a write lands in the graph or in a
 layer, from the session the request acts in (``runtime.session_context``)
 and that session's write mode (``core.write_modes``). ``StagedWrite`` does the
-staging. Reads that compose (§8) arrive in a later slice; until then a
-composing read made in a staged session is refused rather than answered from
-the main graph alone.
+staging. A read made in a staged session composes (§8): ``SessionGate``
+names the session, and ``composed.ComposedStorage`` is the view it reads.
 """
 
 from __future__ import annotations
@@ -24,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional,
 
 from backend.core import Edge, EntityRevisionConflict, Node, StaleUpdateError
 from backend.core import layer_store
+from backend.core.layer_vectors import LayerVectors
 from backend.core.models import _parse_datetime
 from backend.core.session_annotations import saved_view_annotation_error
 from backend.core.session_manager import (
@@ -48,6 +48,8 @@ from .serializers import serialize_edge, serialize_node
 if TYPE_CHECKING:
     from backend.core import GraphStorage
     from backend.core.session_manager import SessionManager
+
+    from .composed import ComposedStorage
 
 LayerKey = Tuple[str, str]
 
@@ -273,6 +275,7 @@ class StagedWrite:
         expected_session_seq: Optional[int],
         max_entries: int,
         actor: str,
+        on_staged: Optional[Callable[[], None]] = None,
     ):
         self._storage = storage
         self._manager = session_manager
@@ -280,6 +283,7 @@ class StagedWrite:
         self._expected_session_seq = expected_session_seq
         self._max_entries = max_entries
         self._actor = actor
+        self._on_staged = on_staged
 
     # -- running one op ---------------------------------------------------------
 
@@ -318,6 +322,8 @@ class StagedWrite:
             expected_session_seq=self._expected_session_seq,
             commit=commit,
         )
+        if self._on_staged is not None:
+            self._on_staged()
         return {
             "entries": staged_entries,
             "removals": applied["removals"],
@@ -962,6 +968,8 @@ class SessionGate:
         self._storage = storage
         self._manager = session_manager
         self._push_target_known = push_target_known
+        # This instance's vectors for staged entries (§8.3).
+        self.layer_vectors = LayerVectors(storage.vector_store)
 
     @property
     def session_manager(self) -> Optional["SessionManager"]:
@@ -1031,20 +1039,50 @@ class SessionGate:
             expected_session_seq=expected_session_seq,
             max_entries=self._manager.write_modes.max_entries,
             actor=actor,
+            on_staged=lambda: self._embed_in_background(session_id),
         )
 
-    def check_read(self, target: str) -> None:
-        """Refuse a composing read made in a staged session (§8 is not built
-        yet), and one naming a session that does not resolve."""
+    def read_session(self) -> Optional[str]:
+        """The staged session a read in the current request composes in, or
+        None to read the main graph. A session that does not resolve is
+        refused, as for a write (§16.1)."""
         session_id = session_context.current_session_id()
         if session_id is None:
-            return
-        if self._mode(session_id) == WRITE_MODE_STAGED:
-            raise session_context.SessionRefused(
-                session_context.SESSION_NOT_SUPPORTED,
-                f"{target} does not yet read a staged session's composed view; "
-                "send the request without the session",
-            )
+            return None
+        return session_id if self._mode(session_id) == WRITE_MODE_STAGED else None
+
+    def is_staged(self, session_id: str) -> bool:
+        """Whether ``session_id`` names an active staged session."""
+        if self._manager is None or not self._manager.write_modes.supports_staged:
+            return False
+        status = self._manager.write_modes.staged_status(session_id)
+        return status == layer_store.STATUS_ACTIVE
+
+    def compose(
+        self,
+        session_id: str,
+        graph_access: Optional[GraphAccessNarrowing] = None,
+    ) -> "ComposedStorage":
+        """The composed view of ``session_id`` for one read, narrowed to
+        ``graph_access``. The layer is read from the store on every call, so
+        a read sees every op staged before it, on any instance (§8.3)."""
+        from .composed import ComposedStorage
+
+        store = self._manager.write_modes.layer_store
+        return ComposedStorage(
+            self._storage,
+            store.load_layer(session_id),
+            session_id=session_id,
+            graph_access=graph_access,
+            layer_vectors=self.layer_vectors,
+        )
+
+    def _embed_in_background(self, session_id: str) -> None:
+        def load():
+            composed = self.compose(session_id)
+            return composed.staged_nodes(), composed.node_entry_ids
+
+        self.layer_vectors.schedule(session_id, load)
 
 
 def refusal_result(exc: Exception, **defaults: Any) -> Optional[Dict[str, Any]]:

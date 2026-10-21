@@ -27,10 +27,11 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Callable, Optional, Pattern, Sequence, Tuple
+from typing import Callable, Collection, Optional, Pattern, Sequence, Tuple
 
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import Headers
+from starlette.routing import Match
 
 from backend.runtime import session_context
 
@@ -86,10 +87,12 @@ class SessionBindingMiddleware:
         api_prefix: str,
         is_retired: Callable[[str], bool],
         sessions_unreadable: Callable[[], bool] = lambda: False,
+        typed_paths: Callable[[], Collection[str]] = frozenset,
     ) -> None:
         self.app = app
         self._is_retired = is_retired
         self._sessions_unreadable = sessions_unreadable
+        self._typed_paths = typed_paths
         self._aware = _compile(api_prefix, _API_SESSION_AWARE) + _compile(
             "", _HOST_SESSION_AWARE
         )
@@ -99,6 +102,8 @@ class SessionBindingMiddleware:
         )
 
     def _is_aware(self, method: str, path: str) -> bool:
+        if method == "GET" and path in self._typed_paths():
+            return True
         return any(
             (m == "*" or m == method) and pattern.fullmatch(path)
             for m, pattern in self._aware
@@ -198,4 +203,32 @@ def add_session_binding_middleware(
         api_prefix=api_prefix,
         is_retired=is_retired,
         sessions_unreadable=sessions_unreadable,
+        typed_paths=lambda: _typed_interface_paths(app),
     )
+
+
+def _typed_interface_paths(app) -> Collection[str]:
+    """The paths of the config-driven typed interfaces (``list_typed_nodes``,
+    ``list_typed_edges``), which compose (§8.2).
+
+    Read off the app's own routes once they are all registered, and only
+    where the typed route is the one a GET of that path reaches: a fixed
+    route registered first wins such a path, and it may not compose.
+    """
+    cached = getattr(app.state, "session_aware_typed_paths", None)
+    if cached is not None:
+        return cached
+    paths = set()
+    routes = list(app.routes)
+    for route in routes:
+        if not (getattr(route, "name", "") or "").startswith("custom_interface_"):
+            continue
+        scope = {"type": "http", "path": route.path, "method": "GET"}
+        first = next(
+            (r for r in routes if r.matches(scope)[0] == Match.FULL),
+            None,
+        )
+        if first is route:
+            paths.add(route.path)
+    app.state.session_aware_typed_paths = frozenset(paths)
+    return app.state.session_aware_typed_paths
