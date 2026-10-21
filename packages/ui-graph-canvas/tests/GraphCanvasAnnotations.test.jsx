@@ -88,7 +88,7 @@ describe('GraphCanvas annotation creation', () => {
     render(<GraphCanvas nodes={[]} edges={[]} />);
     const pane = screen.getByTestId('pane');
     fireEvent.mouseDown(pane, { button: 2, clientX: 100, clientY: 100 });
-    fireEvent.contextMenu(pane, { clientX: 200, clientY: 160 });
+    fireEvent.contextMenu(pane, { button: 2, clientX: 200, clientY: 160 });
     expect(screen.queryByRole('button', { name: /add note/i })).not.toBeInTheDocument();
   });
 
