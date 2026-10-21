@@ -357,6 +357,10 @@
     "metamodel_explorer_hint": "Interactive read-only view of node types, relationships and their configured rules."
   },
   "metamodel": {
+    "error_title": "Metamodel explorer error",
+    "error_message": "The metamodel explorer could not be displayed. The rest of the app is unaffected.",
+    "error_retry": "Try again",
+    "error_close": "Close",
     "title": "Metamodel explorer",
     "close": "Close metamodel explorer",
     "readonly_note": "Read-only view of this deployment's configured schema. Editing the metamodel is not available here.",
