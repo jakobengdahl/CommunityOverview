@@ -191,7 +191,7 @@ describe('MetamodelExplorerDialog', () => {
     // The "Label (sv)" column always shows the schema's sv translation,
     // regardless of the current UI language (the mocked language is 'en',
     // and the schema never carries an 'en' entry in `labels`).
-    expect(within(nodeTable).getByText('Aktör')).toBeInTheDocument();
+    expect(within(nodeTable).getByText('Actor')).toBeInTheDocument();
     // System types stay hidden in the table too, honouring the same toggle.
     expect(within(nodeTable).queryByText('Agent')).not.toBeInTheDocument();
 
@@ -344,5 +344,39 @@ describe('MetamodelExplorerDialog', () => {
     fireEvent.click(screen.getByRole('button', { name: 'metamodel.reset_view' }));
 
     expect(group.getAttribute('transform')).toBe('translate(0,0) scale(1)');
+  });
+
+  it('does not capture the pointer on pointerdown, so a plain click still selects a node type', () => {
+    const { container } = render(
+      <MetamodelExplorerDialog schema={SCHEMA} stats={STATS} onClose={() => {}} />
+    );
+    const svg = container.querySelector('.mme-svg');
+    const capture = vi.fn();
+    svg.setPointerCapture = capture;
+    const node = screen.getByRole('button', { name: /^Actor/ });
+
+    // Capturing on pointerdown retargets the click to the <svg> in real browsers.
+    node.dispatchEvent(pointerLikeEvent('pointerdown', { pointerId: 1, clientX: 10, clientY: 10 }));
+    expect(capture).not.toHaveBeenCalled();
+    fireEvent.click(node);
+    node.dispatchEvent(pointerLikeEvent('pointerup', { pointerId: 1 }));
+
+    expect(
+      within(screen.getByLabelText('metamodel.detail_panel_aria')).getByText('Actor')
+    ).not.toBeNull();
+  });
+
+  it('captures the pointer once a drag moves past the threshold', () => {
+    const { container } = render(
+      <MetamodelExplorerDialog schema={SCHEMA} stats={STATS} onClose={() => {}} />
+    );
+    const svg = container.querySelector('.mme-svg');
+    const capture = vi.fn();
+    svg.setPointerCapture = capture;
+
+    svg.dispatchEvent(pointerLikeEvent('pointerdown', { pointerId: 1, clientX: 10, clientY: 10 }));
+    svg.dispatchEvent(pointerLikeEvent('pointermove', { pointerId: 1, clientX: 40, clientY: 10 }));
+
+    expect(capture).toHaveBeenCalledWith(1);
   });
 });
