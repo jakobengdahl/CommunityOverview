@@ -939,7 +939,7 @@ changing in between fails the merge whole.
 | `merge_blocked` | 409 | a selected entry is not `clean` and has no resolution its status allows; carries `items`, the current diff of the blocking entries |
 | `merge_raced` | 409 | the graph or the layer changed since the merge was decided, or a selected entry is not (or no longer) staged; read the diff again |
 | `merge_incomplete` | 422 | the selection leaves out entries it depends on; carries `missing` |
-| `merge_id_taken` | 409 | the merge id was used by another session's merge |
+| `merge_id_taken` | 409 | the merge id was used by another session's merge. Merge ids are one namespace per graph, so a client should mint unpredictable ones (a UUID): this answer tells that an id is in use somewhere, and nothing else |
 | `invalid_merge_request` | 422 | a malformed selection, resolution or merge id |
 | `session_not_staged` | 409 | merge or discard in a direct session |
 | `write_failed` / `write_outcome_unknown` | 502 / 503 | the store failed; the merge did not land, or could not be confirmed (§4.4) |

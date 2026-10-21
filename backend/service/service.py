@@ -418,14 +418,16 @@ class GraphService:
         attachments.delete_attachments_of_nodes(
             self._attachment_settings, deleted_nodes
         )
-        applied = manager.announce_layer_change(
-            session_id,
-            {
-                "op": "graph_changes_merged",
-                "merge_id": merge_id,
-                "removals": [list(key) for key in plan.removals],
-            },
-        )
+        applied = None
+        if plan.removals:
+            applied = manager.announce_layer_change(
+                session_id,
+                {
+                    "op": "graph_changes_merged",
+                    "merge_id": merge_id,
+                    "removals": [list(key) for key in plan.removals],
+                },
+            )
         return access.attach_mutation_attribution(
             {
                 "success": True,
@@ -484,27 +486,7 @@ class GraphService:
         manager = self._session_gate.session_manager
         try:
             manager.check_layer_op(session_id)
-            review = self._load_review(session_id, decision.graph_access)
-            if entries == "all":
-                keys = sorted(review.in_view)
-            else:
-                try:
-                    keys = staged_review.normalise_selection(review, entries)
-                except staged_review.ReviewRefused as exc:
-                    if exc.code != staged_review.MERGE_RACED:
-                        return exc.to_result()
-                    # Gone already, or never the caller's to see: either way
-                    # there is nothing of it to discard.
-                    keys = [
-                        key
-                        for key in staged_review.requested_keys(entries)
-                        if key in review.in_view
-                    ]
-            removed = (
-                manager.write_modes.layer_store.discard(session_id, keys)
-                if keys
-                else []
-            )
+            removed = self._discard_in_view(session_id, entries, decision.graph_access)
         except staged_review.ReviewRefused as exc:
             return exc.to_result()
         except Exception as exc:
@@ -527,6 +509,39 @@ class GraphService:
             "removed_entries": [list(key) for key in removed],
             "session_seq": None if applied is None else applied["seq"],
         }
+
+    def _discard_in_view(self, session_id: str, entries: Any, graph_access):
+        """Remove the selected entries the caller's view covers, each only
+        while it is still the entry the caller's review read: one restaged
+        since - possibly out of that view - refuses the discard in the store,
+        and it is decided again on the layer as it is then."""
+        store = self._session_gate.session_manager.write_modes.layer_store
+        for attempt in range(self.STAGING_ATTEMPTS):
+            review = self._load_review(session_id, graph_access)
+            if entries == "all":
+                keys = sorted(review.in_view)
+            else:
+                try:
+                    keys = staged_review.normalise_selection(review, entries)
+                except staged_review.ReviewRefused as exc:
+                    if exc.code != staged_review.MERGE_RACED:
+                        raise
+                    # Gone already, or never the caller's to see: either way
+                    # there is nothing of it to discard.
+                    keys = [
+                        key
+                        for key in staged_review.requested_keys(entries)
+                        if key in review.in_view
+                    ]
+            if not keys:
+                return []
+            expected = {key: review.entries[key].get("session_seq") for key in keys}
+            try:
+                return store.discard(session_id, keys, expected=expected)
+            except layer_store.LayerRaced:
+                if attempt + 1 == self.STAGING_ATTEMPTS:
+                    raise LayoutBusy()
+        raise AssertionError("unreachable")  # pragma: no cover
 
     @property
     def storage(self) -> GraphStorage:

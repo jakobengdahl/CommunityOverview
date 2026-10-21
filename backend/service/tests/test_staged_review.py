@@ -730,3 +730,137 @@ def test_an_edit_by_another_instance_inside_the_window_fails_the_merge(
     finally:
         other.shutdown_events()
         backend.close()
+
+
+# -- review round 1 regressions -----------------------------------------------------------
+
+
+def test_an_edge_main_added_between_two_deleted_nodes_is_deleted_once(world):
+    svc, sid = world.service, world.staged_session()
+    _stage(world, sid, ("delete_nodes", (["a", "b"],), {"confirmed": True}))
+    world.storage.add_edge(Edge(id="ab2", source="a", target="b", type="RELATES_TO"))
+    take = [
+        {"kind": "node", "entity_id": n, "choice": "take_session"} for n in ("a", "b")
+    ]
+    result = svc.merge_staged_changes(sid, "m", resolutions=take)
+    assert result["success"] is True, result
+    assert not {"a", "b"} & set(world.storage.nodes)
+    assert "ab2" not in world.storage.edges
+
+
+def test_an_orphaned_node_merged_as_new_takes_its_staged_edge_along(world):
+    svc, sid = world.service, world.staged_session()
+    _stage(
+        world,
+        sid,
+        ("update_node", ("c",), {"updates": {"description": "kept"}}),
+        (
+            "add_nodes",
+            ([], [{"id": "ac", "source": "a", "target": "c", "type": "RELATES_TO"}]),
+            {},
+        ),
+    )
+    world.storage.delete_nodes(["c"], confirmed=True)
+    result = svc.merge_staged_changes(
+        sid, "m", resolutions=[{"kind": "node", "entity_id": "c", "choice": "as_new"}]
+    )
+    assert result["success"] is True, result
+    new_id = {i["entity_id"]: i for i in result["merged"]}["c"]["new_entity_id"]
+    assert world.storage.get_node(new_id).description == "kept"
+    assert world.storage.edges["ac"].target == new_id
+
+
+def test_a_clean_entry_takes_no_as_new_or_manual(world):
+    svc, sid = world.service, world.staged_session()
+    _stage(world, sid, ("update_node", ("a",), {"updates": {"description": "x"}}))
+    result = svc.merge_staged_changes(
+        sid, "m", resolutions=[{"kind": "node", "entity_id": "a", "choice": "as_new"}]
+    )
+    assert result["error"] == "invalid_merge_request"
+    assert world.storage.get_node("a").description == ""
+
+
+def test_an_empty_merge_fans_out_nothing(world):
+    sid = world.staged_session()
+    published = len(world.published)
+    result = world.service.merge_staged_changes(sid, "m")
+    assert result["success"] is True and result["merged"] == []
+    assert len(world.published) == published
+
+
+def test_a_discard_never_drops_an_entry_restaged_after_it_read_the_layer(
+    world, monkeypatch
+):
+    svc, sid = world.service, world.staged_session()
+    _stage(world, sid, ("update_node", ("a",), {"updates": {"description": "v1"}}))
+    store = world.storage.layer_store
+    original = store.discard
+    raced = []
+
+    def restage_first(*args, **kwargs):
+        if not raced:
+            raced.append(True)
+            world.hook.narrow = False
+            _stage(
+                world,
+                sid,
+                (
+                    "update_node",
+                    ("a",),
+                    {
+                        "updates": {
+                            "description": "v2",
+                            "metadata": {"origin_graph_id": "remote"},
+                        },
+                        "metadata_merge": True,
+                    },
+                ),
+            )
+            world.hook.narrow = True
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "discard", restage_first)
+    world.hook.narrow = True
+    result = svc.discard_staged_changes(sid)
+    # Decided again: a has left the narrowed view, so nothing is discarded.
+    assert result["removed_entries"] == []
+    assert world.layer(sid)[("node", "a")]["staged"]["description"] == "v2"
+
+
+def test_an_edge_staged_while_its_endpoint_create_is_withdrawn_is_decided_again(
+    world, monkeypatch
+):
+    svc, sid = world.service, world.staged_session()
+    _stage(
+        world, sid, ("add_nodes", ([{"id": "n", "type": "Actor", "name": "N"}], []), {})
+    )
+    store = world.storage.layer_store
+    original = store.stage
+    raced = []
+
+    def withdraw_first(session_id, entries, removals=(), **kwargs):
+        if not raced:
+            raced.append(True)
+            _stage(world, sid, ("delete_nodes", (["n"],), {"confirmed": True}))
+        return original(session_id, entries, removals, **kwargs)
+
+    monkeypatch.setattr(store, "stage", withdraw_first)
+    with bind_session(sid):
+        result = svc.add_nodes(
+            [], [{"id": "an", "source": "a", "target": "n", "type": "RELATES_TO"}]
+        )
+    assert result["success"] is False
+    assert ("edge", "an") not in world.layer(sid)
+
+
+def test_a_node_delete_meeting_an_edge_the_reader_cannot_see_is_out_of_its_view(
+    world,
+):
+    svc, sid = world.service, world.staged_session()
+    _stage(world, sid, ("delete_nodes", (["c"],), {"confirmed": True}))
+    world.storage.add_edge(Edge(id="cr", source="c", target="r", type="RELATES_TO"))
+    world.hook.narrow = True
+    assert ("node", "c") not in _items(svc.get_staged_changes(sid))
+    world.hook.narrow = False
+    item = _items(svc.get_staged_changes(sid))[("node", "c")]
+    assert (item["status"], item["unstaged_edges"]) == ("conflict", ["cr"])

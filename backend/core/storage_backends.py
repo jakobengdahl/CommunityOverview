@@ -991,6 +991,7 @@ class FileGraphPersistenceBackend:
         *,
         max_entries: Optional[int] = None,
         expected: Optional[Any] = None,
+        exact: bool = False,
     ) -> None:
         session_id = _layer.check_session_id(session_id)
         by_key, removed = _layer.check_entries(entries, removals)
@@ -999,7 +1000,9 @@ class FileGraphPersistenceBackend:
         with self._lock:
             self._begin_layer_write_locked()
             session = self._active_session_locked(session_id)
-            _layer.verify_expected(session_id, session["entries"], expectations)
+            _layer.verify_expected(
+                session_id, session["entries"], expectations, bool(exact)
+            )
             updated = dict(session["entries"])
             for key in removed:
                 updated.pop(key, None)
@@ -1011,13 +1014,19 @@ class FileGraphPersistenceBackend:
             )
 
     def discard(
-        self, session_id: str, removals: Optional[Sequence[Any]] = None
+        self,
+        session_id: str,
+        removals: Optional[Sequence[Any]] = None,
+        *,
+        expected: Optional[Any] = None,
     ) -> List[Tuple[str, str]]:
         session_id = _layer.check_session_id(session_id)
         keys = None if removals is None else _layer.check_keys(removals)
+        expectations = _layer.check_expected(expected)
         with self._lock:
             self._begin_layer_write_locked()
             session = self._active_session_locked(session_id)
+            _layer.verify_expected(session_id, session["entries"], expectations)
             present = session["entries"]
             gone = list(present) if keys is None else [k for k in keys if k in present]
             if not gone:

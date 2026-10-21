@@ -330,7 +330,14 @@ class InMemoryGraphPersistenceBackend:
             self._swap_session(session_id, layer.STATUS_RETIRED, {})
 
     def stage(
-        self, session_id, entries, removals=(), *, max_entries=None, expected=None
+        self,
+        session_id,
+        entries,
+        removals=(),
+        *,
+        max_entries=None,
+        expected=None,
+        exact=False,
     ):
         session_id = layer.check_session_id(session_id)
         by_key, removed = layer.check_entries(entries, removals)
@@ -338,7 +345,7 @@ class InMemoryGraphPersistenceBackend:
         expectations = layer.check_expected(expected)
         with self._lock:
             session = self._active(session_id)
-            layer.verify_expected(session_id, session["entries"], expectations)
+            layer.verify_expected(session_id, session["entries"], expectations, exact)
             updated = dict(session["entries"])
             for key in removed:
                 updated.pop(key, None)
@@ -347,11 +354,13 @@ class InMemoryGraphPersistenceBackend:
                 raise layer.LayerFull(session_id, limit, len(updated))
             self._swap_session(session_id, session["status"], updated)
 
-    def discard(self, session_id, removals=None):
+    def discard(self, session_id, removals=None, *, expected=None):
         session_id = layer.check_session_id(session_id)
         keys = None if removals is None else layer.check_keys(removals)
+        expectations = layer.check_expected(expected)
         with self._lock:
             session = self._active(session_id)
+            layer.verify_expected(session_id, session["entries"], expectations)
             present = session["entries"]
             gone = list(present) if keys is None else [k for k in keys if k in present]
             updated = {k: v for k, v in present.items() if k not in set(gone)}

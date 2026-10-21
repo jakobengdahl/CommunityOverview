@@ -272,13 +272,16 @@ class LayerStoreBackend(Protocol):
         *,
         max_entries: Optional[int] = None,
         expected: Optional[Mapping[LayerKey, Optional[int]]] = None,
+        exact: bool = False,
     ) -> None:
         """Upsert `entries` and remove `removals`, atomically. Refused with
         StagedSessionNotActive unless the session is active, and with
         LayerFull, applying nothing, when the layer would end up holding more
         than `max_entries`. `expected` maps keys to the `session_seq` of the
         entry the caller read, None for one it found absent; any that no
-        longer holds refuses the op with LayerRaced, applying nothing."""
+        longer holds refuses the op with LayerRaced, applying nothing. With
+        `exact`, the op read the whole layer: it must also hold no entry
+        `expected` does not name."""
 
     def merge(
         self,
@@ -292,10 +295,16 @@ class LayerStoreBackend(Protocol):
         """Verify, apply, remove and record as one unit (§7, §11.3, §11.6)."""
 
     def discard(
-        self, session_id: str, removals: Optional[Sequence[LayerKey]] = None
+        self,
+        session_id: str,
+        removals: Optional[Sequence[LayerKey]] = None,
+        *,
+        expected: Optional[Mapping[LayerKey, Optional[int]]] = None,
     ) -> List[LayerKey]:
         """Remove the given entries, or every entry when `removals` is None.
-        Returns the keys actually removed. Touches nothing else (I10)."""
+        Returns the keys actually removed. Touches nothing else (I10).
+        `expected` is checked as `stage` checks it: an entry changed since the
+        caller read it refuses the discard with LayerRaced."""
 
     def load_merge(self, merge_id: str) -> Optional[Dict[str, Any]]:
         """The stored merge record, or None."""
@@ -451,8 +460,14 @@ def verify_expected(
     session_id: str,
     layer: Mapping[LayerKey, Mapping[str, Any]],
     expected: Mapping[LayerKey, Optional[int]],
+    exact: bool = False,
 ) -> None:
-    """Raise LayerRaced unless every key is as the op read it."""
+    """Raise LayerRaced unless every key is as the op read it, and, with
+    `exact`, the layer holds no key the op did not read."""
+    if exact:
+        for key in sorted(layer):
+            if key not in expected:
+                raise LayerRaced(session_id, key)
     for key, seq in sorted(expected.items()):
         entry = layer.get(key)
         held = None if entry is None else entry.get("session_seq")

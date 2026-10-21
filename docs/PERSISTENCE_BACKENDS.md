@@ -571,9 +571,9 @@ The operations are `backend.core.layer_store.LayerStoreBackend`:
 
 ```python
 def load_layer(session_id) -> list[dict]
-def stage(session_id, entries, removals=(), *, max_entries=None, expected=None) -> None
+def stage(session_id, entries, removals=(), *, max_entries=None, expected=None, exact=False) -> None
 def merge(session_id, merge_id, operations, checks, removals, record) -> MergeResult
-def discard(session_id, removals=None) -> list[tuple[str, str]]
+def discard(session_id, removals=None, *, expected=None) -> list[tuple[str, str]]
 def load_merge(merge_id) -> dict | None
 def drop_layer(session_id) -> None
 def record_staged(session_id) -> None
@@ -603,9 +603,14 @@ def layers_in_use() -> list[str]
   maps keys to the `session_seq` of the entry the caller read (None: it
   found none); checked inside the unit, after the session's record is
   locked, so an op decided on a layer another op has changed since raises
-  `LayerRaced` and applies nothing. A staged write passes it for every key it
-  changes and is decided again on `LayerRaced`, so two writers staging into
-  one session at once, on any instances, never lose each other's change.
+  `LayerRaced` and applies nothing; with `exact` (the op scanned the whole
+  layer), so does any entry `expected` does not name. A staged write passes
+  every entry its decision read - the ones it changes, the endpoints it
+  validated against, all of them when it scanned the layer - and is decided
+  again on `LayerRaced`, so two writers staging into one session at once, on
+  any instances, never lose each other's change or stage against an entry
+  that has since gone. `discard` takes the same `expected`: a discard decided
+  on an entry that was restaged since removes nothing.
 - **`merge` is one unit** (§7, §11.3). `operations` are `EntityOperation`s,
   one per entity, each with its expectation; `checks` are `MergeCheck`s:
   `node_exists(id)` (judged on the state the operations leave),

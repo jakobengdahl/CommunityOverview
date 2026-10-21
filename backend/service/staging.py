@@ -164,18 +164,25 @@ class Layer:
             (e["kind"], e["entity_id"]): e for e in entries
         }
         self._changed: Dict[LayerKey, Optional[Dict[str, Any]]] = {}
+        # What the op's decision read of the layer: the keys it looked up, and
+        # whether it scanned every entry. The store refuses the op if any of
+        # that changed before it lands (``expected``).
+        self._read: set = set()
+        self.read_all = False
 
     # -- entries ---------------------------------------------------------------
 
     def entry(self, key: LayerKey) -> Optional[Dict[str, Any]]:
         if key in self._changed:
             return self._changed[key]
+        self._read.add(key)
         return self._loaded.get(key)
 
     def put(self, key: LayerKey, entry: Optional[Dict[str, Any]]) -> None:
         self._changed[key] = entry
 
     def current_entries(self) -> Dict[LayerKey, Dict[str, Any]]:
+        self.read_all = True
         merged = dict(self._loaded)
         for key, entry in self._changed.items():
             if entry is None:
@@ -195,13 +202,17 @@ class Layer:
         ]
 
     def expected(self) -> Dict[LayerKey, Optional[int]]:
-        """What the op read of each entry it changes: the entry's
-        ``session_seq``, None where it found none. The store refuses the op
-        if any has changed since (``LayerRaced``)."""
+        """What the op's decision rested on: every entry it looked up or
+        changes, and every entry when it scanned the layer, as the entry's
+        ``session_seq`` - None where it found none. The store refuses the op
+        if any has changed since (``LayerRaced``); with ``read_all``, also if
+        the layer gained an entry."""
+        keys = set(self._read) | set(self._changed)
+        if self.read_all:
+            keys |= set(self._loaded)
         return {
             key: (self._loaded[key].get("session_seq") if key in self._loaded else None)
-            for key, entry in self._changed.items()
-            if entry is not None or key in self._loaded
+            for key in keys
         }
 
     # -- the main graph ---------------------------------------------------------
@@ -329,6 +340,7 @@ class StagedWrite:
                 removals,
                 max_entries=self._max_entries,
                 expected=layer.expected(),
+                exact=layer.read_all,
             )
             return {"entries": stamped, "removals": [list(k) for k in removals]}
 

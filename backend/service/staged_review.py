@@ -205,6 +205,14 @@ class Review:
         base = entry.get("base")
         composed = self.composed(key)
         if key[0] == "node":
+            if entry["action"] == "delete" and main is not None:
+                # A delete also deletes what main added to the node since;
+                # one such edge the reader cannot see keeps the whole entry
+                # out of its view, as a hidden tombstone it depends on does.
+                if not all(
+                    self._edge_shown_now(e) for e in self.unstaged_edges(key[1])
+                ):
+                    return False
             return all(
                 doc_visible(doc, narrowing)
                 for doc in (composed, main, base)
@@ -386,8 +394,12 @@ class _Outcomes:
             return "drop"
         if status == STATUS_CLEAN:
             if choice not in (None, TAKE_SESSION):
-                self.blocked.append(key)
-                return "blocked"
+                # Nothing to resolve: the choice does not fit the request.
+                raise ReviewRefused(
+                    INVALID_MERGE_REQUEST,
+                    f"{key[0]} {key[1]!r} is clean; it takes no {choice} resolution",
+                    422,
+                )
             if entry["action"] == "delete" and self.review.main[key] is None:
                 return "noop"
             return "apply"
@@ -436,12 +448,13 @@ class _Outcomes:
 
     def endpoints(self, key: LayerKey) -> Tuple[str, ...]:
         """The edge's endpoints as merged: an edge create follows a node
-        created ``as_new`` to its new id (§11.2)."""
+        merged ``as_new`` to its new id (§11.2)."""
         ends = self.review.endpoints(key)
         if self.review.entries[key]["action"] != "create":
             return ends
         return tuple(
-            "\x00as_new" if self._created_here(end) == "as_new" else end for end in ends
+            "\x00as_new" if self.effect.get(("node", end)) == "as_new" else end
+            for end in ends
         )
 
     def _held_by_dropped_create(self, key: LayerKey) -> bool:
@@ -695,6 +708,8 @@ def plan_merge(
     node_deletes: List[SessionMergeWrite] = []
     checks: List[MergeCheck] = []
     results: List[Dict[str, Any]] = []
+    # An edge added since between two nodes the merge deletes is deleted once.
+    deleted_here: Set[str] = set()
 
     for key in sorted(selected):
         kind, entity_id = key
@@ -734,7 +749,12 @@ def plan_merge(
                     )
                 )
                 continue
-            incident = review.unstaged_edges(entity_id)
+            incident = [
+                edge_id
+                for edge_id in review.unstaged_edges(entity_id)
+                if edge_id not in deleted_here
+            ]
+            deleted_here.update(incident)
             # take_session on a conflicting delete deletes the edges added
             # since, each with its own expectation (§11.2).
             for edge_id in incident:

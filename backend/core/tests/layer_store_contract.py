@@ -251,6 +251,35 @@ class LayerStoreContract:
             seeded.stage(A, [entry("node", "a")], expected=expected)
         assert factory().load_layer(A) == []
 
+    def test_an_op_that_read_the_whole_layer_is_refused_when_it_grew(
+        self, seeded, factory
+    ):
+        seeded.stage(A, [entry("node", "a", session_seq=1)])
+        seeded.stage(A, [entry("node", "b", session_seq=2)])
+        with pytest.raises(ls.LayerRaced) as raised:
+            seeded.stage(
+                A, [entry("node", "c")], expected={("node", "a"): 1}, exact=True
+            )
+        assert raised.value.key == ("node", "b")
+        seeded.stage(
+            A,
+            [entry("node", "c")],
+            expected={("node", "a"): 1, ("node", "b"): 2},
+            exact=True,
+        )
+        assert len(factory().load_layer(A)) == 3
+
+    def test_a_discard_of_an_entry_changed_since_removes_nothing(self, seeded, factory):
+        seeded.stage(A, [entry("node", "a", session_seq=2), entry("node", "b")])
+        with pytest.raises(ls.LayerRaced):
+            seeded.discard(
+                A, [("node", "a"), ("node", "b")], expected={("node", "a"): 1}
+            )
+        assert len(factory().load_layer(A)) == 2
+        assert seeded.discard(A, [("node", "a")], expected={("node", "a"): 2}) == [
+            ("node", "a")
+        ]
+
     def test_removing_an_entry_that_is_not_there_is_not_an_error(self, seeded):
         seeded.stage(A, [], [("node", "zz")])
         assert seeded.load_layer(A) == []
