@@ -1608,6 +1608,22 @@ own.
 | GET | `/ui/info` | Get service info (provider, tools) |
 | GET | `/ui/supported-formats` | Get supported document formats |
 
+The routes that reach the graph (`/ui/chat`, `/ui/chat/simple`,
+`/ui/propose-nodes`, `/ui/upload`, `/ui/info`) bind the caller's request
+authorization exactly like the REST graph routes, so the service authorization
+hook evaluates the assistant's tool calls as the caller. As on the REST and MCP
+surfaces, `find_similar_nodes`, `find_similar_nodes_batch` and `get_subtypes`
+do not consult the hook. A denied tool call comes back to the model as an
+`access_denied` tool result and nothing is written. A collection-mode chat
+whose collection lookup is denied runs with every write denied; a collection
+outside the caller's visible graphs counts as missing, so the chat runs without
+collection limits, as it would without `collection_short_name`. Collection
+limits restrict the assistant; the hook is what authorizes the caller. When
+auth is active (`AUTH_ENABLED=true` with `AUTH_PASSWORD` or
+`AUTH_BEARER_TOKEN` set), the auth middleware also rejects an unauthenticated
+request to any `/ui/*` route with 401. MCP-only auth (`MCP_BASIC_AUTH`) leaves
+`/ui/*` as open as `/api/*`.
+
 #### Chat Example
 
 ```bash

@@ -862,6 +862,41 @@ class TestResolveCollection:
         assert perms == all_false_perms
         assert collect_responses is True
 
+    def test_exception_rechecking_cached_collection_fails_closed(
+        self, graph_service, mock_llm_provider
+    ):
+        from backend.ui import ChatService
+
+        with (
+            patch(
+                "backend.ui.chat_logic.create_provider", return_value=mock_llm_provider
+            ),
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+        ):
+            service = ChatService(graph_service)
+
+        akc_node = _make_akc_node("cached-coll", ACTOR_ONLY_PERMS)
+        with patch.object(
+            service._graph_service,
+            "search_graph",
+            return_value={"nodes": [akc_node], "edges": [], "total": 1},
+        ):
+            service._resolve_collection("cached-coll")
+
+        with (
+            patch.object(
+                service._graph_service,
+                "get_node_details",
+                side_effect=RuntimeError("hook failed"),
+            ),
+            patch.object(
+                service._graph_service,
+                "search_graph",
+                side_effect=RuntimeError("hook failed"),
+            ),
+        ):
+            assert service._resolve_collection("cached-coll") == ("", {}, True)
+
     def test_exception_during_resolution_fails_closed(
         self, graph_service, mock_llm_provider
     ):
