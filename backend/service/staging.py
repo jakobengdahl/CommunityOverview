@@ -492,12 +492,19 @@ class StagedWrite:
         self, layer: Layer, node_id: str, graph_access: GraphAccessNarrowing
     ) -> bool:
         """Whether the writer's view holds node ``node_id``: the composed node,
-        and the main node it composes over, if any. A staged change cannot
-        keep in view a main node that has left it (its origin, say), since
-        answers carry the composed node and so the main node's content."""
-        main = layer.main_node(node_id)
-        return self._visible(layer.node(node_id), graph_access) and (
-            main is None or self._visible(main, graph_access)
+        the main node it composes over, and the entry's base, where there are
+        such. A staged change cannot keep in view a main node that has left
+        it (its origin, say), nor one main has since deleted, whose composed
+        form is its base: answers carry the composed node and so that content."""
+        entry = layer.entry(("node", node_id)) or {}
+        return all(
+            self._visible(doc, graph_access)
+            for doc in (layer.node(node_id),)
+            + tuple(
+                d
+                for d in (layer.main_node(node_id), entry.get("base"))
+                if d is not None
+            )
         )
 
     def _hides_tombstone(
@@ -561,6 +568,7 @@ class StagedWrite:
             doc["revision"] = 0
             self._stage_create(layer, "node", doc)
         names = layer.name_to_id() if edges else {}
+        created = {node.id for node in nodes}
         for edge in edges:
             endpoints = []
             for role, value in (("Source", edge.source), ("Target", edge.target)):
@@ -577,8 +585,12 @@ class StagedWrite:
                     value = names[value]
                 endpoints.append(value)
             edge.source, edge.target = endpoints
+            # A node this op creates carries nothing of main's, so it needs no
+            # judging here: as in a direct write, which does not narrow edges
+            # to it (a federated adopt's new local copy, say).
             if graph_access.enabled and not all(
-                self._shown(layer, nid, graph_access) for nid in endpoints
+                nid in created or self._shown(layer, nid, graph_access)
+                for nid in endpoints
             ):
                 return {
                     **failure,
@@ -811,11 +823,14 @@ class StagedWrite:
             self._shown(layer, doc[end], graph_access) for end in ("source", "target")
         ):
             return None
-        if main is not None and not all(
-            self._visible(layer.main_node(main[end]), graph_access)
-            for end in ("source", "target")
-        ):
-            return None
+        base = (layer.entry(("edge", edge_id)) or {}).get("base")
+        for snapshot in (main, base):
+            # An endpoint main no longer holds cannot be judged: hidden.
+            if snapshot is not None and not all(
+                self._visible(layer.main_node(snapshot.get(end) or ""), graph_access)
+                for end in ("source", "target")
+            ):
+                return None
         return doc
 
     def update_edge(

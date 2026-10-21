@@ -1448,3 +1448,50 @@ def test_a_retired_id_stays_retired_once_seen(tmp_path):
     assert modes.staged_status(sid) == "retired"
     storage.layer_store.staged_status = lambda _sid: "none"
     assert modes.staged_status(sid) == "retired"
+
+
+def test_a_node_main_since_deleted_is_judged_by_its_base(world):
+    sid = world.staged_session()
+    with bind_session(sid):
+        world.service.update_node("a", {"metadata": {"origin_graph_id": "g1"}})
+    world.service._authorization_hook = Narrow()
+    world.storage.delete_nodes(["a"], confirmed=True)
+    before = world.layer(sid)
+    with bind_session(sid):
+        answers = [
+            world.service.update_node("a", {"tags": ["t"]}),
+            world.service.archive_nodes(["a"]),
+            world.service.add_edge("b", "a", type="RELATES_TO"),
+        ]
+    for answer in answers:
+        assert "Alpha" not in json.dumps(answer) and "keep" not in json.dumps(answer)
+    assert world.layer(sid) == before
+
+
+def test_a_staged_adopt_under_a_federated_only_view_stages_like_a_direct_one(
+    world, tmp_path
+):
+    from backend.service.tests.test_federated_adoption import (
+        _service_with_cached_federated_node,
+    )
+
+    class FederatedOnly:
+        def evaluate(self, context):
+            return GraphAuthorizationDecision(
+                allowed=True,
+                graph_access=GraphAccessNarrowing(
+                    enabled=True,
+                    allow_local_graph=False,
+                    include_graph_ids=("esam-main",),
+                ),
+            )
+
+    (tmp_path / "fed").mkdir()
+    fed = _service_with_cached_federated_node(tmp_path / "fed")
+    world.service._federation_manager = fed._federation_manager
+    world.service._authorization_hook = FederatedOnly()
+    sid = world.staged_session()
+    with bind_session(sid):
+        staged = world.service.adopt_federated_node("federated::esam-main::remote-1")
+    assert staged["success"] is True, staged
+    assert staged["staged"] is True
