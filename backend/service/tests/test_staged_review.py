@@ -1530,3 +1530,36 @@ def test_an_edge_another_instance_adds_to_a_retyped_node_fails_the_merge(
     finally:
         other.shutdown_events()
         backend.close()
+
+
+# -- post-merge review round 2 regressions ------------------------------------------------
+
+
+def test_an_id_taken_create_retyping_a_node_is_out_of_view_over_a_hidden_tombstone(
+    world,
+):
+    """A create whose id main took with another type has no tombstone
+    dependencies, so a hidden edge the session tombstones must still keep it
+    out of a narrowed reader's view, or the misfit refusal counts it."""
+    svc, sid = world.service, world.staged_session()
+    world.storage.add_nodes(
+        [Node(id="h", type="Initiative", name="H", metadata=dict(REMOTE))], []
+    )
+    _stage(
+        world, sid, ("add_nodes", ([{"id": "l", "type": "Actor", "name": "L"}], []), {})
+    )
+    world.storage.add_nodes(
+        [Node(id="l", type="Legislation", name="L")],
+        [Edge(id="hl", source="h", target="l", type="IMPLEMENTS")],
+    )
+    _stage(world, sid, ("delete_edges", (["hl"],), {"confirmed": True}))
+    world.hook.narrow = True
+    assert ("node", "l") not in _items(svc.get_staged_changes(sid))
+    take = [{"kind": "node", "entity_id": "l", "choice": "take_session"}]
+    result = svc.merge_staged_changes(
+        sid, "m", entries=[{"kind": "node", "entity_id": "l"}], resolutions=take
+    )
+    assert "existing edge" not in str(result)
+    assert world.storage.get_node("l").type_str == "Legislation"
+    world.hook.narrow = False
+    assert _items(svc.get_staged_changes(sid))[("node", "l")]["status"] == "id_taken"

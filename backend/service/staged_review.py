@@ -225,15 +225,21 @@ class Review:
                 and main is not None
                 and composed.get("type") != main.get("type")
             )
-            if (entry["action"] == "delete" or retyped) and main is not None:
-                # A delete also deletes what main added to the node since, and
-                # a type change in place is judged against those edges; one
+            if retyped:
+                # A type change in place is judged against every main edge to
+                # the node not deleted with it, and an id_taken create does not
+                # depend on the tombstones it might be merged without: any
+                # edge the reader cannot see keeps the entry out of its view.
+                edges = [e.id for e in self.storage.get_edges_for_node(key[1])]
+            elif entry["action"] == "delete" and main is not None:
+                # A delete also deletes what main added to the node since; one
                 # such edge the reader cannot see keeps the whole entry out of
                 # its view, as a hidden tombstone it depends on does.
-                if not all(
-                    self._edge_shown_now(e) for e in self.unstaged_edges(key[1])
-                ):
-                    return False
+                edges = self.unstaged_edges(key[1])
+            else:
+                edges = []
+            if not all(self._edge_shown_now(e) for e in edges):
+                return False
             return all(
                 doc_visible(doc, narrowing)
                 for doc in (composed, main, base)
