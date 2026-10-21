@@ -26,7 +26,9 @@ COPY frontend ./frontend
 # the runtime image, so installing them here is pure build-time waste.
 RUN npm ci --ignore-scripts --workspace @community-graph/web --workspace @community-graph/widget --include-workspace-root
 
-# Build web and widget
+# Build web and widget. BUILD_SHA is shown next to the version in Settings.
+ARG BUILD_SHA=
+ENV BUILD_SHA=${BUILD_SHA}
 RUN npm run build:web && npm run build:widget
 
 # -----------------------------------------------------------------------------
