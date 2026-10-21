@@ -924,6 +924,12 @@ no activity.
 The settings that previously lived directly in the app menu are now in the
 **Settings** dialog, opened from the bottom of the session menu.
 
+#### Version
+
+The bottom of the dialog shows the running application version, followed by the
+short build commit in parentheses when the image was built with one; it reads
+"unknown" if the build carries no version.
+
 #### Graph statistics
 
 The top of the dialog shows the total number of nodes and edges currently in the graph,

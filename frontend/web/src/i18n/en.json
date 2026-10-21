@@ -348,6 +348,8 @@
     "edges": "Edges",
     "nodes_by_type": "Nodes by type",
     "details": "Details",
+    "version": "Version",
+    "version_unknown": "unknown",
     "admin_section": "Admin",
     "presence_section": "Your presence",
     "display_name": "Display name",
