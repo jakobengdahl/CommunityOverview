@@ -362,9 +362,16 @@ describe('MCP Apps bridge message handling', () => {
     await expect(pendingCall).resolves.toEqual({ nodes: [1] });
     const sentBefore = sent.length;
 
-    expect(() =>
-      fromHost({ jsonrpc: '2.0', id: req.id, error: { code: -32000, message: 'late' } })
-    ).not.toThrow();
+    // jsdom reports an exception thrown by a listener as a window error event
+    // instead of propagating it out of dispatchEvent.
+    const onError = vi.fn((event) => event.preventDefault());
+    window.addEventListener('error', onError);
+    try {
+      fromHost({ jsonrpc: '2.0', id: req.id, error: { code: -32000, message: 'late' } });
+    } finally {
+      window.removeEventListener('error', onError);
+    }
+    expect(onError).not.toHaveBeenCalled();
     expect(sent).toHaveLength(sentBefore);
   });
 });
@@ -372,6 +379,8 @@ describe('MCP Apps bridge message handling', () => {
 describe('connectHost outside any host', () => {
   it('returns a no-op disconnect and posts nothing on an unframed page without window.openai', async () => {
     Object.defineProperty(window, 'parent', { value: window, configurable: true });
+    // Unframed, window.parent is window, so a post would land here, not on host.
+    const postMessageSpy = vi.spyOn(window, 'postMessage').mockImplementation(() => {});
     const { connectHost } = await import('../src/mcpClient');
     const onToolResult = vi.fn();
 
@@ -379,7 +388,9 @@ describe('connectHost outside any host', () => {
 
     expect(disconnect).toBeTypeOf('function');
     expect(() => disconnect()).not.toThrow();
+    expect(postMessageSpy).not.toHaveBeenCalled();
     expect(sent).toEqual([]);
     expect(addedListeners.filter(([type]) => type === 'message')).toEqual([]);
+    postMessageSpy.mockRestore();
   });
 });
