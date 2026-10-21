@@ -405,7 +405,8 @@ rewritten entities.
   "staged": { "…": "create: the full entity; update: changed fields only; delete: null" },
   "staged_by": "actor, as resolved for the request",
   "staged_at": "ISO-8601",
-  "session_seq": 42
+  "session_seq": 42,
+  "stage_token": "…"
 }
 ```
 
@@ -417,6 +418,10 @@ rewritten entities.
   value outright.
 - **`session_seq`** is the session sequence number of the op that last changed
   the entry (§15).
+- **`stage_token`** names the version of the entry: a value unique to the
+  staging op that last changed it, on every instance. Expectations about the
+  layer compare it, since instances that keep their own session documents
+  may stamp the same `session_seq`.
 
 ### 6.2 Collapsing repeated edits
 

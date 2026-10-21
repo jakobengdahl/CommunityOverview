@@ -932,7 +932,8 @@ by the hook sees, selects and discards only the entries its view wholly covers
 endpoints too) and whose dependencies it covers; a node delete is outside it
 too while main holds an edge to the node the reader cannot see. Any other
 entry is answered as if it were not staged. Every write a merge plans is
-validated as a direct write would be - a `manual` value included - and an
+validated as a direct write would be - a `manual` value included; an update of
+a saved view checks the annotations it brings, a create all of them - and an
 edge endpoint outside the caller's view is refused exactly as a missing one. A merge applies every write with an expectation and
 the store re-checks every condition inside the unit, so the graph or the layer
 changing in between fails the merge whole.

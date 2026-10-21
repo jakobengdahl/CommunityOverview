@@ -143,7 +143,7 @@ class LayerRaced(LayerStoreError):
     """A staging op's expectation about the layer failed inside its unit.
 
     The op read the layer, decided, and expected each entry it changes to
-    be as it read it - the same `session_seq`, or still absent. Another op
+    be as it read it - the same version (`entry_version`), or still absent. Another op
     changed one in between, so applying this one would overwrite that change
     with a decision made without it. Nothing was applied; the caller reads
     the layer again and decides again.
@@ -289,8 +289,8 @@ class LayerStoreBackend(Protocol):
         """Upsert `entries` and remove `removals`, atomically. Refused with
         StagedSessionNotActive unless the session is active, and with
         LayerFull, applying nothing, when the layer would end up holding more
-        than `max_entries`. `expected` maps keys to the `session_seq` of the
-        entry the caller read, None for one it found absent; any that no
+        than `max_entries`. `expected` maps keys to the version of the entry
+        the caller read (`entry_version`), None for one it found absent; any that no
         longer holds refuses the op with LayerRaced, applying nothing. With
         `exact`, the op read the whole layer: it must also hold no entry
         `expected` does not name."""

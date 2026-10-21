@@ -941,49 +941,70 @@ def test_a_manual_value_is_validated_like_a_direct_write(world):
     assert world.storage.get_node("b").metadata == {"k": 2}
 
 
-def test_a_restage_by_another_instance_with_the_same_seq_still_races(
+def _restage_as_another_instance(world, sid, node_id, staged):
+    """What an instance with its own session document stages: the same
+    session_seq as the entry it replaces, a token of its own."""
+    entry = world.layer(sid)[("node", node_id)]
+    world.storage.layer_store.stage(
+        sid, [{**entry, "staged": staged, "stage_token": "other-instance"}]
+    )
+
+
+def test_a_discard_tells_another_instances_restage_apart_by_its_token(
     world, monkeypatch
 ):
-    """Instances with separate session documents can stamp the same
-    session_seq; the stage token tells their entries apart."""
     svc, sid = world.service, world.staged_session()
     _stage(world, sid, ("update_node", ("a",), {"updates": {"description": "x"}}))
     store = world.storage.layer_store
     original = store.discard
-    entry = world.layer(sid)[("node", "a")]
 
-    def other_instance_restages(*args, **kwargs):
-        store.stage(
-            sid,
-            [
-                {
-                    **entry,
-                    "staged": {"description": "y"},
-                    "stage_token": "other-instance",
-                }
-            ],
-        )
+    def other_instance_first(*args, **kwargs):
         monkeypatch.setattr(store, "discard", original)
+        # Same session_seq; the new version moves a out of the narrowed view.
+        _restage_as_another_instance(
+            world, sid, "a", {"metadata": {"origin_graph_id": "remote"}}
+        )
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(store, "discard", other_instance_restages)
+    monkeypatch.setattr(store, "discard", other_instance_first)
+    world.hook.narrow = True
     result = svc.discard_staged_changes(sid)
-    # Decided again on the newer entry, which is then discarded knowingly.
-    assert result["removed_entries"] == [["node", "a"]]
-    raced = world.layer(sid)
-    assert raced == {}
-    _stage(world, sid, ("update_node", ("a",), {"updates": {"description": "x"}}))
-    entry = world.layer(sid)[("node", "a")]
-    store.stage(
-        sid,
-        [{**entry, "staged": {"description": "y"}, "stage_token": "other-instance"}],
-    )
-    check_entry = {**entry}
-    from backend.core import layer_store as ls
+    assert result["removed_entries"] == []
+    world.hook.narrow = False
+    assert world.layer(sid)[("node", "a")]["stage_token"] == "other-instance"
 
-    assert not ls.entry_matches(
-        world.layer(sid)[("node", "a")], ls.entry_version(check_entry)
+
+def test_a_merge_tells_another_instances_restage_apart_by_its_token(world, monkeypatch):
+    svc, sid = world.service, world.staged_session()
+    _stage(world, sid, ("update_node", ("a",), {"updates": {"description": "x"}}))
+    store = world.storage.layer_store
+    original = store.merge
+
+    def other_instance_first(*args, **kwargs):
+        _restage_as_another_instance(world, sid, "a", {"description": "newer"})
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "merge", other_instance_first)
+    result = svc.merge_staged_changes(sid, "m")
+    assert result["error"] == "merge_raced"
+    assert world.storage.get_node("a").description == ""
+    assert world.layer(sid)[("node", "a")]["staged"] == {"description": "newer"}
+
+
+def test_an_update_of_a_saved_view_holding_older_annotations_merges(world):
+    """A direct update checks only the metadata it brings; so does a merge."""
+    svc, sid = world.service, world.staged_session()
+    legacy = [
+        {"id": "x", "type": "image", "image": {"url": "https://example.org/a.png"}}
+    ]
+    world.storage.add_nodes(
+        [Node(id="v", type="SavedView", name="View", metadata={"annotations": legacy})],
+        [],
     )
+    _stage(world, sid, ("update_node", ("v",), {"updates": {"name": "Renamed"}}))
+    result = svc.merge_staged_changes(sid, "m")
+    assert result["success"] is True, result
+    assert world.storage.get_node("v").name == "Renamed"
 
 
 def test_a_manual_value_on_a_saved_view_is_held_to_the_annotation_rules(world):
