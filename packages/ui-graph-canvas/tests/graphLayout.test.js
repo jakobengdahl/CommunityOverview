@@ -484,6 +484,26 @@ describe('sort by date', () => {
     expect(parseIsoDate('2026-01-01T00:30')).toBeLessThan(parseIsoDate('2026-01-01T01:00:00Z'));
   });
 
+  it('orders values that differ only below a second, down to microseconds', () => {
+    expect(parseIsoDate('2026-10-21T08:30:00.100')).toBeLessThan(
+      parseIsoDate('2026-10-21T08:30:00.900')
+    );
+    expect(parseIsoDate('2026-05-19T09:01:02.755032')).toBeLessThan(
+      parseIsoDate('2026-05-19T09:01:02.755051')
+    );
+    expect(parseIsoDate('2026-10-21T08:30:00.5Z')).toBeLessThan(
+      parseIsoDate('2026-10-21T08:30:01Z')
+    );
+  });
+
+  it('applies zone offsets and rejects invalid seconds, offsets and two-digit-year drift', () => {
+    expect(parseIsoDate('2026-10-21T10:00+02:00')).toBe(parseIsoDate('2026-10-21T08:00Z'));
+    expect(parseIsoDate('2026-10-21T10:00-0130')).toBe(parseIsoDate('2026-10-21T11:30Z'));
+    expect(parseIsoDate('2026-10-21T08:30:60')).toBeNull();
+    expect(parseIsoDate('2026-10-21T08:30+25:00')).toBeNull();
+    expect(parseIsoDate('0050-01-01')).toBeLessThan(parseIsoDate('1900-01-01'));
+  });
+
   it('spaces nodes evenly with no overlap', () => {
     const nodes = ['2026-01-01', '2026-01-02', '2026-01-03'].map((d, i) => mk(`n${i}`, `N${i}`, d));
     const xs = [...arrangeNodes(nodes, [], 'dateHorizontal', { dateField: 'start_date' }).values()]

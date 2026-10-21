@@ -591,28 +591,41 @@ export function positionNewNodes(newNodes, existingNodes, edges = [], options = 
 // seconds, fraction and zone). Anything looser is not treated as a date, so free
 // text and numeric ids are never mistaken for one.
 const ISO_DATE_RE =
-  /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
+  /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
 
 /**
  * Parse an ISO-8601 date or date-time string into epoch milliseconds, or null when
- * the value is not a string, not ISO-8601, or not a real calendar date.
+ * the value is not a string, not ISO-8601, or not a real calendar date. A fractional
+ * second is kept below the millisecond (as a fraction of one), so values that differ
+ * only in microseconds — as backend timestamps do — still order correctly.
  */
 export function parseIsoDate(value) {
   if (typeof value !== 'string') return null;
   const m = ISO_DATE_RE.exec(value.trim());
   if (!m) return null;
   const [year, month, day] = [Number(m[1]), Number(m[2]), Number(m[3])];
-  const probe = new Date(Date.UTC(year, month - 1, day));
-  if (probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== day) return null;
-  if (m[4] !== undefined && (Number(m[4]) > 23 || Number(m[5]) > 59)) return null;
-  const hasZone = /(?:Z|[+-]\d{2}:?\d{2})$/.test(value.trim()) && m[4] !== undefined;
-  if (hasZone) {
-    const ms = Date.parse(value.trim().replace(' ', 'T'));
-    return Number.isNaN(ms) ? null : ms;
+  const hour = Number(m[4] || 0);
+  const minute = Number(m[5] || 0);
+  const second = Number(m[6] || 0);
+  if (hour > 23 || minute > 59 || second > 59) return null;
+  // setUTCFullYear keeps years 0000-0099 as written (Date.UTC maps them to 19xx).
+  const base = new Date(0);
+  base.setUTCFullYear(year, month - 1, day);
+  if (base.getUTCMonth() !== month - 1 || base.getUTCDate() !== day) return null;
+  base.setUTCHours(hour, minute, second, 0);
+  let ms = base.getTime();
+  const zone = m[8];
+  if (zone && zone !== 'Z') {
+    const sign = zone[0] === '-' ? -1 : 1;
+    const digits = zone.slice(1).replace(':', '');
+    const zh = Number(digits.slice(0, 2));
+    const zm = Number(digits.slice(2));
+    if (zh > 23 || zm > 59) return null;
+    ms -= sign * (zh * 60 + zm) * 60000;
   }
-  // Zoneless values (date-only or date-time) are read on one clock — UTC — because
-  // Date.parse would otherwise read date-only as UTC but date-time as local time.
-  return Date.UTC(year, month - 1, day, Number(m[4] || 0), Number(m[5] || 0), Number(m[6] || 0));
+  // Zoneless values (date-only or date-time) are read on one clock — UTC — so a
+  // date-only value and a date-time on the same day compare consistently.
+  return ms + (m[7] ? Number(`0.${m[7]}`) * 1000 : 0);
 }
 
 // Node fields are read from the node's `data` (React Flow shape) or the node itself,
