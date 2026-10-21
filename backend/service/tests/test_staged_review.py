@@ -1355,3 +1355,38 @@ def test_a_staged_write_during_a_merge_reads_main_as_the_merge_left_it(
     entry = world.layer(sid)[("node", "a")]
     assert entry["base"]["description"] == "merged"
     assert entry["base_revision"] == world.storage.get_node("a").revision
+
+
+# -- review round 9 regressions -----------------------------------------------------------
+
+
+def test_the_diff_sanitises_a_side_that_is_a_saved_view_whatever_the_others_are(
+    world,
+):
+    """A staged Actor over an id main holds as a saved view (id_taken): main's
+    side is still a saved view's, and read as one."""
+    sid = world.staged_session()
+    _stage(
+        world,
+        sid,
+        (
+            "add_nodes",
+            (
+                [
+                    {
+                        "id": "v",
+                        "type": "Actor",
+                        "name": "A",
+                        "metadata": {"annotations": []},
+                    }
+                ],
+                [],
+            ),
+            {},
+        ),
+    )
+    _legacy_view(world)
+    item = _items(world.service.get_staged_changes(sid))[("node", "v")]
+    assert item["status"] == "id_taken"
+    main = item["fields"]["metadata.annotations"]["main"]
+    assert "url" not in (main[0].get("image") or {})

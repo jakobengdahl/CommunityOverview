@@ -332,8 +332,11 @@ class Review:
         on every side, as every read of a saved view is. Conflicts are judged
         on the stored values."""
         fields = self.field_diff(key)
-        doc = self.composed(key) or self.main[key] or self.entries[key].get("base")
-        if (doc or {}).get("type") not in _SAVED_VIEW_TYPES:
+        # Any side that is a saved view makes every side one to sanitise: the
+        # type can differ between base, main and what the session staged, and
+        # sanitising a non-view's annotations changes nothing it holds.
+        sides = (self.composed(key), self.main[key], self.entries[key].get("base"))
+        if not any((doc or {}).get("type") in _SAVED_VIEW_TYPES for doc in sides):
             return fields
         for name in _ANNOTATION_FIELDS:
             if name not in fields:
