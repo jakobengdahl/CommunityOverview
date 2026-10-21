@@ -827,3 +827,28 @@ def test_an_instance_that_cannot_read_the_stores_records_acts_in_no_session(
     assert _node(client, "u") is None
     # A request naming no session is untouched.
     assert _add(client, {}, "plain").status_code == 200
+
+
+def test_a_stream_join_racing_a_retirement_answers_404(client, monkeypatch):
+    from backend.core.session_manager import SessionNotFound
+
+    def retired(_session_id):
+        raise SessionNotFound()
+
+    monkeypatch.setattr(client.app.state.session_manager, "get_or_create", retired)
+    response = client.get(f"/api/sessions/{UNKNOWN}/stream", params={"client_id": "c"})
+    assert response.status_code == 404
+    assert response.json()["detail"] == "session not found"
+
+
+def test_create_app_hands_the_storage_check_to_the_write_modes(
+    app_config, mock_llm_provider, monkeypatch
+):
+    from backend.core.storage import GraphStorage
+
+    monkeypatch.setattr(
+        GraphStorage, "staged_records_check", property(lambda self: lambda: True)
+    )
+    with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
+        client = TestClient(create_app(app_config))
+    assert client.app.state.write_modes.store_holds_unreadable_records() is True

@@ -523,18 +523,15 @@ class StagedWrite:
                 doc is not None and not self._visible(doc, graph_access)
                 for doc in snapshots
             )
-        # An endpoint main no longer holds hides nothing; one it holds out of
-        # the writer's view does.
+        # An endpoint main no longer holds cannot be judged, as the base keeps
+        # no copy of it: it is taken as hidden, refusing rather than staging
+        # against a base the writer may never have seen.
         snapshots = [existing.get("base"), layer.main_edge(entity_id)]
-        endpoints = [
-            layer.main_node(doc.get(end) or "")
+        return any(
+            not self._visible(layer.main_node(doc.get(end) or ""), graph_access)
             for doc in snapshots
             if doc is not None
             for end in ("source", "target")
-        ]
-        return any(
-            node is not None and not self._visible(node, graph_access)
-            for node in endpoints
         )
 
     # -- the writes (§9.1) ----------------------------------------------------------
@@ -807,11 +804,19 @@ class StagedWrite:
         doc = layer.edge(edge_id)
         if doc is None or not graph_access.enabled:
             return doc
-        if self._shown(layer, doc["source"], graph_access) and self._shown(
-            layer, doc["target"], graph_access
+        # The main edge the composed one stands over, too: re-created with new
+        # endpoints, the composed edge still carries the main edge's content.
+        main = layer.main_edge(edge_id)
+        if not all(
+            self._shown(layer, doc[end], graph_access) for end in ("source", "target")
         ):
-            return doc
-        return None
+            return None
+        if main is not None and not all(
+            self._visible(layer.main_node(main[end]), graph_access)
+            for end in ("source", "target")
+        ):
+            return None
+        return doc
 
     def update_edge(
         self,

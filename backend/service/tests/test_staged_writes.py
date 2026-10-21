@@ -1033,21 +1033,52 @@ def test_re_creating_a_tombstoned_node_outside_the_narrowing_is_refused(world):
     assert world.layer(sid)[("node", "a")]["action"] == "delete"
 
 
-def test_re_creating_an_edge_whose_old_endpoint_main_since_deleted_is_staged(world):
-    sid = _narrowed(world)
-    world.storage.add_nodes(
-        [Node(id="x", type="Actor", name="X", metadata={"origin_graph_id": "g1"})],
-        [Edge(id="xw", source="x", target="w", type="RELATES_TO")],
-    )
-    with bind_session(sid):
-        world.service.delete_edges(["xw"], confirmed=True)
-    world.storage.delete_nodes(["x"], confirmed=True)
+def test_re_creating_a_hidden_edge_after_main_deleted_its_hidden_endpoint_is_refused(
+    world,
+):
+    sid = _hidden_edge_tombstoned(world)
+    world.storage.delete_nodes(["a"], confirmed=True)
     with bind_session(sid):
         result = world.service.add_nodes(
-            [], [{"id": "xw", "source": "v", "target": "w", "type": "RELATES_TO"}]
+            [], [{"id": "va", "source": "w", "target": "w", "type": "RELATES_TO"}]
         )
-    assert result["success"] is True, result
-    assert world.layer(sid)[("edge", "xw")]["staged"]["source"] == "v"
+    assert result["success"] is False
+    assert "SECRET" not in json.dumps(result)
+
+
+def test_a_re_created_edge_cannot_keep_a_main_edge_that_left_the_view_in_it(world):
+    sid = _narrowed(world)
+    world.service._authorization_hook = world.hook
+    with bind_session(sid):
+        world.service.delete_edges(["ab"], confirmed=True)
+        world.service.add_nodes(
+            [], [{"id": "ab", "source": "v", "target": "w", "type": "RELATES_TO"}]
+        )
+    world.storage.update_node("a", {"metadata": {"origin_graph_id": "g2"}})
+    world.storage.update_edge("ab", {"metadata": {"secret_key": "s3cr3t"}})
+
+    class LocalAndG1:
+        def evaluate(self, context):
+            return GraphAuthorizationDecision(
+                allowed=True,
+                graph_access=GraphAccessNarrowing(
+                    enabled=True, allow_local_graph=True, include_graph_ids=("g1",)
+                ),
+            )
+
+    world.service._authorization_hook = LocalAndG1()
+    before = world.layer(sid)
+    with bind_session(sid):
+        answers = [
+            world.service.archive_edges(["ab"]),
+            world.service.update_edge("ab", {"label": "x"}),
+            world.service.update_edge("ab", {"label": "x"}, expected_revision=999),
+            world.service.delete_edges(["ab"], confirmed=True),
+        ]
+    for answer in answers:
+        assert "s3cr3t" not in json.dumps(answer)
+        assert answer.get("current_revision") is None
+    assert world.layer(sid) == before
 
 
 def test_a_staged_change_cannot_keep_a_main_node_that_left_the_view_in_it(world):
@@ -1081,6 +1112,7 @@ def test_a_staged_change_cannot_keep_a_main_node_that_left_the_view_in_it(world)
             world.service.archive_nodes(["v"]),
             world.service.update_node("v", {"tags": ["t"]}),
             world.service.add_edge("v", "b", type="RELATES_TO"),
+            world.service.delete_nodes(["v"], confirmed=True),
         ]
     for answer in answers:
         assert "SECRET" not in json.dumps(answer) and "s3cr3t" not in json.dumps(answer)
@@ -1341,3 +1373,78 @@ def test_expected_revision_on_an_absent_entity_conflicts_like_a_direct_write(wor
     assert staged["current_revision"] is None
     assert staged_edge["error"] == "entity_revision_conflict"
     assert world.layer(sid) == {}
+
+
+def test_an_unnarrowed_re_create_over_a_tombstone_whose_main_endpoint_is_gone(world):
+    sid = world.staged_session()
+    with bind_session(sid):
+        assert world.service.delete_edges(["ab"], confirmed=True)["success"] is True
+    world.storage.delete_nodes(["b"], confirmed=True)
+    with bind_session(sid):
+        result = world.service.add_nodes(
+            [], [{"id": "ab", "source": "a", "target": "a", "type": "RELATES_TO"}]
+        )
+    assert result["success"] is True, result
+
+
+def test_a_single_edge_add_refuses_an_id_tombstoned_outside_the_narrowing(world):
+    from backend.service.staging import StagedWrite
+
+    # The service mints edge ids, so only the unit can be handed a colliding one.
+    sid = _hidden_edge_tombstoned(world)
+    staged = StagedWrite(
+        world.storage,
+        world.manager,
+        sid,
+        expected_session_seq=None,
+        max_entries=1000,
+        actor="t",
+    )
+    before = world.layer(sid)
+    result = staged.add_edge(
+        Edge(id="va", source="w", target="w", type="RELATES_TO"),
+        graph_access=GraphAccessNarrowing(
+            enabled=True, allow_local_graph=False, include_graph_ids=("g1",)
+        ),
+    )
+    assert result["success"] is False
+    assert world.layer(sid).keys() == before.keys()
+
+
+def test_a_staging_instance_never_asks_the_unreadable_records_check(tmp_path):
+    backend = FileGraphPersistenceBackend(tmp_path / "g.json", staged_sessions=True)
+    storage = GraphStorage(str(tmp_path / "g.json"), persistence_backend=backend)
+    asked = []
+    modes = WriteModes(
+        storage.layer_store, unreadable_records=lambda: asked.append(1) or True
+    )
+    assert modes.store_holds_unreadable_records() is False
+    assert asked == []
+
+
+def test_staged_records_check_is_the_backends_own_check(tmp_path):
+    backend = FileGraphPersistenceBackend(tmp_path / "g.json")
+    storage = GraphStorage(str(tmp_path / "g.json"), persistence_backend=backend)
+    assert storage.staged_records_check is None
+    backend.holds_staged_sessions = lambda: True
+    assert storage.staged_records_check() is True
+
+
+def test_staged_status_of_a_malformed_id_is_none_not_an_error(tmp_path):
+    backend = FileGraphPersistenceBackend(tmp_path / "g.json", staged_sessions=True)
+    storage = GraphStorage(str(tmp_path / "g.json"), persistence_backend=backend)
+    modes = WriteModes(storage.layer_store)
+    assert modes.staged_status("not a session id/../x") == "none"
+    assert modes.is_retired("") is False
+
+
+def test_a_retired_id_stays_retired_once_seen(tmp_path):
+    backend = FileGraphPersistenceBackend(tmp_path / "g.json", staged_sessions=True)
+    storage = GraphStorage(str(tmp_path / "g.json"), persistence_backend=backend)
+    sid = "1111-2222-3333-4444"
+    WriteModes(storage.layer_store).record_staged(sid)
+    WriteModes(storage.layer_store).retire(sid, require_empty=False)
+    modes = WriteModes(storage.layer_store)
+    assert modes.staged_status(sid) == "retired"
+    storage.layer_store.staged_status = lambda _sid: "none"
+    assert modes.staged_status(sid) == "retired"

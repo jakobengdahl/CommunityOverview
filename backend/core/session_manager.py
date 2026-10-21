@@ -714,7 +714,7 @@ class SessionManager:
         # session is created explicitly, where the hook is asked.
         try:
             return self.store.get_or_create(session_id)
-        except (SessionRetired, layer_store.StagedSessionRetired):
+        except SessionRetired:
             raise SessionNotFound() from None
 
     def write_mode_of(self, session: Session) -> Dict[str, str]:
