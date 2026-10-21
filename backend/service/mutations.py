@@ -17,10 +17,8 @@ from backend.core import (
     StaleUpdateError,
 )
 from backend.core.models import metadata_depth_error
-from backend.core.storage import build_node_update
 from backend.core.session_annotations import (
     saved_view_annotation_error,
-    saved_view_write_error,
 )
 from backend.runtime.authorization import (
     GRAPH_ACTION_MUTATE,
@@ -260,6 +258,21 @@ def add_nodes(
     return access.attach_mutation_attribution(response, event_context)
 
 
+def _saved_view_update_error(
+    after: Dict[str, Any], updates: Dict[str, Any]
+) -> Optional[str]:
+    """Why a direct update of a saved view may not be stored: every
+    annotation the caller sends - its `metadata` patch and any key outside
+    `metadata`, which is folded into it - is held to the saved-view rule.
+    Judged by the storage under its lock, on the node the write replaces."""
+    if after.get("type") not in _SAVED_VIEW_NODE_TYPES:
+        return None
+    sent = {k: v for k, v in updates.items() if k not in _NODE_MODEL_FIELDS}
+    if isinstance(updates.get("metadata"), dict):
+        sent.update(updates["metadata"])
+    return saved_view_annotation_error(sent)
+
+
 def update_node(
     storage: "GraphStorage",
     hook: "GraphAuthorizationHook",
@@ -314,24 +327,6 @@ def update_node(
     ):
         return {"success": False, "error": f"Node with ID {node_id} not found"}
 
-    if target_node is not None and target_node.type_str in _SAVED_VIEW_NODE_TYPES:
-        # Judged on the metadata the update changes, however it arrived: a
-        # key outside `metadata` is folded into it too.
-        try:
-            candidate = build_node_update(
-                target_node.to_dict(), updates, metadata_merge=metadata_merge
-            ).to_dict()
-        except ValueError:
-            candidate = None  # refused by the storage's own validation below
-        if candidate is not None:
-            annotation_error = saved_view_write_error(target_node.to_dict(), candidate)
-            if annotation_error:
-                return {
-                    "success": False,
-                    "error": f"Error validating input: {annotation_error}",
-                    "error_code": VALIDATION_ERROR_CODE,
-                }
-
     event_context = access.build_event_context(
         target="update_node",
         event_origin=event_origin,
@@ -347,6 +342,7 @@ def update_node(
             metadata_merge=metadata_merge,
             expected_updated_at=expected_updated_at,
             expected_revision=expected_revision,
+            validate=lambda before, after: _saved_view_update_error(after, updates),
         )
     except _WRITE_ERRORS as e:
         return write_error_result(e)

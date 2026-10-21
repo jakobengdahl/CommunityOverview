@@ -3974,9 +3974,16 @@ class GraphStorage:
         metadata_merge: bool = False,
         expected_updated_at: Optional[Any] = None,
         expected_revision: Optional[int] = None,
+        validate: Optional[
+            Callable[[Dict[str, Any], Dict[str, Any]], Optional[str]]
+        ] = None,
     ) -> Optional[Node]:
         """
         Update an existing node.
+
+        ``validate(before, after)`` - the node as it stands and as the update
+        would leave it - runs under the lock, on the node this write actually
+        replaces; a reason it returns refuses the update as ``ValueError``.
 
         Thread-safe: Protected by _lock for the entire operation.
 
@@ -4043,6 +4050,10 @@ class GraphStorage:
             validated = build_node_update(
                 node.to_dict(), updates, metadata_merge=metadata_merge
             )
+            if validate is not None:
+                refused = validate(node.to_dict(), validated.to_dict())
+                if refused:
+                    raise ValueError(refused)
             allowed_fields = _NODE_UPDATE_FIELDS
 
             undo = self._capture(node_ids=[node_id])

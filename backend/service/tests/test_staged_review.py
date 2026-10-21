@@ -1146,3 +1146,50 @@ def test_annotations_passed_outside_metadata_are_checked_on_a_saved_view(world, 
     assert result["success"] is False
     assert result["error_code"] == "validation_error"
     assert world.storage.get_node("v").metadata == {}
+
+
+# -- review round 5 regressions -----------------------------------------------------------
+
+
+def test_a_direct_update_is_judged_on_the_node_it_replaces_not_a_stale_read(
+    world, monkeypatch
+):
+    """A merge can turn a node into a saved view between a direct update's
+    read and its write; the check runs under the storage lock, on the live
+    node."""
+    svc = world.service
+    world.storage.add_nodes([Node(id="q", type="SavedView", name="View")], [])
+    stale = Node(id="q", type="Actor", name="Q")
+    real_get = world.storage.get_node
+    monkeypatch.setattr(
+        world.storage,
+        "get_node",
+        lambda node_id: stale if node_id == "q" else real_get(node_id),
+    )
+    result = svc.update_node("q", {"metadata": {"annotations": _REMOTE_IMAGE}})
+    monkeypatch.setattr(world.storage, "get_node", real_get)
+    assert result["success"] is False
+    assert result["error_code"] == "validation_error"
+    assert world.storage.get_node("q").metadata == {}
+
+
+def test_a_direct_update_re_sending_unsafe_annotations_is_refused_as_before(world):
+    svc = world.service
+    world.storage.add_nodes(
+        [
+            Node(
+                id="v",
+                type="SavedView",
+                name="View",
+                metadata={"annotations": _REMOTE_IMAGE},
+            )
+        ],
+        [],
+    )
+    result = svc.update_node(
+        "v", {"name": "X", "metadata": {"annotations": _REMOTE_IMAGE}}
+    )
+    assert result["error_code"] == "validation_error"
+    assert world.storage.get_node("v").name == "View"
+    # An unrelated change to a view holding them still goes through.
+    assert svc.update_node("v", {"name": "Y"})["success"] is True
