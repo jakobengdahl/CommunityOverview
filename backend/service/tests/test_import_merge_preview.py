@@ -4,6 +4,7 @@ REST, service and MCP tests for the read-only merge preview
 docs/adr/0013-graph-import-merge-mode.md, slice 1.
 """
 
+import inspect
 import json
 import os
 from unittest.mock import Mock
@@ -363,6 +364,15 @@ class TestMcpPreviewTool:
 
     def test_there_is_no_merge_commit_tool(self, storage):
         tools = self._tools(storage)
+        # merge_staged_changes merges a staged session's layer
+        # (docs/SESSION_OVERLAY_CONTRACT.md §11), not an import document.
         assert not [
-            name for name in tools if "merge" in name and name != "preview_graph_merge"
+            name
+            for name in tools
+            if "merge" in name
+            and name not in ("preview_graph_merge", "merge_staged_changes")
         ]
+        assert (
+            "document"
+            not in inspect.signature(tools["merge_staged_changes"]).parameters
+        )

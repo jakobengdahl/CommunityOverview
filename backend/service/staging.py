@@ -26,6 +26,7 @@ from backend.core import layer_store
 from backend.core.layer_vectors import LayerVectors
 from backend.core.models import _parse_datetime
 from backend.core.session_annotations import saved_view_annotation_error
+from backend.core.session_store import is_valid_session_id
 from backend.core.session_manager import (
     LayoutBusy,
     SessionNotFound,
@@ -193,6 +194,16 @@ class Layer:
             if entry is None and key in self._loaded
         ]
 
+    def expected(self) -> Dict[LayerKey, Optional[int]]:
+        """What the op read of each entry it changes: the entry's
+        ``session_seq``, None where it found none. The store refuses the op
+        if any has changed since (``LayerRaced``)."""
+        return {
+            key: (self._loaded[key].get("session_seq") if key in self._loaded else None)
+            for key, entry in self._changed.items()
+            if entry is not None or key in self._loaded
+        }
+
     # -- the main graph ---------------------------------------------------------
 
     def main_node(self, node_id: str) -> Optional[Dict[str, Any]]:
@@ -313,7 +324,11 @@ class StagedWrite:
             stamped = [{**entry, "session_seq": seq} for entry in upserts]
             staged_entries.extend(stamped)
             store.stage(
-                self.session_id, stamped, removals, max_entries=self._max_entries
+                self.session_id,
+                stamped,
+                removals,
+                max_entries=self._max_entries,
+                expected=layer.expected(),
             )
             return {"entries": stamped, "removals": [list(k) for k in removals]}
 
@@ -1041,6 +1056,13 @@ class SessionGate:
             actor=actor,
             on_staged=lambda: self._embed_in_background(session_id),
         )
+
+    def named_mode(self, session_id: str) -> str:
+        """The write mode of a session a session route or tool names, or a
+        refusal as for a session a request acts in (§16.1)."""
+        if not is_valid_session_id(session_id):
+            raise session_context.not_found(session_id)
+        return self._mode(session_id)
 
     def read_session(self) -> Optional[str]:
         """The staged session a read in the current request composes in, or

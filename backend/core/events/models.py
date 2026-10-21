@@ -148,15 +148,26 @@ class EventContext(BaseModel):
         None,
         description="Generic actor and scope attribution for audit-friendly mutation tracking",
     )
+    staged_by: Optional[str] = Field(
+        None,
+        description=(
+            "For a write a session merge applied: the actor who staged the change "
+            "(the merging actor is in attribution)"
+        ),
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dict for JSON serialization."""
-        return {
+        data = {
             "event_origin": self.event_origin,
             "event_session_id": self.event_session_id,
             "event_correlation_id": self.event_correlation_id,
             "attribution": self.attribution.to_dict() if self.attribution else None,
         }
+        if self.staged_by is not None:
+            # Only on a merged write, so every other event reads as before.
+            data["staged_by"] = self.staged_by
+        return data
 
 
 class EntityData(BaseModel):

@@ -54,7 +54,13 @@ from .storage_backends import (
     capabilities_of,
     refused_outright,
 )
-from .storage_merge import ImportMergeUnsupported, MergeApplied, MergeWrites
+from .storage_merge import (
+    ImportMergeUnsupported,
+    MergeApplied,
+    MergeWrites,
+    SessionMergeLanded,
+    SessionMergePlan,
+)
 from .vector_store import VectorStore, dominant_dimension, matching_dimension
 from . import storage_search
 from . import storage_history
@@ -3660,6 +3666,304 @@ class GraphStorage:
             return MergeApplied(
                 revisions=revisions, events=len(changes), generation=self._generation
             )
+
+    # The fields a node's embedding text is built from: a write that changes
+    # one of them re-embeds the node, as update_node does.
+    _EMBEDDED_FIELDS = ("name", "description", "summary", "tags", "aliases")
+
+    def apply_session_merge(
+        self,
+        session_id: str,
+        merge_id: str,
+        prepare: Callable[[], SessionMergePlan],
+        event_context: Optional[EventContext] = None,
+    ) -> SessionMergeLanded:
+        """Apply a session merge as one unit of the layer store (§7, §11).
+
+        Under ``_lock``: a merge id already recorded returns its record and
+        writes nothing (I9; another session's id raises MergeIdTaken).
+        Otherwise ``prepare`` runs, on a model no other writer on this
+        instance can move until this returns, and returns the plan; it raises
+        to refuse the merge. The plan's writes, checks, removals and record go
+        to the store's ``merge`` through the I/O queue, after every write
+        queued before it, and this waits: the store verifies every
+        expectation and check inside the unit and applies all or nothing
+        (I7, I8). Memory changes only once the store has committed, then one
+        ordinary event fires per write, in the unit's order, carrying
+        ``event_context`` and the entry's ``staged_by``.
+
+        Raises:
+            MergeRaced: an expectation or check failed in the unit; nothing
+                was written.
+            MergeIdTaken, StagedSessionNotActive, InvalidLayerRequest: refused
+                before anything was written.
+            GraphWriteFailed, GraphWriteOutcomeUnknown: the store failed and
+                the merge was ruled out, or could not be confirmed (§4.4);
+                for the latter memory was re-read from the store.
+            ValueError: a planned entity does not validate.
+            Whatever ``prepare`` raises.
+        """
+        from . import layer_store as _layer
+
+        backend = self.layer_store
+        if backend is None:
+            raise RuntimeError("this graph backend holds no staged sessions")
+        with self._lock:
+            stored = backend.load_merge(merge_id)
+            if stored is not None:
+                replayed = _layer.replay(stored, session_id, merge_id)
+                return SessionMergeLanded(record=replayed.record, replayed=True)
+            plan = prepare()
+            heal = self._heal_if_needed()
+            if heal is not None:
+                # The store's image must be this instance's before the unit
+                # judges expectations against it.
+                heal.result()
+
+            entities: List[Any] = []
+            for write in plan.writes:
+                if write.action != "upsert":
+                    entities.append(None)
+                    continue
+                doc = dict(write.payload)
+                doc.pop("embedding", None)
+                entity = (Node if write.kind == "node" else Edge).from_dict(doc)
+                if write.kind == "node":
+                    entity.embedding = None
+                entities.append(entity)
+            upserted = [entity for entity in entities if entity is not None]
+            if not self._store_assigns_revisions and upserted:
+                first = self._take_revisions(len(upserted))
+                for offset, entity in enumerate(upserted):
+                    entity.revision = first + offset
+            operations = [
+                EntityOperation(
+                    write.kind,  # type: ignore[arg-type]
+                    write.action,  # type: ignore[arg-type]
+                    write.entity_id,
+                    (
+                        None
+                        if entity is None
+                        else self._serialize_node(entity)
+                        if write.kind == "node"
+                        else entity.to_dict()
+                    ),
+                    expected_revision=write.expected_revision,
+                    expect_absent=write.expect_absent,
+                )
+                for write, entity in zip(plan.writes, entities)
+            ]
+            before = {
+                (op.kind, op.entity_id): (
+                    None
+                    if (self.nodes if op.kind == "node" else self.edges).get(
+                        op.entity_id
+                    )
+                    is None
+                    else (self.nodes if op.kind == "node" else self.edges)[
+                        op.entity_id
+                    ].revision
+                )
+                for op in operations
+            }
+            future = self._io_executor.submit(
+                backend.merge,
+                session_id,
+                merge_id,
+                operations,
+                plan.checks,
+                plan.removals,
+                plan.record,
+            )
+            self._last_write = future
+            try:
+                result = future.result()
+            except (
+                _layer.MergeRaced,
+                _layer.MergeIdTaken,
+                _layer.StagedSessionNotActive,
+                _layer.InvalidLayerRequest,
+            ):
+                raise
+            except Exception as exc:
+                if refused_outright(exc):
+                    logger.warning(f"the store refused a merge: {exc}")
+                    raise GraphWriteFailed("the store refused the merge") from exc
+                result = self._resolve_failed_merge(
+                    session_id, merge_id, operations, before, exc
+                )
+            if result.replayed:
+                # Recorded by another instance between the lookup above and
+                # the unit; its writes reach memory as its announcement does.
+                return SessionMergeLanded(record=result.record, replayed=True)
+
+            stamps = [item.get("revision") for item in result.record["applied"]]
+            fired: List[Tuple[Any, ...]] = []
+            for write, entity, revision in zip(plan.writes, entities, stamps):
+                fired.append(self._apply_merged_write(write, entity, revision))
+            for (
+                event_type,
+                kind,
+                entity_id,
+                entity_type,
+                prior,
+                after,
+                staged_by,
+            ) in fired:
+                context = (event_context or EventContext()).model_copy(
+                    update={"staged_by": staged_by}
+                )
+                self._emit_event(
+                    event_type=event_type,
+                    entity_kind=kind,
+                    entity_id=entity_id,
+                    entity_type=entity_type,
+                    before=prior,
+                    after=after,
+                    context=context,
+                )
+            return SessionMergeLanded(
+                record=result.record,
+                replayed=False,
+                revisions={
+                    (write.kind, write.entity_id): revision
+                    for write, revision in zip(plan.writes, stamps)
+                },
+            )
+
+    def _apply_merged_write(self, write, entity, revision) -> Tuple[Any, ...]:
+        """Put one landed merge write into memory. Callers hold _lock.
+
+        Returns the event it fires, as the arguments of _emit_event."""
+        if write.kind == "node":
+            prior_node = self.nodes.get(write.entity_id)
+            prior = None if prior_node is None else prior_node.to_dict()
+            if write.action == "delete":
+                if self.graph.has_node(write.entity_id):
+                    self.graph.remove_node(write.entity_id)
+                self.nodes.pop(write.entity_id, None)
+                self._searchable_text_cache.pop(write.entity_id, None)
+                self.vector_store.remove_nodes_embeddings([write.entity_id])
+                self._inline_fallback.pop(write.entity_id, None)
+                return (
+                    EventType.NODE_DELETE,
+                    EntityKind.NODE,
+                    write.entity_id,
+                    (prior or {}).get("type", "Unknown"),
+                    prior,
+                    None,
+                    write.staged_by,
+                )
+            entity.revision = revision
+            # Index before `nodes`, as everywhere that adds.
+            self._searchable_text_cache[entity.id] = self._build_match_fields(entity)
+            self.nodes[entity.id] = entity
+            self.graph.add_node(entity.id, data=entity)
+            if prior is None or any(
+                prior.get(field) != getattr(entity, field)
+                for field in self._EMBEDDED_FIELDS
+            ):
+                try:
+                    self.vector_store.update_node_embedding(entity)
+                except Exception as embed_error:
+                    logger.warning(f"could not update embedding: {embed_error}")
+            return (
+                EventType.NODE_CREATE if prior is None else EventType.NODE_UPDATE,
+                EntityKind.NODE,
+                entity.id,
+                entity.type_str,
+                prior,
+                entity.to_dict(),
+                write.staged_by,
+            )
+        prior_edge = self.edges.get(write.entity_id)
+        prior = None if prior_edge is None else prior_edge.to_dict()
+        if prior_edge is not None and self.graph.has_edge(
+            prior_edge.source, prior_edge.target, key=write.entity_id
+        ):
+            self.graph.remove_edge(
+                prior_edge.source, prior_edge.target, key=write.entity_id
+            )
+        if write.action == "delete":
+            self.edges.pop(write.entity_id, None)
+            return (
+                EventType.EDGE_DELETE,
+                EntityKind.EDGE,
+                write.entity_id,
+                (prior or {}).get("type", "RELATES_TO"),
+                prior,
+                None,
+                write.staged_by,
+            )
+        entity.revision = revision
+        self.edges[entity.id] = entity
+        self.graph.add_edge(entity.source, entity.target, key=entity.id, data=entity)
+        return (
+            EventType.EDGE_CREATE if prior is None else EventType.EDGE_UPDATE,
+            EntityKind.EDGE,
+            entity.id,
+            entity.type_str,
+            prior,
+            entity.to_dict(),
+            write.staged_by,
+        )
+
+    def _resolve_failed_merge(
+        self,
+        session_id: str,
+        merge_id: str,
+        operations: List[EntityOperation],
+        before: Dict[Tuple[str, str], Optional[int]],
+        failure: BaseException,
+    ):
+        """Decide a merge whose unit failed on its own evidence (§4.4): its
+        merge record, which exists if and only if the unit committed, and, in
+        a shared store, the revisions of every entity it names. Callers hold
+        _lock. Returns the store's MergeResult when it landed after all;
+        otherwise raises GraphWriteFailed (memory untouched) or
+        GraphWriteOutcomeUnknown (graph re-read from the store)."""
+        from . import layer_store as _layer
+
+        backend = self._persistence_backend
+        keys = [(op.kind, op.entity_id) for op in operations]
+        shared = self._store_assigns_revisions
+        readings: Optional[List[bool]] = []
+        for attempt in range(2 if shared else 1):
+            if attempt:
+                time.sleep(self.WRITE_RESOLVE_DELAY_SECONDS)
+            try:
+                stored = backend.load_merge(merge_id)  # type: ignore[attr-defined]
+                if stored is not None and stored.get("session_id") == session_id:
+                    logger.warning(
+                        f"a merge reported a failure but landed ({failure}); "
+                        f"completing it"
+                    )
+                    return _layer.MergeResult(record=stored)
+                unchanged = True
+                if shared and keys:
+                    evidence = backend.read_write_evidence(keys)  # type: ignore[attr-defined]
+                    unchanged = all(
+                        (evidence.get(key) or (None,))[0] == before[key] for key in keys
+                    )
+            except Exception as exc:
+                logger.warning(f"could not read back a failed merge: {exc}")
+                readings = None
+                break
+            readings.append(unchanged)
+        logger.warning(f"a merge failed: {failure}")
+        if readings and all(readings):
+            raise GraphWriteFailed("the merge did not land") from failure
+        try:
+            self.load(bootstrap_if_missing=False)
+        except Exception as exc:
+            logger.warning(
+                f"could not re-read the graph after a merge of unknown outcome "
+                f"({exc}); memory may differ from the store until the next "
+                f"reported change"
+            )
+        raise GraphWriteOutcomeUnknown(
+            "could not confirm whether the merge landed; re-read before retrying"
+        ) from failure
 
     def update_node(
         self,

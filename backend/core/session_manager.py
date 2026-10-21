@@ -898,6 +898,62 @@ class SessionManager:
         )
         return applied
 
+    def check_layer_op(self, session_id: str) -> None:
+        """Refuse a discard or merge up front, as a staging op is refused:
+        ``SessionNotFound`` without the session's document, ``LayoutBusy``
+        while an ``apply_ops`` batch holds its lock - so the op that follows
+        the layer change can always be applied."""
+        if not is_valid_session_id(session_id):
+            raise SessionNotFound()
+        if self.store.get(session_id) is None:
+            raise SessionNotFound()
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+
+    def announce_layer_change(
+        self, session_id: str, op: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Fan out a change the layer store has already made (§12, §15):
+        ``graph_changes_discarded`` or ``graph_changes_merged``, carrying keys
+        only. The layer change is the commit point; this follows it, and a
+        failure here is logged, never undoes it. Records a session activity
+        entry with no inverse. Returns the applied op, or None when there was
+        no document left to apply it to."""
+        session = (
+            self.store.get(session_id) if is_valid_session_id(session_id) else None
+        )
+        if session is None:
+            logger.warning(
+                "layer of session %s changed; its document is gone, so no op fans out",
+                session_id,
+            )
+            return None
+        try:
+            applied = self.store.apply_state_op(
+                session,
+                {**op, "client_id": GRAPH_STAGING_CLIENT_ID},
+                record_activity=True,
+            )
+        except Exception:
+            logger.exception("layer of session %s changed; its op failed", session_id)
+            return None
+        try:
+            self.store.persist(session)
+        except Exception:
+            logger.exception(
+                "layer of session %s changed; persisting its seq failed", session_id
+            )
+        self.bus.publish(
+            session_id,
+            {
+                "type": "op",
+                "client_id": GRAPH_STAGING_CLIENT_ID,
+                "op": applied,
+                "seq": applied["seq"],
+            },
+        )
+        return applied
+
     def get_session(self, session_id: str) -> Optional[Session]:
         return self.store.get(session_id)
 

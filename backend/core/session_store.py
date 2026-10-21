@@ -37,6 +37,7 @@ from typing import Any, Callable, Deque, Dict, List, Optional, Protocol
 from .session_activity import (
     DEFAULT_ACTIVITY_MAX_AGE_DAYS,
     DEFAULT_MAX_ACTIVITY_RECORDS,
+    RECORDED_ONLY_OPS,
     UNDOABLE_OPS,
     build_activity_record,
     find_latest_undoable as _find_latest_undoable,
@@ -113,10 +114,19 @@ STATE_OPS = {
     # other op, but emitted only by the server, after the layer store or the
     # staged-session record has changed - never accepted from a client.
     "graph_change_staged",
+    "graph_changes_discarded",
+    "graph_changes_merged",
     "write_mode_changed",
 }
 
-SERVER_ONLY_OPS = frozenset({"graph_change_staged", "write_mode_changed"})
+SERVER_ONLY_OPS = frozenset(
+    {
+        "graph_change_staged",
+        "graph_changes_discarded",
+        "graph_changes_merged",
+        "write_mode_changed",
+    }
+)
 
 
 def is_valid_session_id(session_id: str) -> bool:
@@ -1230,6 +1240,20 @@ class SessionStore:
                 op.get("removals"), list
             ):
                 raise OpError("graph_change_staged carries entries and removals")
+        elif op_type in ("graph_changes_discarded", "graph_changes_merged"):
+            removals = op.get("removals")
+            if not isinstance(removals, list):
+                raise OpError(f"{op_type} carries the removed keys")
+            if op_type == "graph_changes_merged" and not isinstance(
+                op.get("merge_id"), str
+            ):
+                raise OpError("graph_changes_merged carries its merge id")
+            activity_kwargs = {
+                "affected": {"kind": "layer", "keys": copy.deepcopy(removals)},
+                "before": None,
+                "after": None,
+                "inverse_op": None,
+            }
         elif op_type == "write_mode_changed":
             if op.get("write_mode") != "staged":
                 raise OpError("write_mode_changed only ever moves to staged")
@@ -1275,7 +1299,7 @@ class SessionStore:
         if (
             record_activity
             and activity_kwargs is not None
-            and op_type in UNDOABLE_OPS
+            and (op_type in UNDOABLE_OPS or op_type in RECORDED_ONLY_OPS)
             and isinstance(actor, str)
             and actor
         ):

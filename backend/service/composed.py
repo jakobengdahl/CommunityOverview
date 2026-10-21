@@ -51,6 +51,31 @@ STATE_NONE = "none"
 _MISSING = object()
 
 
+def doc_visible(doc: Optional[Dict[str, Any]], narrowing: GraphAccessNarrowing) -> bool:
+    """``access.is_node_visible``, on an entity as the layer holds it."""
+    if doc is None:
+        return False
+    graph_id = str((doc.get("metadata") or {}).get("origin_graph_id") or "")
+    return narrowing.matches(graph_id=graph_id.strip())
+
+
+def main_endpoint_shown(
+    storage: "GraphStorage",
+    narrowing: GraphAccessNarrowing,
+    node_id: Any,
+    since: Optional[int],
+) -> bool:
+    """Whether a main edge's or a base's endpoint is in the reader's view,
+    and was when the base was taken. Neither the main edge nor the base keeps
+    a copy of its endpoints, so one main no longer holds counts as hidden,
+    and so does one written after the base: it may have entered the view
+    since (revisions are graph-wide)."""
+    node = storage.get_node(node_id) if isinstance(node_id, str) else None
+    if node is None or not doc_visible(_doc(node), narrowing):
+        return False
+    return since is None or int(node.revision or 0) <= since
+
+
 class _OverlayMap(Mapping):
     """``main`` with ``over`` laid on top: an id in ``over`` answers from it
     (None: absent), any other id from ``main`` when ``keep`` admits it."""
@@ -292,11 +317,7 @@ class ComposedStorage:
         self.node_entry_ids: Set[str] = set(node_entries)
 
         def visible(doc: Optional[Dict[str, Any]]) -> bool:
-            # access.is_node_visible, on an entity as the layer holds it.
-            if doc is None:
-                return False
-            graph_id = str((doc.get("metadata") or {}).get("origin_graph_id") or "")
-            return narrowing.matches(graph_id=graph_id.strip())
+            return doc_visible(doc, narrowing)
 
         over_nodes: Dict[str, Optional[Node]] = {}
         for node_id, entry in node_entries.items():
@@ -316,15 +337,7 @@ class ComposedStorage:
         self.nodes = _OverlayMap(storage.nodes, over_nodes)
 
         def endpoint_shown(node_id: Any, since: Optional[int]) -> bool:
-            """Whether a main edge's or a base's endpoint is in the reader's
-            view, and was when the base was taken. Neither the main edge nor
-            the base keeps a copy of its endpoints, so one main no longer
-            holds counts as hidden, and so does one written after the base:
-            it may have entered the view since (revisions are graph-wide)."""
-            node = storage.get_node(node_id) if isinstance(node_id, str) else None
-            if node is None or not visible(_doc(node)):
-                return False
-            return since is None or int(node.revision or 0) <= since
+            return main_endpoint_shown(storage, narrowing, node_id, since)
 
         over_edges: Dict[str, Optional[Edge]] = {}
         for edge_id, entry in edge_entries.items():
