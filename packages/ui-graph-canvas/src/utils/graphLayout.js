@@ -587,6 +587,79 @@ export function positionNewNodes(newNodes, existingNodes, edges = [], options = 
   return positionedNodes;
 }
 
+// Strict ISO-8601 date / date-time (`2026-10-21`, `2026-10-21T08:30`, with optional
+// seconds, fraction and zone). Anything looser is not treated as a date, so free
+// text and numeric ids are never mistaken for one.
+const ISO_DATE_RE =
+  /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
+
+/**
+ * Parse an ISO-8601 date or date-time string into epoch milliseconds, or null when
+ * the value is not a string, not ISO-8601, or not a real calendar date.
+ */
+export function parseIsoDate(value) {
+  if (typeof value !== 'string') return null;
+  const m = ISO_DATE_RE.exec(value.trim());
+  if (!m) return null;
+  const [year, month, day] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const probe = new Date(Date.UTC(year, month - 1, day));
+  if (probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== day) return null;
+  if (m[4] !== undefined && (Number(m[4]) > 23 || Number(m[5]) > 59)) return null;
+  const ms = Date.parse(value.trim().replace(' ', 'T'));
+  return Number.isNaN(ms) ? null : ms;
+}
+
+// Node fields are read from the node's `data` (React Flow shape) or the node itself,
+// at the top level or one level down in `metadata`; a field key is `name` or
+// `metadata.name`.
+function dateFieldValue(node, field) {
+  const src = node?.data ?? node;
+  if (!src || !field) return undefined;
+  return field.startsWith('metadata.') ? src.metadata?.[field.slice(9)] : src[field];
+}
+
+/**
+ * Fields on which at least two of the given nodes carry a parseable ISO-8601 date.
+ * No field name is assumed: any string-valued property qualifies by its value alone.
+ * Returned in order of how many nodes carry a date there, then by name.
+ *
+ * @param {Array} nodes
+ * @returns {string[]}
+ */
+export function findDateFields(nodes) {
+  const counts = new Map();
+  for (const node of nodes || []) {
+    const src = node?.data ?? node;
+    if (!src || typeof src !== 'object') continue;
+    const keys = Object.keys(src).map((k) => [k, src[k]]);
+    if (src.metadata && typeof src.metadata === 'object') {
+      for (const [k, v] of Object.entries(src.metadata)) keys.push([`metadata.${k}`, v]);
+    }
+    for (const [key, value] of keys) {
+      if (parseIsoDate(value) !== null) counts.set(key, (counts.get(key) || 0) + 1);
+    }
+  }
+  return [...counts.entries()]
+    .filter(([, n]) => n >= 2)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([key]) => key);
+}
+
+/**
+ * Order nodes earliest-first by `field`. Ties break by name then id; nodes with a
+ * missing or unparseable date keep the same name/id order after all dated nodes.
+ */
+export function sortNodesByDate(nodes, field) {
+  const label = (n) => String(n?.data?.name ?? n?.data?.label ?? n?.name ?? '');
+  const keyed = nodes.map((n) => ({ n, t: parseIsoDate(dateFieldValue(n, field)) }));
+  keyed.sort((a, b) => {
+    if ((a.t === null) !== (b.t === null)) return a.t === null ? 1 : -1;
+    if (a.t !== b.t && a.t !== null) return a.t - b.t;
+    return label(a.n).localeCompare(label(b.n)) || String(a.n.id).localeCompare(String(b.n.id));
+  });
+  return keyed.map((k) => k.n);
+}
+
 /**
  * Re-arrange an already-placed set of nodes into a chosen structure, keeping the
  * result centred on the selection's current centroid so it stays where the user
@@ -603,12 +676,17 @@ export function positionNewNodes(newNodes, existingNodes, edges = [], options = 
  *                  dagre tree; otherwise it groups nodes by node type into one column
  *                  per type. Either way the grid spacing keeps nodes overlap-free.
  *
+ *   'dateHorizontal' / 'dateVertical' — a row / column ordered by the date in
+ *                  `options.dateField` (see findDateFields), earliest first; nodes
+ *                  without a parseable date follow the dated ones.
+ *
  * @param {Array} nodesToArrange - Nodes with current positions
  * @param {Array} edges - All edges (only those internal to the selection are used)
  * @param {string} mode - One of the modes above
+ * @param {{dateField?: string}} options - `dateField` for the date modes
  * @returns {Map<string, {x:number,y:number}>}
  */
-export function arrangeNodes(nodesToArrange, edges = [], mode = 'cluster') {
+export function arrangeNodes(nodesToArrange, edges = [], mode = 'cluster', options = {}) {
   const result = new Map();
   if (!Array.isArray(nodesToArrange) || nodesToArrange.length === 0) return result;
 
@@ -641,6 +719,13 @@ export function arrangeNodes(nodesToArrange, edges = [], mode = 'cluster') {
     positioned = nodesToArrange.map((n, i) => ({
       id: n.id,
       position: { x: 0, y: i * GRID_CELL_H },
+    }));
+  } else if (mode === 'dateHorizontal' || mode === 'dateVertical') {
+    const ordered = sortNodesByDate(nodesToArrange, options?.dateField);
+    const horizontal = mode === 'dateHorizontal';
+    positioned = ordered.map((n, i) => ({
+      id: n.id,
+      position: horizontal ? { x: i * GRID_CELL_W, y: 0 } : { x: 0, y: i * GRID_CELL_H },
     }));
   } else if (mode === 'tree') {
     positioned = treeLayout();

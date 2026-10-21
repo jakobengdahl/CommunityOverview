@@ -182,8 +182,13 @@ Restore selected**, **Dim incident edges / Restore incident edges** (every conne
 touching any of the selected nodes, de-duplicated), Delete all. "Select
 all nodes of the same type" extends the selection to every node whose type matches any
 type already in the selection. **Organize** opens a submenu of arrangements — Auto-tidy,
-Cluster, List horizontally, List vertically, or Arrange as tree — keeping the nodes
-centred where they already sit. **Auto-tidy** is the one-click option: it picks a sensible
+Cluster, List horizontally, List vertically, Arrange as tree, or **Sort by date**
+(horizontal or vertical) — keeping the nodes centred where they already sit. **Sort by
+date** places the nodes earliest first, left to right or top to bottom; any field whose
+value is an ISO-8601 date (`2026-10-21` or `2026-10-21T08:30`) counts, and when the
+selection shares more than one such field each gets its own pair of entries. Nodes
+without a usable date follow the dated ones, ties keep name order, and the entries are
+disabled until two selected nodes carry a date. **Auto-tidy** is the one-click option: it picks a sensible
 structure for you — a tree when the selected nodes are connected in a hierarchy,
 otherwise a per-type grouping — and always lays them out overlap-free. The same
 arrangements are available from the keyboard: press **Ctrl/Cmd+O** with a

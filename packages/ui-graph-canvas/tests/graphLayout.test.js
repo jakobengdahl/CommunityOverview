@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   arrangeNodes,
+  findDateFields,
+  parseIsoDate,
   positionNewNodes,
   alignNodes,
   distributeNodes,
@@ -441,5 +443,98 @@ describe('distributeNodes', () => {
     expect(result.get('near').x).toBe(100);
     expect(result.get('mid').x).toBe(500);
     expect(result.get('far').x).toBe(160);
+  });
+});
+
+describe('sort by date', () => {
+  const mk = (id, name, date, extra = {}) => ({
+    id,
+    position: { x: 0, y: 0 },
+    data: { name, start_date: date, ...extra },
+  });
+  const order = (result, axis) =>
+    [...result.entries()].sort((a, b) => a[1][axis] - b[1][axis]).map(([id]) => id);
+
+  it('parses only real ISO-8601 dates', () => {
+    expect(parseIsoDate('2026-10-21')).not.toBeNull();
+    expect(parseIsoDate('2026-10-21T08:30:00Z')).not.toBeNull();
+    expect(parseIsoDate('2026-02-30')).toBeNull();
+    expect(parseIsoDate('21/10/2026')).toBeNull();
+    expect(parseIsoDate('hello')).toBeNull();
+    expect(parseIsoDate(20261021)).toBeNull();
+  });
+
+  it('places the earliest date first, left to right and top to bottom', () => {
+    const nodes = [
+      mk('late', 'C', '2026-03-01'),
+      mk('early', 'A', '2025-01-15'),
+      mk('mid', 'B', '2026-01-01T10:00'),
+    ];
+    const h = arrangeNodes(nodes, [], 'dateHorizontal', { dateField: 'start_date' });
+    expect(order(h, 'x')).toEqual(['early', 'mid', 'late']);
+    expect(new Set([...h.values()].map((p) => p.y)).size).toBe(1);
+    const v = arrangeNodes(nodes, [], 'dateVertical', { dateField: 'start_date' });
+    expect(order(v, 'y')).toEqual(['early', 'mid', 'late']);
+    expect(new Set([...v.values()].map((p) => p.x)).size).toBe(1);
+  });
+
+  it('spaces nodes evenly with no overlap', () => {
+    const nodes = ['2026-01-01', '2026-01-02', '2026-01-03'].map((d, i) => mk(`n${i}`, `N${i}`, d));
+    const xs = [...arrangeNodes(nodes, [], 'dateHorizontal', { dateField: 'start_date' }).values()]
+      .map((p) => p.x)
+      .sort((a, b) => a - b);
+    expect(xs[1] - xs[0]).toBeGreaterThan(0);
+    expect(xs[2] - xs[1]).toBeCloseTo(xs[1] - xs[0]);
+  });
+
+  it('keeps undated and unparseable nodes after dated ones, in name order, and drops none', () => {
+    const nodes = [
+      mk('z', 'Zed', undefined),
+      mk('bad', 'Bad', 'soon'),
+      mk('d', 'Dated', '2026-05-05'),
+      mk('a', 'Alpha', ''),
+    ];
+    const r = arrangeNodes(nodes, [], 'dateHorizontal', { dateField: 'start_date' });
+    expect(r.size).toBe(4);
+    expect(order(r, 'x')).toEqual(['d', 'a', 'bad', 'z']);
+  });
+
+  it('breaks date ties by name', () => {
+    const nodes = [
+      mk('2', 'Banana', '2026-01-01'),
+      mk('1', 'apple', '2026-01-01'),
+      mk('3', 'Cherry', '2026-01-01'),
+    ];
+    const r = arrangeNodes(nodes, [], 'dateVertical', { dateField: 'start_date' });
+    expect(order(r, 'y')).toEqual(['1', '2', '3']);
+  });
+
+  it('keeps the arrangement centred on the selection centroid', () => {
+    const nodes = [mk('a', 'A', '2026-01-01'), mk('b', 'B', '2026-01-02')].map((n, i) => ({
+      ...n,
+      position: { x: 100 + i * 200, y: 50 },
+    }));
+    const r = arrangeNodes(nodes, [], 'dateHorizontal', { dateField: 'start_date' });
+    expect((r.get('a').x + r.get('b').x) / 2).toBeCloseTo(200);
+    expect(r.get('a').y).toBeCloseTo(50);
+  });
+
+  it('reads a date field nested in metadata', () => {
+    const nodes = [
+      mk('b', 'B', undefined, { metadata: { due: '2026-02-01' } }),
+      mk('a', 'A', undefined, { metadata: { due: '2026-01-01' } }),
+    ];
+    const r = arrangeNodes(nodes, [], 'dateHorizontal', { dateField: 'metadata.due' });
+    expect(order(r, 'x')).toEqual(['a', 'b']);
+  });
+
+  it('finds only fields where two or more nodes carry a date, without field-name assumptions', () => {
+    const nodes = [
+      mk('a', 'A', '2026-01-01', { shipped: '2026-02-02', note: 'text' }),
+      mk('b', 'B', '2026-01-02', { shipped: 'n/a' }),
+      mk('c', 'C', undefined),
+    ];
+    expect(findDateFields(nodes)).toEqual(['start_date']);
+    expect(findDateFields([nodes[0], nodes[2]])).toEqual([]);
   });
 });
