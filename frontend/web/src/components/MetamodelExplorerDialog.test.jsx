@@ -2,7 +2,7 @@
  * @vitest-environment jsdom
  */
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent, within } from '@testing-library/react';
+import { render, screen, fireEvent, within, act } from '@testing-library/react';
 import MetamodelExplorerDialog from './MetamodelExplorerDialog';
 
 vi.mock('../i18n', () => ({
@@ -191,7 +191,7 @@ describe('MetamodelExplorerDialog', () => {
     // The "Label (sv)" column always shows the schema's sv translation,
     // regardless of the current UI language (the mocked language is 'en',
     // and the schema never carries an 'en' entry in `labels`).
-    expect(within(nodeTable).getByText('Actor')).toBeInTheDocument();
+    expect(within(nodeTable).getByText('Aktör')).toBeInTheDocument();
     // System types stay hidden in the table too, honouring the same toggle.
     expect(within(nodeTable).queryByText('Agent')).not.toBeInTheDocument();
 
@@ -375,7 +375,11 @@ describe('MetamodelExplorerDialog', () => {
     svg.setPointerCapture = capture;
 
     svg.dispatchEvent(pointerLikeEvent('pointerdown', { pointerId: 1, clientX: 10, clientY: 10 }));
-    svg.dispatchEvent(pointerLikeEvent('pointermove', { pointerId: 1, clientX: 40, clientY: 10 }));
+    act(() => {
+      svg.dispatchEvent(
+        pointerLikeEvent('pointermove', { pointerId: 1, clientX: 40, clientY: 10 })
+      );
+    });
 
     expect(capture).toHaveBeenCalledWith(1);
   });
