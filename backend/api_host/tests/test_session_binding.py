@@ -970,3 +970,10 @@ def test_composing_tools_take_the_session_argument(client):
     assert listed["success"] is True
     unknown = tools["list_saved_views"](visualization_session_id=UNKNOWN)
     assert unknown["error"] == "session_not_found"
+
+
+def test_a_typed_interface_path_takes_the_header_only_on_get():
+    typed = _typed_app([("/api/actors", "custom_interface_actors")])
+    response = typed.post("/api/actors", headers={SESSION_ID_HEADER: UNKNOWN})
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"] == "session_not_supported"

@@ -65,8 +65,9 @@ def _seed(storage: GraphStorage) -> None:
     )
 
 
-@pytest.fixture(params=["file", "postgres"])
-def world(request, tmp_path):
+def make_world(request, tmp_path):
+    """The staged-session world of these tests, on the backend ``request``
+    names; a generator, as a fixture yields it."""
     if request.param == "file":
         backend = FileGraphPersistenceBackend(
             tmp_path / "graph.json", staged_sessions=True
@@ -100,6 +101,11 @@ def world(request, tmp_path):
         backend.close()
         with psycopg.connect(DSN, autocommit=True) as conn:
             conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+
+
+@pytest.fixture(params=["file", "postgres"])
+def world(request, tmp_path):
+    yield from make_world(request, tmp_path)
 
 
 def _ids(entities):
