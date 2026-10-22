@@ -5716,11 +5716,14 @@ def register_mcp_tools(
 
 
 def _finite(value: Any) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-    )
+    """``Number.isFinite`` for a JSON value: a number, not a bool, and finite
+    as a float (an integer too large for one reads as Infinity in the browser)."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def _group_origins(annotations: Any) -> Dict[str, Tuple[float, float]]:
@@ -5734,7 +5737,10 @@ def _group_origins(annotations: Any) -> Dict[str, Tuple[float, float]]:
     """
     origins: Dict[str, Tuple[float, float]] = {}
     for annotation in annotations if isinstance(annotations, list) else []:
-        if not isinstance(annotation, dict) or annotation.get("type") != "group":
+        if (
+            not isinstance(annotation, dict)
+            or annotation_type_of(annotation) != "group"
+        ):
             continue
         geometry = annotation.get("geometry")
         geometry = geometry if isinstance(geometry, dict) else {}

@@ -75,6 +75,18 @@ class TestSummonRoute:
         assert resp.status_code == 400
         assert _summons(viewer) == []
 
+    def test_an_integer_beyond_float_range_is_400(self, test_app: TestClient):
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        body = (
+            '{"client_id": "c", "bounds": {"x": 1%s, "y": 0, "width": 1, "height": 1}}'
+        )
+        resp = test_app.post(
+            f"/api/sessions/{sid}/summon",
+            content=body % ("0" * 400),
+            headers={"content-type": "application/json"},
+        )
+        assert resp.status_code == 400
+
     def test_unknown_session_is_404_and_not_created(self, test_app: TestClient):
         resp = test_app.post(
             "/api/sessions/9999-9991/summon", json={"client_id": "c", "bounds": BOUNDS}

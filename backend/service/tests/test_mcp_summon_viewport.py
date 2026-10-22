@@ -211,6 +211,7 @@ class TestSummonByNodeIds:
                 (1, 400),
             ),
             ({"position": {"x": True, "y": math.inf}}, (0, 0)),
+            ({"geometry": {"x": 10**400, "y": 7}}, (0, 7)),
         ],
     )
     def test_the_group_origin_is_read_the_way_the_canvas_draws_it(
@@ -235,6 +236,22 @@ class TestSummonByNodeIds:
             40.0 + origin[0],
             60.0 + origin[1],
         )
+
+    def test_a_group_known_only_by_kind_still_offsets_its_members(self, tmp_path):
+        tools, manager, storage = _tools(tmp_path)
+        session = _canvas(manager, storage, {"a": (40, 60)})
+        session.state["annotations"] = [
+            {
+                "id": "g1",
+                "kind": "group",
+                "position": {"x": 100, "y": 200},
+                "member_node_ids": ["a"],
+            },
+        ]
+
+        result = tools["summon_session_viewport"](session_id=session.id, node_ids=["a"])
+
+        assert (result["bounds"]["x"], result["bounds"]["y"]) == (140.0, 260.0)
 
     def test_annotations_that_are_not_a_list_add_no_offset(self, tmp_path):
         tools, manager, storage = _tools(tmp_path)

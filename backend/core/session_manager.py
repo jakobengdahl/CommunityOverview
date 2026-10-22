@@ -37,7 +37,6 @@ import asyncio
 import copy
 import json
 import logging
-import math
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -2517,10 +2516,11 @@ def validate_summon_bounds(bounds: Any) -> Dict[str, float]:
         value = bounds.get(key)
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise OpError(f"bounds.{key} must be a number")
-        value = float(value)
-        if not math.isfinite(value) or abs(value) > _SUMMON_MAX_COORDINATE:
+        # Range-checked before float(): a JSON integer beyond float range
+        # parses to a Python int that float() would refuse with OverflowError.
+        if value != value or abs(value) > _SUMMON_MAX_COORDINATE:
             raise OpError(f"bounds.{key} must be a finite number")
-        normalised[key] = value
+        normalised[key] = float(value)
     if normalised["width"] <= 0 or normalised["height"] <= 0:
         raise OpError("bounds.width and bounds.height must be positive")
     return normalised

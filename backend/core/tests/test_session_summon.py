@@ -141,6 +141,8 @@ class TestValidation:
             {**BOUNDS, "y": math.inf},
             {**BOUNDS, "width": -math.inf},
             {**BOUNDS, "x": 1e12},
+            {**BOUNDS, "x": 10**400},
+            {**BOUNDS, "width": -(10**400)},
             {**BOUNDS, "width": 0},
             {**BOUNDS, "height": -5},
         ],
