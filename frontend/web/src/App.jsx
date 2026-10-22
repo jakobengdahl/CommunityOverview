@@ -2448,7 +2448,8 @@ function App() {
       const stagesByDefault =
         capabilities?.staged_sessions === true &&
         capabilities?.session_write_mode_default === 'staged';
-      if (!stagesByDefault) {
+      // A ?view= link loads its view into the session it was opened in.
+      if (!stagesByDefault || _urlParams.get('view')) {
         settleDirect();
         return;
       }
