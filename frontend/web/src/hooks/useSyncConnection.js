@@ -96,6 +96,7 @@ export function useSyncConnection(sessionId) {
           onSessionRenamed: (...a) => callIfCurrent('onSessionRenamed', ...a),
           onSessionDeleted: (...a) => callIfCurrent('onSessionDeleted', ...a),
           onCommand: (...a) => callIfCurrent('onCommand', ...a),
+          onViewportSummoned: (...a) => callIfCurrent('onViewportSummoned', ...a),
           onDropped: (...a) => callIfCurrent('onDropped', ...a),
         },
       });

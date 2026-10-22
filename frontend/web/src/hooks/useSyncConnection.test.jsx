@@ -249,6 +249,7 @@ describe('useSyncConnection.ensureSyncConnected', () => {
       onSessionRenamed: vi.fn(),
       onSessionDeleted: vi.fn(),
       onCommand: vi.fn(),
+      onViewportSummoned: vi.fn(),
       onDropped: vi.fn(),
     };
     result.current.syncHandlersRef.current = handlers;
@@ -266,6 +267,7 @@ describe('useSyncConnection.ensureSyncConnected', () => {
       staleClient.handlers.onSessionRenamed('Stale name');
       staleClient.handlers.onSessionDeleted('stale-user');
       staleClient.handlers.onCommand({ type: 'node_pulse', node_id: 'stale-node' });
+      staleClient.handlers.onViewportSummoned({ bounds: { x: 0 } });
       staleClient.handlers.onDropped([{ op: 'stale' }], 400);
     });
 
@@ -273,6 +275,7 @@ describe('useSyncConnection.ensureSyncConnected', () => {
     expect(handlers.onSessionRenamed).not.toHaveBeenCalled();
     expect(handlers.onSessionDeleted).not.toHaveBeenCalled();
     expect(handlers.onCommand).not.toHaveBeenCalled();
+    expect(handlers.onViewportSummoned).not.toHaveBeenCalled();
     expect(handlers.onDropped).not.toHaveBeenCalled();
 
     act(() => {
@@ -280,6 +283,7 @@ describe('useSyncConnection.ensureSyncConnected', () => {
       currentClient.handlers.onSessionRenamed('Current name');
       currentClient.handlers.onSessionDeleted('current-user');
       currentClient.handlers.onCommand({ type: 'node_pulse', node_id: 'current-node' });
+      currentClient.handlers.onViewportSummoned({ bounds: { x: 1 } });
       currentClient.handlers.onDropped([{ op: 'current' }], 413);
     });
 
@@ -291,6 +295,7 @@ describe('useSyncConnection.ensureSyncConnected', () => {
       node_id: 'current-node',
     });
     expect(handlers.onDropped).toHaveBeenCalledWith([{ op: 'current' }], 413);
+    expect(handlers.onViewportSummoned).toHaveBeenCalledWith({ bounds: { x: 1 } });
   });
 });
 

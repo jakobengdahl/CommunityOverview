@@ -41,6 +41,29 @@ describe('FloatingHeader', () => {
     expect(container.querySelector('.floating-header-presence')).toBeNull();
   });
 
+  it('offers "Bring everyone here" only when someone else is in the session', () => {
+    const onSummonEveryone = vi.fn();
+    const me = { client_id: 'me', display_name: 'Me', color: '#111' };
+    const { rerender } = render(
+      <I18nProvider>
+        <FloatingHeader currentClientId="me" roster={[me]} onSummonEveryone={onSummonEveryone} />
+      </I18nProvider>
+    );
+    expect(screen.queryByLabelText('Bring everyone here')).toBeNull();
+
+    rerender(
+      <I18nProvider>
+        <FloatingHeader
+          currentClientId="me"
+          roster={[me, { client_id: 'you', display_name: 'You', color: '#222' }]}
+          onSummonEveryone={onSummonEveryone}
+        />
+      </I18nProvider>
+    );
+    fireEvent.click(screen.getByLabelText('Bring everyone here'));
+    expect(onSummonEveryone).toHaveBeenCalledTimes(1);
+  });
+
   it('returns explicit fallback text when a translation key is missing (not the key name)', () => {
     // Regression for the t('key') || 'fallback' anti-pattern: t() used to return the key
     // name (truthy) on a miss, so the || branch never fired. The fix adds a 3rd fallback

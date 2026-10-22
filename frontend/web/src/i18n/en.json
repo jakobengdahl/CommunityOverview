@@ -795,5 +795,14 @@
       "generic": "The request failed. Please try again.",
       "generic_with_detail": "The request failed: {detail}"
     }
+  },
+  "summon": {
+    "bring_everyone": "Bring everyone here",
+    "bring_everyone_tooltip": "Move everyone in this session to what you are looking at",
+    "sent": "Brought {count} other(s) to your view",
+    "failed": "Could not bring everyone here",
+    "notice": "{name} brought you here",
+    "notice_anonymous": "Someone brought you here",
+    "return": "Return"
   }
 }
