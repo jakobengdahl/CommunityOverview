@@ -40,6 +40,7 @@ from .storage_backends import (
     GraphWriteOutcomeUnknown,
     GraphPersistenceBackend,
     IncrementalGraphPersistenceBackend,
+    NodeTypeChanged,
     capabilities_of,
 )
 from .history_store import (
@@ -95,6 +96,7 @@ __all__ = [
     "BackendCapabilities",
     "EntityOperation",
     "EntityRevisionConflict",
+    "NodeTypeChanged",
     "GraphWriteFailed",
     "GraphWriteOutcomeUnknown",
     "capabilities_of",

@@ -671,9 +671,10 @@ Reading a layer's diff returns one item per entry:
 A reader the authorization hook narrows sees, selects and discards only the
 entries its view wholly covers - the entity the entry composes to, the main
 entity and the base, and for an edge their endpoints - and whose dependencies
-it covers too, the rule composed reads follow (§8). A node delete is also
-outside that view while main holds an edge to the node the reader cannot see,
-since the merge would delete it. Any other entry is
+it covers too, the rule composed reads follow (§8). A node delete, or an
+entry that changes the type of the node main holds, is also outside that view
+while main holds an edge to the node the reader cannot see, since the merge
+would delete that edge or judge it against the new type. Any other entry is
 answered as if it were not staged: nothing of it, not even its number, is
 shown to that reader.
 
@@ -771,11 +772,23 @@ still true when the merge applies.
     endpoints exist, or are created by the same unit.
   - **Incident edges as listed.** For every node the merge deletes, the node's
     incident edges in the store are exactly those the merge deletes with it.
+    For every node the merge retypes in place, they are exactly those the
+    merge read, each still at the revision it read, since each was judged
+    against the new type.
 - In a shared store, the unit locks the rows those checks read, so they cannot
   change before it commits. The same rule applies to direct writes: an edge
-  create locks its endpoint rows for share, and a node delete locks its node
-  row. So an edge create and a node delete on the same node are ordered against
-  each other, whichever instance issues them.
+  create locks its endpoint rows for share, and a node delete or a merge's
+  retype locks its node row. So an edge create and a node delete or retype on
+  the same node are ordered against each other, whichever instance issues
+  them.
+- An edge write, direct or merged, also carries the type of each endpoint it
+  was judged against. Holding the endpoint, a shared store refuses the write if
+  the endpoint now has another type or is gone, with `entity_revision_conflict`
+  and no revision (`merge_raced` for a merge). So an edge judged before a merge
+  retyped its endpoint cannot land after it. Likewise a node write without an
+  expectation never changes a stored node's type: one from an instance that has
+  not yet seen a retype is refused the same way, rather than putting the old
+  type back under edges judged against the new one.
 - If any expectation or check fails, the whole merge fails with
   `merge_raced`, and nothing is written. The caller re-reads the diff and tries
   again.

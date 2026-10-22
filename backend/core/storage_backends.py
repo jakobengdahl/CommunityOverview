@@ -170,6 +170,15 @@ class EntityOperation:
     `revision_enforcement` reads them; the instance has already checked them
     against its own model before the operation is issued. They are never
     journaled: they are a condition of applying the write, not part of it.
+
+    `endpoint_types`, for an edge upsert, is `(node id, type)` for each
+    endpoint the instance judged the edge's relationship type against. A
+    backend declaring `revision_enforcement` refuses the write when the
+    store holds another type for one of them, or no longer holds it - an
+    endpoint the same batch upserts is judged by that upsert instead - so an
+    edge judged before a merge retyped its endpoint on another instance
+    cannot land after it.
+    Not journaled either, for the same reason.
     """
 
     kind: EntityKindName
@@ -178,6 +187,7 @@ class EntityOperation:
     payload: Optional[Dict[str, Any]] = None
     expected_revision: Optional[int] = None
     expect_absent: bool = False
+    endpoint_types: Tuple[Tuple[str, str], ...] = ()
 
     @classmethod
     def upsert_node(cls, payload: Dict[str, Any]) -> "EntityOperation":
@@ -417,6 +427,21 @@ class EntityRevisionConflict(RuntimeError):
         wanted = "absent" if expected is None else f"revision {expected}"
         found = "absent" if current is None else f"revision {current}"
         super().__init__(f"{kind} {entity_id!r}: expected {wanted}, found {found}")
+
+
+class NodeTypeChanged(EntityRevisionConflict):
+    """A node the write was judged on no longer has that type in the store:
+    an edge's endpoint, or a node updated in place over a retype it has not
+    seen.
+
+    A conflict like any other expectation that did not hold: nothing in the
+    batch was applied, and the caller re-reads before trying again. Without a
+    revision: the node may be one the caller can no longer see.
+    """
+
+    def __init__(self, node_id: str, judged: Optional[str]):
+        super().__init__("node", node_id, None, None)
+        self.args = (f"node {node_id!r}: no longer of type {judged!r}",)
 
 
 class WriteRefusedByStore(RuntimeError):

@@ -84,6 +84,7 @@ from backend.core.storage_backends import (
     EntityRevisionConflict,
     ExternalChange,
     ExternalChangeRefused,
+    NodeTypeChanged,
     WriteRefusedByStore,
 )
 
@@ -1628,6 +1629,12 @@ class PostgresGraphPersistenceBackend:
         strongly. One single-row statement per endpoint, in sorted order, so
         two batches over the same nodes take them in the same order, and
         each is a primary-key lookup whatever the table's size.
+
+        Held, each endpoint's type is compared with the one the edge was
+        judged against (`endpoint_types`): a merge retypes a node in place
+        under FOR UPDATE, so an edge judged before it waits here and then
+        finds the new type, and is refused rather than landing a
+        relationship the new type does not allow.
         """
         upserted = {
             op.entity_id
@@ -1646,12 +1653,19 @@ class PostgresGraphPersistenceBackend:
         )
         if not endpoints:
             return
+        judged: Dict[str, str] = {}
+        for op in operations:
+            if op.kind == "edge" and op.action == "upsert":
+                judged.update(op.endpoint_types)
         scope, scope_params = self._and_scope()
-        statement = sql.SQL("SELECT 1 FROM {} WHERE id = %s{} FOR KEY SHARE").format(
-            self._table("graph_nodes"), scope
-        )
+        statement = sql.SQL(
+            "SELECT doc->>'type' FROM {} WHERE id = %s{} FOR KEY SHARE"
+        ).format(self._table("graph_nodes"), scope)
         for endpoint in endpoints:
-            conn.execute(statement, (endpoint, *scope_params))
+            row = conn.execute(statement, (endpoint, *scope_params)).fetchone()
+            # Gone counts too: the id could be created again with any type.
+            if endpoint in judged and (row is None or row[0] != judged[endpoint]):
+                raise NodeTypeChanged(endpoint, judged[endpoint])
 
     def _stored_revision_of(self, conn, table: str, entity_id: str) -> Optional[int]:
         """The visible row's revision, or None when there is no such row."""
@@ -1774,16 +1788,30 @@ class PostgresGraphPersistenceBackend:
                 raise self._refuse(conn, table, operation)
             return int(row[0])
 
+        # A node's type changes in place only under an expectation (a merge's
+        # retype); a plain upsert that would change it was made over a type
+        # this instance has not seen replaced, and putting the old type back
+        # would strand the edges judged against the new one.
+        same_type = (
+            sql.SQL(" {bare}.doc->>'type' IS NOT DISTINCT FROM EXCLUDED.doc->>'type'")
+            if operation.kind == "node"
+            else sql.SQL(" TRUE")
+        ).format(bare=sql.Identifier(table))
         if not scoped:
             row = conn.execute(
                 sql.SQL("INSERT INTO {} ({}) VALUES (").format(
                     self._table(table), columns
                 )
                 + values
-                + sql.SQL(") ON CONFLICT (id) DO UPDATE SET doc = EXCLUDED.doc")
+                + sql.SQL(") ON CONFLICT (id) DO UPDATE SET doc = EXCLUDED.doc WHERE")
+                + same_type
                 + returning,
                 value_params,
             ).fetchone()
+            if row is None:
+                raise NodeTypeChanged(
+                    operation.entity_id, operation.payload.get("type")
+                )
             return int(row[0])
         # The scope travels with the row. A row written before this instance
         # had a scope carries none, and adopting it here is what stops the
@@ -1809,12 +1837,24 @@ class PostgresGraphPersistenceBackend:
             + sql.SQL(
                 ") ON CONFLICT (id) DO UPDATE"
                 " SET doc = EXCLUDED.doc, {col} = EXCLUDED.{col}"
-                " WHERE ({bare}.{col} IS NULL OR {bare}.{col} = %s)"
+                " WHERE ({bare}.{col} IS NULL OR {bare}.{col} = %s) AND"
             ).format(col=sql.Identifier(SCOPE_COLUMN), bare=sql.Identifier(table))
+            + same_type
             + returning,
             value_params + (self._scope,),
         ).fetchone()
         if row is None:
+            scope, scope_params = self._and_scope()
+            stored = conn.execute(
+                sql.SQL("SELECT doc->>'type' FROM {} WHERE id = %s{}").format(
+                    self._table(table), scope
+                ),
+                (operation.entity_id, *scope_params),
+            ).fetchone()
+            if operation.kind == "node" and stored is not None:
+                raise NodeTypeChanged(
+                    operation.entity_id, operation.payload.get("type")
+                )
             raise self._cross_scope(operation)
         return int(row[0])
 
@@ -2456,8 +2496,8 @@ class PostgresGraphPersistenceBackend:
         for check in incident:
             rows = conn.execute(
                 sql.SQL(
-                    "SELECT id FROM {} WHERE (doc->>'source' = %s"
-                    " OR doc->>'target' = %s){}"
+                    "SELECT id, COALESCE((doc->>'revision')::bigint, 0) FROM {}"
+                    " WHERE (doc->>'source' = %s OR doc->>'target' = %s){}"
                 ).format(self._table("graph_edges"), edge_scope),
                 (check.entity_id, check.entity_id, *edge_params),
             ).fetchall()
@@ -2468,6 +2508,14 @@ class PostgresGraphPersistenceBackend:
                     f"node {check.entity_id!r} has incident edges the merge "
                     f"did not list"
                 )
+            # An edge write holds its endpoints FOR KEY SHARE, which the lock
+            # above excludes, so these revisions hold until the commit.
+            stored = {row[0]: int(row[1]) for row in rows}
+            for edge_id, revision in check.edge_revisions:
+                if stored.get(edge_id) != revision:
+                    raise layer_store.MergeRaced(
+                        f"edge {edge_id!r} to node {check.entity_id!r} changed"
+                    )
 
     # -- change notification -------------------------------------------------
 
