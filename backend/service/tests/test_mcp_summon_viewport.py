@@ -78,6 +78,7 @@ class TestSummonByBounds:
         assert result["connected_clients"] == 1
         (event,) = _summons(sub)
         assert event["summoned_by"] == "Planner"
+        assert event["client_id"] == "mcp-agent"
         assert event["bounds"] == {k: float(v) for k, v in BOUNDS.items()}
 
     def test_default_display_name_and_length_cap(self, tmp_path):
@@ -161,6 +162,41 @@ class TestSummonByNodeIds:
         }
         assert result["bounds"] == expected
         assert _summons(sub)[0]["bounds"] == expected
+
+    def test_a_grouped_node_is_framed_where_the_canvas_draws_it(self, tmp_path):
+        # A group member's stored position is relative to its group.
+        tools, manager, storage = _tools(tmp_path)
+        session = _canvas(manager, storage, {"a": (40, 60), "b": (10, 10)})
+        manager.upsert_annotation(
+            session.id,
+            "mcp-agent",
+            {
+                "id": "g1",
+                "type": "group",
+                "position": {"x": 2000, "y": 1500},
+                "member_node_ids": ["a"],
+            },
+        )
+
+        grouped = tools["summon_session_viewport"](
+            session_id=session.id, node_ids=["a"]
+        )
+        loose = tools["summon_session_viewport"](session_id=session.id, node_ids=["b"])
+
+        assert (grouped["bounds"]["x"], grouped["bounds"]["y"]) == (2040.0, 1560.0)
+        assert (loose["bounds"]["x"], loose["bounds"]["y"]) == (10.0, 10.0)
+
+    def test_a_stale_position_for_a_node_off_the_canvas_is_refused(self, tmp_path):
+        tools, manager, storage = _tools(tmp_path)
+        session = _canvas(manager, storage, {"a": (0, 0)})
+        storage.add_nodes([Node(id="gone", type="Actor", name="gone")], [])
+        session.state["positions"]["gone"] = {"x": 5.0, "y": 5.0}
+
+        result = tools["summon_session_viewport"](
+            session_id=session.id, node_ids=["gone"]
+        )
+
+        assert result["error"] == "unknown_node_ids"
 
     def test_ids_not_on_the_canvas_are_refused_and_named(self, tmp_path):
         tools, manager, storage = _tools(tmp_path)

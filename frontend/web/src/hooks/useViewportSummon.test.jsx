@@ -71,6 +71,27 @@ describe('useViewportSummon', () => {
     expect(result.current.viewportRequest).toEqual({ viewport: { x: -40, y: -20, zoom: 2 } });
   });
 
+  it('a summon after a session switch returns to that session, not the one left', () => {
+    const { result, rerender, latestViewport, canvasRef, showNotification } = setup();
+    act(() => result.current.receiveSummon({ bounds: BOUNDS, summonedBy: 'Ada' }));
+    latestViewport.current = { x: 7, y: 8, zoom: 1 }; // camera in the new session
+    rerender({ sessionId: '2222-3333', latestViewport, canvasRef, showNotification, t: (k) => k });
+    act(() => result.current.receiveSummon({ bounds: BOUNDS, summonedBy: 'Bo' }));
+    act(() => result.current.returnFromSummon());
+    expect(result.current.viewportRequest).toEqual({ viewport: { x: 7, y: 8, zoom: 1 } });
+  });
+
+  it('the notice stays up for ten seconds, counted from the latest summon', () => {
+    const { result } = setup();
+    act(() => result.current.receiveSummon({ bounds: BOUNDS }));
+    act(() => vi.advanceTimersByTime(8000));
+    act(() => result.current.receiveSummon({ bounds: BOUNDS }));
+    act(() => vi.advanceTimersByTime(9900));
+    expect(result.current.summonNotice).not.toBeNull();
+    act(() => vi.advanceTimersByTime(200));
+    expect(result.current.summonNotice).toBeNull();
+  });
+
   it('ignores a summon addressed to another session', () => {
     const { result } = setup();
     act(() => result.current.receiveSummon({ bounds: BOUNDS, sessionId: '9999-9999' }));

@@ -857,7 +857,9 @@ to everyone in the roster and on your selection badges. The name is stored in
 your browser and takes effect the next time you open or switch session.
 
 **Bring everyone here.** When others are in the session, a broadcast button
-appears in the top bar next to the presence dots. Click **Bring everyone here**
+appears in the top bar next to the presence dots (on a computer; the phone
+layout has no presence dots, so the button is not offered there, but a phone
+is moved and gets the notice like everyone else). Click **Bring everyone here**
 to move everyone's view to exactly what you are looking at — on any screen size,
 they see the same region of the canvas. Their camera glides there (or jumps, if
 their system is set to reduce motion) and a notice tells them who brought them;

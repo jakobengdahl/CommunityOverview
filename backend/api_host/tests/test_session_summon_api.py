@@ -59,6 +59,9 @@ class TestSummonRoute:
             {**BOUNDS, "width": 0},
             {"x": 0, "y": 0, "width": 1},
             {**BOUNDS, "x": 1e30},
+            "everywhere",
+            [0, 0, 1, 1],
+            None,
         ],
     )
     def test_invalid_bounds_are_400(self, test_app: TestClient, bounds):

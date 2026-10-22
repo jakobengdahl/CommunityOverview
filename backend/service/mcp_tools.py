@@ -18,6 +18,7 @@ Usage:
 import functools
 import inspect
 import json
+import math
 import secrets
 from typing import List, Optional, Dict, Any, Callable, Tuple
 
@@ -2301,8 +2302,16 @@ def register_mcp_tools(
                     ),
                     "node_ids": missing,
                 }
-            xs = [float(positions[n]["x"]) for n in wanted]
-            ys = [float(positions[n]["y"]) for n in wanted]
+            # A group member's stored position is relative to its group (the
+            # canvas keeps ReactFlow's parent-relative coordinates), so add the
+            # group's origin to frame where the node actually is.
+            origins = _group_origins(session.state.get("annotations"))
+            xs = [
+                float(positions[n]["x"]) + origins.get(n, (0.0, 0.0))[0] for n in wanted
+            ]
+            ys = [
+                float(positions[n]["y"]) + origins.get(n, (0.0, 0.0))[1] for n in wanted
+            ]
             bounds = {
                 "x": min(xs),
                 "y": min(ys),
@@ -5704,6 +5713,34 @@ def register_mcp_tools(
         }
 
     return tools_map
+
+
+def _group_origins(annotations: Any) -> Dict[str, Tuple[float, float]]:
+    """``{member_node_id: (x, y)}`` of the group annotation each node belongs to.
+
+    Read the way the browser's ``annotationsToGroups`` reads a group (its
+    ``position``, else its ``geometry``), since that is where the canvas draws
+    it and therefore what a member's relative position is relative to.
+    """
+    origins: Dict[str, Tuple[float, float]] = {}
+    for annotation in annotations if isinstance(annotations, list) else []:
+        if not isinstance(annotation, dict) or annotation.get("type") != "group":
+            continue
+        place = annotation.get("position")
+        if not isinstance(place, dict):
+            place = annotation.get("geometry")
+        if not isinstance(place, dict):
+            place = {}
+        x, y = place.get("x", 0), place.get("y", 0)
+        if not all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+            for v in (x, y)
+        ):
+            continue
+        for member in annotation.get("member_node_ids") or []:
+            if isinstance(member, str):
+                origins[member] = (float(x), float(y))
+    return origins
 
 
 def _push_to_session(

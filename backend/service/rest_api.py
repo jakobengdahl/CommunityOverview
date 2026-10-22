@@ -555,7 +555,9 @@ class SummonViewportRequest(BaseModel):
     client_id: str = Field(
         ..., min_length=1, max_length=100, description="Summoning client id"
     )
-    bounds: Dict[str, Any] = Field(
+    # Any, not a dict type: the manager validates the shape, so a non-object
+    # is the same 400 as any other invalid bounds rather than a 422.
+    bounds: Any = Field(
         ...,
         description="Model-space region {x, y, width, height}; x/y is top-left",
     )

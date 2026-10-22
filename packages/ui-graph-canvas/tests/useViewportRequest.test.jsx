@@ -19,10 +19,8 @@ describe('useViewportRequest', () => {
     renderHook(() =>
       useViewportRequest({ viewportRequest: { bounds }, fitBounds, setViewport: vi.fn() })
     );
-    expect(fitBounds).toHaveBeenCalledWith(bounds, {
-      padding: 0,
-      duration: VIEWPORT_REQUEST_DURATION_MS,
-    });
+    expect(VIEWPORT_REQUEST_DURATION_MS).toBe(600);
+    expect(fitBounds).toHaveBeenCalledWith(bounds, { padding: 0, duration: 600 });
   });
 
   it('jumps instead of animating when the viewer prefers reduced motion', () => {

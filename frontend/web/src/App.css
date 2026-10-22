@@ -15,7 +15,10 @@
   left: 0;
 }
 
-.app.fullscreen-canvas-mode > :not(.app-canvas):not(.fullscreen-canvas-exit) {
+/* The summon notice stays: a fullscreen viewer is still moved by a summon
+   and must still see who moved them and be able to Return. */
+.app.fullscreen-canvas-mode
+  > :not(.app-canvas):not(.fullscreen-canvas-exit):not(.app-summon-notice) {
   display: none !important;
 }
 
