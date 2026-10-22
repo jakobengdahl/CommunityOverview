@@ -1,0 +1,254 @@
+"""
+Tests for the ``summon_session_viewport`` MCP tool: it asks the hook as a
+session mutation, validates its target (finite bounds, or node ids on the
+session's canvas that the caller may read) and publishes nothing on refusal.
+The broadcast semantics themselves are covered in
+``backend/core/tests/test_session_summon.py``.
+"""
+
+import math
+import os
+from unittest.mock import MagicMock, Mock
+
+import pytest
+
+from backend.core import GraphStorage, Node
+from backend.core.session_manager import SessionManager
+from backend.core.session_store import InMemorySessionPersistenceBackend, SessionStore
+from backend.runtime.authorization import GRAPH_ACTION_MUTATE
+from backend.service import GraphService, register_mcp_tools
+from backend.service.mcp_tools import _ASSUMED_NODE_SIZE, _INVALID_SESSION_ID_ERROR
+from backend.service.tests.test_authorization import FixedNarrowingHook
+from backend.service.tests.test_mcp_auto_add_tools import DenyAllRecordingHook
+
+BOUNDS = {"x": 0, "y": 0, "width": 400, "height": 300}
+
+
+def _tools(tmp_path, hook=None):
+    storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+    service = GraphService(storage, authorization_hook=hook)
+    manager = SessionManager(SessionStore(InMemorySessionPersistenceBackend()))
+    mock_mcp = Mock()
+    mock_mcp.tool = MagicMock(return_value=lambda f: f)
+    tools_map = register_mcp_tools(mock_mcp, service, session_manager=manager)
+    return tools_map, manager, storage
+
+
+def _listen(manager, session_id):
+    sub, _ = manager.connect(session_id, "viewer", "Viewer")
+    while not sub.queue.empty():
+        sub.queue.get_nowait()
+    return sub
+
+
+def _summons(sub):
+    out = []
+    while not sub.queue.empty():
+        event = sub.queue.get_nowait()
+        if event.get("type") == "viewport_summoned":
+            out.append(event)
+    return out
+
+
+def _canvas(manager, storage, placed):
+    """A session whose canvas holds *placed* ``{id: (x, y)}`` as graph nodes."""
+    for node_id in placed:
+        storage.add_nodes([Node(id=node_id, type="Actor", name=node_id)], [])
+    session = manager.create_session()
+    manager.add_node_refs(session.id, "mcp-agent", list(placed))
+    manager.apply_layout(
+        session.id,
+        "mcp-agent",
+        positions={n: {"x": x, "y": y} for n, (x, y) in placed.items()},
+    )
+    return session
+
+
+class TestSummonByBounds:
+    def test_publishes_the_bounds_under_the_given_display_name(self, tmp_path):
+        tools, manager, _ = _tools(tmp_path)
+        session = manager.create_session()
+        sub = _listen(manager, session.id)
+
+        result = tools["summon_session_viewport"](
+            session_id=session.id, bounds=BOUNDS, display_name="  Planner  "
+        )
+
+        assert result["success"] is True
+        assert result["connected_clients"] == 1
+        (event,) = _summons(sub)
+        assert event["summoned_by"] == "Planner"
+        assert event["bounds"] == {k: float(v) for k, v in BOUNDS.items()}
+
+    def test_default_display_name_and_length_cap(self, tmp_path):
+        tools, manager, _ = _tools(tmp_path)
+        session = manager.create_session()
+        sub = _listen(manager, session.id)
+
+        tools["summon_session_viewport"](session_id=session.id, bounds=BOUNDS)
+        tools["summon_session_viewport"](
+            session_id=session.id, bounds=BOUNDS, display_name="x" * 500
+        )
+
+        first, second = _summons(sub)
+        assert first["summoned_by"] == "AI assistant"
+        assert second["summoned_by"] == "x" * 100
+
+    @pytest.mark.parametrize(
+        "bounds",
+        [
+            {**BOUNDS, "x": math.nan},
+            {**BOUNDS, "width": math.inf},
+            {**BOUNDS, "height": 0},
+            {"x": 0, "y": 0},
+        ],
+    )
+    def test_invalid_bounds_publish_nothing(self, tmp_path, bounds):
+        tools, manager, _ = _tools(tmp_path)
+        session = manager.create_session()
+        sub = _listen(manager, session.id)
+
+        result = tools["summon_session_viewport"](session_id=session.id, bounds=bounds)
+
+        assert result["success"] is False
+        assert "bounds" in result["error"]
+        assert _summons(sub) == []
+
+    def test_needs_exactly_one_target(self, tmp_path):
+        tools, manager, _ = _tools(tmp_path)
+        session = manager.create_session()
+        sub = _listen(manager, session.id)
+
+        neither = tools["summon_session_viewport"](session_id=session.id)
+        both = tools["summon_session_viewport"](
+            session_id=session.id, bounds=BOUNDS, node_ids=["a"]
+        )
+
+        assert neither["success"] is False and both["success"] is False
+        assert _summons(sub) == []
+
+    def test_unknown_and_invalid_sessions(self, tmp_path):
+        tools, manager, _ = _tools(tmp_path)
+
+        unknown = tools["summon_session_viewport"](
+            session_id="1234-5678", bounds=BOUNDS
+        )
+        invalid = tools["summon_session_viewport"](session_id="nope", bounds=BOUNDS)
+
+        assert unknown["success"] is False and "not found" in unknown["error"]
+        assert invalid == {"success": False, "error": _INVALID_SESSION_ID_ERROR}
+        assert manager.get_session("1234-5678") is None
+
+
+class TestSummonByNodeIds:
+    def test_frames_the_bounding_box_of_the_named_nodes(self, tmp_path):
+        tools, manager, storage = _tools(tmp_path)
+        session = _canvas(
+            manager, storage, {"a": (100, 50), "b": (400, 250), "c": (0, 0)}
+        )
+        sub = _listen(manager, session.id)
+
+        result = tools["summon_session_viewport"](
+            session_id=session.id, node_ids=["a", "b", "a"]
+        )
+
+        assert result["success"] is True, result
+        expected = {
+            "x": 100.0,
+            "y": 50.0,
+            "width": 300.0 + _ASSUMED_NODE_SIZE["width"],
+            "height": 200.0 + _ASSUMED_NODE_SIZE["height"],
+        }
+        assert result["bounds"] == expected
+        assert _summons(sub)[0]["bounds"] == expected
+
+    def test_ids_not_on_the_canvas_are_refused_and_named(self, tmp_path):
+        tools, manager, storage = _tools(tmp_path)
+        session = _canvas(manager, storage, {"a": (0, 0)})
+        # On the graph but not on this session's canvas.
+        storage.add_nodes([Node(id="elsewhere", type="Actor", name="e")], [])
+        sub = _listen(manager, session.id)
+
+        result = tools["summon_session_viewport"](
+            session_id=session.id, node_ids=["a", "elsewhere", "ghost"]
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "unknown_node_ids"
+        assert result["node_ids"] == ["elsewhere", "ghost"]
+        assert _summons(sub) == []
+
+    def test_a_node_on_the_canvas_without_a_position_is_refused(self, tmp_path):
+        tools, manager, storage = _tools(tmp_path)
+        storage.add_nodes([Node(id="a", type="Actor", name="a")], [])
+        session = manager.create_session()
+        manager.add_node_refs(session.id, "mcp-agent", ["a"])
+
+        result = tools["summon_session_viewport"](session_id=session.id, node_ids=["a"])
+
+        assert result["error"] == "unknown_node_ids"
+
+    def test_a_node_the_caller_may_not_read_is_reported_as_unknown(self, tmp_path):
+        hook = FixedNarrowingHook(allow_local_graph=False, include_graph_ids=("g2",))
+        tools, manager, storage = _tools(tmp_path, hook)
+        session = _canvas(manager, storage, {"local": (0, 0)})
+        storage.add_nodes(
+            [
+                Node(
+                    id="remote",
+                    type="Actor",
+                    name="remote",
+                    metadata={"origin_graph_id": "g2"},
+                )
+            ],
+            [],
+        )
+        manager.add_node_refs(session.id, "mcp-agent", ["remote"])
+        manager.apply_layout(
+            session.id, "mcp-agent", positions={"remote": {"x": 5, "y": 5}}
+        )
+
+        hidden = tools["summon_session_viewport"](
+            session_id=session.id, node_ids=["local"]
+        )
+        visible = tools["summon_session_viewport"](
+            session_id=session.id, node_ids=["remote"]
+        )
+
+        assert hidden["error"] == "unknown_node_ids"
+        assert visible["success"] is True
+
+    @pytest.mark.parametrize("node_ids", [[], [""], [1], "a"])
+    def test_malformed_node_ids_are_refused(self, tmp_path, node_ids):
+        tools, manager, _ = _tools(tmp_path)
+        session = manager.create_session()
+
+        result = tools["summon_session_viewport"](
+            session_id=session.id, node_ids=node_ids
+        )
+
+        assert result["success"] is False
+
+    def test_too_many_node_ids(self, tmp_path):
+        tools, manager, _ = _tools(tmp_path)
+        session = manager.create_session()
+
+        result = tools["summon_session_viewport"](
+            session_id=session.id, node_ids=[f"n{i}" for i in range(501)]
+        )
+
+        assert result["error"] == "too_large"
+
+
+class TestAuthorization:
+    def test_a_denied_caller_cannot_summon(self, tmp_path):
+        hook = DenyAllRecordingHook()
+        tools, manager, _ = _tools(tmp_path, hook)
+        session = manager.create_session()
+        sub = _listen(manager, session.id)
+
+        result = tools["summon_session_viewport"](session_id=session.id, bounds=BOUNDS)
+
+        assert result.get("success") is not True
+        assert (GRAPH_ACTION_MUTATE, "summon_session_viewport") in hook.seen
+        assert _summons(sub) == []

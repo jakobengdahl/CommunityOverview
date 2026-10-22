@@ -3865,6 +3865,13 @@ _MCP_BUCKET_WRITES = {
         optimized_image_bytes=100,
         rate_limit_label=label,
     ),
+    "summon_viewport_sync": lambda mgr, sid, i, label: mgr.summon_viewport_sync(
+        sid,
+        "mcp-agent",
+        {"x": i, "y": i, "width": 10, "height": 10},
+        display_name="AI assistant",
+        rate_limit_label=label,
+    ),
     "rename_session_sync": lambda mgr, sid, i, label: mgr.rename_session_sync(
         sid, f"name-{i}", client_id="mcp-agent", rate_limit_label=label
     ),

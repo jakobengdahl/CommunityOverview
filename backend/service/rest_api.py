@@ -549,6 +549,18 @@ class SessionOpsRequest(BaseModel):
     ops: List[Dict[str, Any]] = Field(..., description="Ordered ops to apply")
 
 
+class SummonViewportRequest(BaseModel):
+    """Request model for summoning a session's clients to a model-space region."""
+
+    client_id: str = Field(
+        ..., min_length=1, max_length=100, description="Summoning client id"
+    )
+    bounds: Dict[str, Any] = Field(
+        ...,
+        description="Model-space region {x, y, width, height}; x/y is top-left",
+    )
+
+
 class UndoSessionActionRequest(BaseModel):
     """Request model for undoing a session actor's latest eligible action."""
 
@@ -1560,6 +1572,29 @@ def _register_session_endpoints(
                     "message": str(exc),
                 },
             )
+        except OpError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @router.post("/sessions/{session_id}/summon")
+    async def summon_session_viewport(
+        session_id: str, request: SummonViewportRequest, http_request: Request
+    ) -> Dict[str, Any]:
+        """Move every client connected to the session to ``bounds`` (ephemeral).
+
+        Asks the hook under the name of its MCP twin, like the other session
+        changes; the summoner's display name comes from its presence entry.
+        """
+        if not is_valid_session_id(session_id):
+            raise HTTPException(status_code=400, detail="invalid session_id format")
+        _authorize_session_change(http_request, "summon_session_viewport", session_id)
+        try:
+            return session_manager.summon_viewport(
+                session_id, request.client_id, request.bounds
+            )
+        except SessionNotFound:
+            raise HTTPException(status_code=404, detail="session not found")
+        except RateLimited:
+            raise HTTPException(status_code=429, detail="rate limit exceeded")
         except OpError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 

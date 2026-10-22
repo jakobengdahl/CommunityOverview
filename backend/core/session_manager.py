@@ -25,6 +25,10 @@ the single entry point used by the REST/SSE endpoints and by MCP pushes:
 * ``catch_up`` returns either the missed ops (from the store ring buffer) or a
   full-state snapshot when the ring cannot prove continuity.
 * a per-client token bucket bounds op throughput (429 on exhaustion).
+* ``summon_viewport`` broadcasts a ``viewport_summoned`` event asking every
+  connected client to frame a model-space region. Like claims it is ephemeral —
+  never persisted, sequenced or replayed — so it moves only the clients
+  connected when it is sent.
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ import asyncio
 import copy
 import json
 import logging
+import math
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -2398,3 +2403,124 @@ class SessionManager:
             return False
         self.bus.publish(session_id, {"type": "command", "command": command})
         return True
+
+    # ---------------- summon to viewport ----------------
+
+    def summon_viewport(
+        self, session_id: str, client_id: str, bounds: Any
+    ) -> Dict[str, Any]:
+        """Ask every client connected to ``session_id`` to frame ``bounds``.
+
+        The browser path (REST ``/summon``): charged to the op bucket under the
+        caller's ``client_id`` like ``/ops``, so summoning cannot be used to
+        flood collaborators' cameras. The summoner is named by the display name
+        it joined the session's presence with — the request carries no name, so
+        a summoner cannot claim someone else's.
+
+        Ephemeral by design: the event goes straight to the bus — no state
+        change, no ``seq``, no ring entry — so a client joining later is not
+        moved and a catch-up never replays it.
+
+        Raises ``OpError`` for an invalid target, ``SessionNotFound`` for an
+        unknown session (a summon never creates one) and ``RateLimited``.
+        """
+        target = self._check_summon(session_id, client_id, bounds)
+        if not self._bucket.consume(client_id, 1.0):
+            raise RateLimited()
+        member = next(
+            (
+                m
+                for m in self.presence.roster(session_id)
+                if m.get("client_id") == client_id
+            ),
+            None,
+        )
+        return self._publish_summon(
+            session_id,
+            client_id,
+            target,
+            member.get("display_name") if member else None,
+        )
+
+    def summon_viewport_sync(
+        self,
+        session_id: str,
+        client_id: str,
+        bounds: Any,
+        *,
+        display_name: Optional[str],
+        rate_limit_label: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """``summon_viewport`` for the MCP tool path: charges ``_mcp_bucket``
+        like every other synchronous MCP write, and names the summoner with the
+        ``display_name`` the tool resolved."""
+        target = self._check_summon(session_id, client_id, bounds)
+        self._consume_mcp_budget(
+            self._mcp_rate_limit_key(client_id, rate_limit_label), 1.0
+        )
+        return self._publish_summon(session_id, client_id, target, display_name)
+
+    def _check_summon(
+        self, session_id: str, client_id: str, bounds: Any
+    ) -> Dict[str, float]:
+        if not is_valid_session_id(session_id):
+            raise SessionNotFound()
+        if not isinstance(client_id, str) or not client_id:
+            raise OpError("'client_id' is required")
+        target = validate_summon_bounds(bounds)
+        if self.store.get(session_id) is None:
+            raise SessionNotFound()
+        return target
+
+    def _publish_summon(
+        self,
+        session_id: str,
+        client_id: str,
+        target: Dict[str, float],
+        display_name: Optional[str],
+    ) -> Dict[str, Any]:
+        # Only the target and the summoner's name, plus the originating
+        # client_id envelope every broadcast carries (the summoner's own
+        # browser uses it to ignore its echo).
+        self.bus.publish(
+            session_id,
+            {
+                "type": "viewport_summoned",
+                "client_id": client_id,
+                "summoned_by": display_name,
+                "bounds": target,
+            },
+        )
+        return {
+            "bounds": target,
+            "connected_clients": self.presence.count(session_id),
+        }
+
+
+# Model-space coordinates are pixels at zoom 1; anything this far out is a
+# caller error, not a region a canvas could usefully frame.
+_SUMMON_MAX_COORDINATE = 1e7
+
+
+def validate_summon_bounds(bounds: Any) -> Dict[str, float]:
+    """Normalise a summon target ``{x, y, width, height}`` in model space.
+
+    ``x``/``y`` is the region's top-left corner, the same convention as node
+    positions in the layout contract. Every value must be a finite number
+    within ``±_SUMMON_MAX_COORDINATE`` and the extent strictly positive, so
+    every client — whatever its screen size — can fit the same region.
+    """
+    if not isinstance(bounds, dict):
+        raise OpError("'bounds' must be an object with x, y, width and height")
+    normalised: Dict[str, float] = {}
+    for key in ("x", "y", "width", "height"):
+        value = bounds.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise OpError(f"bounds.{key} must be a number")
+        value = float(value)
+        if not math.isfinite(value) or abs(value) > _SUMMON_MAX_COORDINATE:
+            raise OpError(f"bounds.{key} must be a finite number")
+        normalised[key] = value
+    if normalised["width"] <= 0 or normalised["height"] <= 0:
+        raise OpError("bounds.width and bounds.height must be positive")
+    return normalised

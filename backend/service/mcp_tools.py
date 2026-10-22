@@ -103,6 +103,11 @@ from .service import GraphService
 # assumed default — model-space units at zoom 1, matching the canvas node box.
 _ASSUMED_NODE_SIZE = {"width": 220, "height": 120}
 
+# summon_session_viewport: who summoned, when the caller names no one, and the
+# largest node set one summon may frame (the add_nodes_to_session batch size).
+_SUMMON_DEFAULT_DISPLAY_NAME = "AI assistant"
+_SUMMON_MAX_NODE_IDS = 500
+
 # Stable client id the shared-session op protocol attributes MCP layout writes to,
 # so an AI agent is just another collaborator (design 3.8) and rate limiting /
 # presence group all its writes together.
@@ -2190,6 +2195,139 @@ def register_mcp_tools(
             "moved": result["moved"],
             "revision": result["revision"],
         }
+
+    @register_tool
+    def summon_session_viewport(
+        session_id: str,
+        bounds: Optional[Dict[str, Any]] = None,
+        node_ids: Optional[List[str]] = None,
+        display_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Move every browser connected to a session to the same region of the canvas.
+
+        Use it to bring everyone's attention to one place ("look here"). Each
+        connected client animates its camera to fit the region (a viewer who
+        asked for reduced motion jumps instead), sees a short notice naming who
+        summoned them, and can press Return to go back to where they were.
+        The summon is ephemeral: nothing is stored in the session, and a user
+        who joins afterwards is not moved. Clients in other sessions are
+        never affected.
+
+        Give exactly one target:
+        - ``bounds``: a model-space region ``{"x", "y", "width", "height"}``
+          (pixels at zoom 1, ``x``/``y`` = top-left, the same space
+          ``get_visualization_layout`` reports). Every value must be a finite
+          number and width/height positive. Clients with different screen
+          sizes all fit this same region.
+        - ``node_ids``: ids of nodes on the session's canvas (at most 500). The
+          region is their bounding box, using ``assumed_node_size`` for the
+          node extent. Every id must be on the canvas with a position and
+          readable by you; in a staged session that is the composed view,
+          staged nodes included.
+
+        Args:
+            session_id: The session ID shown in the browser header (e.g. "8244-1742")
+            bounds: Model-space region to frame. Provide this or ``node_ids``.
+            node_ids: Nodes to frame. Provide this or ``bounds``.
+            display_name: Name shown to the summoned users (max 100 characters).
+                Defaults to "AI assistant".
+
+        Returns:
+            Dict with success, the model-space ``bounds`` sent and
+            ``connected_clients`` (how many clients were connected to receive
+            it; 0 means nobody was moved). Retryable error: rate_limited.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {"success": False, "error": _INVALID_SESSION_ID_ERROR}
+        denied = _authorize_session(GRAPH_ACTION_MUTATE, "summon_session_viewport")
+        if denied:
+            return denied
+        if (bounds is None) == (node_ids is None):
+            return {
+                "success": False,
+                "error": "Provide exactly one of bounds or node_ids.",
+            }
+        if display_name is not None and not isinstance(display_name, str):
+            return {"success": False, "error": "display_name must be a string"}
+        name = (display_name or "").strip()[:100] or _SUMMON_DEFAULT_DISPLAY_NAME
+        session = session_manager.get_session(session_id)
+        if session is None:
+            return {"success": False, "error": f"Session '{session_id}' not found."}
+        if node_ids is not None:
+            if (
+                not isinstance(node_ids, list)
+                or not node_ids
+                or not all(isinstance(n, str) and n for n in node_ids)
+            ):
+                return {
+                    "success": False,
+                    "error": "node_ids must be a non-empty list of node ids",
+                }
+            if len(node_ids) > _SUMMON_MAX_NODE_IDS:
+                return {
+                    "success": False,
+                    "error": "too_large",
+                    "message": f"At most {_SUMMON_MAX_NODE_IDS} node_ids per summon.",
+                }
+            wanted = list(dict.fromkeys(node_ids))
+            refs = set(session.state.get("node_refs", []))
+            positions = session.state.get("positions", {})
+            on_canvas = [n for n in wanted if n in refs and n in positions]
+            # Read in the session, so a staged session resolves its composed
+            # view; an id the caller may not read is reported like an absent
+            # one rather than confirming that it exists.
+            with service.reading_in(session_id):
+                resolved = service.resolve_session_node_semantics(
+                    on_canvas,
+                    action=GRAPH_ACTION_READ,
+                    target="summon_session_viewport",
+                )
+            if resolved.get("error") in _SESSION_REFUSALS:
+                return resolved
+            semantics = resolved.get("nodes") or {}
+            missing = [
+                n for n in wanted if (semantics.get(n) or {}).get("type") is None
+            ]
+            if missing:
+                return {
+                    "success": False,
+                    "error": "unknown_node_ids",
+                    "message": (
+                        "These node ids are not on the session's canvas with a "
+                        "position: " + ", ".join(missing)
+                    ),
+                    "node_ids": missing,
+                }
+            xs = [float(positions[n]["x"]) for n in wanted]
+            ys = [float(positions[n]["y"]) for n in wanted]
+            bounds = {
+                "x": min(xs),
+                "y": min(ys),
+                "width": max(xs) - min(xs) + _ASSUMED_NODE_SIZE["width"],
+                "height": max(ys) - min(ys) + _ASSUMED_NODE_SIZE["height"],
+            }
+        try:
+            result = session_manager.summon_viewport_sync(
+                session_id,
+                _MCP_LAYOUT_CLIENT_ID,
+                bounds,
+                display_name=name,
+                rate_limit_label="summon_session_viewport",
+            )
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many summons; slow down and retry.",
+            }
+        except SessionNotFound:
+            return {"success": False, "error": f"Session '{session_id}' not found."}
+        except OpError as exc:
+            return {"success": False, "error": str(exc)}
+        return {"success": True, "session_id": session_id, **result}
 
     @register_tool
     def add_nodes_to_session(
