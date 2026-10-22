@@ -1,0 +1,3 @@
+## 2024-05-15 - Batched Incident Edge Lookup
+**Learning:** In NetworkX, fetching incident edges for a batch of nodes using a python loop over individual `out_edges` / `in_edges` calls adds substantial overhead compared to passing the list of nodes directly to `out_edges([n1, n2, ...])` / `in_edges([n1, n2, ...])`.
+**Action:** When gathering incident edges for multiple nodes (like in `get_incident_edges`), pass the iterable of valid node IDs to the `out_edges` and `in_edges` generators instead of looping in Python. This improves retrieval performance significantly without altering the codebase architecture.
