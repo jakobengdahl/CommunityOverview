@@ -45,6 +45,7 @@ vi.mock('../src/services/api', () => {
     setSessionModeDirect: vi.fn(),
     setSessionOnServer: vi.fn(),
     setStagingAvailable: vi.fn(),
+    subscribeStagedMarks: vi.fn(() => () => {}),
     getStagedSessionBinding: vi.fn(() => null),
     getStagedChanges: vi.fn(async () => ({ items: [], count: 0 })),
     getDisplayName: vi.fn(() => null),

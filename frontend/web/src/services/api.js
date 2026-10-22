@@ -131,11 +131,26 @@ export function setActiveSessionForRequests(sessionId) {
  * @param {string} sessionId
  * @param {boolean} staged
  */
+const _stagedListeners = new Set();
+
+/**
+ * Be told whenever a session is newly marked staged here, so a mark made below
+ * the UI (e.g. on a re-read before an approval) shows at once.
+ * @param {(sessionId: string) => void} listener
+ * @returns {() => void} unsubscribe
+ */
+export function subscribeStagedMarks(listener) {
+  _stagedListeners.add(listener);
+  return () => _stagedListeners.delete(listener);
+}
+
 export function setSessionStaged(sessionId, staged) {
   if (!sessionId) return;
   _modeUnknown.delete(sessionId);
   if (staged) {
+    const isNew = !_stagedSessions.has(sessionId);
     _stagedSessions.add(sessionId);
+    if (isNew) _stagedListeners.forEach((listener) => listener(sessionId));
   } else {
     _stagedSessions.delete(sessionId);
     _serverSessions.delete(sessionId);
@@ -753,8 +768,25 @@ export async function decideAgentProposal(proposalId, action) {
     // may have been switched to staged by someone else a moment ago: read its
     // mode first, so an approval from a now-staged session names it and one
     // made elsewhere is refused rather than written to the graph.
-    const now = await getSession(_activeSessionId).catch(() => null);
-    if (now?.write_mode === 'staged') setSessionStaged(_activeSessionId, true);
+    const id = _activeSessionId;
+    let now;
+    try {
+      now = await getSession(id);
+    } catch (error) {
+      // Unread, the session may be staged: refuse rather than approve
+      // unbound. A 404 means the server holds no such session (it is then
+      // browser-only, so direct).
+      if (error?.status !== 404) throw error;
+      now = null;
+    }
+    // About the session that was read, and only while it is still the one
+    // approving: another session's mode is never inferred from it.
+    if (now?.write_mode === 'staged' && _activeSessionId === id) setSessionStaged(id, true);
+    if (_activeSessionId !== id) {
+      const error = new Error('The session changed while approving; approve again.');
+      error.code = 'session_changed';
+      throw error;
+    }
   }
   return apiFetch(`${getPathRoot()}/agents/proposals/${encodeURIComponent(proposalId)}/${action}`, {
     method: 'POST',

@@ -164,6 +164,48 @@ describe('a direct session the server holds, where staging exists', () => {
     expect(headerOf(approve)).toBeUndefined();
   });
 
+  it('refuses to approve when the session mode cannot be read', async () => {
+    const calls = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url, options = {}) => {
+        calls.push({ url, options });
+        return { ok: false, status: 503, json: async () => ({ detail: 'down' }) };
+      })
+    );
+    api.setStagingAvailable(true);
+    api.setActiveSessionForRequests('5555-6666-7777-8888');
+    api.setSessionOnServer('5555-6666-7777-8888');
+    const error = await api.decideAgentProposal('p1', 'approve').catch((e) => e);
+    expect(error.status).toBe(503);
+    expect(calls.some((c) => c.url.endsWith('/approve'))).toBe(false);
+  });
+
+  it('marks no other session from a read made for the one that was left', async () => {
+    let answer;
+    const calls = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url, options = {}) => {
+        calls.push({ url, options });
+        return new Promise((resolve) => {
+          answer = () =>
+            resolve({ ok: true, status: 200, json: async () => ({ write_mode: 'staged' }) });
+        });
+      })
+    );
+    api.setStagingAvailable(true);
+    api.setActiveSessionForRequests('5555-6666-7777-8888');
+    api.setSessionOnServer('5555-6666-7777-8888');
+    const pending = api.decideAgentProposal('p1', 'approve').catch((e) => e);
+    api.setActiveSessionForRequests('9999-0000-1111-2222');
+    answer();
+    const error = await pending;
+    expect(error.code).toBe('session_changed');
+    expect(api.getStagedSessionBinding()).toBeNull();
+    expect(calls.some((c) => c.url.endsWith('/approve'))).toBe(false);
+  });
+
   it('names a session switched to staged elsewhere before approving from it', async () => {
     const calls = mockFetch(200, { write_mode: 'staged' });
     api.setStagingAvailable(true);

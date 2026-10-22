@@ -70,6 +70,15 @@ export function useStagedSession(sessionId) {
     });
   }, []);
 
+  // A session marked staged below the UI (api.js) shows as staged at once.
+  useEffect(
+    () =>
+      api.subscribeStagedMarks?.((id) =>
+        setModes((prev) => (prev[id] === 'staged' ? prev : { ...prev, [id]: 'staged' }))
+      ),
+    []
+  );
+
   const markModeUnknown = useCallback((id) => {
     if (!id || modesRef.current[id] === 'staged') return;
     api.setSessionModeUnknown(id);

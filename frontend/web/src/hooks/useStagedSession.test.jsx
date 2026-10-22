@@ -7,7 +7,12 @@ vi.mock('../services/api', () => ({
   setSessionModeDirect: vi.fn(),
   setSessionOnServer: vi.fn(),
   getStagedChanges: vi.fn(),
+  subscribeStagedMarks: vi.fn((listener) => {
+    stagedMarkListeners.add(listener);
+    return () => stagedMarkListeners.delete(listener);
+  }),
 }));
+const stagedMarkListeners = new Set();
 
 import * as api from '../services/api';
 import { useStagedSession } from './useStagedSession';
@@ -143,6 +148,13 @@ describe('useStagedSession', () => {
       await result.current.refreshDiff();
     });
     expect(api.getStagedChanges).not.toHaveBeenCalled();
+  });
+
+  it('shows a session as staged the moment api.js marks it so', () => {
+    api.getStagedChanges.mockResolvedValue({ items: [] });
+    const { result } = renderHook(() => useStagedSession('1111-2222'));
+    act(() => stagedMarkListeners.forEach((listener) => listener('1111-2222')));
+    expect(result.current.writeMode).toBe('staged');
   });
 
   it('forgets a deleted session', () => {
