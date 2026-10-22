@@ -742,6 +742,20 @@ export async function uploadFile(file, analyze = false, options = {}) {
  * @param {'approve'|'reject'} action
  */
 export async function decideAgentProposal(proposalId, action) {
+  if (
+    action === 'approve' &&
+    _stagingAvailable &&
+    _activeSessionId &&
+    _serverSessions.has(_activeSessionId) &&
+    !_stagedSessions.has(_activeSessionId)
+  ) {
+    // A direct session leaves approval to the proposal's own session, but it
+    // may have been switched to staged by someone else a moment ago: read its
+    // mode first, so an approval from a now-staged session names it and one
+    // made elsewhere is refused rather than written to the graph.
+    const now = await getSession(_activeSessionId).catch(() => null);
+    if (now?.write_mode === 'staged') setSessionStaged(_activeSessionId, true);
+  }
   return apiFetch(`${getPathRoot()}/agents/proposals/${encodeURIComponent(proposalId)}/${action}`, {
     method: 'POST',
   });
