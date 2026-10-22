@@ -8,6 +8,8 @@ import { useToolResultCommands } from './useToolResultCommands';
 
 vi.mock('../services/api', () => ({
   getVisualizationStreamUrl: vi.fn((id) => `/viz/${id}`),
+  isActiveSessionPossiblyStaged: vi.fn(() => false),
+  getNodeDetails: vi.fn(),
 }));
 
 vi.mock('@community-graph/ui-graph-canvas', () => ({

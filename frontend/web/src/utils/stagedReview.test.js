@@ -65,6 +65,19 @@ describe('selection stays closed under dependencies', () => {
     expect([...dependencyClosure(items, ['edge:e1'])].sort()).toEqual(['edge:e1', 'node:n1']);
   });
 
+  it('ticking an entry ticks its dependencies transitively', () => {
+    const chain = [
+      { ...edgeCreate, entity_id: 'a', depends_on: [{ kind: 'edge', entity_id: 'b' }] },
+      { ...edgeCreate, entity_id: 'b', depends_on: [{ kind: 'node', entity_id: 'c' }] },
+      { ...nodeCreate, entity_id: 'c' },
+    ];
+    expect([...dependencyClosure(chain, ['edge:a'])].sort()).toEqual([
+      'edge:a',
+      'edge:b',
+      'node:c',
+    ]);
+  });
+
   it('unticking a node unticks what depends on it, transitively', () => {
     const chained = [
       ...items,
@@ -122,6 +135,17 @@ describe('resolutions', () => {
       true
     );
     expect(isResolved(conflictUpdate, { choice: 'as_new' })).toBe(true);
+    const twoConflicts = {
+      ...conflictUpdate,
+      fields: {
+        description: { base: 'a', staged: 'b', main: 'c', conflict: true },
+        name: { base: 'n', staged: 'm', main: 'o', conflict: true },
+      },
+    };
+    expect(isResolved(twoConflicts, { choice: 'manual', values: { description: 'x' } })).toBe(
+      false
+    );
+    expect(isResolved({ ...conflictUpdate, kind: 'edge' }, { choice: 'as_new' })).toBe(false);
     expect(isResolved(conflictUpdate, undefined)).toBe(false);
     expect(isResolved(nodeCreate, undefined)).toBe(true);
   });
@@ -179,6 +203,21 @@ describe('review drift', () => {
     expect(reviewDrift(ticked(nodeCreate), [conflictUpdate])).toEqual(['node:n1']);
     const fresh = [nodeCreate, edgeCreate, { ...conflictUpdate, session_seq: 9 }];
     expect(reviewDrift(ticked(nodeCreate), fresh)).toEqual([]);
+  });
+
+  it('flags a changed value, dependency, action or unstaged edge', () => {
+    const variants = [
+      {
+        ...conflictUpdate,
+        fields: { description: { ...conflictUpdate.fields.description, staged: 'x' } },
+      },
+      { ...conflictUpdate, depends_on: [{ kind: 'node', entity_id: 'n1' }] },
+      { ...conflictUpdate, action: 'delete' },
+      { ...conflictUpdate, unstaged_edges: ['e7'] },
+    ];
+    for (const changed of variants) {
+      expect(reviewDrift(ticked(conflictUpdate), [changed])).toEqual(['node:n2']);
+    }
   });
 
   it('measures from when the entry was ticked, not from the latest live read', () => {

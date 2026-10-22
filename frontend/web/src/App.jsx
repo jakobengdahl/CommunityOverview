@@ -323,6 +323,8 @@ function App() {
     refreshDiff: refreshStagedDiff,
     handleSessionOp: handleStagedSessionOp,
   } = useStagedSession(sessionId);
+  const sessionWriteModeRef = useRef(sessionWriteMode);
+  sessionWriteModeRef.current = sessionWriteMode;
   const setStoreWriteMode = useGraphStore((state) => state.setSessionWriteMode);
   useEffect(() => {
     setStoreWriteMode(sessionWriteMode);
@@ -423,18 +425,23 @@ function App() {
     [setRemoteAnnotationOps]
   );
 
+  // When each edge was last removed by a remote op (a running count), so a
+  // composed re-read still in flight does not put back an edge removed after
+  // it started.
+  const edgeRemovalSeqRef = useRef({ seq: 0, removed: new Map() });
   const applyRemoteOp = useCallback(
     async (op) => {
       const store = useGraphStore.getState();
       if (
         (op?.op === 'edges_added' || op?.op === 'edges_updated') &&
-        api.getStagedSessionBinding()
+        api.isActiveSessionPossiblyStaged()
       ) {
         // In a staged session the edge an op carries is staged content, and
         // the stream reaches anyone holding the session id: read it from the
         // composed view instead, which asks the authorization hook
         // (docs/SESSION_OVERLAY_CONTRACT.md §15).
         const sessionAtStart = syncRef.current?.sessionId;
+        const removalsAtStart = edgeRemovalSeqRef.current.seq;
         const onCanvas = new Set(store.nodes.map((n) => n.id));
         const wanted = (op.edges || []).filter(
           (e) => e && e.id && onCanvas.has(e.source) && onCanvas.has(e.target)
@@ -448,7 +455,16 @@ function App() {
         const have = new Set(useGraphStore.getState().edges.map((e) => e.id));
         const fresh = wanted.map((e) => listed.get(e.id)).filter(Boolean);
         fresh.filter((e) => have.has(e.id)).forEach((e) => updateEdgeData(e.id, e));
-        const added = fresh.filter((e) => !have.has(e.id));
+        // Only an add adds, and not an edge a later op removed while this
+        // read was in flight (the sync baseline already has that removal).
+        const added =
+          op.op === 'edges_added'
+            ? fresh.filter(
+                (e) =>
+                  !have.has(e.id) &&
+                  !((edgeRemovalSeqRef.current.removed.get(e.id) ?? -1) > removalsAtStart)
+              )
+            : [];
         if (added.length) addNodesToVisualization([], added);
         return fresh.length > 0;
       }
@@ -530,6 +546,12 @@ function App() {
         }
         case 'edges_removed': {
           const removeIds = op.edge_ids || [];
+          const removals = edgeRemovalSeqRef.current;
+          removeIds.forEach((id) => {
+            removals.seq += 1;
+            removals.removed.set(id, removals.seq);
+          });
+          if (removals.removed.size > 1000) removals.removed.clear();
           const existing = new Set(store.edges.map((e) => e.id));
           removeIds.forEach((id) => removeEdge(id));
           return removeIds.some((id) => existing.has(id));
@@ -2404,7 +2426,10 @@ function App() {
         // can come without its mode (a drained stream), and staged is final.
         // A mode not yet known counts as staged: leaving it for a direct
         // session could be the silent switch §13 rules out.
-        const wasStaged = deletedWriteMode === 'staged' || sessionWriteMode !== 'direct';
+        const wasStaged =
+          deletedWriteMode === 'staged' ||
+          sessionWriteMode === 'staged' ||
+          (!deletedWriteMode && sessionWriteMode === 'unknown');
         if (wasStaged) {
           // Handled by the local delete path only in the tab that deleted it:
           // the client id is shared by every tab of this browser.
@@ -2757,15 +2782,18 @@ function App() {
     const { id, staged: wasStaged } = deleteSessionDialog;
     setDeleteSessionDialog(null);
     locallyDeletingRef.current.add(id);
+    let browserOnly = false;
     try {
       // The user confirmed a dialog that said a staged session's changes
       // go with it.
       await api.deleteServerSession(id, api.getClientId(), { discardStaged: wasStaged });
     } catch (error) {
-      let gone = error?.status === 404;
-      if (typeof error?.status !== 'number') {
-        // No answer: the delete may have landed. Ask whether the session is
-        // still there rather than report a failure that did not happen.
+      browserOnly = error?.status === 404;
+      let gone = browserOnly || deletedStagedRef.current.has(id);
+      if (!gone && (typeof error?.status !== 'number' || error.status >= 500)) {
+        // No answer, or a server error that may have come after the delete
+        // landed: ask whether the session is still there rather than report
+        // a failure that did not happen.
         gone = await api.getSession(id).then(
           () => false,
           (e) => e?.status === 404
@@ -2782,11 +2810,15 @@ function App() {
     }
     sessionStore.removeSession(id);
     // The server's notice may say staged where this tab thought direct (it
-    // was switched meanwhile): then the replacement is staged too.
+    // was switched meanwhile): then the replacement is staged too. So does a
+    // mode not known yet - unless the server never held the session, which
+    // makes it browser-only and direct (§5.1). The current mode, not the one
+    // this callback closed over: it may have changed during the delete.
+    const modeNow = sessionWriteModeRef.current;
     const leftStaged =
       wasStaged ||
       deletedStagedRef.current.has(id) ||
-      (id === sessionId && sessionWriteMode !== 'direct');
+      (id === sessionId && (modeNow === 'staged' || (modeNow === 'unknown' && !browserOnly)));
     if (id === sessionId) {
       // Deleting the active session: drop its content and switch into a fresh
       // one (design 3.6); a staged one into a staged one (§13). Other
@@ -2804,7 +2836,6 @@ function App() {
   }, [
     deleteSessionDialog,
     sessionId,
-    sessionWriteMode,
     leaveDeletedSession,
     forgetStagedSession,
     showNotification,
@@ -2858,9 +2889,28 @@ function App() {
       ensureSyncConnected(targetId);
       showNotification('info', t('staged.switched'));
     } catch (error) {
+      if (typeof error?.status !== 'number' || error.status >= 500) {
+        // The switch may have landed with its answer lost: read what the
+        // server holds, so a staged session never goes on looking direct.
+        const now = await api.getSession(targetId).catch(() => null);
+        if (now) adoptSessionPayload(targetId, now);
+        if (now?.write_mode === 'staged') {
+          ensureSyncConnected(targetId);
+          showNotification('info', t('staged.switched'));
+          return;
+        }
+      }
       showNotification('error', error.message || t('staged.switch_failed'));
     }
-  }, [sessionId, currentSessionName, adoptWriteMode, ensureSyncConnected, showNotification, t]);
+  }, [
+    sessionId,
+    currentSessionName,
+    adoptWriteMode,
+    adoptSessionPayload,
+    ensureSyncConnected,
+    showNotification,
+    t,
+  ]);
 
   // After a merge or discard from the review: re-read what it touched (its op
   // does the same when it arrives; this covers a stream that is down), and put
@@ -2894,10 +2944,10 @@ function App() {
 
   const closeStagedReview = useCallback(() => setStagedReviewOpen(false), []);
 
-  // The diff's states, over those the composed reads put on each entity
-  // (`staged_state`), so a staged entity stays marked even when the diff
-  // cannot be read.
+  // The diff's states; when the diff cannot be read, those the composed reads
+  // put on each entity (`staged_state`), so a staged entity stays marked.
   const canvasStagedStates = useMemo(() => {
+    if (!stagedDiffError) return stagedStates;
     const fromReads = (list) =>
       Object.fromEntries(
         (list || [])
@@ -2908,7 +2958,7 @@ function App() {
       nodes: { ...fromReads(nodes), ...stagedStates.nodes },
       edges: { ...fromReads(edges), ...stagedStates.edges },
     };
-  }, [nodes, edges, stagedStates]);
+  }, [nodes, edges, stagedStates, stagedDiffError]);
 
   const stagedStateLabels = useMemo(
     () => ({

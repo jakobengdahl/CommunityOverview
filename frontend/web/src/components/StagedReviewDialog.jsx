@@ -110,8 +110,14 @@ function StagedReviewDialog({
 
   // A merge_blocked answer's statuses hold for that selection and those
   // resolutions only.
+  // Ticks that went stale are kept (unticked) until the user ticks that
+  // entry again or clears the selection, so they are never re-ticked on the
+  // way to ticking something that depends on them.
   const changeSelection = (next) => {
     setBlockedStatus(new Map());
+    for (const [key, print] of selected) {
+      if (!liveSelected.has(key) && !next.has(key) && byKey.has(key)) next.set(key, print);
+    }
     setSelected(next);
   };
 
@@ -138,7 +144,10 @@ function StagedReviewDialog({
   };
 
   const selectAll = () => changeSelection(ticked(items.map(itemKey)));
-  const selectNone = () => changeSelection(new Map());
+  const selectNone = () => {
+    setBlockedStatus(new Map());
+    setSelected(new Map());
+  };
 
   const setChoice = (item, choice) => {
     const key = itemKey(item);

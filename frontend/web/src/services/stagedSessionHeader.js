@@ -48,6 +48,7 @@ const SESSION_AWARE = [
   ['GET', /^\/export_graph$/],
   ['POST', /^\/ui\/chat$/],
   ['POST', /^\/ui\/chat\/simple$/],
+  ['POST', /^\/agents\/proposals\/[^/]+\/approve$/],
 ];
 
 // POSTs that change nothing in the graph, so they stay usable in a staged

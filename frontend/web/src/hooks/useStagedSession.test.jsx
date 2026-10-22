@@ -130,6 +130,21 @@ describe('useStagedSession', () => {
     expect(api.setSessionOnServer).not.toHaveBeenCalled();
   });
 
+  it('routes every staged-change op to a diff re-read', () => {
+    const { result } = renderHook(() => useStagedSession('1111-2222'));
+    for (const op of ['graph_change_staged', 'graph_changes_merged', 'graph_changes_discarded']) {
+      expect(result.current.handleSessionOp({ op })).toBe(true);
+    }
+  });
+
+  it('never reads a diff for a direct session', async () => {
+    const { result } = renderHook(() => useStagedSession('1111-2222'));
+    await act(async () => {
+      await result.current.refreshDiff();
+    });
+    expect(api.getStagedChanges).not.toHaveBeenCalled();
+  });
+
   it('forgets a deleted session', () => {
     api.getStagedChanges.mockResolvedValue({ items: [] });
     const { result } = renderHook(() => useStagedSession('1111-2222'));

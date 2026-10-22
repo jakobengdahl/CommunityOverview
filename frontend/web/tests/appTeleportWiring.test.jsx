@@ -41,6 +41,7 @@ vi.mock('../src/services/api', () => {
     setActiveSessionForRequests: vi.fn(),
     setSessionStaged: vi.fn(),
     setSessionModeUnknown: vi.fn(),
+    isActiveSessionPossiblyStaged: vi.fn(() => false),
     setSessionModeDirect: vi.fn(),
     setSessionOnServer: vi.fn(),
     setStagingAvailable: vi.fn(),

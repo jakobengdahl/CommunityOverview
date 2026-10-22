@@ -161,6 +161,20 @@ export function setSessionModeDirect(sessionId) {
   _modeUnknown.delete(sessionId);
 }
 
+/**
+ * Whether content the session stream hands over may be staged content for
+ * this viewer: the active session is staged, or its mode is not known yet.
+ * Such content is re-read through composed, authorized reads, never shown as
+ * delivered.
+ * @returns {boolean}
+ */
+export function isActiveSessionPossiblyStaged() {
+  return (
+    !!_activeSessionId &&
+    (_stagedSessions.has(_activeSessionId) || _modeUnknown.has(_activeSessionId))
+  );
+}
+
 /** @returns {string|null} the active session's id when it is staged */
 export function getStagedSessionBinding() {
   return _activeSessionId && _stagedSessions.has(_activeSessionId) ? _activeSessionId : null;

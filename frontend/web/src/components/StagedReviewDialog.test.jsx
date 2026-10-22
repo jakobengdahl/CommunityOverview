@@ -113,6 +113,34 @@ describe('StagedReviewDialog', () => {
     expect(api.mergeStagedChanges).not.toHaveBeenCalled();
   });
 
+  it('does not merge when the fresh read fails', async () => {
+    renderDialog({ onRefresh: vi.fn(async () => null) });
+    fireEvent.click(checkbox('node:n1'));
+    fireEvent.click(screen.getByTestId('staged-merge'));
+    await waitFor(() => expect(screen.getByText('staged.refresh_failed')).toBeTruthy());
+    expect(api.mergeStagedChanges).not.toHaveBeenCalled();
+  });
+
+  it('does not discard an entry that changed since it was ticked', async () => {
+    renderDialog({ onRefresh: vi.fn(async () => [{ ...CREATE, session_seq: 9 }, EDGE, CONFLICT]) });
+    fireEvent.click(checkbox('node:n1'));
+    fireEvent.click(screen.getByText('staged.discard_selected'));
+    fireEvent.click(screen.getByText('staged.discard_confirm'));
+    await waitFor(() => expect(screen.getByText('staged.review_drift')).toBeTruthy());
+    expect(api.discardStagedChanges).not.toHaveBeenCalled();
+  });
+
+  it('retries a raced merge at most once', async () => {
+    const raced = () =>
+      Object.assign(new Error('raced'), { status: 409, code: 'merge_raced', data: {} });
+    api.mergeStagedChanges.mockRejectedValue(raced());
+    renderDialog();
+    fireEvent.click(checkbox('node:n1'));
+    fireEvent.click(screen.getByTestId('staged-merge'));
+    await waitFor(() => expect(screen.getByText('staged.merge_raced')).toBeTruthy());
+    expect(api.mergeStagedChanges).toHaveBeenCalledTimes(2);
+  });
+
   it('asks for a decision on a conflict before merging', async () => {
     renderDialog();
     fireEvent.click(checkbox('node:n2'));
