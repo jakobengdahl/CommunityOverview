@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 from backend.core import (
     Edge,
     EntityRevisionConflict,
+    NodeTypeChanged,
     GraphWriteFailed,
     GraphWriteOutcomeUnknown,
     Node,
@@ -109,7 +110,10 @@ def _create_conflict_result(
     """A refused create: the caller needs only to know the id is taken. The
     taken entity may be one this caller cannot see - another instance's
     create on a shared store it has not applied yet - so nothing about it,
-    its revision included, goes back."""
+    its revision included, goes back. A node the create was judged on that
+    changed type meanwhile is that conflict, not a taken id."""
+    if isinstance(conflict, NodeTypeChanged):
+        return write_error_result(conflict, **extra)
     return write_error_result(
         EntityRevisionConflict(conflict.kind, conflict.entity_id, None, None),
         message=f"{conflict.kind} {conflict.entity_id!r} already exists",

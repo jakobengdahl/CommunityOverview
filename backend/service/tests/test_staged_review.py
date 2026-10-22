@@ -1647,3 +1647,131 @@ def test_an_edge_judged_before_a_retype_merge_cannot_land_after_it(
     finally:
         other.shutdown_events()
         backend.close()
+
+
+# -- post-merge review round 4 regressions ------------------------------------------------
+
+
+def _lagging_instance(world, monkeypatch):
+    """Another instance that has not applied the store's changes yet."""
+    from backend.core import GraphStorage
+
+    original = GraphStorage.apply_external_change
+
+    def held_back(self, change):
+        if getattr(self, "_lagging", False):
+            return None
+        return original(self, change)
+
+    monkeypatch.setattr(GraphStorage, "apply_external_change", held_back)
+    other, backend = _other_instance(world)
+    other._lagging = True
+    return other, backend
+
+
+def test_a_node_update_over_a_retype_it_has_not_seen_is_refused(pg_world, monkeypatch):
+    """An instance still holding the old type cannot put it back under edges
+    judged against the new one."""
+    from backend.core.storage_backends import EntityRevisionConflict
+
+    world = pg_world
+    world.storage.add_nodes(
+        [
+            Node(id="i", type="Initiative", name="I"),
+            Node(id="l", type="Actor", name="L"),
+        ],
+        [],
+    )
+    other, backend = _lagging_instance(world, monkeypatch)
+    try:
+        sid = world.staged_session()
+        _stage(
+            world,
+            sid,
+            ("delete_nodes", (["l"],), {"confirmed": True}),
+            ("add_nodes", ([{"id": "l", "type": "Legislation", "name": "L"}], []), {}),
+        )
+        assert world.service.merge_staged_changes(sid, "m")["success"] is True
+        world.storage.add_edge(Edge(id="x", source="i", target="l", type="IMPLEMENTS"))
+        assert other.get_node("l").type_str == "Actor"
+        with pytest.raises(EntityRevisionConflict, match="no longer of type"):
+            other.update_node("l", {"description": "edited elsewhere"})
+        nodes = {n["id"]: n for n in backend.load_graph_data()["nodes"]}
+        assert nodes["l"]["type"] == "Legislation"
+    finally:
+        other.shutdown_events()
+        backend.close()
+
+
+def test_an_edge_judged_on_an_endpoint_deleted_meanwhile_is_refused(
+    pg_world, monkeypatch
+):
+    """The id of a deleted endpoint can be created again with any type, so an
+    edge judged against the node that held it does not land."""
+    from backend.core.storage_backends import EntityRevisionConflict
+
+    world = pg_world
+    world.storage.add_nodes(
+        [
+            Node(id="i", type="Initiative", name="I"),
+            Node(id="l", type="Legislation", name="L"),
+        ],
+        [],
+    )
+    other, backend = _other_instance(world)
+    try:
+        mine = world.storage._persistence_backend
+        original = mine._apply_batch_once
+
+        def other_deletes_first(*args, **kwargs):
+            if other.get_node("l") is not None:
+                assert other.delete_nodes(["l"], confirmed=True).success
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(mine, "_apply_batch_once", other_deletes_first)
+        with pytest.raises(EntityRevisionConflict, match="no longer of type"):
+            world.storage.add_edge(
+                Edge(id="x", source="i", target="l", type="IMPLEMENTS")
+            )
+        assert "x" not in {e["id"] for e in backend.load_graph_data()["edges"]}
+    finally:
+        other.shutdown_events()
+        backend.close()
+
+
+def _hide_and_retype_b_first(world, monkeypatch, other):
+    mine = world.storage._persistence_backend
+    original = mine._apply_batch_once
+
+    def other_first(*args, **kwargs):
+        if other.get_node("b").type_str != "Initiative":
+            assert other.delete_nodes(["b"], confirmed=True).success
+            other.add_nodes(
+                [Node(id="b", type="Initiative", name="B", metadata=dict(REMOTE))], []
+            )
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(mine, "_apply_batch_once", other_first)
+
+
+@pytest.mark.parametrize("write", ["update_edge", "add_edge"])
+def test_an_edge_write_refused_over_a_retyped_endpoint_tells_nothing_of_it(
+    pg_world, monkeypatch, write
+):
+    """A narrowed caller refused because an endpoint changed type gets no
+    revision of a node it may no longer see, and no 'already exists'."""
+    world = pg_world
+    other, backend = _other_instance(world)
+    try:
+        _hide_and_retype_b_first(world, monkeypatch, other)
+        world.hook.narrow = True
+        if write == "update_edge":
+            result = world.service.update_edge("ab", {"label": "z"})
+        else:
+            result = world.service.add_edge("c", "b", type="RELATES_TO")
+        assert result["error"] == "entity_revision_conflict"
+        assert result["current_revision"] is None
+        assert "already exists" not in result["message"]
+    finally:
+        other.shutdown_events()
+        backend.close()

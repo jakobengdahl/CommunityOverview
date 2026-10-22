@@ -174,8 +174,9 @@ class EntityOperation:
     `endpoint_types`, for an edge upsert, is `(node id, type)` for each
     endpoint the instance judged the edge's relationship type against. A
     backend declaring `revision_enforcement` refuses the write when the
-    store holds another type for one of them, so an edge judged before a
-    merge retyped its endpoint on another instance cannot land after it.
+    store holds another type for one of them, or no longer holds it, so an
+    edge judged before a merge retyped its endpoint on another instance
+    cannot land after it.
     Not journaled either, for the same reason.
     """
 
@@ -427,15 +428,18 @@ class EntityRevisionConflict(RuntimeError):
         super().__init__(f"{kind} {entity_id!r}: expected {wanted}, found {found}")
 
 
-class EndpointTypeChanged(EntityRevisionConflict):
-    """An edge write's endpoint no longer has the type it was judged against.
+class NodeTypeChanged(EntityRevisionConflict):
+    """A node the write was judged on no longer has that type in the store:
+    an edge's endpoint, or a node updated in place over a retype it has not
+    seen.
 
     A conflict like any other expectation that did not hold: nothing in the
-    batch was applied, and the caller re-reads before trying again.
+    batch was applied, and the caller re-reads before trying again. Without a
+    revision: the node may be one the caller can no longer see.
     """
 
-    def __init__(self, node_id: str, judged: str, current: Optional[int]):
-        super().__init__("node", node_id, None, current)
+    def __init__(self, node_id: str, judged: Optional[str]):
+        super().__init__("node", node_id, None, None)
         self.args = (f"node {node_id!r}: no longer of type {judged!r}",)
 
 

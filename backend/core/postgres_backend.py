@@ -80,11 +80,11 @@ from psycopg_pool import ConnectionPool
 from backend.core import layer_store
 from backend.core.storage_backends import (
     BackendCapabilities,
-    EndpointTypeChanged,
     EntityOperation,
     EntityRevisionConflict,
     ExternalChange,
     ExternalChangeRefused,
+    NodeTypeChanged,
     WriteRefusedByStore,
 )
 
@@ -1659,13 +1659,13 @@ class PostgresGraphPersistenceBackend:
                 judged.update(op.endpoint_types)
         scope, scope_params = self._and_scope()
         statement = sql.SQL(
-            "SELECT doc->>'type', COALESCE((doc->>'revision')::bigint, 0)"
-            " FROM {} WHERE id = %s{} FOR KEY SHARE"
+            "SELECT doc->>'type' FROM {} WHERE id = %s{} FOR KEY SHARE"
         ).format(self._table("graph_nodes"), scope)
         for endpoint in endpoints:
             row = conn.execute(statement, (endpoint, *scope_params)).fetchone()
-            if row is not None and endpoint in judged and row[0] != judged[endpoint]:
-                raise EndpointTypeChanged(endpoint, judged[endpoint], int(row[1]))
+            # Gone counts too: the id could be created again with any type.
+            if endpoint in judged and (row is None or row[0] != judged[endpoint]):
+                raise NodeTypeChanged(endpoint, judged[endpoint])
 
     def _stored_revision_of(self, conn, table: str, entity_id: str) -> Optional[int]:
         """The visible row's revision, or None when there is no such row."""
@@ -1788,16 +1788,30 @@ class PostgresGraphPersistenceBackend:
                 raise self._refuse(conn, table, operation)
             return int(row[0])
 
+        # A node's type changes in place only under an expectation (a merge's
+        # retype); a plain upsert that would change it was made over a type
+        # this instance has not seen replaced, and putting the old type back
+        # would strand the edges judged against the new one.
+        same_type = (
+            sql.SQL(" {bare}.doc->>'type' IS NOT DISTINCT FROM EXCLUDED.doc->>'type'")
+            if operation.kind == "node"
+            else sql.SQL(" TRUE")
+        ).format(bare=sql.Identifier(table))
         if not scoped:
             row = conn.execute(
                 sql.SQL("INSERT INTO {} ({}) VALUES (").format(
                     self._table(table), columns
                 )
                 + values
-                + sql.SQL(") ON CONFLICT (id) DO UPDATE SET doc = EXCLUDED.doc")
+                + sql.SQL(") ON CONFLICT (id) DO UPDATE SET doc = EXCLUDED.doc WHERE")
+                + same_type
                 + returning,
                 value_params,
             ).fetchone()
+            if row is None:
+                raise NodeTypeChanged(
+                    operation.entity_id, operation.payload.get("type")
+                )
             return int(row[0])
         # The scope travels with the row. A row written before this instance
         # had a scope carries none, and adopting it here is what stops the
@@ -1823,12 +1837,24 @@ class PostgresGraphPersistenceBackend:
             + sql.SQL(
                 ") ON CONFLICT (id) DO UPDATE"
                 " SET doc = EXCLUDED.doc, {col} = EXCLUDED.{col}"
-                " WHERE ({bare}.{col} IS NULL OR {bare}.{col} = %s)"
+                " WHERE ({bare}.{col} IS NULL OR {bare}.{col} = %s) AND"
             ).format(col=sql.Identifier(SCOPE_COLUMN), bare=sql.Identifier(table))
+            + same_type
             + returning,
             value_params + (self._scope,),
         ).fetchone()
         if row is None:
+            scope, scope_params = self._and_scope()
+            stored = conn.execute(
+                sql.SQL("SELECT doc->>'type' FROM {} WHERE id = %s{}").format(
+                    self._table(table), scope
+                ),
+                (operation.entity_id, *scope_params),
+            ).fetchone()
+            if operation.kind == "node" and stored is not None:
+                raise NodeTypeChanged(
+                    operation.entity_id, operation.payload.get("type")
+                )
             raise self._cross_scope(operation)
         return int(row[0])
 

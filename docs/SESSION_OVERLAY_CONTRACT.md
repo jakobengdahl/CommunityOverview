@@ -782,10 +782,13 @@ still true when the merge applies.
   the same node are ordered against each other, whichever instance issues
   them.
 - An edge write, direct or merged, also carries the type of each endpoint it
-  was judged against. Holding the endpoint, a shared store refuses the write if the
-  endpoint now has another type, with `entity_revision_conflict` (`merge_raced`
-  for a merge). So an edge judged before a merge retyped its endpoint cannot
-  land after it.
+  was judged against. Holding the endpoint, a shared store refuses the write if
+  the endpoint now has another type or is gone, with `entity_revision_conflict`
+  and no revision (`merge_raced` for a merge). So an edge judged before a merge
+  retyped its endpoint cannot land after it. Likewise a node write without an
+  expectation never changes a stored node's type: one from an instance that has
+  not yet seen a retype is refused the same way, rather than putting the old
+  type back under edges judged against the new one.
 - If any expectation or check fails, the whole merge fails with
   `merge_raced`, and nothing is written. The caller re-reads the diff and tries
   again.
