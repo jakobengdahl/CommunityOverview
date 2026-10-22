@@ -1063,6 +1063,11 @@ you to look again; if the connection drops mid-merge, merging again is safe and
 never applies the changes twice. **Discard** drops the ticked changes from the
 session after you confirm; the graph is not touched.
 
+Opening a link to a session shows *Loading how this session writes* until
+the session has loaded, and edits wait until then: the session may be staged.
+**Retry** loads it again if that failed. File attachments are not staged: an
+attachment added to a node in a staged session is stored at once.
+
 **Deleting a staged session** drops its unmerged changes with it, and the
 delete confirmation says so. Everyone who was in it — you included — lands in a
 new, empty staged session, so nobody who was staging suddenly edits the graph

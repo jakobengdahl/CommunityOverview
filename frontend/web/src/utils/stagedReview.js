@@ -91,13 +91,32 @@ export function conflictingFields(item) {
 }
 
 /**
+ * Whether a dangling edge is the dependant of a node create the user drops
+ * with keep_main: only then may it be kept, attached to the graph's node that
+ * holds the id (§11.2).
+ */
+export function heldByDroppedCreate(item, items, resolutions) {
+  const creates = new Set(
+    (items || [])
+      .filter((i) => i.kind === 'node' && i.action === 'create')
+      .map(itemKey)
+      .filter((key) => resolutions?.[key]?.choice === 'keep_main')
+  );
+  return (item?.depends_on || []).some((dep) => creates.has(keyOfRef(dep)));
+}
+
+/**
  * The resolutions §11.2 allows for an item, in the order the dialog offers
- * them. A clean item needs none.
+ * them. A clean item needs none. A dangling one can only be dropped, unless
+ * it depends on a create dropped with keep_main (`heldByDropped`).
  * @param {Object} item
+ * @param {boolean} [heldByDropped]
  * @returns {string[]}
  */
-export function allowedChoices(item) {
+export function allowedChoices(item, heldByDropped = false) {
   if (!item || item.status === STATUS_CLEAN) return [];
+  if (item.status === 'dangling')
+    return heldByDropped ? ['take_session', 'keep_main'] : ['keep_main'];
   const choices = ['take_session', 'keep_main'];
   const nodeNotDelete = item.kind === 'node' && item.action !== 'delete';
   if (nodeNotDelete && ['conflict', 'orphaned', 'id_taken'].includes(item.status)) {
@@ -111,10 +130,10 @@ export function allowedChoices(item) {
  * Whether a resolution covers an item: a non-clean item needs one of its
  * allowed choices, and `manual` a final value for every conflicting field.
  */
-export function isResolved(item, resolution) {
+export function isResolved(item, resolution, heldByDropped = false) {
   if (!item || item.status === STATUS_CLEAN) return true;
   const choice = resolution?.choice;
-  if (!allowedChoices(item).includes(choice)) return false;
+  if (!allowedChoices(item, heldByDropped).includes(choice)) return false;
   if (choice !== 'manual') return true;
   const values = resolution.values || {};
   return conflictingFields(item).every((field) => Object.hasOwn(values, field));
@@ -130,7 +149,10 @@ export function isResolved(item, resolution) {
 export function unresolvedKeys(items, selected, resolutions) {
   return (items || [])
     .filter((item) => selected.has(itemKey(item)))
-    .filter((item) => !isResolved(item, resolutions[itemKey(item)]))
+    .filter(
+      (item) =>
+        !isResolved(item, resolutions[itemKey(item)], heldByDroppedCreate(item, items, resolutions))
+    )
     .map(itemKey);
 }
 
@@ -161,7 +183,11 @@ export function buildMergeRequest(items, selected, resolutions) {
   return request;
 }
 
-function itemFingerprint(item) {
+/**
+ * What a user has seen of an entry: everything the review shows that decides
+ * what merging it does. Two reads with the same fingerprint show the same.
+ */
+export function itemFingerprint(item) {
   return JSON.stringify([
     item.action,
     item.status,
@@ -173,25 +199,38 @@ function itemFingerprint(item) {
 }
 
 /**
- * The selected entries whose diff changed between the review the user read
- * and a fresh one: restaged, merged or discarded meanwhile, or judged
- * differently against the main graph. A merge goes only when this is empty,
- * so what lands is what the user reviewed.
- * @param {Array} reviewed
+ * The entries whose fresh read no longer matches the fingerprint taken when
+ * the user ticked them: restaged, merged or discarded meanwhile, or judged
+ * differently against the main graph. A merge or discard is sent only when
+ * this is empty. (The request cannot pin the version itself, so a restage
+ * after this read still lands; see the dialog.)
+ * @param {Map<string, string>} prints - entry key -> fingerprint when ticked
  * @param {Array} fresh
- * @param {Set<string>} selected
  * @returns {string[]} entry keys
  */
-export function reviewDrift(reviewed, fresh, selected) {
+export function reviewDrift(prints, fresh) {
   const freshByKey = new Map((fresh || []).map((item) => [itemKey(item), item]));
   const drift = [];
-  for (const item of reviewed || []) {
-    const key = itemKey(item);
-    if (!selected.has(key)) continue;
+  for (const [key, print] of prints) {
     const now = freshByKey.get(key);
-    if (!now || itemFingerprint(now) !== itemFingerprint(item)) drift.push(key);
+    if (!now || itemFingerprint(now) !== print) drift.push(key);
   }
   return drift;
+}
+
+/**
+ * `items` with the statuses a merge_blocked answer gave: some (a dangling
+ * dependant of a dropped create) exist only within that merge, so the plain
+ * diff shows them clean and would offer no resolution.
+ * @param {Array} items
+ * @param {Map<string, string>} statuses - entry key -> status
+ */
+export function withStatuses(items, statuses) {
+  if (!statuses?.size) return items;
+  return (items || []).map((item) => {
+    const status = statuses.get(itemKey(item));
+    return status ? { ...item, status } : item;
+  });
 }
 
 /**

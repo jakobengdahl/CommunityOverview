@@ -831,7 +831,6 @@
     "replacement_failed": "Could not create a staged session to continue in; this new session edits the graph directly",
     "delete_failed": "The staged session was not deleted",
     "delete_staged_warning": "This is a staged session: any changes in it that have not been merged will be discarded.",
-    "delete_staged_warning_count": "This is a staged session: its {count} unmerged change(s) will be discarded.",
     "review_title": "Staged changes",
     "review_intro": "These changes are held in this session and are not in the graph. Tick the ones to merge into the graph or to discard. Changes that others made to the graph since are shown next to yours.",
     "refresh": "Refresh",
@@ -854,7 +853,7 @@
     "merge_unknown": "The merge may or may not have reached the graph. Merge again: it will not be applied twice.",
     "merge_blocked": "{count} change(s) need a decision before they can be merged",
     "merge_raced": "The graph or the session changed while merging; nothing was written. Review the changes and merge again.",
-    "merge_incomplete": "{count} change(s) these depend on were added to the selection; review and merge again",
+    "merge_incomplete": "These must be merged with it — check and tick them: {names}",
     "review_drift": "{count} selected change(s) changed since you opened the review; check them and try again",
     "needs_decision": "Choose how to resolve {count} change(s) first",
     "manual_invalid": "The value for {field} is not valid",
@@ -904,6 +903,9 @@
       "deleted": "Staged: deleted"
     },
     "edit_notice": "Staged session: this edit is held for review and does not reach the graph until it is merged.",
-    "mode_staged_short": "not in the graph until merged"
+    "mode_staged_short": "not in the graph until merged",
+    "mode_unknown": "Loading how this session writes — edits are paused until it has loaded.",
+    "mode_retry": "Retry",
+    "ticks_dropped": "{count} ticked change(s) changed since you ticked them and were unticked; check them and tick again"
   }
 }

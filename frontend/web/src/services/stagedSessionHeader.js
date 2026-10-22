@@ -60,6 +60,14 @@ const NON_GRAPH_POSTS = [
 
 const SESSION_ROUTES = /^\/(api\/)?sessions(\/.*)?$/;
 
+// Session-aware POSTs that only read the graph.
+const READ_POSTS = [
+  /^\/api\/search$/,
+  /^\/api\/nodes\/[^/]+\/related$/,
+  /^\/api\/similar$/,
+  /^\/api\/similar\/batch$/,
+];
+
 const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 /**
@@ -72,9 +80,34 @@ const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 export function needsSessionHeader(method, path) {
   const verb = (method || 'GET').toUpperCase();
   if (SESSION_ROUTES.test(path)) return false;
-  if (SESSION_AWARE.some(([m, re]) => m === verb && re.test(path))) return true;
+  if (isSessionAware(verb, path)) return true;
   if (!MUTATING.has(verb)) return false;
   return !(verb === 'POST' && NON_GRAPH_POSTS.some((re) => re.test(path)));
+}
+
+/**
+ * Whether a request that needs the session header may change the graph:
+ * everything but plain reads. Chat and tool calls count as writes, since
+ * the assistant's tools can write.
+ * @param {string} method
+ * @param {string} path
+ */
+export function mayWriteGraph(method, path) {
+  const verb = (method || 'GET').toUpperCase();
+  if (verb === 'GET') return false;
+  if (verb === 'POST' && READ_POSTS.some((re) => re.test(path))) return false;
+  return needsSessionHeader(verb, path);
+}
+
+/**
+ * Whether the backend stages or composes on this route: the header is safe
+ * on it in a direct session too, where it changes nothing.
+ * @param {string} method
+ * @param {string} path
+ */
+export function isSessionAware(method, path) {
+  const verb = (method || 'GET').toUpperCase();
+  return SESSION_AWARE.some(([m, re]) => m === verb && re.test(path));
 }
 
 /**

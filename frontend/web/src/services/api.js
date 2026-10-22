@@ -4,7 +4,13 @@
  * Calls the backend endpoints exposed by app_host
  */
 
-import { SESSION_ID_HEADER, needsSessionHeader, pathBelowRoot } from './stagedSessionHeader';
+import {
+  SESSION_ID_HEADER,
+  isSessionAware,
+  mayWriteGraph,
+  needsSessionHeader,
+  pathBelowRoot,
+} from './stagedSessionHeader';
 
 export function getPathRoot() {
   const pathname = window.location.pathname;
@@ -83,6 +89,33 @@ export function getEventOrigin() {
 // (§5.1), and naming one the server does not hold would be refused.
 let _activeSessionId = null;
 const _stagedSessions = new Set();
+// Sessions whose write mode has not been read from the server yet (a deep
+// link before its session loads, or whose load failed). A graph write made
+// from one is refused here rather than sent without the header: if the
+// session is staged, that write would land in the graph.
+const _modeUnknown = new Set();
+// Where the backend can stage, a session the server holds may be switched to
+// staged by another participant at any moment. Naming every such session on
+// the routes that stage or compose lets the server decide each write by the
+// mode it holds then, instead of this browser's possibly stale knowledge; in a
+// direct session the header changes nothing there.
+let _stagingAvailable = false;
+const _serverSessions = new Set();
+
+/** @param {boolean} available - the backend reports staged_sessions */
+export function setStagingAvailable(available) {
+  _stagingAvailable = !!available;
+}
+
+/**
+ * Record that the server holds a session (its payload was read, it was
+ * created, or its stream connected), so naming it cannot be refused as
+ * session_not_found.
+ * @param {string} sessionId
+ */
+export function setSessionOnServer(sessionId) {
+  if (sessionId) _serverSessions.add(sessionId);
+}
 
 /**
  * Set the session graph requests are made from.
@@ -100,8 +133,32 @@ export function setActiveSessionForRequests(sessionId) {
  */
 export function setSessionStaged(sessionId, staged) {
   if (!sessionId) return;
-  if (staged) _stagedSessions.add(sessionId);
-  else _stagedSessions.delete(sessionId);
+  _modeUnknown.delete(sessionId);
+  if (staged) {
+    _stagedSessions.add(sessionId);
+  } else {
+    _stagedSessions.delete(sessionId);
+    _serverSessions.delete(sessionId);
+  }
+}
+
+/**
+ * Hold graph writes from a session until the server has said how it writes.
+ * setSessionStaged (with either answer) releases them.
+ * @param {string} sessionId
+ */
+export function setSessionModeUnknown(sessionId) {
+  if (sessionId && !_stagedSessions.has(sessionId)) _modeUnknown.add(sessionId);
+}
+
+/**
+ * The server says the session is direct (or holds no such session, which a
+ * browser-only session is): release writes held by setSessionModeUnknown.
+ * Never turns a staged session direct.
+ * @param {string} sessionId
+ */
+export function setSessionModeDirect(sessionId) {
+  _modeUnknown.delete(sessionId);
 }
 
 /** @returns {string|null} the active session's id when it is staged */
@@ -110,10 +167,20 @@ export function getStagedSessionBinding() {
 }
 
 function sessionHeaders(url, method) {
+  const path = pathBelowRoot(url, getPathRoot());
   const staged = getStagedSessionBinding();
-  if (!staged) return {};
-  if (!needsSessionHeader(method, pathBelowRoot(url, getPathRoot()))) return {};
-  return { [SESSION_ID_HEADER]: staged };
+  if (staged) {
+    return needsSessionHeader(method, path) ? { [SESSION_ID_HEADER]: staged } : {};
+  }
+  if (
+    _stagingAvailable &&
+    _activeSessionId &&
+    _serverSessions.has(_activeSessionId) &&
+    isSessionAware(method, path)
+  ) {
+    return { [SESSION_ID_HEADER]: _activeSessionId };
+  }
+  return {};
 }
 
 // ============================================================
@@ -145,6 +212,17 @@ async function responseError(response) {
  * Generic fetch helper with error handling
  */
 async function apiFetch(url, options = {}) {
+  if (
+    _activeSessionId &&
+    _modeUnknown.has(_activeSessionId) &&
+    mayWriteGraph(options.method, pathBelowRoot(url, getPathRoot()))
+  ) {
+    const error = new Error(
+      "This session's write mode is not known yet, so nothing is written until it has loaded."
+    );
+    error.code = 'session_mode_unknown';
+    throw error;
+  }
   const response = await fetch(url, {
     ...options,
     headers: {

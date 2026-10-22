@@ -4,7 +4,9 @@ import {
   buildMergeRequest,
   dependants,
   dependencyClosure,
+  heldByDroppedCreate,
   isResolved,
+  itemFingerprint,
   itemLabel,
   mergeOutcomeUnknown,
   nextMergeAttempt,
@@ -12,6 +14,7 @@ import {
   reviewDrift,
   stagedStatesFromDiff,
   unresolvedKeys,
+  withStatuses,
 } from './stagedReview';
 
 const nodeCreate = {
@@ -88,6 +91,31 @@ describe('resolutions', () => {
     expect(allowedChoices(idTaken)).toEqual(['take_session', 'keep_main', 'as_new']);
   });
 
+  it('keeps a dangling edge only as the dependant of a create dropped with keep_main', () => {
+    const dangling = { ...edgeCreate, status: 'dangling' };
+    expect(allowedChoices(dangling)).toEqual(['keep_main']);
+    expect(allowedChoices(dangling, true)).toEqual(['take_session', 'keep_main']);
+    expect(heldByDroppedCreate(dangling, items, { 'node:n1': { choice: 'keep_main' } })).toBe(true);
+    expect(heldByDroppedCreate(dangling, items, {})).toBe(false);
+    expect(
+      unresolvedKeys([nodeCreate, dangling], new Set(['edge:e1']), {
+        'node:n1': { choice: 'keep_main' },
+        'edge:e1': { choice: 'take_session' },
+      })
+    ).toEqual([]);
+    expect(
+      unresolvedKeys([nodeCreate, dangling], new Set(['edge:e1']), {
+        'edge:e1': { choice: 'take_session' },
+      })
+    ).toEqual(['edge:e1']);
+  });
+
+  it('judges with the statuses a merge_blocked answer gave', () => {
+    const judged = withStatuses(items, new Map([['edge:e1', 'dangling']]));
+    expect(judged.find((i) => i.entity_id === 'e1').status).toBe('dangling');
+    expect(withStatuses(items, new Map())).toBe(items);
+  });
+
   it('a manual resolution covers an entry only with a value for every conflicting field', () => {
     expect(isResolved(conflictUpdate, { choice: 'manual', values: {} })).toBe(false);
     expect(isResolved(conflictUpdate, { choice: 'manual', values: { description: '' } })).toBe(
@@ -134,20 +162,28 @@ describe('the merge request', () => {
 });
 
 describe('review drift', () => {
-  it('flags a selected entry restaged since the review was read', () => {
+  const ticked = (...list) =>
+    new Map(list.map((item) => [`${item.kind}:${item.entity_id}`, itemFingerprint(item)]));
+
+  it('flags an entry restaged since it was ticked', () => {
     const fresh = [nodeCreate, edgeCreate, { ...conflictUpdate, session_seq: 9 }];
-    expect(reviewDrift(items, fresh, new Set(['node:n2', 'node:n1']))).toEqual(['node:n2']);
+    expect(reviewDrift(ticked(conflictUpdate, nodeCreate), fresh)).toEqual(['node:n2']);
   });
 
-  it('flags a selected entry the main graph now judges differently', () => {
+  it('flags an entry the main graph now judges differently', () => {
     const fresh = [{ ...nodeCreate, status: 'id_taken' }, edgeCreate, conflictUpdate];
-    expect(reviewDrift(items, fresh, new Set(['node:n1']))).toEqual(['node:n1']);
+    expect(reviewDrift(ticked(nodeCreate), fresh)).toEqual(['node:n1']);
   });
 
-  it('flags a selected entry that is gone, and ignores changes outside the selection', () => {
-    expect(reviewDrift(items, [conflictUpdate], new Set(['node:n1']))).toEqual(['node:n1']);
+  it('flags an entry that is gone, and ignores changes to entries not ticked', () => {
+    expect(reviewDrift(ticked(nodeCreate), [conflictUpdate])).toEqual(['node:n1']);
     const fresh = [nodeCreate, edgeCreate, { ...conflictUpdate, session_seq: 9 }];
-    expect(reviewDrift(items, fresh, new Set(['node:n1']))).toEqual([]);
+    expect(reviewDrift(ticked(nodeCreate), fresh)).toEqual([]);
+  });
+
+  it('measures from when the entry was ticked, not from the latest live read', () => {
+    const restaged = { ...nodeCreate, session_seq: 7 };
+    expect(reviewDrift(ticked(nodeCreate), [restaged])).toEqual(['node:n1']);
   });
 });
 

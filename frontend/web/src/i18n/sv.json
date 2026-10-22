@@ -831,7 +831,6 @@
     "replacement_failed": "Kunde inte skapa en granskad session att fortsätta i; den nya sessionen redigerar grafen direkt",
     "delete_failed": "Den granskade sessionen raderades inte",
     "delete_staged_warning": "Det här är en granskad session: ändringar i den som inte slagits ihop kastas.",
-    "delete_staged_warning_count": "Det här är en granskad session: dess {count} ej ihopslagna ändring(ar) kastas.",
     "review_title": "Granskade ändringar",
     "review_intro": "De här ändringarna hålls i sessionen och finns inte i grafen. Markera de som ska slås ihop med grafen eller kastas. Ändringar som andra gjort i grafen sedan dess visas bredvid dina.",
     "refresh": "Uppdatera",
@@ -854,7 +853,7 @@
     "merge_unknown": "Det är oklart om sammanslagningen nådde grafen. Slå ihop igen: den görs inte två gånger.",
     "merge_blocked": "{count} ändring(ar) behöver ett beslut innan de kan slås ihop",
     "merge_raced": "Grafen eller sessionen ändrades under sammanslagningen; inget skrevs. Granska och slå ihop igen.",
-    "merge_incomplete": "{count} ändring(ar) som de beror på lades till i urvalet; granska och slå ihop igen",
+    "merge_incomplete": "De här måste slås ihop samtidigt — kontrollera och markera dem: {names}",
     "review_drift": "{count} markerade ändring(ar) har ändrats sedan granskningen öppnades; kontrollera och försök igen",
     "needs_decision": "Välj först hur {count} ändring(ar) ska lösas",
     "manual_invalid": "Värdet för {field} är inte giltigt",
@@ -904,6 +903,9 @@
       "deleted": "Granskad: raderad"
     },
     "edit_notice": "Granskad session: ändringen hålls för granskning och når inte grafen förrän den slås ihop.",
-    "mode_staged_short": "inte i grafen förrän ihopslaget"
+    "mode_staged_short": "inte i grafen förrän ihopslaget",
+    "mode_unknown": "Läser in hur sessionen skriver — ändringar väntar tills den har lästs in.",
+    "mode_retry": "Försök igen",
+    "ticks_dropped": "{count} markerade ändring(ar) har ändrats sedan du markerade dem och avmarkerades; kontrollera och markera igen"
   }
 }

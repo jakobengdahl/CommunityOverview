@@ -1,6 +1,9 @@
 import { test, expect } from '@playwright/test';
 import { addNodeViaSearch, canvasNode, seedNode, uniqueToken } from './helpers';
 
+// Each test walks a whole staged-session flow across several round trips.
+test.describe.configure({ timeout: 90000 });
+
 /**
  * Staged sessions through the real UI (docs/SESSION_OVERLAY_CONTRACT.md §17):
  * create a staged session, edit a node in it, see the edit held out of the
@@ -19,8 +22,12 @@ async function readMainNode(request, id) {
 
 async function editDescription(page, name, description) {
   const node = canvasNode(page, name);
-  await node.hover();
-  await node.locator('.graph-edit-button').click();
+  // The edit button shows only while hovered, and a re-render of the node can
+  // take it away between the hover and the click: hover and click together.
+  await expect(async () => {
+    await node.hover();
+    await node.locator('.graph-edit-button').click({ timeout: 2000 });
+  }).toPass({ timeout: 20000 });
   const dialog = page.getByRole('dialog');
   await expect(dialog.getByTestId('staged-edit-notice')).toBeVisible();
   await dialog.locator('textarea').first().fill(description);
@@ -143,7 +150,7 @@ test('staged session: live for every participant, replaced staged when deleted',
   await b.locator('.floating-header-hamburger').click();
   await b.locator('.session-drawer-session.current .session-context-menu-trigger').click();
   await b.locator('.session-context-menu-item.danger').click();
-  await expect(b.getByText(/its 1 unmerged change\(s\) will be discarded/)).toBeVisible();
+  await expect(b.getByText(/that have not been merged will be discarded/)).toBeVisible();
   await b.getByRole('button', { name: 'Delete' }).click();
 
   // Both land in new staged sessions, never in a direct one (§13).

@@ -3,6 +3,9 @@ import { renderHook, act, waitFor } from '@testing-library/react';
 
 vi.mock('../services/api', () => ({
   setSessionStaged: vi.fn(),
+  setSessionModeUnknown: vi.fn(),
+  setSessionModeDirect: vi.fn(),
+  setSessionOnServer: vi.fn(),
   getStagedChanges: vi.fn(),
 }));
 
@@ -106,6 +109,25 @@ describe('useStagedSession', () => {
     vi.useRealTimers();
     await waitFor(() => expect(result.current.items).toEqual([ITEM]));
     expect(api.getStagedChanges).toHaveBeenCalledWith('1111-2222');
+  });
+
+  it('holds a linked session as unknown until the server answers, either way', () => {
+    const { result } = renderHook(() => useStagedSession('1111-2222'));
+    act(() => result.current.markModeUnknown('1111-2222'));
+    expect(api.setSessionModeUnknown).toHaveBeenCalledWith('1111-2222');
+    expect(result.current.writeMode).toBe('unknown');
+    act(() => result.current.adoptSessionPayload('1111-2222', { write_mode: 'direct' }));
+    expect(api.setSessionModeDirect).toHaveBeenCalledWith('1111-2222');
+    expect(api.setSessionOnServer).toHaveBeenCalledWith('1111-2222');
+    expect(result.current.writeMode).toBe('direct');
+  });
+
+  it('settles a session the server does not hold as direct (browser-only)', () => {
+    const { result } = renderHook(() => useStagedSession('1111-2222'));
+    act(() => result.current.markModeUnknown('1111-2222'));
+    act(() => result.current.adoptSessionPayload('1111-2222', null));
+    expect(result.current.writeMode).toBe('direct');
+    expect(api.setSessionOnServer).not.toHaveBeenCalled();
   });
 
   it('forgets a deleted session', () => {

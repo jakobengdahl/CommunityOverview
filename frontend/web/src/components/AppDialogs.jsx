@@ -208,15 +208,7 @@ function AppDialogs({
                   count: deleteSessionDialog.connectedOthers,
                 })
               : t('sessions.delete_session_message')) +
-            (deleteSessionDialog.staged
-              ? `\n\n${
-                  typeof deleteSessionDialog.pending === 'number'
-                    ? t('staged.delete_staged_warning_count', {
-                        count: deleteSessionDialog.pending,
-                      })
-                    : t('staged.delete_staged_warning')
-                }`
-              : '')
+            (deleteSessionDialog.staged ? `\n\n${t('staged.delete_staged_warning')}` : '')
           }
           confirmText={t('sessions.delete_confirm')}
           cancelText={t('common.cancel')}

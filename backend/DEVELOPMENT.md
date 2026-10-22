@@ -933,7 +933,11 @@ session staged only from what the server says (a session payload or a
 `write_mode_changed` op), and from then on sends the session header on every
 route above and on every other graph-changing request
 (`frontend/web/src/services/stagedSessionHeader.js`), so a write the backend
-cannot stage is refused rather than applied. The pending count, the canvas
+cannot stage is refused rather than applied. Where `/ui/capabilities` reports
+`staged_sessions`, it also names every session the server holds on the routes
+that stage or compose, so a switch to staged by another participant takes
+effect on its next write; and it holds graph writes from a linked session
+until that session's payload has said how it writes. The pending count, the canvas
 markers and the review all come from `GET /api/sessions/{id}/staged`; the
 stream's staged-change ops are only a cue to re-read it and the composed
 entities they name. A merge names the reviewed entries explicitly (never

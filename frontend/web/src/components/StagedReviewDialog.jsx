@@ -4,6 +4,8 @@ import { useI18n } from '../i18n';
 import ConfirmDialog from './ConfirmDialog';
 import {
   allowedChoices,
+  heldByDroppedCreate,
+  withStatuses,
   buildMergeRequest,
   conflictingFields,
   dependants,
@@ -15,6 +17,7 @@ import {
   mergeOutcomeUnknown,
   nextMergeAttempt,
   parseManualValue,
+  itemFingerprint,
   reviewDrift,
   unresolvedKeys,
 } from '../utils/stagedReview';
@@ -29,10 +32,12 @@ function newMergeId() {
  * (docs/SESSION_OVERLAY_CONTRACT.md §10–§12, §17).
  *
  * `items` is the diff as the server last answered it for this session; it
- * follows live changes. A merge or discard always names the entries the user
- * ticked — never `all` — and goes only after a fresh read of the diff shows
- * those entries exactly as they were on screen, so nothing is merged or
- * dropped that the user did not see.
+ * follows live changes. A tick remembers the entry as it was on screen; one
+ * that changes afterwards drops out. A merge or discard always names the
+ * ticked entries — never `all` — and is sent only after a fresh read shows
+ * each of them as it was ticked. The merge request cannot carry that version,
+ * so a restage landing between that read and the merge itself still merges
+ * (an open contract question); everything before it is caught here.
  */
 function StagedReviewDialog({
   sessionId,
@@ -45,11 +50,17 @@ function StagedReviewDialog({
   canvasName,
 }) {
   const { t } = useI18n();
-  const [selected, setSelected] = useState(() => new Set());
+  // Ticked entries, each with the fingerprint of the entry as it was on
+  // screen when ticked: what the user reviewed is that, not whatever the
+  // live diff later turns it into.
+  const [selected, setSelected] = useState(() => new Map());
   const [resolutions, setResolutions] = useState({});
   const [manualText, setManualText] = useState({});
-  const [expanded, setExpanded] = useState(() => new Set());
+  const [collapsed, setCollapsed] = useState(() => new Set());
   const [blockedKeys, setBlockedKeys] = useState(() => new Set());
+  // Statuses the last merge_blocked answer gave, which can differ from the
+  // plain diff's (a status that exists only within that merge).
+  const [blockedStatus, setBlockedStatus] = useState(() => new Map());
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState(null);
   const [confirmDiscard, setConfirmDiscard] = useState(null);
@@ -68,12 +79,22 @@ function StagedReviewDialog({
   }, [sessionId, onClose]);
 
   const byKey = useMemo(() => new Map(items.map((item) => [itemKey(item), item])), [items]);
+  // What resolutions are judged against; fingerprints stay on `items`.
+  const judged = useMemo(() => withStatuses(items, blockedStatus), [items, blockedStatus]);
 
-  // Entries merged, discarded or restaged elsewhere leave the selection.
+  // A tick holds only while the entry is still what was ticked: one merged,
+  // discarded or restaged since (by anyone) drops out, and must be looked at
+  // and ticked again.
   const liveSelected = useMemo(
-    () => new Set([...selected].filter((key) => byKey.has(key))),
+    () =>
+      new Set(
+        [...selected]
+          .filter(([key, print]) => byKey.has(key) && itemFingerprint(byKey.get(key)) === print)
+          .map(([key]) => key)
+      ),
     [selected, byKey]
   );
+  const staleTicks = selected.size - liveSelected.size;
 
   const labelOf = useCallback((item) => itemLabel(item, canvasName), [canvasName]);
   const labelOfRef = useCallback(
@@ -84,20 +105,20 @@ function StagedReviewDialog({
     [byKey, labelOf]
   );
 
+  const ticked = (keys) =>
+    new Map([...keys].filter((k) => byKey.has(k)).map((k) => [k, itemFingerprint(byKey.get(k))]));
+
   const toggle = (key) => {
-    setSelected((prev) => {
-      const next = new Set([...prev].filter((k) => byKey.has(k)));
-      if (next.has(key)) {
-        next.delete(key);
-        dependants(items, key).forEach((k) => next.delete(k));
-        return next;
-      }
-      return dependencyClosure(items, [...next, key]);
-    });
+    if (liveSelected.has(key)) {
+      const drop = new Set([key, ...dependants(items, key)]);
+      setSelected(ticked([...liveSelected].filter((k) => !drop.has(k))));
+      return;
+    }
+    setSelected(ticked(dependencyClosure(items, [...liveSelected, key])));
   };
 
-  const selectAll = () => setSelected(new Set(items.map(itemKey)));
-  const selectNone = () => setSelected(new Set());
+  const selectAll = () => setSelected(ticked(items.map(itemKey)));
+  const selectNone = () => setSelected(new Map());
 
   const setChoice = (item, choice) => {
     const key = itemKey(item);
@@ -135,27 +156,33 @@ function StagedReviewDialog({
     return out;
   };
 
-  // Read the diff again and check the chosen entries are what the user saw.
-  const freshUnchanged = async (keys) => {
+  // Read the diff again and check every chosen entry is still exactly what
+  // was on screen when it was ticked (`prints`: key -> fingerprint).
+  const freshUnchanged = async (prints) => {
     const fresh = await onRefresh();
     if (!fresh) {
       setMessage({ kind: 'error', text: t('staged.refresh_failed') });
       return null;
     }
-    const drift = reviewDrift(items, fresh, keys);
+    const drift = reviewDrift(prints, fresh);
     if (drift.length) {
+      // A merge whose outcome was unknown is settled now: it landed (its
+      // entries are gone) or the entries changed. Either way its id must
+      // not be replayed for whatever is merged next.
+      attemptRef.current = null;
       setMessage({ kind: 'warning', text: t('staged.review_drift', { count: drift.length }) });
       return null;
     }
     return fresh;
   };
 
-  const merge = async ({ retried = false } = {}) => {
+  const merge = async ({ retried = false, prints: carried = null } = {}) => {
     const keys = liveSelected;
     if (!keys.size) return;
+    const prints = carried || new Map([...keys].map((k) => [k, selected.get(k)]));
     const resolved = resolvedForRequest();
     if (!resolved) return;
-    const unresolved = unresolvedKeys(items, keys, resolved);
+    const unresolved = unresolvedKeys(judged, keys, resolved);
     if (unresolved.length) {
       setBlockedKeys(new Set(unresolved));
       setMessage({
@@ -167,9 +194,9 @@ function StagedReviewDialog({
     setBusy(true);
     setMessage(null);
     try {
-      const fresh = await freshUnchanged(keys);
+      const fresh = await freshUnchanged(prints);
       if (!fresh) return;
-      const request = buildMergeRequest(fresh, keys, resolved);
+      const request = buildMergeRequest(withStatuses(fresh, blockedStatus), keys, resolved);
       const attempt = nextMergeAttempt(attemptRef.current, request, newMergeId);
       attemptRef.current = attempt;
       let result;
@@ -183,14 +210,15 @@ function StagedReviewDialog({
           return;
         }
         attemptRef.current = null;
-        await handleMergeRefusal(error, retried);
+        await handleMergeRefusal(error, retried, prints);
         return;
       }
       attemptRef.current = null;
-      setSelected(new Set());
+      setSelected(new Map());
       setResolutions({});
       setManualText({});
       setBlockedKeys(new Set());
+      setBlockedStatus(new Map());
       const count = (result?.merged || []).length;
       setMessage({
         kind: 'success',
@@ -202,12 +230,13 @@ function StagedReviewDialog({
     }
   };
 
-  const handleMergeRefusal = async (error, retried) => {
+  const handleMergeRefusal = async (error, retried, prints) => {
     const data = error.data || {};
     switch (error.code) {
       case 'merge_blocked': {
         const blocking = (data.items || []).map(itemKey);
         setBlockedKeys(new Set(blocking));
+        setBlockedStatus(new Map((data.items || []).map((item) => [itemKey(item), item.status])));
         await onRefresh();
         setMessage({
           kind: 'warning',
@@ -220,20 +249,23 @@ function StagedReviewDialog({
         // still read as reviewed; otherwise the user looks again.
         if (!retried) {
           setBusy(false);
-          await merge({ retried: true });
+          await merge({ retried: true, prints });
           return;
         }
         await onRefresh();
         setMessage({ kind: 'warning', text: t('staged.merge_raced') });
         return;
       case 'merge_incomplete': {
-        const missing = (data.missing || [])
-          .map((ref) => entryKey(ref.kind, ref.entity_id))
-          .filter((key) => byKey.has(key));
-        setSelected((prev) => dependencyClosure(items, [...prev, ...missing]));
+        // Name what is missing; the user ticks it after looking at it.
+        const missing = data.missing || [];
+        setBlockedKeys(new Set(missing.map((ref) => entryKey(ref.kind, ref.entity_id))));
+        await onRefresh();
         setMessage({
           kind: 'warning',
-          text: t('staged.merge_incomplete', { count: (data.missing || []).length }),
+          text: t('staged.merge_incomplete', {
+            count: missing.length,
+            names: missing.map(labelOfRef).join(', '),
+          }),
         });
         return;
       }
@@ -242,24 +274,28 @@ function StagedReviewDialog({
     }
   };
 
-  const requestDiscard = (keys) => {
-    if (keys.size) setConfirmDiscard(keys);
+  // The entries asked to be discarded are fixed, with their fingerprints, when
+  // the user asks; the confirm does not pick up anything changed since.
+  const requestDiscard = () => {
+    if (liveSelected.size) {
+      setConfirmDiscard(new Map([...liveSelected].map((k) => [k, selected.get(k)])));
+    }
   };
 
   const discard = async () => {
-    const keys = confirmDiscard;
+    const prints = confirmDiscard;
     setConfirmDiscard(null);
-    if (!keys?.size) return;
+    if (!prints?.size) return;
     setBusy(true);
     setMessage(null);
     try {
-      const fresh = await freshUnchanged(keys);
+      const fresh = await freshUnchanged(prints);
       if (!fresh) return;
       const entries = fresh
-        .filter((item) => keys.has(itemKey(item)))
+        .filter((item) => prints.has(itemKey(item)))
         .map((item) => ({ kind: item.kind, entity_id: item.entity_id }));
       const result = await api.discardStagedChanges(sessionId, entries);
-      setSelected(new Set());
+      setSelected(new Map());
       setMessage({
         kind: 'success',
         text: t('staged.discarded', { count: (result?.removed_entries || []).length }),
@@ -273,7 +309,7 @@ function StagedReviewDialog({
   };
 
   const toggleExpanded = (key) =>
-    setExpanded((prev) => {
+    setCollapsed((prev) => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key);
       else next.add(key);
@@ -313,7 +349,7 @@ function StagedReviewDialog({
   };
 
   const renderResolution = (item) => {
-    const choices = allowedChoices(item);
+    const choices = allowedChoices(item, heldByDroppedCreate(item, judged, resolutions));
     if (!choices.length) return null;
     const key = itemKey(item);
     const current = resolutions[key]?.choice || '';
@@ -359,7 +395,8 @@ function StagedReviewDialog({
 
   const renderItem = (item) => {
     const key = itemKey(item);
-    const isOpen = expanded.has(key) || item.status !== 'clean';
+    // Open unless the user folded it: a change is reviewed by its values.
+    const isOpen = !collapsed.has(key);
     return (
       <li
         key={key}
@@ -445,6 +482,11 @@ function StagedReviewDialog({
           {diffError && (
             <p className="staged-review-message kind-error">{t('staged.diff_unavailable')}</p>
           )}
+          {staleTicks > 0 && (
+            <p className="staged-review-message kind-warning" role="status">
+              {t('staged.ticks_dropped', { count: staleTicks })}
+            </p>
+          )}
           {message && (
             <p className={`staged-review-message kind-${message.kind}`} role="status">
               {message.text}
@@ -462,14 +504,14 @@ function StagedReviewDialog({
                   {t('staged.select_none')}
                 </button>
               </div>
-              <ul className="staged-review-list">{items.map(renderItem)}</ul>
+              <ul className="staged-review-list">{judged.map(renderItem)}</ul>
             </>
           )}
           <div className="staged-review-actions">
             <button
               type="button"
               className="confirm-dialog-button danger"
-              onClick={() => requestDiscard(liveSelected)}
+              onClick={requestDiscard}
               disabled={busy || liveSelected.size === 0}
             >
               {t('staged.discard_selected', { count: liveSelected.size })}

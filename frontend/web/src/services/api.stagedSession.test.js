@@ -33,6 +33,8 @@ beforeEach(() => {
 
 afterEach(() => {
   api.setSessionStaged('1111-2222-3333-4444', false);
+  api.setSessionStaged('5555-6666-7777-8888', false);
+  api.setStagingAvailable(false);
   api.setActiveSessionForRequests(null);
   vi.unstubAllGlobals();
 });
@@ -108,6 +110,59 @@ describe('staged-session binding in api.js', () => {
     await api.deleteServerSession('1111-2222', 'c1', { discardStaged: true });
     expect(calls[0].url).not.toContain('discard_staged');
     expect(calls[1].url).toContain('discard_staged=true');
+  });
+});
+
+describe('a session whose write mode is not known yet', () => {
+  it('writes nothing until the server has said how it writes', async () => {
+    const calls = mockFetch();
+    api.setActiveSessionForRequests('5555-6666-7777-8888');
+    api.setSessionModeUnknown('5555-6666-7777-8888');
+    const error = await api.updateNode('n1', { name: 'x' }).catch((e) => e);
+    expect(error.code).toBe('session_mode_unknown');
+    expect(calls).toHaveLength(0);
+    // Reads still go: they change nothing.
+    await api.searchGraph('q');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('releases writes once the server says direct, and stages them once it says staged', async () => {
+    const calls = mockFetch();
+    api.setActiveSessionForRequests('5555-6666-7777-8888');
+    api.setSessionModeUnknown('5555-6666-7777-8888');
+    api.setSessionModeDirect('5555-6666-7777-8888');
+    await api.updateNode('n1', { name: 'x' });
+    expect(headerOf(calls[0])).toBeUndefined();
+    api.setSessionModeUnknown('1111-2222-3333-4444');
+    api.setActiveSessionForRequests('1111-2222-3333-4444');
+    api.setSessionStaged('1111-2222-3333-4444', true);
+    await api.updateNode('n1', { name: 'y' });
+    expect(headerOf(calls[1])).toBe('1111-2222-3333-4444');
+  });
+});
+
+describe('a direct session the server holds, where staging exists', () => {
+  it('names the session on staging routes, so a switch by someone else is honoured at once', async () => {
+    const calls = mockFetch();
+    api.setStagingAvailable(true);
+    api.setActiveSessionForRequests('5555-6666-7777-8888');
+    api.setSessionOnServer('5555-6666-7777-8888');
+    await api.updateNode('n1', { name: 'x' });
+    await api.saveView('v');
+    expect(headerOf(calls[0])).toBe('5555-6666-7777-8888');
+    // A route that neither stages nor composes keeps working in a direct session.
+    expect(headerOf(calls[1])).toBeUndefined();
+  });
+
+  it('names no session the server does not hold, nor any where staging is off', async () => {
+    const calls = mockFetch();
+    api.setActiveSessionForRequests('5555-6666-7777-8888');
+    api.setSessionOnServer('5555-6666-7777-8888');
+    await api.updateNode('n1', { name: 'x' });
+    api.setStagingAvailable(true);
+    api.setActiveSessionForRequests('9999-0000-1111-2222');
+    await api.updateNode('n1', { name: 'y' });
+    expect(calls.map(headerOf)).toEqual([undefined, undefined]);
   });
 });
 

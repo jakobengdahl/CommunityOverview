@@ -41,17 +41,49 @@ export function useStagedSession(sessionId) {
   const timerRef = useRef(null);
   const requestSeqRef = useRef(0);
 
-  const writeMode = modes[sessionId] === 'staged' ? 'staged' : 'direct';
+  // 'unknown' until the server has said how a session that may exist there
+  // writes (a deep link before its load lands, or after it failed); graph
+  // writes from it are held meanwhile (api.setSessionModeUnknown).
+  const writeMode =
+    modes[sessionId] === 'staged'
+      ? 'staged'
+      : modes[sessionId] === 'unknown'
+        ? 'unknown'
+        : 'direct';
 
   const adoptWriteMode = useCallback((id, mode) => {
-    if (!id || mode !== 'staged') return;
-    api.setSessionStaged(id, true);
-    setModes((prev) => (prev[id] === 'staged' ? prev : { ...prev, [id]: 'staged' }));
+    if (!id) return;
+    if (mode === 'staged') {
+      api.setSessionStaged(id, true);
+      setModes((prev) => (prev[id] === 'staged' ? prev : { ...prev, [id]: 'staged' }));
+      return;
+    }
+    if (mode !== 'direct') return;
+    // Staged is final: a direct answer only settles a session not known staged.
+    if (modesRef.current[id] === 'staged') return;
+    api.setSessionModeDirect(id);
+    setModes((prev) => {
+      if (!(id in prev) || prev[id] === 'staged') return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
   }, []);
 
-  // A session payload (GET/POST/PATCH /api/sessions...) names its mode.
+  const markModeUnknown = useCallback((id) => {
+    if (!id || modesRef.current[id] === 'staged') return;
+    api.setSessionModeUnknown(id);
+    setModes((prev) => ({ ...prev, [id]: 'unknown' }));
+  }, []);
+
+  // A session payload (GET/POST/PATCH /api/sessions...) names its mode; null
+  // means the server holds no such session, which is then browser-only and
+  // direct (§5.1).
   const adoptSessionPayload = useCallback(
-    (id, payload) => adoptWriteMode(id, payload?.write_mode),
+    (id, payload) => {
+      if (payload) api.setSessionOnServer(id);
+      adoptWriteMode(id, payload ? payload.write_mode : 'direct');
+    },
     [adoptWriteMode]
   );
 
@@ -138,6 +170,7 @@ export function useStagedSession(sessionId) {
     stagedStates,
     adoptWriteMode,
     adoptSessionPayload,
+    markModeUnknown,
     forgetSession,
     refreshDiff,
     handleSessionOp,

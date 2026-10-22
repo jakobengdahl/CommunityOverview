@@ -70,7 +70,8 @@ export function useSharedSession({
   // Told the session payload the server answered, before its content is
   // applied, so the session's write mode (and with it the staged-session
   // header, docs/SESSION_OVERLAY_CONTRACT.md §16.1) is known before anything
-  // is done in it. Optional.
+  // is done in it; told null when the server holds no such session (it then
+  // exists only in this browser, so it is direct, §5.1). Optional.
   onSessionPayload,
 }) {
   // Load a session's canvas content from the server (resolved node refs +
@@ -142,6 +143,7 @@ export function useSharedSession({
       } catch (error) {
         // Session does not exist server-side yet — new / not-yet-saved share URL.
         if (error?.status === 404) {
+          onSessionPayload?.(targetId, null);
           clearVisualization();
           // Switching into a brand-new / empty session is still a session switch:
           // reset the carried-over UI state just as the loaded-content path does.

@@ -18,8 +18,25 @@ function WriteModeBar({
   diffUnavailable = false,
   onReview,
   onSwitchToStaged,
+  onRetryMode,
 }) {
   const { t } = useI18n();
+  if (writeMode === 'unknown' && stagedAvailable) {
+    // A linked session whose mode has not loaded: it may be staged, so edits
+    // are held until it has.
+    return (
+      <div
+        className="write-mode-bar write-mode-bar--unknown"
+        role="status"
+        data-testid="write-mode-unknown"
+      >
+        <span className="write-mode-bar-text">{t('staged.mode_unknown')}</span>
+        <button type="button" className="write-mode-bar-link" onClick={onRetryMode}>
+          {t('staged.mode_retry')}
+        </button>
+      </div>
+    );
+  }
   if (writeMode === 'staged') {
     return (
       <div
@@ -41,7 +58,7 @@ function WriteModeBar({
       </div>
     );
   }
-  if (!stagedAvailable) return null;
+  if (!stagedAvailable || writeMode !== 'direct') return null;
   return (
     <div
       className="write-mode-bar write-mode-bar--direct"
