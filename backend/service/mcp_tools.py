@@ -2276,7 +2276,16 @@ def register_mcp_tools(
             wanted = list(dict.fromkeys(node_ids))
             refs = set(session.state.get("node_refs", []))
             positions = session.state.get("positions", {})
-            on_canvas = [n for n in wanted if n in refs and n in positions]
+            # A browser op can store a non-finite position (json accepts NaN
+            # and Infinity); such a node has no frameable position either.
+            on_canvas = [
+                n
+                for n in wanted
+                if n in refs
+                and n in positions
+                and _finite(positions[n].get("x"))
+                and _finite(positions[n].get("y"))
+            ]
             # Read in the session, so a staged session resolves its composed
             # view; an id the caller may not read is reported like an absent
             # one rather than confirming that it exists.

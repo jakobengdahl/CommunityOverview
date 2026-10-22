@@ -253,7 +253,7 @@ class TestSummonByNodeIds:
 
         assert (result["bounds"]["x"], result["bounds"]["y"]) == (140.0, 260.0)
 
-    @pytest.mark.parametrize("members", [5, "a", None, {"a": 1}])
+    @pytest.mark.parametrize("members", [5, "a", None, {"a": 1}, [["a"], {"b": 1}]])
     def test_a_group_whose_members_are_not_a_list_offsets_nothing(
         self, tmp_path, members
     ):
@@ -315,6 +315,26 @@ class TestSummonByNodeIds:
         assert result["success"] is False
         assert result["error"] == "unknown_node_ids"
         assert result["node_ids"] == ["elsewhere", "ghost"]
+        assert _summons(sub) == []
+
+    @pytest.mark.parametrize("bad", [math.nan, math.inf, -math.inf])
+    def test_a_node_with_a_non_finite_position_is_refused_in_any_order(
+        self, tmp_path, bad
+    ):
+        tools, manager, storage = _tools(tmp_path)
+        session = _canvas(manager, storage, {"a": (0, 0), "b": (300, 400)})
+        # What a raw browser node_moved can store: json accepts NaN/Infinity.
+        session.state["positions"]["a"] = {"x": bad, "y": 0.0}
+        sub = _listen(manager, session.id)
+
+        results = [
+            tools["summon_session_viewport"](session_id=session.id, node_ids=ids)
+            for ids in (["a", "b"], ["b", "a"])
+        ]
+
+        for result in results:
+            assert result["error"] == "unknown_node_ids"
+            assert result["node_ids"] == ["a"]
         assert _summons(sub) == []
 
     def test_a_node_on_the_canvas_without_a_position_is_refused(self, tmp_path):

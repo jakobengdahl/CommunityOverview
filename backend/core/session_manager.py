@@ -2413,8 +2413,10 @@ class SessionManager:
         The browser path (REST ``/summon``): charged to the op bucket under the
         caller's ``client_id`` like ``/ops``, so summoning cannot be used to
         flood collaborators' cameras. The summoner is named by the display name
-        it joined the session's presence with — the request carries no name, so
-        a summoner cannot claim someone else's.
+        its ``client_id`` joined the session's presence with; the request
+        carries no free-text name. ``client_id`` is self-asserted, as it is for
+        ``/ops``, so the name is a courtesy label, not an authenticated
+        identity.
 
         Ephemeral by design: the event goes straight to the bus — no state
         change, no ``seq``, no ring entry — so a client joining later is not
