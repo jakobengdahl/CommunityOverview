@@ -404,7 +404,7 @@ def create_ui_router(
     # ==================== Capabilities Endpoint ====================
 
     @router.get("/capabilities")
-    async def get_ui_capabilities() -> Dict[str, Any]:
+    async def get_ui_capabilities(http_request: Request) -> Dict[str, Any]:
         """
         Return UI feature availability based on runtime configuration.
 
@@ -412,16 +412,24 @@ def create_ui_router(
         Reports LLM availability so the chat panel can be hidden when no API
         keys are configured, and the public (non-secret) model profile list so
         the chat UI can preselect the default profile and offer a selector when
-        more than one enabled profile exists.
+        more than one enabled profile exists. ``staged_sessions`` and
+        ``session_write_mode_default`` say whether a session can be created
+        staged here, so the UI offers the choice only where the backend would
+        accept it (docs/SESSION_OVERLAY_CONTRACT.md §5, §17).
         """
         from backend.llm.llm_providers import get_llm_availability
         from backend.config import config_loader
 
         llm = get_llm_availability()
+        write_modes = getattr(http_request.app.state, "write_modes", None)
         return {
             "llm_available": llm["available"],
             "llm_provider": llm["provider"],
             "model_profiles": config_loader.get_model_profiles_public(),
+            "staged_sessions": bool(write_modes and write_modes.supports_staged),
+            "session_write_mode_default": (
+                write_modes.default_mode if write_modes else "direct"
+            ),
         }
 
     # ==================== Info Endpoints ====================
