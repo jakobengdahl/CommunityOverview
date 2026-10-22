@@ -2232,6 +2232,35 @@ describe('Server-backed session lifecycle', () => {
       expect(api.createSession).not.toHaveBeenCalled();
     });
 
+    it('shows no mode bar, so no Retry, until the start is settled', async () => {
+      let answerCapabilities;
+      api.getUiCapabilities.mockImplementation(
+        () =>
+          new Promise(
+            (resolve) =>
+              (answerCapabilities = () =>
+                resolve({
+                  llm_available: false,
+                  staged_sessions: true,
+                  session_write_mode_default: 'staged',
+                }))
+          )
+      );
+      api.createSession.mockRejectedValue(Object.assign(new Error('no'), { status: 403 }));
+      renderApp();
+      const [startId] = api.setActiveSessionForRequests.mock.calls[0];
+      await waitFor(() => expect(answerCapabilities).toBeTruthy());
+      expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+      expect(
+        screen.queryByText(
+          'Loading how this session writes — edits are paused until it has loaded.'
+        )
+      ).toBeNull();
+      await act(async () => answerCapabilities());
+      await waitFor(() => expect(api.setSessionModeDirect).toHaveBeenCalledWith(startId));
+      expect(await screen.findByText('Switch to staged…')).toBeTruthy();
+    });
+
     it('starts in a server-created session where the installation stages by default', async () => {
       stagesByDefault();
       api.createSession.mockImplementation(async () => ({

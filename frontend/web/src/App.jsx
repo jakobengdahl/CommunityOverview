@@ -343,6 +343,13 @@ function App() {
   // the capabilities settle how it starts (settleStartingSession).
   const startingSessionRef = useRef(null);
   const settleStartingSessionRef = useRef(null);
+  // While the start is settled its mode bar is not shown: graph writes are
+  // held meanwhile, and its Retry would settle the start before the
+  // capabilities say how it starts. An installation without staging sees no
+  // bar at all, as before.
+  const [settlingStartId, setSettlingStartId] = useState(() =>
+    sessionStore.isValidSessionId(_urlParams.get('session')) ? null : sessionIdRef.current
+  );
   const [defaultWriteMode, setDefaultWriteMode] = useState('direct');
   const defaultWriteModeRef = useRef('direct');
   defaultWriteModeRef.current = defaultWriteMode;
@@ -2490,7 +2497,8 @@ function App() {
     },
     [adoptSessionPayload, ensureSyncConnected, setSessionId]
   );
-  settleStartingSessionRef.current = settleStartingSession;
+  settleStartingSessionRef.current = (capabilities) =>
+    settleStartingSession(capabilities).finally(() => setSettlingStartId(null));
 
   // Keep the sync client's handlers pointed at the latest closures. A remote op
   // or resync triggers a debounced authoritative apply; a remote delete of the
@@ -3698,20 +3706,22 @@ function App() {
           </button>
         </div>
       )}
-      <WriteModeBar
-        writeMode={sessionWriteMode}
-        stagedAvailable={stagedAvailable}
-        pendingCount={stagedPendingCount}
-        diffUnavailable={!!stagedDiffError}
-        onReview={() => setStagedReviewOpen(true)}
-        onSwitchToStaged={() => setSwitchToStagedConfirm(true)}
-        onRetryMode={() =>
-          // As a switch to this session: a load that answers after the user
-          // moved on then moves the user back, consistently, rather than
-          // leaving canvas, stream and requests on different sessions.
-          switchToSession(sessionId, { register: false, eagerConnect: true })
-        }
-      />
+      {sessionId !== settlingStartId && (
+        <WriteModeBar
+          writeMode={sessionWriteMode}
+          stagedAvailable={stagedAvailable}
+          pendingCount={stagedPendingCount}
+          diffUnavailable={!!stagedDiffError}
+          onReview={() => setStagedReviewOpen(true)}
+          onSwitchToStaged={() => setSwitchToStagedConfirm(true)}
+          onRetryMode={() =>
+            // As a switch to this session: a load that answers after the user
+            // moved on then moves the user back, consistently, rather than
+            // leaving canvas, stream and requests on different sessions.
+            switchToSession(sessionId, { register: false, eagerConnect: true })
+          }
+        />
+      )}
       {newSessionDialogOpen && (
         <NewSessionDialog
           defaultMode={defaultWriteMode}
