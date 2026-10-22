@@ -907,6 +907,8 @@
     "mode_unknown": "Loading how this session writes — edits are paused until it has loaded.",
     "mode_retry": "Retry",
     "ticks_dropped": "{count} ticked change(s) changed since you ticked them and were unticked; check them and tick again",
-    "recheck_first": "These changed since you ticked them; check them and tick them first: {names}"
+    "recheck_first": "These changed since you ticked them; check them and tick them first: {names}",
+    "write_held": "This session's write mode is not known yet, so nothing is written until it has loaded.",
+    "approve_session_changed": "The session changed while approving; approve again."
   }
 }

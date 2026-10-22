@@ -131,6 +131,20 @@ export function setActiveSessionForRequests(sessionId) {
  * @param {string} sessionId
  * @param {boolean} staged
  */
+// Messages this module raises itself, shown wherever an error's message is
+// shown: translated by the app (setMessageTranslator), English until then.
+let _translate = null;
+
+/** @param {(key: string) => string} translator - i18n `t` */
+export function setMessageTranslator(translator) {
+  _translate = translator || null;
+}
+
+function translate(key, english) {
+  const text = _translate?.(key);
+  return text && text !== key ? text : english;
+}
+
 const _stagedListeners = new Set();
 
 /**
@@ -247,7 +261,10 @@ async function apiFetch(url, options = {}) {
     mayWriteGraph(options.method, pathBelowRoot(url, getPathRoot()))
   ) {
     const error = new Error(
-      "This session's write mode is not known yet, so nothing is written until it has loaded."
+      translate(
+        'staged.write_held',
+        "This session's write mode is not known yet, so nothing is written until it has loaded."
+      )
     );
     error.code = 'session_mode_unknown';
     throw error;
@@ -783,7 +800,12 @@ export async function decideAgentProposal(proposalId, action) {
     // approving: another session's mode is never inferred from it.
     if (now?.write_mode === 'staged' && _activeSessionId === id) setSessionStaged(id, true);
     if (_activeSessionId !== id) {
-      const error = new Error('The session changed while approving; approve again.');
+      const error = new Error(
+        translate(
+          'staged.approve_session_changed',
+          'The session changed while approving; approve again.'
+        )
+      );
       error.code = 'session_changed';
       throw error;
     }

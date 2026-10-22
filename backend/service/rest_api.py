@@ -1465,7 +1465,8 @@ def _register_session_endpoints(
     ) -> Dict[str, Any]:
         if not is_valid_session_id(session_id):
             raise HTTPException(status_code=400, detail="invalid session_id format")
-        if session_manager.write_modes.mode_of(session_id) == WRITE_MODE_STAGED:
+        write_mode = session_manager.write_modes.mode_of(session_id)
+        if write_mode == WRITE_MODE_STAGED:
             # Retiring a staged session's record, and with discard_staged
             # dropping its layer, is a change to the layer (§13, §14).
             _authorize_session_change(
@@ -1492,7 +1493,9 @@ def _register_session_endpoints(
             )
         if not existed:
             raise HTTPException(status_code=404, detail="session not found")
-        return {"deleted": True, "id": session_id}
+        # The mode the session was deleted in, so the deleting client replaces
+        # a staged session with a staged one even before its notice arrives.
+        return {"deleted": True, "id": session_id, "write_mode": write_mode}
 
     @router.get("/sessions/{session_id}/staged")
     async def get_staged_changes(

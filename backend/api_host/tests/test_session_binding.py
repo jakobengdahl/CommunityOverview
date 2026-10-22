@@ -197,6 +197,15 @@ def test_deleting_a_staged_session_with_work_needs_discard_staged_and_retires_it
     assert client.app.state.session_manager.get_session(sid) is None
 
 
+def test_deleting_a_session_answers_the_mode_it_was_deleted_in(client):
+    """The deleting client replaces a staged session with a staged one even
+    when the switch's notice has not reached it yet."""
+    staged = _staged(client)
+    plain = client.post("/api/sessions", json={"name": "plain"}).json()["id"]
+    assert client.delete(f"/api/sessions/{staged}").json()["write_mode"] == "staged"
+    assert client.delete(f"/api/sessions/{plain}").json()["write_mode"] == "direct"
+
+
 def test_staged_is_refused_where_staged_sessions_are_off(app_config, mock_llm_provider):
     with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
         client = TestClient(create_app(app_config))

@@ -63,6 +63,7 @@ vi.mock('../src/services/api', () => {
     setSessionOnServer: vi.fn(),
     setStagingAvailable: vi.fn(),
     subscribeStagedMarks: vi.fn(() => () => {}),
+    setMessageTranslator: vi.fn(),
     getStagedSessionBinding: vi.fn(() => null),
     getStagedChanges: vi.fn(async () => ({ items: [], count: 0 })),
     getDisplayName: vi.fn(() => null),
@@ -2082,6 +2083,32 @@ describe('Server-backed session lifecycle', () => {
     expect(sessionStore.listSessions().find((s) => s.id === '5555-6666').name).toBe(
       'My local name'
     );
+  });
+
+  it('learns that a session it never read from the server is staged once the stream connects', async () => {
+    // Someone else switched this browser-only session to staged; the switch
+    // op is not replayed to a first connect, so the mode is read then.
+    api.getUiCapabilities.mockImplementation(async () => ({
+      llm_available: false,
+      staged_sessions: true,
+    }));
+    api.getSession.mockImplementation(async (id) => ({
+      id,
+      write_mode: 'staged',
+      state: {},
+      resolved: { nodes: [], edges: [] },
+      roster: [],
+    }));
+    const { container } = renderApp();
+    await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+    const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+    fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+    await waitFor(() => expect(api.setSessionOnServer).toHaveBeenCalled());
+    const [sessionId] = api.setSessionOnServer.mock.calls.at(-1);
+    await waitFor(() => expect(api.setSessionStaged).toHaveBeenCalledWith(sessionId, true));
   });
 
   it('a real load failure (non-404) shows an error notice and stays on the current session', async () => {

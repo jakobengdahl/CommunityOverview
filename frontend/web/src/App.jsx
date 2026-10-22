@@ -323,6 +323,10 @@ function App() {
     refreshDiff: refreshStagedDiff,
     handleSessionOp: handleStagedSessionOp,
   } = useStagedSession(sessionId);
+  // api.js's own messages (held writes, a changed session) in the UI language.
+  useEffect(() => {
+    api.setMessageTranslator(t);
+  }, [t]);
   const sessionWriteModeRef = useRef(sessionWriteMode);
   sessionWriteModeRef.current = sessionWriteMode;
   const setStoreWriteMode = useGraphStore((state) => state.setSessionWriteMode);
@@ -330,6 +334,8 @@ function App() {
     setStoreWriteMode(sessionWriteMode);
   }, [sessionWriteMode, setStoreWriteMode]);
   const [stagedAvailable, setStagedAvailable] = useState(false);
+  const stagedAvailableRef = useRef(false);
+  stagedAvailableRef.current = stagedAvailable;
   const [defaultWriteMode, setDefaultWriteMode] = useState('direct');
   const [newSessionDialogOpen, setNewSessionDialogOpen] = useState(false);
   const [stagedReviewOpen, setStagedReviewOpen] = useState(false);
@@ -2385,8 +2391,21 @@ function App() {
   // a remote rename refreshes the recents name.
   useEffect(() => {
     syncHandlersRef.current = {
-      // The stream's first snapshot: the server holds this session now.
-      onReady: () => api.setSessionOnServer(syncRef.current?.sessionId),
+      // The stream's first snapshot: the server holds this session now. A
+      // session this tab never read from the server (browser-only until now)
+      // may have been switched to staged by someone else meanwhile, and that
+      // op is not replayed to a first connect: read its mode.
+      onReady: () => {
+        const readyId = syncRef.current?.sessionId;
+        api.setSessionOnServer(readyId);
+        if (!readyId || !stagedAvailableRef.current) return;
+        api.getSession(readyId).then(
+          (payload) => {
+            if (sessionIdRef.current === readyId) adoptSessionPayload(readyId, payload);
+          },
+          () => {}
+        );
+      },
       // Report recovery status back to the user (task fbd32fc9): a resync
       // that had to replay locally-queued ops means real, user-visible
       // content survived a dropped connection — worth a confirmation rather
@@ -2806,7 +2825,11 @@ function App() {
     try {
       // The user confirmed a dialog that said a staged session's changes
       // go with it.
-      await api.deleteServerSession(id, api.getClientId(), { discardStaged: wasStaged });
+      const answer = await api.deleteServerSession(id, api.getClientId(), {
+        discardStaged: wasStaged,
+      });
+      // Switched to staged after the dialog opened, with the notice not here yet.
+      if (answer?.write_mode === 'staged') deletedStagedRef.current.add(id);
     } catch (error) {
       browserOnly = error?.status === 404;
       let gone = browserOnly || deletedStagedRef.current.has(id);

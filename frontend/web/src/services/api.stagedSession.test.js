@@ -249,6 +249,27 @@ describe('possibly staged', () => {
   });
 });
 
+describe('staged marks', () => {
+  it('tells subscribers once, when a session is first marked staged', () => {
+    const seen = [];
+    const unsubscribe = api.subscribeStagedMarks((id) => seen.push(id));
+    api.setSessionStaged('1111-2222-3333-4444', true);
+    api.setSessionStaged('1111-2222-3333-4444', true);
+    unsubscribe();
+    expect(seen).toEqual(['1111-2222-3333-4444']);
+  });
+
+  it('raises its own messages in the UI language', async () => {
+    mockFetch();
+    api.setMessageTranslator((key) => `sv:${key}`);
+    api.setActiveSessionForRequests('5555-6666-7777-8888');
+    api.setSessionModeUnknown('5555-6666-7777-8888');
+    const error = await api.updateNode('n1', { name: 'x' }).catch((e) => e);
+    api.setMessageTranslator(null);
+    expect(error.message).toBe('sv:staged.write_held');
+  });
+});
+
 describe('structured refusals', () => {
   it('carries the code and data of a staged-change refusal', async () => {
     mockFetch(409, {
