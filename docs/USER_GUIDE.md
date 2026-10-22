@@ -1062,13 +1062,17 @@ connection also ticks the new nodes it needs; unticking a node unticks what
 depends on it. **Merge** applies the ticked changes to the graph as one step —
 all of them or none. If any of them changed after you opened the review (someone
 staged over it, or the graph moved on), nothing is merged and the review asks
-you to look again; if the connection drops mid-merge, merging again is safe and
-never applies the changes twice. **Discard** drops the ticked changes from the
-session after you confirm; the graph is not touched.
+you to look again: a change that is not as you reviewed it loses its tick, and
+a decision you made on it is cleared, until you look at it again. If the
+connection drops mid-merge, merging again is safe and never applies the changes
+twice. **Discard** drops the ticked changes from the session after you confirm;
+the graph is not touched, and a change staged over since you reviewed it is not
+discarded.
 
 Opening a link to a session shows *Loading how this session writes* until
 the session has loaded, and edits wait until then: the session may be staged.
-**Retry** loads it again if that failed. File attachments are not staged: an
+**Retry** loads it again if that failed. A link to a staged session that has
+since been deleted opens a new session instead. File attachments are not staged: an
 attachment added to a node in a staged session is stored at once.
 
 **Deleting a staged session** drops its unmerged changes with it, and the

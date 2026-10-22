@@ -335,6 +335,7 @@ class GraphService:
                 chosen,
                 actor=access.build_mutation_actor_id(target="merge_staged_changes"),
                 merge_id=merge_id,
+                expected=staged_review.expected_versions(entries),
             )
             planned["results"] = results
             planned["plan"] = plan
@@ -517,6 +518,9 @@ class GraphService:
         since - possibly out of that view - refuses the discard in the store,
         and it is decided again on the layer as it is then."""
         store = self._session_gate.session_manager.write_modes.layer_store
+        # The versions the caller reviewed (§12): an entry restaged since is
+        # not discarded unseen.
+        pinned = staged_review.expected_versions(entries)
         for attempt in range(self.STAGING_ATTEMPTS):
             review = self._load_review(session_id, graph_access)
             if entries == "all":
@@ -539,6 +543,17 @@ class GraphService:
             expected = {
                 key: layer_store.entry_version(review.entries[key]) for key in keys
             }
+            changed = [
+                key for key in keys if pinned.get(key, expected[key]) != expected[key]
+            ]
+            if changed:
+                raise staged_review.ReviewRefused(
+                    staged_review.MERGE_RACED,
+                    "some selected entries changed since they were read; read "
+                    "the diff again",
+                    409,
+                    entries=[{"kind": k, "entity_id": i} for k, i in changed],
+                )
             try:
                 return store.discard(session_id, keys, expected=expected)
             except layer_store.LayerRaced:

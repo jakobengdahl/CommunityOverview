@@ -288,6 +288,29 @@ describe('useSharedSession.loadSessionFromServer', () => {
     expect(setBaseline).toHaveBeenCalledWith({}, { seq: 0 });
   });
 
+  it('never treats a deleted staged session as a new one to stay in', async () => {
+    const setBaseline = vi.fn();
+    const deps = makeDeps({ ensureSyncConnected: vi.fn(() => ({ setBaseline, sessionId: null })) });
+    const retired = Object.assign(new Error('session not found'), {
+      status: 404,
+      code: 'session_not_found',
+    });
+    api.getSession.mockRejectedValueOnce(retired);
+    const onMissing = vi.fn();
+    const { result } = renderHook(() => useSharedSession(deps));
+
+    await act(async () => {
+      await expect(
+        result.current.loadSessionFromServer('1234-5678', { eagerConnect: true, onMissing })
+      ).rejects.toBe(retired);
+    });
+
+    // Nothing connects to it and nothing seeds a baseline to write from.
+    expect(setBaseline).not.toHaveBeenCalled();
+    expect(deps.ensureSyncConnected).not.toHaveBeenCalled();
+    expect(deps.clearVisualization).not.toHaveBeenCalled();
+  });
+
   it('reseeds an already-connected client on a non-eager 404 without a load seq', async () => {
     const setBaseline = vi.fn();
     const deps = makeDeps({ syncRef: { current: { sessionId: '1234-5678', setBaseline } } });

@@ -177,6 +177,18 @@ describe('the merge request', () => {
     ]);
   });
 
+  it('names each entry with the version the diff gave it, when it gave one', () => {
+    const request = buildMergeRequest(
+      [{ ...nodeCreate, version: 'tok-1' }, edgeCreate],
+      new Set(['node:n1', 'edge:e1']),
+      {}
+    );
+    expect(request.entries).toEqual([
+      { kind: 'node', entity_id: 'n1', version: 'tok-1' },
+      { kind: 'edge', entity_id: 'e1' },
+    ]);
+  });
+
   it('drops a resolution left on a clean or unselected entry', () => {
     const request = buildMergeRequest(items, new Set(['node:n1']), {
       'node:n1': { choice: 'keep_main' },
@@ -215,6 +227,7 @@ describe('review drift', () => {
       { ...conflictUpdate, depends_on: [{ kind: 'node', entity_id: 'n1' }] },
       { ...conflictUpdate, action: 'delete' },
       { ...conflictUpdate, unstaged_edges: ['e7'] },
+      { ...conflictUpdate, version: 'another-instance' },
     ];
     for (const changed of variants) {
       expect(reviewDrift(ticked(conflictUpdate), [changed])).toEqual(['node:n2']);
@@ -249,6 +262,15 @@ describe('merge ids', () => {
     expect(second.mergeId).not.toBe(first.mergeId);
   });
 
+  it('takes a fresh id for an entry restaged since, even after an unknown outcome', () => {
+    const ids = newIds();
+    const reviewed = (version) =>
+      buildMergeRequest([{ ...nodeCreate, version }], new Set(['node:n1']), {});
+    const first = nextMergeAttempt(null, reviewed('tok-1'), ids);
+    first.outcomeUnknown = true;
+    expect(nextMergeAttempt(first, reviewed('tok-2'), ids).mergeId).not.toBe(first.mergeId);
+  });
+
   it('takes a fresh id after a definite answer', () => {
     const ids = newIds();
     const request = { entries: [] };
@@ -281,6 +303,10 @@ describe('display helpers', () => {
       'Server says'
     );
     expect(refusalText(t, refused(undefined, ''), 'staged.merge_failed')).toBe(
+      't:staged.merge_failed'
+    );
+    // A network failure or an uncoded answer: the UI's own words.
+    expect(refusalText(t, new TypeError('Failed to fetch'), 'staged.merge_failed')).toBe(
       't:staged.merge_failed'
     );
   });

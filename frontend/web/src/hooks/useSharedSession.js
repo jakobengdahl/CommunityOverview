@@ -142,7 +142,9 @@ export function useSharedSession({
         }
       } catch (error) {
         // Session does not exist server-side yet — new / not-yet-saved share URL.
-        if (error?.status === 404) {
+        // Not a deleted staged session (coded session_not_found): its id is
+        // never created again (contract §5), so it is no session to stay in.
+        if (error?.status === 404 && error?.code !== 'session_not_found') {
           onSessionPayload?.(targetId, null);
           clearVisualization();
           // Switching into a brand-new / empty session is still a session switch:

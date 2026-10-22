@@ -346,11 +346,14 @@ function App() {
   const locallyDeletingRef = useRef(new Set());
   // A deleted direct id can be opened again (a link recreates it): once this
   // tab switches to it, a later delete of it is someone else's again.
+  // Not while its delete is still in flight, or the delete's own notice would
+  // read as someone else's and the session be left twice.
+  const deletesInFlightRef = useRef(new Set());
   const previousSessionIdRef = useRef(sessionId);
   useEffect(() => {
     if (previousSessionIdRef.current === sessionId) return;
     previousSessionIdRef.current = sessionId;
-    locallyDeletingRef.current.delete(sessionId);
+    if (!deletesInFlightRef.current.has(sessionId)) locallyDeletingRef.current.delete(sessionId);
   }, [sessionId]);
   // Sessions this tab is deleting that the server's notice says were staged,
   // even if this tab had not learnt it: they are replaced by staged ones.
@@ -1188,6 +1191,19 @@ function App() {
       urlSessionBootstrapRef.current = loadSessionFromServer(urlSession, {
         eagerConnect: true,
         onMissing: () => showNotification('info', t('sessions.link_not_found')),
+      }).catch((error) => {
+        if (error?.code !== 'session_not_found') throw error;
+        // A link to a deleted staged session: its id is never created again,
+        // so the tab moves to a fresh session rather than writing from it.
+        forgetStagedSession(urlSession);
+        dropIntoFreshSession({
+          freshId: api.generateVisualizationSessionId(),
+          clearVisualization,
+          resetSessionScopedState: resetSessionScopedUi,
+          setSessionId,
+          reflectSessionUrl,
+        });
+        showNotification('info', t('sessions.link_not_found'));
       });
     }
     setSessionsVersion((v) => v + 1);
@@ -2830,62 +2846,67 @@ function App() {
     const modeOfDeleted = () =>
       sessionIdRef.current === id ? sessionWriteModeRef.current : modeAtConfirm;
     locallyDeletingRef.current.add(id);
-    let browserOnly = false;
+    deletesInFlightRef.current.add(id);
     try {
-      // The user confirmed a dialog that said a staged session's changes
-      // go with it.
-      const answer = await api.deleteServerSession(id, api.getClientId(), {
-        discardStaged: wasStaged,
-      });
-      // Switched to staged after the dialog opened, with the notice not here yet.
-      if (answer?.write_mode === 'staged') deletedStagedRef.current.add(id);
-    } catch (error) {
-      browserOnly = error?.status === 404;
-      let gone = browserOnly || deletedStagedRef.current.has(id);
-      if (!gone && (typeof error?.status !== 'number' || error.status >= 500)) {
-        // No answer, or a server error that may have come after the delete
-        // landed: ask whether the session is still there rather than report
-        // a failure that did not happen.
-        gone = await api.getSession(id).then(
-          () => false,
-          (e) => e?.status === 404
+      let browserOnly = false;
+      try {
+        // The user confirmed a dialog that said a staged session's changes
+        // go with it.
+        const answer = await api.deleteServerSession(id, api.getClientId(), {
+          discardStaged: wasStaged,
+        });
+        // Switched to staged after the dialog opened, with the notice not here yet.
+        if (answer?.write_mode === 'staged') deletedStagedRef.current.add(id);
+      } catch (error) {
+        browserOnly = error?.status === 404;
+        let gone = browserOnly || deletedStagedRef.current.has(id);
+        if (!gone && (typeof error?.status !== 'number' || error.status >= 500)) {
+          // No answer, or a server error that may have come after the delete
+          // landed: ask whether the session is still there rather than report
+          // a failure that did not happen.
+          gone = await api.getSession(id).then(
+            () => false,
+            (e) => e?.status === 404
+          );
+        }
+        if (!gone) {
+          // A session that was not deleted keeps its work: never act as if it
+          // were gone.
+          locallyDeletingRef.current.delete(id);
+          showNotification('error', refusalText(t, error, 'staged.delete_failed'));
+          return;
+        }
+        // 404: the session only ever existed locally.
+      }
+      sessionStore.removeSession(id);
+      // The server's notice may say staged where this tab thought direct (it
+      // was switched meanwhile): then the replacement is staged too. So does a
+      // mode not known yet - unless the server never held the session, which
+      // makes it browser-only and direct (§5.1). The current mode, not the one
+      // this callback closed over: it may have changed during the delete.
+      const modeNow = modeOfDeleted();
+      const leftStaged =
+        wasStaged ||
+        deletedStagedRef.current.has(id) ||
+        modeNow === 'staged' ||
+        (modeNow === 'unknown' && !browserOnly);
+      if (sessionIdRef.current === id) {
+        // Deleting the active session: drop its content and switch into a fresh
+        // one (design 3.6); a staged one into a staged one (§13). Other
+        // connected clients are notified via the server's session_deleted
+        // broadcast.
+        showNotification(
+          'info',
+          t(leftStaged ? 'staged.session_deleted' : 'sessions.session_deleted')
         );
+        await leaveDeletedSession(id, leftStaged);
+      } else if (leftStaged) {
+        forgetStagedSession(id);
       }
-      if (!gone) {
-        // A session that was not deleted keeps its work: never act as if it
-        // were gone.
-        locallyDeletingRef.current.delete(id);
-        showNotification('error', refusalText(t, error, 'staged.delete_failed'));
-        return;
-      }
-      // 404: the session only ever existed locally.
+      setSessionsVersion((v) => v + 1);
+    } finally {
+      deletesInFlightRef.current.delete(id);
     }
-    sessionStore.removeSession(id);
-    // The server's notice may say staged where this tab thought direct (it
-    // was switched meanwhile): then the replacement is staged too. So does a
-    // mode not known yet - unless the server never held the session, which
-    // makes it browser-only and direct (§5.1). The current mode, not the one
-    // this callback closed over: it may have changed during the delete.
-    const modeNow = modeOfDeleted();
-    const leftStaged =
-      wasStaged ||
-      deletedStagedRef.current.has(id) ||
-      modeNow === 'staged' ||
-      (modeNow === 'unknown' && !browserOnly);
-    if (sessionIdRef.current === id) {
-      // Deleting the active session: drop its content and switch into a fresh
-      // one (design 3.6); a staged one into a staged one (§13). Other
-      // connected clients are notified via the server's session_deleted
-      // broadcast.
-      showNotification(
-        'info',
-        t(leftStaged ? 'staged.session_deleted' : 'sessions.session_deleted')
-      );
-      await leaveDeletedSession(id, leftStaged);
-    } else if (leftStaged) {
-      forgetStagedSession(id);
-    }
-    setSessionsVersion((v) => v + 1);
   }, [
     deleteSessionDialog,
     sessionId,

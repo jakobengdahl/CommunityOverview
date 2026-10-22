@@ -21,6 +21,17 @@ function keyOfRef(ref) {
 }
 
 /**
+ * How a merge or discard request names an entry: with the version the diff
+ * gave it, so the server refuses (merge_raced) an entry restaged since it was
+ * reviewed (§11.4, §12).
+ */
+export function entryRef(item) {
+  const ref = { kind: item.kind, entity_id: item.entity_id };
+  if (typeof item.version === 'string' && item.version) ref.version = item.version;
+  return ref;
+}
+
+/**
  * How each staged entity shows on the canvas, from the diff: `created`,
  * `updated`, `orphaned` (an update of an entity the graph no longer holds,
  * §8.1) or `deleted` (a tombstone).
@@ -166,7 +177,7 @@ export function unresolvedKeys(items, selected, resolutions) {
  */
 export function buildMergeRequest(items, selected, resolutions) {
   const chosen = (items || []).filter((item) => selected.has(itemKey(item)));
-  const entries = chosen.map((item) => ({ kind: item.kind, entity_id: item.entity_id }));
+  const entries = chosen.map(entryRef);
   const resolved = [];
   for (const item of chosen) {
     const resolution = resolutions[itemKey(item)];
@@ -195,6 +206,7 @@ export function itemFingerprint(item) {
     item.depends_on,
     item.unstaged_edges || null,
     item.session_seq,
+    item.version ?? null,
   ]);
 }
 
@@ -312,7 +324,9 @@ export const KNOWN_REFUSALS = [
  */
 export function refusalText(t, error, fallbackKey) {
   if (KNOWN_REFUSALS.includes(error?.code)) return t(`staged.refusal.${error.code}`);
-  return error?.message || t(fallbackKey);
+  // Only a coded refusal carries a server sentence worth showing; a network
+  // failure or a bare status says nothing the fallback does not.
+  return (error?.code && error.message) || t(fallbackKey);
 }
 
 /** Render a field value for display. */

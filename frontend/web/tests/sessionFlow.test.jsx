@@ -2144,6 +2144,76 @@ describe('Server-backed session lifecycle', () => {
     );
   });
 
+  it('leaves a staged session once when the user opens it while deleting it', async () => {
+    // The delete's own notice reaches the tab after it switched to the
+    // session: it is still this tab's delete, not someone else's.
+    api.getUiCapabilities.mockImplementation(async () => ({
+      llm_available: false,
+      staged_sessions: true,
+    }));
+    api.getSession.mockImplementation(async (id) => ({
+      id,
+      write_mode: 'staged',
+      state: {},
+      resolved: { nodes: [], edges: [] },
+      roster: [],
+    }));
+    let answerDelete;
+    api.deleteServerSession.mockImplementation(
+      (id) => new Promise((resolve) => (answerDelete = () => resolve({ deleted: true, id })))
+    );
+    sessionStore.touchSession('7777-8888');
+    renderApp();
+    await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+    fireEvent.click(screen.getByTitle('Menu'));
+    const rows = await screen.findAllByText('7777-8888');
+    let row = rows.find((el) => el.closest('.session-drawer'));
+    while (!row.querySelector('[aria-label="Session actions"]')) row = row.parentElement;
+    fireEvent.click(row.querySelector('[aria-label="Session actions"]'));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete session' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(api.deleteServerSession).toHaveBeenCalled());
+    fireEvent.click(screen.getAllByText('7777-8888').find((el) => el.closest('.session-drawer')));
+    await waitFor(() =>
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('7777-8888')
+    );
+    await waitFor(() =>
+      expect(
+        FakeEventSource.instances.some((es) => es.url.includes('/sessions/7777-8888/stream'))
+      ).toBe(true)
+    );
+    const stream = FakeEventSource.instances.find((es) =>
+      es.url.includes('/sessions/7777-8888/stream')
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    // The replacement is still being created when the delete answers.
+    const created = [];
+    api.createSession.mockImplementation(
+      () =>
+        new Promise((resolve) =>
+          created.push(() => resolve({ id: `9999-000${created.length}`, write_mode: 'staged' }))
+        )
+    );
+    await act(async () => {
+      stream.onmessage?.({
+        data: JSON.stringify({
+          type: 'session_deleted',
+          deleted_by: 'client-test',
+          write_mode: 'staged',
+        }),
+      });
+    });
+    await act(async () => answerDelete());
+    await waitFor(() => expect(api.createSession).toHaveBeenCalled());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    expect(api.createSession).toHaveBeenCalledTimes(1);
+    await act(async () => created.forEach((resolve) => resolve()));
+  });
+
   it('a real load failure (non-404) shows an error notice and stays on the current session', async () => {
     // Distinguishes an actual backend/network error from a 404 ("session
     // doesn't exist yet", handled elsewhere as a normal empty session): only

@@ -920,6 +920,7 @@
       "staged_unsupported": "Staged sessions are not available on this server.",
       "layer_full": "The session holds as many staged changes as it can. Merge or discard some first.",
       "layer_not_empty": "The session still holds staged changes. Merge or discard them first."
-    }
+    },
+    "discard_raced": "Some of these changes were changed again since you reviewed them; nothing was discarded. Check them and try again."
   }
 }

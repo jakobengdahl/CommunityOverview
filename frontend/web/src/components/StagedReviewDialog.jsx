@@ -11,6 +11,7 @@ import {
   dependants,
   dependencyClosure,
   entryKey,
+  entryRef,
   formatValue,
   itemKey,
   itemLabel,
@@ -96,6 +97,18 @@ function StagedReviewDialog({
     [selected, byKey]
   );
   const staleTicks = selected.size - liveSelected.size;
+  // Likewise a resolution: it decides the entry as it was when chosen, and an
+  // entry changed since (a new conflict, say) is decided again.
+  const liveResolutions = useMemo(
+    () =>
+      Object.fromEntries(
+        Object.entries(resolutions).filter(
+          ([key, resolution]) =>
+            byKey.has(key) && itemFingerprint(byKey.get(key)) === resolution.print
+        )
+      ),
+    [resolutions, byKey]
+  );
   // A tick that went stale can leave a ticked entry without one it depends
   // on; such a selection is not merged until the dependency is ticked again.
   const selectionOpen = useMemo(
@@ -161,7 +174,9 @@ function StagedReviewDialog({
     // Resolving a blocked entry keeps that answer's statuses; changing any
     // other entry's resolution can change them, so they no longer hold.
     if (!blockedStatus.has(key)) setBlockedStatus(new Map());
-    setResolutions((prev) => ({ ...prev, [key]: { choice } }));
+    // The entry as the diff gives it, not with a merge_blocked status laid on.
+    const print = itemFingerprint(byKey.get(key) || item);
+    setResolutions((prev) => ({ ...prev, [key]: { choice, print } }));
     if (choice === 'manual') {
       // Seed each conflicting field not yet typed in, keeping what was typed.
       const seeded = {};
@@ -175,7 +190,7 @@ function StagedReviewDialog({
   // Resolutions with every manual value parsed; null when one does not parse.
   const resolvedForRequest = () => {
     const out = {};
-    for (const [key, resolution] of Object.entries(resolutions)) {
+    for (const [key, resolution] of Object.entries(liveResolutions)) {
       if (resolution.choice !== 'manual') {
         out[key] = resolution;
         continue;
@@ -220,10 +235,10 @@ function StagedReviewDialog({
     return fresh;
   };
 
-  const merge = async ({ retried = false, prints: carried = null } = {}) => {
+  const merge = async () => {
     const keys = liveSelected;
     if (!keys.size) return;
-    const prints = carried || new Map([...keys].map((k) => [k, selected.get(k)]));
+    const prints = new Map([...keys].map((k) => [k, selected.get(k)]));
     const resolved = resolvedForRequest();
     if (!resolved) return;
     const unresolved = unresolvedKeys(judged, keys, resolved);
@@ -254,7 +269,7 @@ function StagedReviewDialog({
           return;
         }
         attemptRef.current = null;
-        await handleMergeRefusal(error, retried, prints);
+        await handleMergeRefusal(error);
         return;
       }
       attemptRef.current = null;
@@ -274,7 +289,7 @@ function StagedReviewDialog({
     }
   };
 
-  const handleMergeRefusal = async (error, retried, prints) => {
+  const handleMergeRefusal = async (error) => {
     const data = error.data || {};
     switch (error.code) {
       case 'merge_blocked': {
@@ -289,13 +304,9 @@ function StagedReviewDialog({
         return;
       }
       case 'merge_raced':
-        // Something changed underneath. Retry once when the chosen entries
-        // still read as reviewed; otherwise the user looks again.
-        if (!retried) {
-          setBusy(false);
-          await merge({ retried: true, prints });
-          return;
-        }
+        // An entry was restaged since it was reviewed, or the graph moved:
+        // read again. A changed entry loses its tick, so it is reviewed again
+        // before any merge sends it.
         await onRefresh();
         setMessage({ kind: 'warning', text: t('staged.merge_raced') });
         return;
@@ -335,9 +346,7 @@ function StagedReviewDialog({
     try {
       const fresh = await freshUnchanged(prints);
       if (!fresh) return;
-      const entries = fresh
-        .filter((item) => prints.has(itemKey(item)))
-        .map((item) => ({ kind: item.kind, entity_id: item.entity_id }));
+      const entries = fresh.filter((item) => prints.has(itemKey(item))).map(entryRef);
       const result = await api.discardStagedChanges(sessionId, entries);
       setSelected(new Map());
       setMessage({
@@ -346,6 +355,13 @@ function StagedReviewDialog({
       });
       onDiscarded?.(result);
     } catch (error) {
+      if (error?.code === 'merge_raced') {
+        // Restaged since it was reviewed: read again, and the changed entries
+        // lose their ticks until looked at again.
+        await onRefresh();
+        setMessage({ kind: 'warning', text: t('staged.discard_raced') });
+        return;
+      }
       setMessage({ kind: 'error', text: refusalText(t, error, 'staged.discard_failed') });
     } finally {
       setBusy(false);
@@ -393,10 +409,10 @@ function StagedReviewDialog({
   };
 
   const renderResolution = (item) => {
-    const choices = allowedChoices(item, heldByDroppedCreate(item, judged, resolutions));
+    const choices = allowedChoices(item, heldByDroppedCreate(item, judged, liveResolutions));
     if (!choices.length) return null;
     const key = itemKey(item);
-    const current = resolutions[key]?.choice || '';
+    const current = liveResolutions[key]?.choice || '';
     return (
       <div className="staged-review-resolution">
         <label>

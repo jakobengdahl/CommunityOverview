@@ -920,6 +920,7 @@
       "staged_unsupported": "Granskade sessioner finns inte på den här servern.",
       "layer_full": "Sessionen rymmer inte fler väntande ändringar. Slå samman eller kasta några först.",
       "layer_not_empty": "Sessionen har fortfarande väntande ändringar. Slå samman eller kasta dem först."
-    }
+    },
+    "discard_raced": "Några av ändringarna har ändrats igen sedan du granskade dem; inget kastades. Kontrollera dem och försök igen."
   }
 }

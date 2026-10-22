@@ -130,15 +130,16 @@ describe('StagedReviewDialog', () => {
     expect(api.discardStagedChanges).not.toHaveBeenCalled();
   });
 
-  it('retries a raced merge at most once', async () => {
-    const raced = () =>
-      Object.assign(new Error('raced'), { status: 409, code: 'merge_raced', data: {} });
-    api.mergeStagedChanges.mockRejectedValue(raced());
-    renderDialog();
+  it('names each entry with the version it was reviewed at', async () => {
+    api.mergeStagedChanges.mockResolvedValue({ merged: [{}] });
+    const versioned = [{ ...CREATE, version: 'tok-1' }, EDGE, CONFLICT];
+    renderDialog({ items: versioned });
     fireEvent.click(checkbox('node:n1'));
     fireEvent.click(screen.getByTestId('staged-merge'));
-    await waitFor(() => expect(screen.getByText('staged.merge_raced')).toBeTruthy());
-    expect(api.mergeStagedChanges).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(api.mergeStagedChanges).toHaveBeenCalled());
+    expect(api.mergeStagedChanges.mock.calls[0][1].entries).toEqual([
+      { kind: 'node', entity_id: 'n1', version: 'tok-1' },
+    ]);
   });
 
   it('asks for a decision on a conflict before merging', async () => {
@@ -181,6 +182,28 @@ describe('StagedReviewDialog', () => {
     rerender([CREATE, EDGE, twoConflicts]);
     // The tick dropped when the entry changed; the user ticks it again.
     expect(checkbox('node:n2').checked).toBe(false);
+    fireEvent.click(checkbox('node:n2'));
+    fireEvent.click(screen.getByTestId('staged-merge'));
+    await waitFor(() => expect(screen.getByText('staged.needs_decision')).toBeTruthy());
+    expect(api.mergeStagedChanges).not.toHaveBeenCalled();
+  });
+
+  it('decides again an entry that changed after its resolution was chosen', async () => {
+    const changed = {
+      ...CONFLICT,
+      fields: {
+        ...CONFLICT.fields,
+        name: { base: 'n', staged: 'mine', main: 'theirs', conflict: true },
+      },
+      version: 'tok-2',
+    };
+    const { rerender } = renderDialog({ onRefresh: vi.fn(async () => [CREATE, EDGE, changed]) });
+    fireEvent.click(checkbox('node:n2'));
+    fireEvent.change(screen.getByTestId('resolution-node:n2'), {
+      target: { value: 'take_session' },
+    });
+    rerender([CREATE, EDGE, changed]);
+    expect(screen.getByTestId('resolution-node:n2').value).toBe('');
     fireEvent.click(checkbox('node:n2'));
     fireEvent.click(screen.getByTestId('staged-merge'));
     await waitFor(() => expect(screen.getByText('staged.needs_decision')).toBeTruthy());
@@ -232,19 +255,40 @@ describe('StagedReviewDialog', () => {
     expect(ids[0]).not.toBe(ids[1]);
   });
 
-  it('on merge_raced reads again and retries once with a fresh id when nothing shown changed', async () => {
-    api.mergeStagedChanges
-      .mockRejectedValueOnce(
-        Object.assign(new Error('raced'), { status: 409, code: 'merge_raced', data: {} })
-      )
-      .mockResolvedValueOnce({ merged: [{}] });
-    const { onMerged, onRefresh } = renderDialog();
+  it('on merge_raced reads again and asks for a review rather than retrying', async () => {
+    api.mergeStagedChanges.mockRejectedValueOnce(
+      Object.assign(new Error('raced'), { status: 409, code: 'merge_raced', data: {} })
+    );
+    const versioned = [{ ...CREATE, version: 'tok-1' }, EDGE, CONFLICT];
+    const { onMerged, onRefresh, rerender } = renderDialog({ items: versioned });
     fireEvent.click(checkbox('node:n1'));
     fireEvent.click(screen.getByTestId('staged-merge'));
-    await waitFor(() => expect(onMerged).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByText('staged.merge_raced')).toBeTruthy());
+    expect(api.mergeStagedChanges).toHaveBeenCalledTimes(1);
     expect(onRefresh).toHaveBeenCalledTimes(2);
-    const ids = api.mergeStagedChanges.mock.calls.map((call) => call[1].merge_id);
-    expect(ids).toEqual(['uuid-1', 'uuid-2']);
+    expect(onMerged).not.toHaveBeenCalled();
+    // Restaged by another instance: same session_seq, a new version. The
+    // tick goes until the entry is looked at again.
+    rerender([{ ...CREATE, version: 'tok-2' }, EDGE, CONFLICT]);
+    expect(checkbox('node:n1').checked).toBe(false);
+  });
+
+  it('on a raced discard reads again and discards nothing more', async () => {
+    api.discardStagedChanges.mockRejectedValueOnce(
+      Object.assign(new Error('raced'), { status: 409, code: 'merge_raced', data: {} })
+    );
+    const versioned = [{ ...CREATE, version: 'tok-1' }, EDGE, CONFLICT];
+    const { onRefresh, onDiscarded } = renderDialog({ items: versioned });
+    fireEvent.click(checkbox('node:n1'));
+    fireEvent.click(screen.getByText('staged.discard_selected'));
+    fireEvent.click(screen.getByText('staged.discard_confirm'));
+    await waitFor(() => expect(screen.getByText('staged.discard_raced')).toBeTruthy());
+    expect(api.discardStagedChanges.mock.calls[0][1]).toEqual([
+      { kind: 'node', entity_id: 'n1', version: 'tok-1' },
+    ]);
+    expect(api.discardStagedChanges).toHaveBeenCalledTimes(1);
+    expect(onRefresh).toHaveBeenCalledTimes(2);
+    expect(onDiscarded).not.toHaveBeenCalled();
   });
 
   it('marks the entries a merge_blocked answer names', async () => {

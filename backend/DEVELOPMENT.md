@@ -924,9 +924,9 @@ its MCP twin (`get_staged_changes` as `read`; `merge_staged_changes` and
 
 | Method | Path | MCP tool | Description |
 |---|---|---|---|
-| GET | `/api/sessions/{id}/staged` | `get_staged_changes` | The diff: one item per staged entry - `kind`, `entity_id`, `action`, `base_revision`, `main_revision`, `fields` (per field, and per `metadata.<key>`: `base`, `staged`, `main`, `conflict`), `status` (`clean`, `conflict`, `orphaned`, `id_taken`, `dangling`), `depends_on`, `session_seq`, `staged_by`, `staged_at`; a node delete also lists its `unstaged_edges`, the main edges to the node the layer does not tombstone (added since, or missed). A direct session answers an empty list |
-| POST | `/api/sessions/{id}/staged/merge` | `merge_staged_changes` | `{merge_id, entries: "all" \| [{kind, entity_id}], resolutions?: [{kind, entity_id, choice, values?}]}`. Applies the selected entries to the graph and removes them from the layer as one unit, or nothing. `choice` is `take_session`, `keep_main`, `as_new` (nodes) or `manual` (updates; `values` gives the final value of every conflicting field). Repeating a `merge_id` returns the first result (`replayed: true`) and writes nothing. Graph events fire as for direct writes, with `event_origin` `session-merge`, the merge id as correlation id and `staged_by` |
-| POST | `/api/sessions/{id}/staged/discard` | `discard_staged_changes` | `{entries: "all" \| [{kind, entity_id}]}`. Removes entries from the layer; the graph does not change and no graph event fires. Answers the keys actually removed |
+| GET | `/api/sessions/{id}/staged` | `get_staged_changes` | The diff: one item per staged entry - `kind`, `entity_id`, `action`, `base_revision`, `main_revision`, `fields` (per field, and per `metadata.<key>`: `base`, `staged`, `main`, `conflict`), `status` (`clean`, `conflict`, `orphaned`, `id_taken`, `dangling`), `depends_on`, `session_seq`, `version` (opaque; what a merge or discard names to bind itself to the reviewed entry), `staged_by`, `staged_at`; a node delete also lists its `unstaged_edges`, the main edges to the node the layer does not tombstone (added since, or missed). A direct session answers an empty list |
+| POST | `/api/sessions/{id}/staged/merge` | `merge_staged_changes` | `{merge_id, entries: "all" \| [{kind, entity_id, version?}], resolutions?: [{kind, entity_id, choice, values?}]}`. `version` is the opaque one the diff gave the entry: an entry restaged since refuses the merge (`merge_raced`), checked in the merge unit. Applies the selected entries to the graph and removes them from the layer as one unit, or nothing. `choice` is `take_session`, `keep_main`, `as_new` (nodes) or `manual` (updates; `values` gives the final value of every conflicting field). Repeating a `merge_id` returns the first result (`replayed: true`) and writes nothing. Graph events fire as for direct writes, with `event_origin` `session-merge`, the merge id as correlation id and `staged_by` |
+| POST | `/api/sessions/{id}/staged/discard` | `discard_staged_changes` | `{entries: "all" \| [{kind, entity_id, version?}]}`. Removes entries from the layer (an entry restaged since its named `version` refuses the discard with `merge_raced`); the graph does not change and no graph event fires. Answers the keys actually removed |
 
 **In the web app** (docs/SESSION_OVERLAY_CONTRACT.md §17): the client marks a
 session staged only from what the server says (a session payload or a
@@ -940,9 +940,12 @@ effect on its next write; and it holds graph writes from a linked session
 until that session's payload has said how it writes. The pending count, the canvas
 markers and the review all come from `GET /api/sessions/{id}/staged`; the
 stream's staged-change ops are only a cue to re-read it and the composed
-entities they name. A merge names the reviewed entries explicitly (never
-`all`), goes only after a fresh read shows them unchanged, and reuses its
-UUID `merge_id` only to retry the same request whose outcome is unknown.
+entities they name. A merge or discard names the reviewed entries explicitly
+(never `all`), each with the `version` it was reviewed at, so the server
+refuses one restaged since (`merge_raced`; the review then reads again and the
+changed entries need a new tick and decision). It goes only after a fresh read
+shows them unchanged, and reuses its UUID `merge_id` only to retry the same
+request whose outcome is unknown.
 
 Merge and discard fan out on the session stream as `graph_changes_merged`
 (`merge_id`, `removals`) and `graph_changes_discarded` (`removals`) - keys

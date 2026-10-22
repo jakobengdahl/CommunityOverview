@@ -388,6 +388,9 @@ class Review:
                 {"kind": dep[0], "entity_id": dep[1]} for dep in self.depends_on[key]
             ],
             "session_seq": entry.get("session_seq"),
+            # Opaque: what a merge or discard request names to bind itself to
+            # the version of the entry its caller reviewed (§11.4).
+            "version": entry_version(entry),
             "staged_by": entry.get("staged_by"),
             "staged_at": entry.get("staged_at"),
         }
@@ -684,6 +687,39 @@ def _validate_writes(
                 raise refuse(write, error)
 
 
+MAX_VERSION_LENGTH = 200
+
+
+def expected_versions(selection: Any) -> Dict[LayerKey, str]:
+    """The entry versions a list selection binds itself to (§11.4): each
+    entry's optional ``version``, as the diff gave it when the caller
+    reviewed the entry. An entry without one is not bound."""
+    if not isinstance(selection, list):
+        return {}
+    pinned: Dict[LayerKey, str] = {}
+    for item in selection:
+        if not isinstance(item, dict) or item.get("version") is None:
+            continue
+        version = item["version"]
+        if (
+            not isinstance(version, str)
+            or not version
+            or len(version) > MAX_VERSION_LENGTH
+        ):
+            raise ReviewRefused(
+                INVALID_MERGE_REQUEST,
+                "an entry's version is the string the diff gave it",
+                422,
+            )
+        key = (item.get("kind"), item.get("entity_id"))
+        if pinned.get(key, version) != version:
+            raise ReviewRefused(
+                INVALID_MERGE_REQUEST, "an entry is named with two versions", 422
+            )
+        pinned[key] = version
+    return pinned
+
+
 def _endpoint_doc(review: Review, planned: Dict[str, Any], node_id: str):
     return planned.get(node_id) or _main_doc(review.storage, ("node", node_id))
 
@@ -790,13 +826,18 @@ def plan_merge(
     actor: str,
     merge_id: str,
     new_id: Any = None,
+    expected: Optional[Dict[LayerKey, str]] = None,
 ) -> Tuple[SessionMergePlan, List[Dict[str, Any]]]:
     """The merge unit for ``selected`` (§11), and one result item per entry.
 
     Raises ReviewRefused: ``merge_incomplete`` for a selection not closed
     under dependencies, ``merge_blocked`` (with the current diff of the
     blocking entries) for an entry no allowed resolution covers,
-    ``invalid_merge_request`` for a resolution that does not fit."""
+    ``invalid_merge_request`` for a resolution that does not fit.
+
+    ``expected`` holds the versions the caller reviewed: the unit also
+    checks each entry is still that version, so an entry restaged after the
+    review, even before this plan read it, refuses the merge (merge_raced)."""
     new_id = new_id or (lambda: str(uuid.uuid4()))
     chosen = set(selected)
     missing = sorted(
@@ -900,6 +941,8 @@ def plan_merge(
         )
         staged_by = entry.get("staged_by")
         checks.append(MergeCheck.entry_unchanged(kind, entity_id, entry_version(entry)))
+        if expected and key in expected:
+            checks.append(MergeCheck.entry_unchanged(kind, entity_id, expected[key]))
         result = {
             "kind": kind,
             "entity_id": entity_id,
