@@ -2947,6 +2947,9 @@ function App() {
       sessionIdRef.current === id ? sessionWriteModeRef.current : modeAtConfirm;
     locallyDeletingRef.current.add(id);
     deletesInFlightRef.current.add(id);
+    // What an earlier delete of this id learnt does not decide this one: a
+    // direct id can be opened, and deleted, again.
+    deletedStagedRef.current.delete(id);
     try {
       let browserOnly = false;
       try {
