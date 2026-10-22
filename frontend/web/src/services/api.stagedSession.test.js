@@ -228,6 +228,27 @@ describe('a direct session the server holds, where staging exists', () => {
   });
 });
 
+describe('mode-unknown hold, more cases', () => {
+  it('holds a chat message too, since the assistant can write', async () => {
+    const calls = mockFetch();
+    api.setActiveSessionForRequests('5555-6666-7777-8888');
+    api.setSessionModeUnknown('5555-6666-7777-8888');
+    const error = await api.sendChatMessage([{ role: 'user', content: 'hi' }]).catch((e) => e);
+    expect(error.code).toBe('session_mode_unknown');
+    expect(calls).toHaveLength(0);
+    api.setSessionModeDirect('5555-6666-7777-8888');
+  });
+
+  it('never turns a staged session back into an unknown one', async () => {
+    const calls = mockFetch();
+    api.setActiveSessionForRequests('1111-2222-3333-4444');
+    api.setSessionStaged('1111-2222-3333-4444', true);
+    api.setSessionModeUnknown('1111-2222-3333-4444');
+    await api.updateNode('n1', { name: 'x' });
+    expect(headerOf(calls[0])).toBe('1111-2222-3333-4444');
+  });
+});
+
 describe('possibly staged', () => {
   it('is true for a staged or not-yet-known session, false for a direct one or none', () => {
     expect(api.isActiveSessionPossiblyStaged()).toBe(false);

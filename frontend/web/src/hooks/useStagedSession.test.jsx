@@ -178,6 +178,14 @@ describe('useStagedSession', () => {
     expect(result.current.writeMode).toBe('staged');
   });
 
+  it('keeps a staged session staged when it is later marked not known', () => {
+    api.getStagedChanges.mockResolvedValue({ items: [] });
+    const { result } = renderHook(() => useStagedSession('1111-2222'));
+    act(() => result.current.adoptSessionPayload('1111-2222', { write_mode: 'staged' }));
+    act(() => result.current.markModeUnknown('1111-2222'));
+    expect(result.current.writeMode).toBe('staged');
+  });
+
   it('forgets a deleted session', () => {
     api.getStagedChanges.mockResolvedValue({ items: [] });
     const { result } = renderHook(() => useStagedSession('1111-2222'));

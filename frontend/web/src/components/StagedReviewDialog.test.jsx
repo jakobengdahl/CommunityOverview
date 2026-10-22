@@ -325,6 +325,14 @@ describe('StagedReviewDialog', () => {
     expect(api.mergeStagedChanges).toHaveBeenCalledTimes(1);
   });
 
+  it('unticks what depends on an entry when it is unticked', () => {
+    renderDialog();
+    fireEvent.click(checkbox('edge:e1'));
+    expect(checkbox('node:n1').checked).toBe(true);
+    fireEvent.click(checkbox('node:n1'));
+    expect(checkbox('edge:e1').checked).toBe(false);
+  });
+
   it('unticks an entry restaged after it was ticked, so it never merges unseen', async () => {
     const { rerender } = renderDialog();
     fireEvent.click(checkbox('node:n1'));
