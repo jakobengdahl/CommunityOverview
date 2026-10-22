@@ -772,11 +772,20 @@ still true when the merge applies.
     endpoints exist, or are created by the same unit.
   - **Incident edges as listed.** For every node the merge deletes, the node's
     incident edges in the store are exactly those the merge deletes with it.
+    For every node the merge retypes in place, they are exactly those the
+    merge read, each still at the revision it read, since each was judged
+    against the new type.
 - In a shared store, the unit locks the rows those checks read, so they cannot
   change before it commits. The same rule applies to direct writes: an edge
-  create locks its endpoint rows for share, and a node delete locks its node
-  row. So an edge create and a node delete on the same node are ordered against
-  each other, whichever instance issues them.
+  create locks its endpoint rows for share, and a node delete or a merge's
+  retype locks its node row. So an edge create and a node delete or retype on
+  the same node are ordered against each other, whichever instance issues
+  them.
+- An edge write, direct or merged, also carries the type of each endpoint it
+  was judged against. Holding the endpoint, a shared store refuses the write if the
+  endpoint now has another type, with `entity_revision_conflict` (`merge_raced`
+  for a merge). So an edge judged before a merge retyped its endpoint cannot
+  land after it.
 - If any expectation or check fails, the whole merge fails with
   `merge_raced`, and nothing is written. The caller re-reads the diff and tries
   again.

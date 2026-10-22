@@ -1563,3 +1563,87 @@ def test_an_id_taken_create_retyping_a_node_is_out_of_view_over_a_hidden_tombsto
     assert world.storage.get_node("l").type_str == "Legislation"
     world.hook.narrow = False
     assert _items(svc.get_staged_changes(sid))[("node", "l")]["status"] == "id_taken"
+
+
+# -- post-merge review round 3 regressions ------------------------------------------------
+
+
+def _other_instance(world):
+    from backend.core import GraphStorage
+    from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+    from backend.core.tests.test_persistence_contract_postgres import DSN
+
+    backend = PostgresGraphPersistenceBackend(
+        DSN, schema=world.storage._persistence_backend.schema, staged_sessions=True
+    )
+    return GraphStorage(persistence_backend=backend), backend
+
+
+def test_a_kept_edge_another_instance_changes_fails_a_retype_merge(
+    pg_world, monkeypatch
+):
+    """A retype keeps the edges it judged against the new type: one another
+    instance changed since the plan, its id unchanged, refuses the unit."""
+    world = pg_world
+    svc, sid = world.service, world.staged_session()
+    _stage(
+        world, sid, ("add_nodes", ([{"id": "l", "type": "Actor", "name": "L"}], []), {})
+    )
+    world.storage.add_nodes(
+        [
+            Node(id="i", type="Initiative", name="I"),
+            Node(id="l", type="Legislation", name="L"),
+        ],
+        [Edge(id="x", source="i", target="l", type="RELATES_TO")],
+    )
+    other, backend = _other_instance(world)
+    try:
+        store = world.storage.layer_store
+        original = store.merge
+
+        def other_instance_first(*args, **kwargs):
+            # Valid when written: l is still Legislation in the store.
+            other.update_edge("x", {"type": "IMPLEMENTS"})
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(store, "merge", other_instance_first)
+        take = [{"kind": "node", "entity_id": "l", "choice": "take_session"}]
+        result = svc.merge_staged_changes(
+            sid, "m", entries=[{"kind": "node", "entity_id": "l"}], resolutions=take
+        )
+        assert result["error"] == "merge_raced"
+        assert other.get_node("l").type_str == "Legislation"
+        assert ("node", "l") in world.layer(sid)
+    finally:
+        other.shutdown_events()
+        backend.close()
+
+
+def test_an_edge_judged_before_a_retype_merge_cannot_land_after_it(
+    pg_world, monkeypatch
+):
+    """An edge another instance judged against a node's old type, written
+    once a merge retyped the node, is refused by the store."""
+    from backend.core.storage_backends import EntityRevisionConflict
+
+    world = pg_world
+    svc, sid = world.service, _recreate_legislation_as_actor(world)
+    other, backend = _other_instance(world)
+    merged = {}
+    original = backend._apply_batch_once
+
+    def merge_between_judgement_and_write(*args, **kwargs):
+        merged.setdefault("result", svc.merge_staged_changes(sid, "m"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(backend, "_apply_batch_once", merge_between_judgement_and_write)
+    try:
+        with pytest.raises(EntityRevisionConflict, match="no longer of type"):
+            other.add_edge(Edge(id="x", source="i", target="l", type="IMPLEMENTS"))
+        assert merged["result"]["success"] is True
+        assert world.storage.get_node("l").type_str == "Actor"
+        assert "x" not in other.edges
+        assert "x" not in {e["id"] for e in backend.load_graph_data()["edges"]}
+    finally:
+        other.shutdown_events()
+        backend.close()

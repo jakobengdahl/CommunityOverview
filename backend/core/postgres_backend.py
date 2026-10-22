@@ -80,6 +80,7 @@ from psycopg_pool import ConnectionPool
 from backend.core import layer_store
 from backend.core.storage_backends import (
     BackendCapabilities,
+    EndpointTypeChanged,
     EntityOperation,
     EntityRevisionConflict,
     ExternalChange,
@@ -1628,6 +1629,12 @@ class PostgresGraphPersistenceBackend:
         strongly. One single-row statement per endpoint, in sorted order, so
         two batches over the same nodes take them in the same order, and
         each is a primary-key lookup whatever the table's size.
+
+        Held, each endpoint's type is compared with the one the edge was
+        judged against (`endpoint_types`): a merge retypes a node in place
+        under FOR UPDATE, so an edge judged before it waits here and then
+        finds the new type, and is refused rather than landing a
+        relationship the new type does not allow.
         """
         upserted = {
             op.entity_id
@@ -1646,12 +1653,19 @@ class PostgresGraphPersistenceBackend:
         )
         if not endpoints:
             return
+        judged: Dict[str, str] = {}
+        for op in operations:
+            if op.kind == "edge" and op.action == "upsert":
+                judged.update(op.endpoint_types)
         scope, scope_params = self._and_scope()
-        statement = sql.SQL("SELECT 1 FROM {} WHERE id = %s{} FOR KEY SHARE").format(
-            self._table("graph_nodes"), scope
-        )
+        statement = sql.SQL(
+            "SELECT doc->>'type', COALESCE((doc->>'revision')::bigint, 0)"
+            " FROM {} WHERE id = %s{} FOR KEY SHARE"
+        ).format(self._table("graph_nodes"), scope)
         for endpoint in endpoints:
-            conn.execute(statement, (endpoint, *scope_params))
+            row = conn.execute(statement, (endpoint, *scope_params)).fetchone()
+            if row is not None and endpoint in judged and row[0] != judged[endpoint]:
+                raise EndpointTypeChanged(endpoint, judged[endpoint], int(row[1]))
 
     def _stored_revision_of(self, conn, table: str, entity_id: str) -> Optional[int]:
         """The visible row's revision, or None when there is no such row."""
@@ -2456,8 +2470,8 @@ class PostgresGraphPersistenceBackend:
         for check in incident:
             rows = conn.execute(
                 sql.SQL(
-                    "SELECT id FROM {} WHERE (doc->>'source' = %s"
-                    " OR doc->>'target' = %s){}"
+                    "SELECT id, COALESCE((doc->>'revision')::bigint, 0) FROM {}"
+                    " WHERE (doc->>'source' = %s OR doc->>'target' = %s){}"
                 ).format(self._table("graph_edges"), edge_scope),
                 (check.entity_id, check.entity_id, *edge_params),
             ).fetchall()
@@ -2468,6 +2482,14 @@ class PostgresGraphPersistenceBackend:
                     f"node {check.entity_id!r} has incident edges the merge "
                     f"did not list"
                 )
+            # An edge write holds its endpoints FOR KEY SHARE, which the lock
+            # above excludes, so these revisions hold until the commit.
+            stored = {row[0]: int(row[1]) for row in rows}
+            for edge_id, revision in check.edge_revisions:
+                if stored.get(edge_id) != revision:
+                    raise layer_store.MergeRaced(
+                        f"edge {edge_id!r} to node {check.entity_id!r} changed"
+                    )
 
     # -- change notification -------------------------------------------------
 

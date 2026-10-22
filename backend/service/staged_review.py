@@ -1029,15 +1029,18 @@ def plan_merge(
     )
     # The kept edges of a retyped node were judged against the new type on
     # what this instance holds; the store refuses the unit if another one
-    # added an edge to the node since, which no direct retype could keep.
-    checks.extend(
-        MergeCheck.incident_edges(
-            w.entity_id,
-            [e.id for e in review.storage.get_edges_for_node(w.entity_id)],
-        )
-        for w in node_upserts
-        if _retyped(review, w)
-    )
+    # added an edge to the node since, or changed one of them, which no
+    # direct retype could keep.
+    for write in node_upserts:
+        if _retyped(review, write):
+            edges = review.storage.get_edges_for_node(write.entity_id)
+            checks.append(
+                MergeCheck.incident_edges(
+                    write.entity_id,
+                    [e.id for e in edges],
+                    {e.id: _revision(_doc(e)) for e in edges},
+                )
+            )
     writes = node_upserts + edge_deletes + edge_upserts + node_deletes
     if renamed:
         # Which staged edge creates follow a node merged as new was decided

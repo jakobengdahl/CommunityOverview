@@ -170,6 +170,13 @@ class EntityOperation:
     `revision_enforcement` reads them; the instance has already checked them
     against its own model before the operation is issued. They are never
     journaled: they are a condition of applying the write, not part of it.
+
+    `endpoint_types`, for an edge upsert, is `(node id, type)` for each
+    endpoint the instance judged the edge's relationship type against. A
+    backend declaring `revision_enforcement` refuses the write when the
+    store holds another type for one of them, so an edge judged before a
+    merge retyped its endpoint on another instance cannot land after it.
+    Not journaled either, for the same reason.
     """
 
     kind: EntityKindName
@@ -178,6 +185,7 @@ class EntityOperation:
     payload: Optional[Dict[str, Any]] = None
     expected_revision: Optional[int] = None
     expect_absent: bool = False
+    endpoint_types: Tuple[Tuple[str, str], ...] = ()
 
     @classmethod
     def upsert_node(cls, payload: Dict[str, Any]) -> "EntityOperation":
@@ -417,6 +425,18 @@ class EntityRevisionConflict(RuntimeError):
         wanted = "absent" if expected is None else f"revision {expected}"
         found = "absent" if current is None else f"revision {current}"
         super().__init__(f"{kind} {entity_id!r}: expected {wanted}, found {found}")
+
+
+class EndpointTypeChanged(EntityRevisionConflict):
+    """An edge write's endpoint no longer has the type it was judged against.
+
+    A conflict like any other expectation that did not hold: nothing in the
+    batch was applied, and the caller re-reads before trying again.
+    """
+
+    def __init__(self, node_id: str, judged: str, current: Optional[int]):
+        super().__init__("node", node_id, None, current)
+        self.args = (f"node {node_id!r}: no longer of type {judged!r}",)
 
 
 class WriteRefusedByStore(RuntimeError):

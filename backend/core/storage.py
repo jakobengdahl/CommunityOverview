@@ -1407,9 +1407,26 @@ class GraphStorage:
                         else None
                     ),
                     expect_absent=expected is EXPECT_ABSENT,
+                    endpoint_types=self._endpoint_types(kind, action, payload),
                 )
             )
         return operations
+
+    def _endpoint_types(
+        self, kind: str, action: str, payload: Optional[Dict[str, Any]]
+    ) -> Tuple[Tuple[str, str], ...]:
+        """What an edge upsert's endpoints are in memory, where its relationship
+        type was judged. Callers must hold _lock."""
+        if kind != "edge" or action != "upsert" or not payload:
+            return ()
+        ends = {payload.get("source"), payload.get("target")}
+        return tuple(
+            sorted(
+                (end, self.nodes[end].type_str)
+                for end in ends
+                if end is not None and end in self.nodes
+            )
+        )
 
     def _await_landing(self, future: "Future[Any]") -> None:
         """Wait for a single-writer write with an expectation (§4.4).
@@ -3758,6 +3775,9 @@ class GraphStorage:
                     ),
                     expected_revision=write.expected_revision,
                     expect_absent=write.expect_absent,
+                    endpoint_types=self._endpoint_types(
+                        write.kind, write.action, write.payload
+                    ),
                 )
                 for write, entity in zip(plan.writes, entities)
             ]

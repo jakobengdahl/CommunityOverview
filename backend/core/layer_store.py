@@ -203,8 +203,11 @@ class MergeCheck:
       endpoint, judged on the state the unit leaves.
     - `incident_edges(node_id, edge_ids)`: before the unit's operations, the
       edges incident to the node in the store are exactly `edge_ids` - the
-      ones the merge deletes with the node, or judged against the new type
-      of a node it retypes. An edge added since the diff was read fails it.
+      ones the merge deletes with the node, or the ones of a node it retypes
+      in place. An edge added since the diff was read fails it. With
+      `revisions`, each listed edge must also still have the revision the
+      merge read, so a kept edge another instance changed since (its type,
+      which the new type was judged against) fails it too.
     - `entry_unchanged(kind, entity_id, version)`: the layer still holds
       the entry the decision was made on: its `entry_version` is `version`
       (a string), or, for an int, its `session_seq` is that number. A
@@ -222,6 +225,7 @@ class MergeCheck:
     entity_id: str
     kind: str = "node"
     edge_ids: Tuple[str, ...] = ()
+    edge_revisions: Tuple[Tuple[str, int], ...] = ()
     session_seq: Optional[Union[int, str]] = None
     keys: Tuple[LayerKey, ...] = ()
 
@@ -230,8 +234,18 @@ class MergeCheck:
         return cls("node_exists", node_id)
 
     @classmethod
-    def incident_edges(cls, node_id: str, edge_ids: Iterable[str]) -> "MergeCheck":
-        return cls("incident_edges", node_id, edge_ids=tuple(sorted(set(edge_ids))))
+    def incident_edges(
+        cls,
+        node_id: str,
+        edge_ids: Iterable[str],
+        revisions: Optional[Mapping[str, int]] = None,
+    ) -> "MergeCheck":
+        return cls(
+            "incident_edges",
+            node_id,
+            edge_ids=tuple(sorted(set(edge_ids))),
+            edge_revisions=tuple(sorted((revisions or {}).items())),
+        )
 
     @classmethod
     def entry_unchanged(
@@ -579,6 +593,11 @@ def check_merge_request(
         check_keys(check.keys)
         for edge_id in check.edge_ids:
             _check_id(edge_id, "edge id")
+        for edge_id, revision in check.edge_revisions:
+            if edge_id not in check.edge_ids or type(revision) is not int:
+                raise InvalidLayerRequest(
+                    "an incident edge revision names a listed edge and an int"
+                )
     removed = check_keys(removals)
     if len(set(removed)) != len(removed):
         raise InvalidLayerRequest("a merge removes one entry twice")
@@ -653,6 +672,11 @@ def apply_merge_to_model(
             raise MergeRaced(
                 f"node {check.entity_id!r} has incident edges the merge did not list"
             )
+        for edge_id, revision in check.edge_revisions:
+            if stored_revision(edges.get(edge_id)) != revision:
+                raise MergeRaced(
+                    f"edge {edge_id!r} to node {check.entity_id!r} changed"
+                )
     for op in operations:
         table = nodes if op.kind == "node" else edges
         current = stored_revision(table.get(op.entity_id))
