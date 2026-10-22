@@ -349,6 +349,10 @@ E2E tests include:
   `page.route`, so no request reaches an LLM provider
 - `shared-session.spec.js` - Two browser contexts in one shared session
   (presence, node and note fan-out, move sync, delete warning)
+- `staged-session.spec.js` - Staged sessions: create, edit, review a conflict,
+  merge, discard; live updates to a second participant; a deleted staged
+  session replaced by a staged one; direct → staged switch. The backend
+  Playwright starts runs with `GRAPH_STAGED_SESSIONS=true` for it
 - `mobile-smoke.spec.js` - Phone-viewport smoke tests (see below)
 
 The e2e graph file starts empty, so the desktop specs seed the nodes they need
@@ -923,6 +927,18 @@ its MCP twin (`get_staged_changes` as `read`; `merge_staged_changes` and
 | GET | `/api/sessions/{id}/staged` | `get_staged_changes` | The diff: one item per staged entry - `kind`, `entity_id`, `action`, `base_revision`, `main_revision`, `fields` (per field, and per `metadata.<key>`: `base`, `staged`, `main`, `conflict`), `status` (`clean`, `conflict`, `orphaned`, `id_taken`, `dangling`), `depends_on`, `session_seq`, `staged_by`, `staged_at`; a node delete also lists its `unstaged_edges`, the main edges to the node the layer does not tombstone (added since, or missed). A direct session answers an empty list |
 | POST | `/api/sessions/{id}/staged/merge` | `merge_staged_changes` | `{merge_id, entries: "all" \| [{kind, entity_id}], resolutions?: [{kind, entity_id, choice, values?}]}`. Applies the selected entries to the graph and removes them from the layer as one unit, or nothing. `choice` is `take_session`, `keep_main`, `as_new` (nodes) or `manual` (updates; `values` gives the final value of every conflicting field). Repeating a `merge_id` returns the first result (`replayed: true`) and writes nothing. Graph events fire as for direct writes, with `event_origin` `session-merge`, the merge id as correlation id and `staged_by` |
 | POST | `/api/sessions/{id}/staged/discard` | `discard_staged_changes` | `{entries: "all" \| [{kind, entity_id}]}`. Removes entries from the layer; the graph does not change and no graph event fires. Answers the keys actually removed |
+
+**In the web app** (docs/SESSION_OVERLAY_CONTRACT.md §17): the client marks a
+session staged only from what the server says (a session payload or a
+`write_mode_changed` op), and from then on sends the session header on every
+route above and on every other graph-changing request
+(`frontend/web/src/services/stagedSessionHeader.js`), so a write the backend
+cannot stage is refused rather than applied. The pending count, the canvas
+markers and the review all come from `GET /api/sessions/{id}/staged`; the
+stream's staged-change ops are only a cue to re-read it and the composed
+entities they name. A merge names the reviewed entries explicitly (never
+`all`), goes only after a fresh read shows them unchanged, and reuses its
+UUID `merge_id` only to retry the same request whose outcome is unknown.
 
 Merge and discard fan out on the session stream as `graph_changes_merged`
 (`merge_id`, `removals`) and `graph_changes_discarded` (`removals`) - keys
@@ -1735,6 +1751,7 @@ own.
 | POST | `/ui/upload/extract` | Extract text only (no LLM analysis) |
 | GET | `/ui/info` | Get service info (provider, tools) |
 | GET | `/ui/supported-formats` | Get supported document formats |
+| GET | `/ui/capabilities` | UI feature availability: `llm_available`, `llm_provider`, `model_profiles`, and `staged_sessions` (whether a session can be staged here, i.e. `GRAPH_STAGED_SESSIONS`) with `session_write_mode_default`. The web app offers the staged choice only when `staged_sessions` is true |
 
 The routes that reach the graph (`/ui/chat`, `/ui/chat/simple`,
 `/ui/propose-nodes`, `/ui/upload`, `/ui/info`) bind the caller's request
