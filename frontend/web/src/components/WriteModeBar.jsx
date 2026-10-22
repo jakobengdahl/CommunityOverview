@@ -21,7 +21,7 @@ function WriteModeBar({
   onRetryMode,
 }) {
   const { t } = useI18n();
-  if (writeMode === 'unknown' && stagedAvailable) {
+  if (writeMode === 'unknown') {
     // A linked session whose mode has not loaded: it may be staged, so edits
     // are held until it has.
     return (

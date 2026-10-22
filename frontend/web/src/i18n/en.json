@@ -906,6 +906,7 @@
     "mode_staged_short": "not in the graph until merged",
     "mode_unknown": "Loading how this session writes — edits are paused until it has loaded.",
     "mode_retry": "Retry",
-    "ticks_dropped": "{count} ticked change(s) changed since you ticked them and were unticked; check them and tick again"
+    "ticks_dropped": "{count} ticked change(s) changed since you ticked them and were unticked; check them and tick again",
+    "recheck_first": "These changed since you ticked them; check them and tick them first: {names}"
   }
 }

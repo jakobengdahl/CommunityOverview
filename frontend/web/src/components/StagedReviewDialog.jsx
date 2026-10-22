@@ -108,20 +108,43 @@ function StagedReviewDialog({
   const ticked = (keys) =>
     new Map([...keys].filter((k) => byKey.has(k)).map((k) => [k, itemFingerprint(byKey.get(k))]));
 
+  // A merge_blocked answer's statuses hold for that selection and those
+  // resolutions only.
+  const changeSelection = (next) => {
+    setBlockedStatus(new Map());
+    setSelected(next);
+  };
+
   const toggle = (key) => {
     if (liveSelected.has(key)) {
       const drop = new Set([key, ...dependants(items, key)]);
-      setSelected(ticked([...liveSelected].filter((k) => !drop.has(k))));
+      changeSelection(ticked([...liveSelected].filter((k) => !drop.has(k))));
       return;
     }
-    setSelected(ticked(dependencyClosure(items, [...liveSelected, key])));
+    const closure = dependencyClosure(items, [...liveSelected, key]);
+    // An entry whose tick went stale (it changed after it was ticked) is not
+    // ticked again on the way: the user looks at it and ticks it first.
+    const stale = [...closure].filter((k) => k !== key && selected.has(k) && !liveSelected.has(k));
+    if (stale.length) {
+      setMessage({
+        kind: 'warning',
+        text: t('staged.recheck_first', {
+          names: stale.map((k) => labelOf(byKey.get(k))).join(', '),
+        }),
+      });
+      return;
+    }
+    changeSelection(ticked(closure));
   };
 
-  const selectAll = () => setSelected(ticked(items.map(itemKey)));
-  const selectNone = () => setSelected(new Map());
+  const selectAll = () => changeSelection(ticked(items.map(itemKey)));
+  const selectNone = () => changeSelection(new Map());
 
   const setChoice = (item, choice) => {
     const key = itemKey(item);
+    // Resolving a blocked entry keeps that answer's statuses; changing any
+    // other entry's resolution can change them, so they no longer hold.
+    if (!blockedStatus.has(key)) setBlockedStatus(new Map());
     setResolutions((prev) => ({ ...prev, [key]: { choice } }));
     if (choice === 'manual' && !manualText[key]) {
       const seeded = {};

@@ -906,6 +906,7 @@
     "mode_staged_short": "inte i grafen förrän ihopslaget",
     "mode_unknown": "Läser in hur sessionen skriver — ändringar väntar tills den har lästs in.",
     "mode_retry": "Försök igen",
-    "ticks_dropped": "{count} markerade ändring(ar) har ändrats sedan du markerade dem och avmarkerades; kontrollera och markera igen"
+    "ticks_dropped": "{count} markerade ändring(ar) har ändrats sedan du markerade dem och avmarkerades; kontrollera och markera igen",
+    "recheck_first": "De här har ändrats sedan du markerade dem; kontrollera och markera dem först: {names}"
   }
 }

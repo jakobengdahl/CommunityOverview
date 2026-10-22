@@ -229,6 +229,36 @@ describe('StagedReviewDialog', () => {
     expect(screen.getByTestId('staged-merge').disabled).toBe(true);
   });
 
+  it('does not re-tick a restaged dependency on the way to ticking its dependant', () => {
+    const { rerender } = renderDialog();
+    fireEvent.click(checkbox('node:n1'));
+    rerender([{ ...CREATE, session_seq: 9 }, EDGE, CONFLICT]);
+    expect(checkbox('node:n1').checked).toBe(false);
+    fireEvent.click(checkbox('edge:e1'));
+    expect(checkbox('edge:e1').checked).toBe(false);
+    expect(screen.getByText('staged.recheck_first')).toBeTruthy();
+  });
+
+  it('drops a merge_blocked status once another entry is resolved differently', async () => {
+    api.mergeStagedChanges.mockRejectedValueOnce(
+      Object.assign(new Error('blocked'), {
+        status: 409,
+        code: 'merge_blocked',
+        data: { items: [{ ...EDGE, status: 'dangling' }] },
+      })
+    );
+    renderDialog({ items: [{ ...CREATE, status: 'id_taken' }, EDGE] });
+    fireEvent.click(checkbox('edge:e1'));
+    fireEvent.change(screen.getByTestId('resolution-node:n1'), { target: { value: 'keep_main' } });
+    fireEvent.click(screen.getByTestId('staged-merge'));
+    await waitFor(() => expect(screen.getByTestId('resolution-edge:e1')).toBeTruthy());
+    fireEvent.change(screen.getByTestId('resolution-node:n1'), {
+      target: { value: 'take_session' },
+    });
+    expect(screen.queryByTestId('resolution-edge:e1')).toBeNull();
+    expect(screen.getByTestId('staged-item-edge:e1').textContent).toContain('staged.status.clean');
+  });
+
   it('a merge_blocked status that exists only within the merge can be resolved', async () => {
     api.mergeStagedChanges
       .mockRejectedValueOnce(

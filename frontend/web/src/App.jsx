@@ -335,6 +335,9 @@ function App() {
   // Sessions this tab is deleting, so its own delete notice is told apart from
   // one another tab of the same browser (same client id) caused.
   const locallyDeletingRef = useRef(new Set());
+  // Sessions this tab is deleting that the server's notice says were staged,
+  // even if this tab had not learnt it: they are replaced by staged ones.
+  const deletedStagedRef = useRef(new Set());
   const applyServerSessionRef = useRef(null);
   // Guards resyncFromServer against overlapping reconnects (review round 2):
   // a flaky connection can drop and reconnect more than once before a slow
@@ -423,6 +426,32 @@ function App() {
   const applyRemoteOp = useCallback(
     async (op) => {
       const store = useGraphStore.getState();
+      if (
+        (op?.op === 'edges_added' || op?.op === 'edges_updated') &&
+        api.getStagedSessionBinding()
+      ) {
+        // In a staged session the edge an op carries is staged content, and
+        // the stream reaches anyone holding the session id: read it from the
+        // composed view instead, which asks the authorization hook
+        // (docs/SESSION_OVERLAY_CONTRACT.md §15).
+        const sessionAtStart = syncRef.current?.sessionId;
+        const onCanvas = new Set(store.nodes.map((n) => n.id));
+        const wanted = (op.edges || []).filter(
+          (e) => e && e.id && onCanvas.has(e.source) && onCanvas.has(e.target)
+        );
+        const sources = [...new Set(wanted.map((e) => e.source))];
+        const reads = await Promise.all(
+          sources.map((id) => api.getNodeDetails(id).catch(() => null))
+        );
+        if (syncRef.current?.sessionId !== sessionAtStart) return false; // switched away while fetching
+        const listed = new Map(reads.flatMap((r) => r?.edges || []).map((e) => [e.id, e]));
+        const have = new Set(useGraphStore.getState().edges.map((e) => e.id));
+        const fresh = wanted.map((e) => listed.get(e.id)).filter(Boolean);
+        fresh.filter((e) => have.has(e.id)).forEach((e) => updateEdgeData(e.id, e));
+        const added = fresh.filter((e) => !have.has(e.id));
+        if (added.length) addNodesToVisualization([], added);
+        return fresh.length > 0;
+      }
       switch (op?.op) {
         case 'nodes_added': {
           const have = new Set(store.nodes.map((n) => n.id));
@@ -2373,11 +2402,16 @@ function App() {
       onSessionDeleted: (deletedBy, deletedWriteMode) => {
         // Either side knowing the session was staged is enough: the notice
         // can come without its mode (a drained stream), and staged is final.
-        const wasStaged = deletedWriteMode === 'staged' || sessionWriteMode === 'staged';
+        // A mode not yet known counts as staged: leaving it for a direct
+        // session could be the silent switch §13 rules out.
+        const wasStaged = deletedWriteMode === 'staged' || sessionWriteMode !== 'direct';
         if (wasStaged) {
           // Handled by the local delete path only in the tab that deleted it:
           // the client id is shared by every tab of this browser.
-          if (locallyDeletingRef.current.has(sessionId)) return;
+          if (locallyDeletingRef.current.has(sessionId)) {
+            deletedStagedRef.current.add(sessionId);
+            return;
+          }
           // Refuse writes naming the deleted id until the replacement exists,
           // even if this client had not learnt it was staged.
           adoptWriteMode(sessionId, 'staged');
@@ -2387,8 +2421,11 @@ function App() {
           leaveDeletedSession(sessionId, true).then(() => setSessionsVersion((v) => v + 1));
           return;
         }
+        // Per tab, not per client id (shared by every tab of this browser).
+        if (locallyDeletingRef.current.has(sessionId)) return;
+        forgetStagedSession(sessionId);
         const dropped = receiveRemoteSessionDeleted({
-          deletedBy,
+          deletedBy: null,
           clientId: api.getClientId(),
           sessionId,
           generateSessionId: api.generateVisualizationSessionId,
@@ -2454,6 +2491,7 @@ function App() {
     sessionWriteMode,
     leaveDeletedSession,
     adoptWriteMode,
+    forgetStagedSession,
     handleStagedSessionOp,
     refreshStagedEntities,
     refreshStagedDiff,
@@ -2724,7 +2762,16 @@ function App() {
       // go with it.
       await api.deleteServerSession(id, api.getClientId(), { discardStaged: wasStaged });
     } catch (error) {
-      if (error?.status !== 404) {
+      let gone = error?.status === 404;
+      if (typeof error?.status !== 'number') {
+        // No answer: the delete may have landed. Ask whether the session is
+        // still there rather than report a failure that did not happen.
+        gone = await api.getSession(id).then(
+          () => false,
+          (e) => e?.status === 404
+        );
+      }
+      if (!gone) {
         // A session that was not deleted keeps its work: never act as if it
         // were gone.
         locallyDeletingRef.current.delete(id);
@@ -2734,6 +2781,12 @@ function App() {
       // 404: the session only ever existed locally.
     }
     sessionStore.removeSession(id);
+    // The server's notice may say staged where this tab thought direct (it
+    // was switched meanwhile): then the replacement is staged too.
+    const leftStaged =
+      wasStaged ||
+      deletedStagedRef.current.has(id) ||
+      (id === sessionId && sessionWriteMode !== 'direct');
     if (id === sessionId) {
       // Deleting the active session: drop its content and switch into a fresh
       // one (design 3.6); a staged one into a staged one (§13). Other
@@ -2741,16 +2794,17 @@ function App() {
       // broadcast.
       showNotification(
         'info',
-        t(wasStaged ? 'staged.session_deleted' : 'sessions.session_deleted')
+        t(leftStaged ? 'staged.session_deleted' : 'sessions.session_deleted')
       );
-      await leaveDeletedSession(id, wasStaged);
-    } else if (wasStaged) {
+      await leaveDeletedSession(id, leftStaged);
+    } else if (leftStaged) {
       forgetStagedSession(id);
     }
     setSessionsVersion((v) => v + 1);
   }, [
     deleteSessionDialog,
     sessionId,
+    sessionWriteMode,
     leaveDeletedSession,
     forgetStagedSession,
     showNotification,
@@ -2839,6 +2893,22 @@ function App() {
   );
 
   const closeStagedReview = useCallback(() => setStagedReviewOpen(false), []);
+
+  // The diff's states, over those the composed reads put on each entity
+  // (`staged_state`), so a staged entity stays marked even when the diff
+  // cannot be read.
+  const canvasStagedStates = useMemo(() => {
+    const fromReads = (list) =>
+      Object.fromEntries(
+        (list || [])
+          .filter((e) => e?.staged_state && e.staged_state !== 'none')
+          .map((e) => [e.id, e.staged_state])
+      );
+    return {
+      nodes: { ...fromReads(nodes), ...stagedStates.nodes },
+      edges: { ...fromReads(edges), ...stagedStates.edges },
+    };
+  }, [nodes, edges, stagedStates]);
 
   const stagedStateLabels = useMemo(
     () => ({
@@ -3122,7 +3192,7 @@ function App() {
           nodePreviewEnabled={nodePreviewEnabled}
           schema={schema}
           onContextMenuAction={handleContextMenuAction}
-          stagedStates={sessionWriteMode === 'staged' ? stagedStates : null}
+          stagedStates={sessionWriteMode === 'staged' ? canvasStagedStates : null}
           stagedStateLabels={stagedStateLabels}
           contextMenuLabels={{
             edit: t('context_menu.edit'),

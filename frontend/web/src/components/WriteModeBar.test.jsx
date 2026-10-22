@@ -38,4 +38,12 @@ describe('WriteModeBar', () => {
     render(<WriteModeBar writeMode="staged" pendingCount={0} diffUnavailable />);
     expect(screen.getByTestId('staged-pending-count').textContent).toBe('staged.pending_unknown');
   });
+
+  it('says a linked session is still loading, with a retry, wherever writes are held', () => {
+    const onRetry = vi.fn();
+    render(<WriteModeBar writeMode="unknown" stagedAvailable={false} onRetryMode={onRetry} />);
+    expect(screen.getByTestId('write-mode-unknown')).toBeTruthy();
+    fireEvent.click(screen.getByText('staged.mode_retry'));
+    expect(onRetry).toHaveBeenCalled();
+  });
 });
