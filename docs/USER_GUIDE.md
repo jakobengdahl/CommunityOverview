@@ -856,6 +856,19 @@ recognisable name under **Settings → Your presence → Display name**; it is s
 to everyone in the roster and on your selection badges. The name is stored in
 your browser and takes effect the next time you open or switch session.
 
+**Bring everyone here.** When others are in the session, a broadcast button
+appears in the top bar next to the presence dots. Click **Bring everyone here**
+to move everyone's view to exactly what you are looking at — on any screen size,
+they see the same region of the canvas. Their camera glides there (or jumps, if
+their system is set to reduce motion) and a notice tells them who brought them;
+**Return** in that notice takes them back to where they were. Only people
+connected right now are moved: someone who joins afterwards keeps their own
+view, and nothing about the summon is saved in the session. People in other
+sessions are never affected.
+
+![Summon notice with Return](images/session-summon-notice.png)
+*A summoned collaborator sees who brought them here, with a Return action.*
+
 **Reconnecting after a dropped connection.** If your connection drops — a
 network blip, closing your laptop, a poor signal — any edits you made while
 offline are kept locally and delivered once you reconnect; they are not lost.
@@ -1078,6 +1091,7 @@ interface.
 | `save_view` | Save a named canvas view |
 | `get_capabilities` | Discover what the server supports |
 | `connect_to_visualization_session` | Check that a session ID resolves, and whether a client is connected to it |
+| `summon_session_viewport` | Move everyone connected to a session to one region of the canvas — given as bounds or as a set of node ids — the same as **Bring everyone here** |
 | `show_graph_widget` | Show matching nodes as an interactive graph inside the chat (see [8.5](#85-interactive-graph-inside-the-chat)) |
 
 ### 8.2 Connecting
@@ -1305,6 +1319,7 @@ Screenshots for this guide are saved to `docs/images/` in PNG format.
 | `create-agent.png` | ✓ | Create Agent dialog with all configuration sections |
 | `skills.png` | ✓ | Chat panel bottom showing active skill and selected nodes |
 | `mcp-session-control.png` | ✓ | External AI (ChatGPT) controlling the canvas via session ID |
+| `session-summon-notice.png` | pending | Summoned collaborator's canvas with the "… brought you here" notice and its Return button; top bar showing the Bring everyone here button |
 | `federation-depth.png` | pending | Canvas depth selector (requires federation-enabled instance) |
 | `mobile-canvas-controls.png` | pending | Phone viewport with the compact zoom/fit/focus pill in the bottom-right corner |
 | `mobile-focus-view.png` | pending | Phone viewport in focus view — one node ringed by its direct neighbours |
