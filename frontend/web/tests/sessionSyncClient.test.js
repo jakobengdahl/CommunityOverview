@@ -1552,6 +1552,24 @@ describe('SessionSyncClient', () => {
     expect(onSessionDeleted).toHaveBeenCalledWith('client-other', null);
   });
 
+  it('delivers a server-only staged op even when it carries this client id (another tab)', () => {
+    const onRemoteOps = vi.fn();
+    const { client } = makeClient({ handlers: { onRemoteOps } });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, roster: [] });
+    es.emit({
+      type: 'op',
+      seq: 1,
+      client_id: client.clientId,
+      op: { op: 'write_mode_changed', write_mode: 'staged' },
+    });
+    expect(onRemoteOps).toHaveBeenCalledWith(
+      [{ op: 'write_mode_changed', write_mode: 'staged' }],
+      expect.anything()
+    );
+  });
+
   it('passes the deleted session write mode on, so a staged one is replaced staged', () => {
     const onSessionDeleted = vi.fn();
     const { client } = makeClient({ handlers: { onSessionDeleted } });

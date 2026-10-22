@@ -101,6 +101,8 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
 
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
+  const queueRef = useRef(Promise.resolve());
+  const pendingRef = useRef(0);
 
   // Apply an MCP tool-result command to the canvas. Shared by the legacy push
   // stream and the op-protocol stream's `command` events (design §3.8, R5) so
@@ -121,15 +123,31 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
       // composed read returns it, which asks the authorization hook
       // (docs/SESSION_OVERLAY_CONTRACT.md §15). Ids the read refuses are left
       // out.
-      if (!api.isActiveSessionPossiblyStaged()) {
+      // Pushes apply in the order they arrived: one waiting on its composed
+      // re-read holds back every later one.
+      if (!api.isActiveSessionPossiblyStaged() && pendingRef.current === 0) {
         applyToCanvas(pushed);
         return;
       }
       const target = sessionIdRef.current;
-      composedToolResult(pushed).then((toolResult) => {
-        if (sessionIdRef.current !== target) return; // switched away meanwhile
-        applyToCanvas(toolResult);
-      });
+      const prepared = api.isActiveSessionPossiblyStaged()
+        ? composedToolResult(pushed)
+        : Promise.resolve(pushed);
+      pendingRef.current += 1;
+      queueRef.current = queueRef.current
+        .then(() => prepared)
+        .then((toolResult) => {
+          if (sessionIdRef.current !== target) return; // switched away meanwhile
+          // Nothing of a replacing push could be read (a transient failure):
+          // keep the canvas rather than clear it for nothing.
+          const replaces = ['load_visualization', 'replace_visualization'].includes(pushed.action);
+          if (replaces && (pushed.nodes || []).length && !toolResult.nodes.length) return;
+          applyToCanvas(toolResult);
+        })
+        .catch(() => {})
+        .finally(() => {
+          pendingRef.current -= 1;
+        });
     },
     [applyToCanvas]
   );

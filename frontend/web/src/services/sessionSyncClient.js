@@ -27,6 +27,15 @@
 // do not emit a stream of no-op node_moved ops.
 const POSITION_EPSILON = 0.5;
 
+// Ops only the server emits (docs/SESSION_OVERLAY_CONTRACT.md §15), never
+// echoes of a client's own batch.
+const SERVER_ONLY_OPS = new Set([
+  'graph_change_staged',
+  'graph_changes_discarded',
+  'graph_changes_merged',
+  'write_mode_changed',
+]);
+
 // Above this many changed positions in one snapshot, collapse them into a single
 // layout_applied op instead of one node_moved each — keeps bulk layouts and
 // initial materialisation within the server's per-batch op cap.
@@ -1778,7 +1787,11 @@ export class SessionSyncClient {
           if (data.client_id !== this.clientId) this._applyLeaseOp(data.client_id, op);
           return;
         }
-        if (data.client_id === this.clientId) return; // echo of our own op — baseline already has it
+        // Echo of our own op — baseline already has it. Not so for an op
+        // only the server emits: one carrying this client id (a write-mode
+        // switch made from this browser) may come from another tab sharing
+        // the id, which must still learn of it.
+        if (data.client_id === this.clientId && !SERVER_ONLY_OPS.has(op.op)) return;
         // Fold the remote change into the baseline before the host applies it,
         // so the resulting local store change does not diff back out as an
         // echo — UNLESS foldLocalOp already folded this exact annotation

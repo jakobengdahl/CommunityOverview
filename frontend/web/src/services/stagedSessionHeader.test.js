@@ -1,7 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { isSessionAware, needsSessionHeader, pathBelowRoot } from './stagedSessionHeader';
+import {
+  SESSION_AWARE,
+  isSessionAware,
+  needsSessionHeader,
+  pathBelowRoot,
+} from './stagedSessionHeader';
 
 // The frontend's list must name every route backend/api_host/session_binding.py
 // stages or composes on: a route missing here would read or write a staged
@@ -33,6 +38,14 @@ describe('session-aware routes', () => {
     expect(routes.length).toBeGreaterThan(20);
     for (const [method, path] of routes) {
       expect([method, path, isSessionAware(method, path)]).toEqual([method, path, true]);
+    }
+  });
+
+  it('name no route the backend does not treat as session-aware', () => {
+    const backend = backendAwareRoutes();
+    for (const [method, re] of SESSION_AWARE) {
+      const matched = backend.some(([m, path]) => (m === method || m === '*') && re.test(path));
+      expect([method, String(re), matched]).toEqual([method, String(re), true]);
     }
   });
 

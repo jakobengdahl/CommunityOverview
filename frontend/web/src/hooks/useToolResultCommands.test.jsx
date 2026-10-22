@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 
 import * as api from '../services/api';
@@ -329,5 +329,62 @@ describe('useToolResultCommands legacy SSE stream', () => {
     });
     expect(store().clearVisualization).not.toHaveBeenCalled();
     expect(store().updateVisualization).not.toHaveBeenCalled();
+  });
+});
+
+describe('useToolResultCommands in a session that may be staged', () => {
+  afterEach(() => {
+    api.isActiveSessionPossiblyStaged.mockReturnValue(false);
+    api.getNodeDetails.mockReset();
+  });
+
+  it('applies only what the viewer’s own composed reads return, in arrival order', async () => {
+    api.isActiveSessionPossiblyStaged.mockReturnValue(true);
+    let releaseFirst;
+    api.getNodeDetails.mockImplementation((id) =>
+      id === 'slow'
+        ? new Promise(
+            (resolve) => (releaseFirst = () => resolve({ node: { id, type: 'Goal' }, edges: [] }))
+          )
+        : id === 'hidden'
+          ? Promise.reject(Object.assign(new Error('nf'), { status: 404 }))
+          : Promise.resolve({ node: { id, type: 'Goal', name: 'composed' }, edges: [] })
+    );
+    const { result } = render();
+    act(() =>
+      result.current.applyToolResultCommand(
+        { action: 'add_to_visualization', nodes: [{ id: 'slow', name: 'pushed' }] },
+        'c1'
+      )
+    );
+    act(() =>
+      result.current.applyToolResultCommand(
+        { action: 'load_visualization', nodes: [{ id: 'n2', name: 'pushed' }, { id: 'hidden' }] },
+        'c2'
+      )
+    );
+    await act(async () => {});
+    expect(store().clearVisualization).not.toHaveBeenCalled();
+    await act(async () => releaseFirst());
+    await act(async () => {});
+    expect(store().addNodesToVisualization).toHaveBeenCalledTimes(1);
+    expect(store().clearVisualization).toHaveBeenCalledTimes(1);
+    const replaced = store().updateVisualization.mock.calls.at(-1)[0];
+    expect(replaced.map((n) => [n.id, n.name])).toEqual([['n2', 'composed']]);
+  });
+
+  it('keeps the canvas when nothing of a replacing push can be read', async () => {
+    api.isActiveSessionPossiblyStaged.mockReturnValue(true);
+    api.getNodeDetails.mockRejectedValue(new TypeError('Failed to fetch'));
+    const { result } = render();
+    act(() =>
+      result.current.applyToolResultCommand(
+        { action: 'load_visualization', nodes: [{ id: 'n1' }] },
+        'c3'
+      )
+    );
+    await act(async () => {});
+    await act(async () => {});
+    expect(store().clearVisualization).not.toHaveBeenCalled();
   });
 });

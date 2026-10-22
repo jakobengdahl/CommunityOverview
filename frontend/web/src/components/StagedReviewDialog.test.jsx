@@ -267,6 +267,24 @@ describe('StagedReviewDialog', () => {
     expect(screen.getByText('staged.recheck_first')).toBeTruthy();
   });
 
+  it('keeps a stale tick through an unrelated tick, then refuses to re-tick it on the way', () => {
+    const { rerender } = renderDialog();
+    fireEvent.click(checkbox('node:n1'));
+    rerender([{ ...CREATE, session_seq: 9 }, EDGE, CONFLICT]);
+    fireEvent.click(checkbox('node:n2'));
+    fireEvent.click(checkbox('edge:e1'));
+    expect(checkbox('edge:e1').checked).toBe(false);
+    expect(screen.getByText('staged.recheck_first')).toBeTruthy();
+  });
+
+  it('will not merge a selection a stale dependency left open', () => {
+    const { rerender } = renderDialog();
+    fireEvent.click(checkbox('edge:e1'));
+    rerender([{ ...CREATE, session_seq: 9 }, EDGE, CONFLICT]);
+    expect(checkbox('edge:e1').checked).toBe(true);
+    expect(screen.getByTestId('staged-merge').disabled).toBe(true);
+  });
+
   it('drops a merge_blocked status once another entry is resolved differently', async () => {
     api.mergeStagedChanges.mockRejectedValueOnce(
       Object.assign(new Error('blocked'), {

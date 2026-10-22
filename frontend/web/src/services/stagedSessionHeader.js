@@ -23,7 +23,7 @@ export const SESSION_ID_HEADER = 'x-communityoverview-session-id';
 
 // [method, path below the deployment root]. Kept in step with
 // backend/api_host/session_binding.py's _API_SESSION_AWARE/_HOST_SESSION_AWARE.
-const SESSION_AWARE = [
+export const SESSION_AWARE = [
   ['POST', /^\/api\/search$/],
   ['GET', /^\/api\/nodes\/[^/]+$/],
   ['POST', /^\/api\/nodes\/[^/]+\/related$/],
@@ -55,6 +55,7 @@ const SESSION_AWARE = [
 // session without a header the backend would refuse.
 const NON_GRAPH_POSTS = [
   /^\/api\/federation\/teleport$/,
+  /^\/agents\/proposals\/[^/]+\/reject$/,
   /^\/ui\/propose-nodes$/,
   /^\/ui\/upload(\/.*)?$/,
 ];

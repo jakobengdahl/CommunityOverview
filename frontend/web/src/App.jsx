@@ -428,7 +428,7 @@ function App() {
   // When each edge was last removed by a remote op (a running count), so a
   // composed re-read still in flight does not put back an edge removed after
   // it started.
-  const edgeRemovalSeqRef = useRef({ seq: 0, removed: new Map() });
+  const edgeRemovalSeqRef = useRef({ seq: 0, removed: new Map(), inFlight: new Set() });
   const applyRemoteOp = useCallback(
     async (op) => {
       const store = useGraphStore.getState();
@@ -442,14 +442,19 @@ function App() {
         // (docs/SESSION_OVERLAY_CONTRACT.md §15).
         const sessionAtStart = syncRef.current?.sessionId;
         const removalsAtStart = edgeRemovalSeqRef.current.seq;
+        const inFlight = edgeRemovalSeqRef.current.inFlight;
+        inFlight.add(removalsAtStart);
         const onCanvas = new Set(store.nodes.map((n) => n.id));
         const wanted = (op.edges || []).filter(
           (e) => e && e.id && onCanvas.has(e.source) && onCanvas.has(e.target)
         );
         const sources = [...new Set(wanted.map((e) => e.source))];
-        const reads = await Promise.all(
-          sources.map((id) => api.getNodeDetails(id).catch(() => null))
-        );
+        let reads;
+        try {
+          reads = await Promise.all(sources.map((id) => api.getNodeDetails(id).catch(() => null)));
+        } finally {
+          inFlight.delete(removalsAtStart);
+        }
         if (syncRef.current?.sessionId !== sessionAtStart) return false; // switched away while fetching
         const listed = new Map(reads.flatMap((r) => r?.edges || []).map((e) => [e.id, e]));
         const have = new Set(useGraphStore.getState().edges.map((e) => e.id));
@@ -551,7 +556,14 @@ function App() {
             removals.seq += 1;
             removals.removed.set(id, removals.seq);
           });
-          if (removals.removed.size > 1000) removals.removed.clear();
+          if (removals.removed.size > 1000) {
+            // Forget only removals no re-read still in flight could compare
+            // against.
+            const oldest = Math.min(removals.seq, ...removals.inFlight);
+            for (const [id, seq] of removals.removed) {
+              if (seq <= oldest) removals.removed.delete(id);
+            }
+          }
           const existing = new Set(store.edges.map((e) => e.id));
           removeIds.forEach((id) => removeEdge(id));
           return removeIds.some((id) => existing.has(id));
@@ -2781,6 +2793,11 @@ function App() {
     if (!deleteSessionDialog) return;
     const { id, staged: wasStaged } = deleteSessionDialog;
     setDeleteSessionDialog(null);
+    // The deleted session's own mode: the user may switch sessions while the
+    // delete is in flight.
+    const modeAtConfirm = sessionIdRef.current === id ? sessionWriteModeRef.current : null;
+    const modeOfDeleted = () =>
+      sessionIdRef.current === id ? sessionWriteModeRef.current : modeAtConfirm;
     locallyDeletingRef.current.add(id);
     let browserOnly = false;
     try {
@@ -2814,12 +2831,13 @@ function App() {
     // mode not known yet - unless the server never held the session, which
     // makes it browser-only and direct (§5.1). The current mode, not the one
     // this callback closed over: it may have changed during the delete.
-    const modeNow = sessionWriteModeRef.current;
+    const modeNow = modeOfDeleted();
     const leftStaged =
       wasStaged ||
       deletedStagedRef.current.has(id) ||
-      (id === sessionId && (modeNow === 'staged' || (modeNow === 'unknown' && !browserOnly)));
-    if (id === sessionId) {
+      modeNow === 'staged' ||
+      (modeNow === 'unknown' && !browserOnly);
+    if (sessionIdRef.current === id) {
       // Deleting the active session: drop its content and switch into a fresh
       // one (design 3.6); a staged one into a staged one (§13). Other
       // connected clients are notified via the server's session_deleted
@@ -2899,6 +2917,11 @@ function App() {
           showNotification('info', t('staged.switched'));
           return;
         }
+        if (!now) {
+          // Neither answered: the session may be staged now. Hold its graph
+          // writes until its mode is read again (the bar offers Retry).
+          markModeUnknown(targetId);
+        }
       }
       showNotification('error', error.message || t('staged.switch_failed'));
     }
@@ -2907,6 +2930,7 @@ function App() {
     currentSessionName,
     adoptWriteMode,
     adoptSessionPayload,
+    markModeUnknown,
     ensureSyncConnected,
     showNotification,
     t,

@@ -735,6 +735,19 @@ export async function uploadFile(file, analyze = false, options = {}) {
 }
 
 /**
+ * Approve or reject an agent's held proposal. Through apiFetch, so in a staged
+ * session an approval names the session: the backend then applies it there,
+ * or refuses one made elsewhere, instead of writing it to the graph.
+ * @param {string} proposalId
+ * @param {'approve'|'reject'} action
+ */
+export async function decideAgentProposal(proposalId, action) {
+  return apiFetch(`${getPathRoot()}/agents/proposals/${encodeURIComponent(proposalId)}/${action}`, {
+    method: 'POST',
+  });
+}
+
+/**
  * Get chat service info
  * @returns {Promise<{llm_provider: string, supported_formats: string[]}>}
  */

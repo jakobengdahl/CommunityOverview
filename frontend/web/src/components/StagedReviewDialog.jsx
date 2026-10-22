@@ -95,6 +95,12 @@ function StagedReviewDialog({
     [selected, byKey]
   );
   const staleTicks = selected.size - liveSelected.size;
+  // A tick that went stale can leave a ticked entry without one it depends
+  // on; such a selection is not merged until the dependency is ticked again.
+  const selectionOpen = useMemo(
+    () => [...dependencyClosure(items, liveSelected)].some((k) => !liveSelected.has(k)),
+    [items, liveSelected]
+  );
 
   const labelOf = useCallback((item) => itemLabel(item, canvasName), [canvasName]);
   const labelOfRef = useCallback(
@@ -560,7 +566,7 @@ function StagedReviewDialog({
               type="button"
               className="confirm-dialog-button primary"
               onClick={() => merge()}
-              disabled={busy || liveSelected.size === 0}
+              disabled={busy || liveSelected.size === 0 || selectionOpen}
               data-testid="staged-merge"
             >
               {t('staged.merge_selected', { count: liveSelected.size })}

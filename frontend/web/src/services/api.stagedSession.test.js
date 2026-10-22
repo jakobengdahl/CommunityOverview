@@ -166,6 +166,27 @@ describe('a direct session the server holds, where staging exists', () => {
   });
 });
 
+describe('possibly staged', () => {
+  it('is true for a staged or not-yet-known session, false for a direct one or none', () => {
+    expect(api.isActiveSessionPossiblyStaged()).toBe(false);
+    api.setActiveSessionForRequests('5555-6666-7777-8888');
+    expect(api.isActiveSessionPossiblyStaged()).toBe(false);
+    api.setSessionModeUnknown('5555-6666-7777-8888');
+    expect(api.isActiveSessionPossiblyStaged()).toBe(true);
+    api.setSessionStaged('5555-6666-7777-8888', true);
+    expect(api.isActiveSessionPossiblyStaged()).toBe(true);
+  });
+
+  it('approves an agent proposal with the staged session named, and rejects without', async () => {
+    const calls = mockFetch();
+    api.setActiveSessionForRequests('1111-2222-3333-4444');
+    api.setSessionStaged('1111-2222-3333-4444', true);
+    await api.decideAgentProposal('p1', 'approve');
+    await api.decideAgentProposal('p1', 'reject');
+    expect(calls.map(headerOf)).toEqual(['1111-2222-3333-4444', undefined]);
+  });
+});
+
 describe('structured refusals', () => {
   it('carries the code and data of a staged-change refusal', async () => {
     mockFetch(409, {
