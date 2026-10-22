@@ -174,7 +174,8 @@ class EntityOperation:
     `endpoint_types`, for an edge upsert, is `(node id, type)` for each
     endpoint the instance judged the edge's relationship type against. A
     backend declaring `revision_enforcement` refuses the write when the
-    store holds another type for one of them, or no longer holds it, so an
+    store holds another type for one of them, or no longer holds it - an
+    endpoint the same batch upserts is judged by that upsert instead - so an
     edge judged before a merge retyped its endpoint on another instance
     cannot land after it.
     Not journaled either, for the same reason.
