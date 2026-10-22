@@ -251,14 +251,13 @@ async function responseError(response) {
   return error;
 }
 
-/**
- * Generic fetch helper with error handling
- */
-async function apiFetch(url, options = {}) {
+// A request that may write the graph from a session whose write mode is not
+// known yet is held: the session may be staged.
+function refuseWhileModeUnknown(url, method) {
   if (
     _activeSessionId &&
     _modeUnknown.has(_activeSessionId) &&
-    mayWriteGraph(options.method, pathBelowRoot(url, getPathRoot()))
+    mayWriteGraph(method, pathBelowRoot(url, getPathRoot()))
   ) {
     const error = new Error(
       translate(
@@ -269,6 +268,13 @@ async function apiFetch(url, options = {}) {
     error.code = 'session_mode_unknown';
     throw error;
   }
+}
+
+/**
+ * Generic fetch helper with error handling
+ */
+async function apiFetch(url, options = {}) {
+  refuseWhileModeUnknown(url, options.method);
   const response = await fetch(url, {
     ...options,
     headers: {
@@ -753,8 +759,12 @@ export async function uploadFile(file, analyze = false, options = {}) {
 
   const endpoint = analyze ? `${UI_API_BASE}/upload` : `${UI_API_BASE}/upload/extract`;
 
+  // Analysis runs the assistant, which can write: held and named like any
+  // other write (no JSON content type: the body is a form).
+  refuseWhileModeUnknown(endpoint, 'POST');
   const response = await fetch(endpoint, {
     method: 'POST',
+    headers: sessionHeaders(endpoint, 'POST'),
     body: formData,
   });
 

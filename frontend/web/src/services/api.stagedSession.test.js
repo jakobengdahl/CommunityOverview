@@ -252,6 +252,26 @@ describe('mode-unknown hold, more cases', () => {
   });
 });
 
+describe('file upload', () => {
+  it('names a staged session on an upload with analysis, and holds it while the mode is unknown', async () => {
+    const calls = mockFetch();
+    const file = new File(['x'], 'a.txt');
+    api.setActiveSessionForRequests('1111-2222-3333-4444');
+    api.setSessionStaged('1111-2222-3333-4444', true);
+    await api.uploadFile(file, true);
+    expect(headerOf(calls[0])).toBe('1111-2222-3333-4444');
+    // Extraction only changes nothing: no header.
+    await api.uploadFile(file, false);
+    expect(headerOf(calls[1])).toBeUndefined();
+    api.setActiveSessionForRequests('5555-6666-7777-8888');
+    api.setSessionModeUnknown('5555-6666-7777-8888');
+    const error = await api.uploadFile(file, true).catch((e) => e);
+    expect(error.code).toBe('session_mode_unknown');
+    expect(calls).toHaveLength(2);
+    api.setSessionModeDirect('5555-6666-7777-8888');
+  });
+});
+
 describe('possibly staged', () => {
   it('is true for a staged or not-yet-known session, false for a direct one or none', () => {
     expect(api.isActiveSessionPossiblyStaged()).toBe(false);
