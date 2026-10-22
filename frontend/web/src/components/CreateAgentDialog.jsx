@@ -314,8 +314,14 @@ export default function CreateAgentDialog({
 
   return (
     <div className="dialog-overlay" onClick={onClose}>
-      <div className="dialog-content subscription-dialog" onClick={(e) => e.stopPropagation()}>
-        <h2>{initialData ? 'Edit Agent' : 'Create Agent'}</h2>
+      <div
+        className="dialog-content subscription-dialog"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="create-agent-title"
+      >
+        <h2 id="create-agent-title">{initialData ? 'Edit Agent' : 'Create Agent'}</h2>
         <p className="dialog-description">
           An agent listens to graph changes and processes events using an LLM with MCP tools.
         </p>
