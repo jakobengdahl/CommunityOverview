@@ -30,6 +30,8 @@ import { serverStateToMirror, useSharedSession } from './hooks/useSharedSession'
 import { DEFAULT_REQUEST_TIMEOUT_MS as SYNC_REQUEST_TIMEOUT_MS } from './services/sessionSyncClient';
 import { useSyncConnection } from './hooks/useSyncConnection';
 import { useToolResultCommands } from './hooks/useToolResultCommands';
+import { useViewportSummon } from './hooks/useViewportSummon';
+import SummonNotice from './components/SummonNotice';
 import { useViewportMode } from './hooks/useViewportMode';
 import { useFullscreenCanvas } from './hooks/useFullscreenCanvas';
 import FullscreenExitButton from './components/FullscreenExitButton';
@@ -179,6 +181,7 @@ function App() {
   const latestViewport = useRef(null);
   const dialogOpenRef = useRef(false);
   const appRef = useRef(null);
+  const canvasContainerRef = useRef(null);
   // Image annotation ids this browser has already rendered optimistically
   // (handleImageIngest below); see createSelfEchoDedup for why the confirming
   // SSE echo of the same op must be swallowed, not reapplied.
@@ -1113,6 +1116,23 @@ function App() {
     setNotification({ type, message });
     setTimeout(() => setNotification(null), 3000);
   }, []);
+
+  // "Bring everyone here": the canvas camera request, the summoned-viewer
+  // notice with its Return point, and the summon action itself.
+  const {
+    viewportRequest,
+    summonNotice,
+    receiveSummon,
+    returnFromSummon,
+    dismissSummonNotice,
+    summonEveryone,
+  } = useViewportSummon({
+    sessionId,
+    latestViewport,
+    canvasRef: canvasContainerRef,
+    showNotification,
+    t,
+  });
 
   // Arrive from a teleport: ?node=<id> focuses that node, and ?from_graph
   // names where the visitor came from. This is the receiving half of the
@@ -2166,6 +2186,7 @@ function App() {
         setSessionsVersion((v) => v + 1);
         showNotification('info', t('sessions.session_deleted_remote'));
       },
+      onViewportSummoned: receiveSummon,
       onCommand: (command) => {
         if (command?.type === 'tool_result' && command.result) {
           applyToolResultCommand(command.result, command.command_id);
@@ -2223,6 +2244,7 @@ function App() {
     t,
     applyToolResultCommand,
     applyPulseCommand,
+    receiveSummon,
     syncHandlersRef,
     setRoster,
     setRemoteSelections,
@@ -2655,7 +2677,7 @@ function App() {
       ref={appRef}
       className={`app${drawerOpen ? ' session-drawer-open' : ''}${isMobile ? ' is-mobile' : ''}${isCoarsePointer ? ' is-touch' : ''}${fullscreenCanvasActive ? ' fullscreen-canvas-mode' : ''}`}
     >
-      <div className="app-canvas" id="guide-target-canvas">
+      <div className="app-canvas" id="guide-target-canvas" ref={canvasContainerRef}>
         <GraphCanvas
           nodes={nodes}
           edges={edges}
@@ -2945,6 +2967,7 @@ function App() {
           onViewportChange={(vp) => {
             latestViewport.current = vp;
           }}
+          viewportRequest={viewportRequest}
         />
       </div>
 
@@ -2963,6 +2986,7 @@ function App() {
           roster={roster}
           currentClientId={api.getClientId()}
           onClear={() => requestClear('button')}
+          onSummonEveryone={summonEveryone}
           drawerOpen={drawerOpen}
           onToggleDrawer={() => setDrawerOpen((prev) => !prev)}
           onCloseDrawer={() => setDrawerOpen(false)}
@@ -3025,6 +3049,11 @@ function App() {
           </button>
         </div>
       )}
+      <SummonNotice
+        notice={summonNotice}
+        onReturn={returnFromSummon}
+        onDismiss={dismissSummonNotice}
+      />
       {isOffline && (
         <div className="app-offline-banner" role="status">
           {t('offline.read_only')}

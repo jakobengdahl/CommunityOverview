@@ -39,6 +39,7 @@ import {
 } from './ContextMenus';
 import { useRemotePositions } from '../hooks/useRemotePositions';
 import { useAnimatedLayout } from '../hooks/useAnimatedLayout';
+import { useViewportRequest } from '../hooks/useViewportRequest';
 import { useCanvasHistory } from '../hooks/useCanvasHistory';
 import {
   applyLayout,
@@ -476,6 +477,10 @@ function GraphCanvasInner({
   onContextMenuAction = null,
   nodeColorResolver = null,
   onViewportChange = null,
+  // A host request to move the camera: a fresh `{ bounds }` (model-space
+  // region to fit) or `{ viewport }` (exact camera to restore) object per
+  // request. See useViewportRequest.
+  viewportRequest = null,
   // Identity of the active visualization session. Changing it signals a session
   // switch: the canvas discards the previous session's live node positions (so a
   // node shared between sessions is not left at the old coordinates) and refits
@@ -974,9 +979,12 @@ function GraphCanvasInner({
     getNodes: getFlowNodes,
     getViewport,
     fitView,
+    fitBounds,
+    setViewport,
     zoomIn,
     zoomOut,
   } = useReactFlow();
+  useViewportRequest({ viewportRequest, fitBounds, setViewport });
   // Read through refs (updated every render below) inside the freehand
   // pointer-capture effect instead of closing over these directly: some
   // `useReactFlow()` implementations (and this package's own test mocks)

@@ -149,6 +149,7 @@
   cursor: default;
 }
 
+.floating-header-summon,
 .floating-header-clear {
   background: transparent;
   border: none;
@@ -163,6 +164,15 @@
   transition:
     background 0.15s,
     color 0.15s;
+}
+
+.floating-header-summon {
+  color: #8b93ff;
+}
+
+.floating-header-summon:hover {
+  background: rgba(100, 108, 255, 0.15);
+  color: #b3b8ff;
 }
 
 .floating-header-clear:hover {
@@ -180,11 +190,13 @@
    the bar's height, and therefore that clearance, unchanged. */
 @media (pointer: coarse) {
   .floating-header-hamburger,
+  .floating-header-summon,
   .floating-header-clear {
     position: relative;
   }
 
   .floating-header-hamburger::after,
+  .floating-header-summon::after,
   .floating-header-clear::after {
     content: '';
     position: absolute;

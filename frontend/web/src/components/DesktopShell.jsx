@@ -17,6 +17,7 @@ function DesktopShell({
   roster,
   currentClientId,
   onClear,
+  onSummonEveryone,
   drawerOpen,
   onToggleDrawer,
   onCloseDrawer,
@@ -54,6 +55,7 @@ function DesktopShell({
         currentClientId={currentClientId}
         onClear={onClear}
         onToggleDrawer={onToggleDrawer}
+        onSummonEveryone={onSummonEveryone}
       />
       <SessionDrawer
         open={drawerOpen}

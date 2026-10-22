@@ -100,6 +100,27 @@
   color: #999;
 }
 
+/* Sits above the regular notification so a summon notice and its Return
+   action are never hidden behind an unrelated toast. */
+.app-summon-notice {
+  bottom: 76px;
+  bottom: calc(76px + env(safe-area-inset-bottom));
+}
+
+.app-notification button.app-summon-return {
+  color: #8b93ff;
+  font-size: 0.9rem;
+  font-weight: 600;
+  border: 1px solid #646cff;
+  border-radius: 6px;
+  padding: 4px 10px;
+}
+
+.app-notification button.app-summon-return:hover {
+  color: #fff;
+  background: rgba(100, 108, 255, 0.25);
+}
+
 .app-offline-banner {
   position: fixed;
   top: calc(12px + env(safe-area-inset-top));

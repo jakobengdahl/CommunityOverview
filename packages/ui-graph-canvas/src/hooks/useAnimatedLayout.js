@@ -18,7 +18,7 @@ const EASINGS = {
 // prefers-reduced-motion is a *client* decision (contract §9): when the viewer
 // asked for reduced motion the canvas snaps to the final positions regardless of
 // the agent's `animate` hint. Guarded for non-browser (test) environments.
-function prefersReducedMotion() {
+export function prefersReducedMotion() {
   return (
     typeof window !== 'undefined' &&
     typeof window.matchMedia === 'function' &&
