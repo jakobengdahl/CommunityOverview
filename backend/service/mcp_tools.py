@@ -5751,7 +5751,10 @@ def _group_origins(annotations: Any) -> Dict[str, Tuple[float, float]]:
             fallback = point.get(key) if _finite(point.get(key)) else 0
             value = geometry.get(key) if _finite(geometry.get(key)) else fallback
             origin.append(float(value))
-        for member in annotation.get("member_node_ids") or []:
+        # Browser ops do not validate member_node_ids, so a stored group may
+        # carry anything there; only a list names members.
+        members = annotation.get("member_node_ids")
+        for member in members if isinstance(members, list) else []:
             if isinstance(member, str):
                 origins[member] = (origin[0], origin[1])
     return origins

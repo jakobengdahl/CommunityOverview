@@ -253,6 +253,33 @@ class TestSummonByNodeIds:
 
         assert (result["bounds"]["x"], result["bounds"]["y"]) == (140.0, 260.0)
 
+    @pytest.mark.parametrize("members", [5, "a", None, {"a": 1}])
+    def test_a_group_whose_members_are_not_a_list_offsets_nothing(
+        self, tmp_path, members
+    ):
+        tools, manager, storage = _tools(tmp_path)
+        session = _canvas(manager, storage, {"a": (40, 60)})
+        session.state["annotations"] = [
+            {
+                "id": "g1",
+                "type": "group",
+                "position": {"x": 100, "y": 200},
+                "member_node_ids": members,
+            },
+            # Only a group makes its members relative to it.
+            {
+                "id": "n1",
+                "type": "note",
+                "position": {"x": 500, "y": 500},
+                "member_node_ids": ["a"],
+            },
+        ]
+
+        result = tools["summon_session_viewport"](session_id=session.id, node_ids=["a"])
+
+        assert result["success"] is True, result
+        assert (result["bounds"]["x"], result["bounds"]["y"]) == (40.0, 60.0)
+
     def test_annotations_that_are_not_a_list_add_no_offset(self, tmp_path):
         tools, manager, storage = _tools(tmp_path)
         session = _canvas(manager, storage, {"a": (40, 60)})
