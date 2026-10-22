@@ -278,6 +278,10 @@ describe('merge ids', () => {
     expect(nextMergeAttempt(first, request, ids).mergeId).not.toBe(first.mergeId);
   });
 
+  it('treats a plain 500 as possibly landed, so its retry replays the same merge id', () => {
+    expect(mergeOutcomeUnknown(Object.assign(new Error('x'), { status: 500 }))).toBe(true);
+  });
+
   it('treats a network failure or a server error as possibly landed, a refusal as not', () => {
     expect(mergeOutcomeUnknown(new TypeError('Failed to fetch'))).toBe(true);
     expect(mergeOutcomeUnknown(Object.assign(new Error('x'), { status: 503 }))).toBe(true);

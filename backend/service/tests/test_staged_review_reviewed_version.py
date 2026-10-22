@@ -145,6 +145,35 @@ def test_a_discard_of_an_entry_restaged_since_its_review_is_refused(world, resta
     assert world.layer(sid)[("node", "a")]["staged"] == {"description": "later"}
 
 
+def test_a_discard_checks_every_entry_it_names_not_only_the_first(world):
+    svc, sid = world.service, world.staged_session()
+    _stage(
+        world,
+        sid,
+        ("update_node", ("a",), {"updates": {"description": "reviewed"}}),
+        ("update_node", ("b",), {"updates": {"description": "reviewed"}}),
+    )
+    reviewed = [_reviewed(world, sid, "a"), _reviewed(world, sid, "b")]
+    _restage_as_another_instance(world, sid, "b", {"description": "later"})
+    result = svc.discard_staged_changes(sid, entries=reviewed)
+    assert result["error"] == "merge_raced"
+    layer = world.layer(sid)
+    assert ("node", "a") in layer and ("node", "b") in layer
+
+
+def test_an_entry_named_with_two_versions_is_refused(world):
+    svc, sid = world.service, world.staged_session()
+    _stage(world, sid, ("update_node", ("a",), {"updates": {"description": "x"}}))
+    reviewed = _reviewed(world, sid, "a")
+    twice = [reviewed, {**reviewed, "version": "another"}]
+    assert svc.merge_staged_changes(sid, "m", entries=twice)["error"] == (
+        "invalid_merge_request"
+    )
+    assert svc.discard_staged_changes(sid, entries=twice)["error"] == (
+        "invalid_merge_request"
+    )
+
+
 def test_a_restage_inside_the_discard_window_is_refused_against_the_reviewed_version(
     world, monkeypatch
 ):

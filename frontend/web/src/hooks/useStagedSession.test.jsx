@@ -137,6 +137,27 @@ describe('useStagedSession', () => {
     expect(result.current.items).toEqual([]);
   });
 
+  it('never lets a superseded failed read clear a newer diff', async () => {
+    let failFirst;
+    api.getStagedChanges.mockResolvedValue({ items: [] });
+    const { result } = renderHook(() => useStagedSession('1111-2222'));
+    act(() => result.current.adoptSessionPayload('1111-2222', { write_mode: 'staged' }));
+    await act(async () => {});
+    api.getStagedChanges.mockImplementationOnce(
+      () => new Promise((_, reject) => (failFirst = reject))
+    );
+    api.getStagedChanges.mockResolvedValueOnce({ items: [ITEM] });
+    let first;
+    await act(async () => {
+      first = result.current.refreshDiff();
+      await result.current.refreshDiff();
+    });
+    await act(async () => failFirst(Object.assign(new Error('no'), { status: 503 })));
+    expect(await first).toBeNull();
+    expect(result.current.items).toEqual([ITEM]);
+    expect(result.current.diffError).toBeNull();
+  });
+
   it('holds a linked session as unknown until the server answers, either way', () => {
     const { result } = renderHook(() => useStagedSession('1111-2222'));
     act(() => result.current.markModeUnknown('1111-2222'));
