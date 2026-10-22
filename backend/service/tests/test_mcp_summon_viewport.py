@@ -317,14 +317,15 @@ class TestSummonByNodeIds:
         assert result["node_ids"] == ["elsewhere", "ghost"]
         assert _summons(sub) == []
 
+    @pytest.mark.parametrize("axis", ["x", "y"])
     @pytest.mark.parametrize("bad", [math.nan, math.inf, -math.inf])
     def test_a_node_with_a_non_finite_position_is_refused_in_any_order(
-        self, tmp_path, bad
+        self, tmp_path, bad, axis
     ):
         tools, manager, storage = _tools(tmp_path)
         session = _canvas(manager, storage, {"a": (0, 0), "b": (300, 400)})
         # What a raw browser node_moved can store: json accepts NaN/Infinity.
-        session.state["positions"]["a"] = {"x": bad, "y": 0.0}
+        session.state["positions"]["a"] = {"x": 0.0, "y": 0.0, axis: bad}
         sub = _listen(manager, session.id)
 
         results = [

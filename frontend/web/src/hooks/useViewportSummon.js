@@ -32,9 +32,15 @@ export function visibleModelBounds(viewport, width, height) {
  */
 export function useViewportSummon({ sessionId, latestViewport, canvasRef, showNotification, t }) {
   const [viewportRequest, setViewportRequest] = useState(null);
-  // The notice records the session it was raised in: switching session hides
-  // it (its camera belongs to the session left) without an effect.
+  // The notice records the session it was raised in, and a session switch
+  // drops it for good (its camera belongs to the session left): switching
+  // back must neither revive it nor let a new summon chain onto it.
   const [notice, setNotice] = useState(null);
+  const [noticeScope, setNoticeScope] = useState(sessionId);
+  if (noticeScope !== sessionId) {
+    setNoticeScope(sessionId);
+    setNotice(null);
+  }
   const summonNotice = notice && notice.sessionId === sessionId ? notice : null;
   // The open notice, for callbacks: a chained summon must read the return
   // point the previous one stored even before React re-renders.
@@ -49,6 +55,11 @@ export function useViewportSummon({ sessionId, latestViewport, canvasRef, showNo
   }, []);
 
   useEffect(() => () => clearTimeout(timerRef.current), []);
+  useEffect(() => {
+    clearTimeout(timerRef.current);
+    timerRef.current = null;
+    noticeRef.current = null;
+  }, [sessionId]);
 
   const receiveSummon = useCallback(
     (event) => {

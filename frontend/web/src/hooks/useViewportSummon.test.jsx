@@ -92,6 +92,21 @@ describe('useViewportSummon', () => {
     expect(result.current.summonNotice).toBeNull();
   });
 
+  it('a notice left behind by a session switch stays gone after switching back', () => {
+    const { result, rerender, latestViewport, canvasRef, showNotification } = setup();
+    const props = { latestViewport, canvasRef, showNotification, t: (k) => k };
+    act(() => result.current.receiveSummon({ bounds: BOUNDS, summonedBy: 'Ada' }));
+    rerender({ ...props, sessionId: '2222-3333' });
+    rerender({ ...props, sessionId: '1234-5678' });
+    expect(result.current.summonNotice).toBeNull();
+
+    // A new summon is a fresh one: Return goes to the camera just before it.
+    latestViewport.current = { x: 1, y: 2, zoom: 3 };
+    act(() => result.current.receiveSummon({ bounds: BOUNDS, summonedBy: 'Bo' }));
+    act(() => result.current.returnFromSummon());
+    expect(result.current.viewportRequest).toEqual({ viewport: { x: 1, y: 2, zoom: 3 } });
+  });
+
   it('ignores a summon addressed to another session', () => {
     const { result } = setup();
     act(() => result.current.receiveSummon({ bounds: BOUNDS, sessionId: '9999-9999' }));
