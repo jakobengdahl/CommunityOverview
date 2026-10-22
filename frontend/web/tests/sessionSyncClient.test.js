@@ -1549,7 +1549,19 @@ describe('SessionSyncClient', () => {
     es.emit({ type: 'session_renamed', name: 'Team map' });
     es.emit({ type: 'session_deleted', deleted_by: 'client-other' });
     expect(onSessionRenamed).toHaveBeenCalledWith('Team map');
-    expect(onSessionDeleted).toHaveBeenCalledWith('client-other');
+    expect(onSessionDeleted).toHaveBeenCalledWith('client-other', null);
+  });
+
+  it('passes the deleted session write mode on, so a staged one is replaced staged', () => {
+    const onSessionDeleted = vi.fn();
+    const { client } = makeClient({ handlers: { onSessionDeleted } });
+    client.connect();
+    FakeEventSource.instances[0].emit({
+      type: 'session_deleted',
+      deleted_by: 'client-other',
+      write_mode: 'staged',
+    });
+    expect(onSessionDeleted).toHaveBeenCalledWith('client-other', 'staged');
   });
 
   it('passes since_seq once a seq is known and stops after close', async () => {

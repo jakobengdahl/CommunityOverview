@@ -29,6 +29,10 @@ import {
 import { serverStateToMirror, useSharedSession } from './hooks/useSharedSession';
 import { DEFAULT_REQUEST_TIMEOUT_MS as SYNC_REQUEST_TIMEOUT_MS } from './services/sessionSyncClient';
 import { useSyncConnection } from './hooks/useSyncConnection';
+import { useStagedSession } from './hooks/useStagedSession';
+import WriteModeBar from './components/WriteModeBar';
+import NewSessionDialog from './components/NewSessionDialog';
+import StagedReviewDialog from './components/StagedReviewDialog';
 import { useToolResultCommands } from './hooks/useToolResultCommands';
 import { useViewportSummon } from './hooks/useViewportSummon';
 import SummonNotice from './components/SummonNotice';
@@ -130,6 +134,8 @@ function App() {
     removeNode,
     removeEdge,
     updateEdgeData,
+    setNodes,
+    setEdges,
     presentation,
     setConfig,
     focusNodeId,
@@ -216,9 +222,11 @@ function App() {
   // stream and state uploads reconnect automatically when it changes.
   const [sessionId, setSessionIdState] = useState(() => {
     const urlSession = _urlParams.get('session');
-    return sessionStore.isValidSessionId(urlSession)
+    const initial = sessionStore.isValidSessionId(urlSession)
       ? urlSession
       : api.generateVisualizationSessionId();
+    api.setActiveSessionForRequests(initial);
+    return initial;
   });
   // Written together with the state, not from an effect: a switch bumps the
   // session epoch before React re-renders, and the ?view= load must not see the
@@ -226,6 +234,9 @@ function App() {
   const sessionIdRef = useRef(sessionId);
   const setSessionId = useCallback((id) => {
     sessionIdRef.current = id;
+    // Before any request is made from the new session: graph requests carry a
+    // session's header only while it is the active one and known staged.
+    api.setActiveSessionForRequests(id);
     setSessionIdState(id);
   }, []);
   // The session the page was opened into, for the ?view= load to compare against.
@@ -295,6 +306,29 @@ function App() {
     setRemoteLeases,
     opStreamReady,
   } = useSyncConnection(sessionId);
+  // The active session's write mode and staged changes
+  // (docs/SESSION_OVERLAY_CONTRACT.md §17).
+  const {
+    writeMode: sessionWriteMode,
+    items: stagedItems,
+    pendingCount: stagedPendingCount,
+    diffError: stagedDiffError,
+    stagedStates,
+    adoptWriteMode,
+    adoptSessionPayload,
+    forgetSession: forgetStagedSession,
+    refreshDiff: refreshStagedDiff,
+    handleSessionOp: handleStagedSessionOp,
+  } = useStagedSession(sessionId);
+  const setStoreWriteMode = useGraphStore((state) => state.setSessionWriteMode);
+  useEffect(() => {
+    setStoreWriteMode(sessionWriteMode);
+  }, [sessionWriteMode, setStoreWriteMode]);
+  const [stagedAvailable, setStagedAvailable] = useState(false);
+  const [defaultWriteMode, setDefaultWriteMode] = useState('direct');
+  const [newSessionDialogOpen, setNewSessionDialogOpen] = useState(false);
+  const [stagedReviewOpen, setStagedReviewOpen] = useState(false);
+  const [switchToStagedConfirm, setSwitchToStagedConfirm] = useState(false);
   const applyServerSessionRef = useRef(null);
   // Guards resyncFromServer against overlapping reconnects (review round 2):
   // a flaky connection can drop and reconnect more than once before a slow
@@ -737,6 +771,7 @@ function App() {
           } catch {
             return 0;
           }
+          adoptSessionPayload(targetId, payload);
           // Also bail if the guard timeout already fired and a newer resync
           // now owns it (review round 4): the token check above only stops
           // *this* stale call from clearing a flag it no longer owns — without
@@ -843,7 +878,74 @@ function App() {
         if (resyncGuardTokenRef.current === myToken) resyncInFlightRef.current = null;
       }
     },
-    [syncRef, applyRemoteOp]
+    [syncRef, applyRemoteOp, adoptSessionPayload]
+  );
+
+  // Re-read, in the session's composed view, the canvas entities a staged
+  // change touched (docs/SESSION_OVERLAY_CONTRACT.md §15). Only the keys of the
+  // op are used: its content reaches anyone holding the session id, while a
+  // composed read asks the authorization hook. A node the composed view no
+  // longer holds is taken off the canvas when `removeMissing` is set (after a
+  // merge or discard: a discarded create, a merged delete); after a staging
+  // op that is left to the session ops that remove it, as in direct mode.
+  // Deliberately not a full reload: canvas additions not yet flushed to the
+  // session would be lost with it.
+  const refreshStagedEntities = useCallback(
+    async (op, { removeMissing = false } = {}) => {
+      const sessionAtStart = syncRef.current?.sessionId;
+      const keys = [
+        ...(op.entries || []).map((e) => [e?.kind, e?.entity_id]),
+        ...(op.removals || []).map((r) => (Array.isArray(r) ? r : [r?.kind, r?.entity_id])),
+      ];
+      const store = useGraphStore.getState();
+      const onCanvas = new Set(store.nodes.map((n) => n.id));
+      const nodeIds = new Set();
+      for (const [kind, id] of keys) {
+        if (kind === 'node' && onCanvas.has(id)) nodeIds.add(id);
+        if (kind === 'edge') {
+          const edge = store.edges.find((e) => e.id === id);
+          if (edge && onCanvas.has(edge.source)) nodeIds.add(edge.source);
+        }
+      }
+      const missing = [];
+      const fetched = await Promise.all(
+        [...nodeIds].map((id) =>
+          api.getNodeDetails(id).catch((error) => {
+            if (error?.status === 404) missing.push(id);
+            return null;
+          })
+        )
+      );
+      if (syncRef.current?.sessionId !== sessionAtStart) return; // switched away while fetching
+      if (removeMissing) missing.forEach((id) => removeNode(id));
+      const current = useGraphStore.getState();
+      const present = new Set(current.nodes.map((n) => n.id));
+      const nodeUpdates = new Map();
+      const listed = new Map();
+      fetched.forEach((r) => {
+        if (!r?.node) return;
+        nodeUpdates.set(r.node.id, r.node);
+        (r.edges || []).forEach((e) => listed.set(e.id, e));
+      });
+      if (!nodeUpdates.size) return;
+      const nodes = current.nodes.map((n) =>
+        nodeUpdates.has(n.id) ? { ...n, ...nodeUpdates.get(n.id) } : n
+      );
+      // An edge of a re-read node that its composed read no longer lists is
+      // gone from the session's view (a staged delete).
+      const edges = current.edges
+        .filter(
+          (e) => listed.has(e.id) || !(nodeUpdates.has(e.source) || nodeUpdates.has(e.target))
+        )
+        .map((e) => (listed.has(e.id) ? { ...e, ...listed.get(e.id) } : e));
+      const known = new Set(edges.map((e) => e.id));
+      listed.forEach((e, id) => {
+        if (!known.has(id) && present.has(e.source) && present.has(e.target)) edges.push(e);
+      });
+      setNodes(nodes);
+      setEdges(edges);
+    },
+    [syncRef, setNodes, setEdges, removeNode]
   );
 
   // Callbacks waiting for the next canvas snapshot (positions/groups arrive
@@ -891,6 +993,9 @@ function App() {
       connectDialogOpen ||
       renameDialog ||
       deleteSessionDialog ||
+      newSessionDialogOpen ||
+      stagedReviewOpen ||
+      switchToStagedConfirm ||
       clearConfirm ||
       (akcShortName && akcConfig && !akcIntroShown)
     );
@@ -912,6 +1017,9 @@ function App() {
     connectDialogOpen,
     renameDialog,
     deleteSessionDialog,
+    newSessionDialogOpen,
+    stagedReviewOpen,
+    switchToStagedConfirm,
     clearConfirm,
     akcShortName,
     akcConfig,
@@ -1042,6 +1150,10 @@ function App() {
         setStats(statsData);
         setLlmAvailable(capabilitiesData.llm_available ?? false);
         setModelProfilesCapability(capabilitiesData.model_profiles);
+        setStagedAvailable(capabilitiesData.staged_sessions === true);
+        setDefaultWriteMode(
+          capabilitiesData.session_write_mode_default === 'staged' ? 'staged' : 'direct'
+        );
       } catch (error) {
         console.error('Error loading configuration:', error);
         api.getGraphStats().then(setStats).catch(console.error);
@@ -2123,9 +2235,69 @@ function App() {
     ensureSyncConnected,
     syncRef,
     resetSessionScopedState: resetSessionScopedUi,
+    onSessionPayload: adoptSessionPayload,
   });
   // Expose the latest applyServerSession to resyncFromServer (defined earlier).
   applyServerSessionRef.current = applyServerSession;
+
+  // Leave a session that was deleted (by this user or another) for a new one
+  // (design D11). A staged session is replaced by a staged one, created on the
+  // server before anything is done in it, so a user who was staging keeps
+  // staging (docs/SESSION_OVERLAY_CONTRACT.md §13, I2). Until the replacement
+  // exists the deleted id stays active, and the server refuses anything still
+  // naming it, rather than letting a write land in the graph meanwhile.
+  const leaveDeletedSession = useCallback(
+    async (deletedId, wasStaged) => {
+      if (!wasStaged) {
+        forgetStagedSession(deletedId);
+        dropIntoFreshSession({
+          freshId: api.generateVisualizationSessionId(),
+          clearVisualization,
+          resetSessionScopedState: resetSessionScopedUi,
+          setSessionId,
+          reflectSessionUrl,
+        });
+        return true;
+      }
+      clearVisualization();
+      resetSessionScopedUi();
+      try {
+        const created = await api.createSession(null, { writeMode: 'staged' });
+        if (created?.write_mode !== 'staged' || !created?.id) {
+          throw new Error('replacement session is not staged');
+        }
+        adoptWriteMode(created.id, 'staged');
+        await loadSessionFromServer(created.id, { eagerConnect: true });
+        setSessionId(created.id);
+        reflectSessionUrl(created.id);
+        sessionStore.touchSession(created.id);
+        forgetStagedSession(deletedId);
+        return true;
+      } catch (error) {
+        console.error('Error creating the staged replacement session:', error);
+        forgetStagedSession(deletedId);
+        dropIntoFreshSession({
+          freshId: api.generateVisualizationSessionId(),
+          clearVisualization,
+          resetSessionScopedState: resetSessionScopedUi,
+          setSessionId,
+          reflectSessionUrl,
+        });
+        showNotification('error', t('staged.replacement_failed'));
+        return false;
+      }
+    },
+    [
+      forgetStagedSession,
+      adoptWriteMode,
+      clearVisualization,
+      resetSessionScopedUi,
+      loadSessionFromServer,
+      setSessionId,
+      showNotification,
+      t,
+    ]
+  );
 
   // Keep the sync client's handlers pointed at the latest closures. A remote op
   // or resync triggers a debounced authoritative apply; a remote delete of the
@@ -2139,6 +2311,9 @@ function App() {
       // content survived a dropped connection — worth a confirmation rather
       // than a silent reconciliation.
       onResync: async (resyncSessionId = sessionId) => {
+        // Staged-change ops missed while disconnected are not replayed to the
+        // canvas; the diff is read again instead.
+        refreshStagedDiff();
         const recovered = await resyncFromServer(resyncSessionId);
         if (recovered > 0) {
           showNotification('info', t('sessions.reconnect_recovered', { count: recovered }));
@@ -2146,7 +2321,17 @@ function App() {
       },
       onRemoteOps: (ops, meta = {}) => {
         if (meta.sessionId && meta.sessionId !== sessionId) return;
-        (ops || []).forEach((op) => applyRemoteOp(op));
+        (ops || []).forEach((op) => {
+          if (!handleStagedSessionOp(op)) {
+            applyRemoteOp(op);
+          } else if (op.op === 'graph_change_staged') {
+            refreshStagedEntities(op);
+          } else if (op.op === 'graph_changes_merged' || op.op === 'graph_changes_discarded') {
+            // Merged entities now read from the graph; discarded ones are
+            // back to what the graph holds, or gone.
+            refreshStagedEntities(op, { removeMissing: true });
+          }
+        });
       },
       // This client's own annotation write just got acked with a fresh
       // server version/field_versions (dec-annotation-field-patches-and-
@@ -2170,7 +2355,18 @@ function App() {
         sessionStore.renameSession(sessionId, name);
         setSessionsVersion((v) => v + 1);
       },
-      onSessionDeleted: (deletedBy) => {
+      onSessionDeleted: (deletedBy, deletedWriteMode) => {
+        // Either side knowing the session was staged is enough: the notice
+        // can come without its mode (a drained stream), and staged is final.
+        const wasStaged = deletedWriteMode === 'staged' || sessionWriteMode === 'staged';
+        if (wasStaged) {
+          if (deletedBy && deletedBy === api.getClientId()) return; // handled locally
+          sessionStore.removeSession(sessionId);
+          setSessionsVersion((v) => v + 1);
+          showNotification('info', t('staged.session_deleted_remote'));
+          leaveDeletedSession(sessionId, true).then(() => setSessionsVersion((v) => v + 1));
+          return;
+        }
         const dropped = receiveRemoteSessionDeleted({
           deletedBy,
           clientId: api.getClientId(),
@@ -2235,6 +2431,11 @@ function App() {
     };
   }, [
     sessionId,
+    sessionWriteMode,
+    leaveDeletedSession,
+    handleStagedSessionOp,
+    refreshStagedEntities,
+    refreshStagedDiff,
     resyncFromServer,
     applyRemoteOp,
     applyAnnotationUpsertToCanvas,
@@ -2272,9 +2473,13 @@ function App() {
   );
 
   const handleNewSession = useCallback(() => {
+    if (stagedAvailable) {
+      setNewSessionDialogOpen(true);
+      return;
+    }
     switchToSession(api.generateVisualizationSessionId(), { register: false });
     showNotification('info', t('sessions.new_session_started'));
-  }, [switchToSession, showNotification, t]);
+  }, [stagedAvailable, switchToSession, showNotification, t]);
 
   const handleSelectSession = useCallback(
     (targetId) => {
@@ -2465,50 +2670,174 @@ function App() {
   // warn when other users are connected (design 3.6). The roster is populated
   // only once clients subscribe via the realtime stream (step 7), so in step 4
   // it is typically empty and the warning stays dormant.
-  const handleRequestDeleteSession = useCallback(async (targetId) => {
-    let connectedOthers = 0;
-    try {
-      const payload = await api.getSession(targetId);
-      const roster = payload?.roster || [];
-      connectedOthers = roster.filter((m) => m.client_id !== api.getClientId()).length;
-    } catch {
-      // Session may not exist server-side yet — nothing to warn about.
-    }
-    setDeleteSessionDialog({ id: targetId, connectedOthers });
-  }, []);
+  const handleRequestDeleteSession = useCallback(
+    async (targetId) => {
+      let connectedOthers = 0;
+      let staged = false;
+      try {
+        const payload = await api.getSession(targetId);
+        const roster = payload?.roster || [];
+        connectedOthers = roster.filter((m) => m.client_id !== api.getClientId()).length;
+        staged = payload?.write_mode === 'staged';
+        adoptSessionPayload(targetId, payload);
+      } catch {
+        // Session may not exist server-side yet — nothing to warn about.
+      }
+      // Deleting a staged session drops its unmerged changes with it (§13);
+      // the dialog says so, and how many there are when this is the active one.
+      setDeleteSessionDialog({
+        id: targetId,
+        connectedOthers,
+        staged,
+        pending: staged && targetId === sessionId ? stagedPendingCount : null,
+      });
+    },
+    [adoptSessionPayload, sessionId, stagedPendingCount]
+  );
 
   const handleConfirmDeleteSession = useCallback(async () => {
     if (!deleteSessionDialog) return;
-    const { id } = deleteSessionDialog;
+    const { id, staged } = deleteSessionDialog;
     setDeleteSessionDialog(null);
+    const wasStaged = staged || (id === sessionId && sessionWriteMode === 'staged');
     try {
-      await api.deleteServerSession(id, api.getClientId());
-    } catch {
+      // The user confirmed a dialog that said a staged session's changes
+      // go with it.
+      await api.deleteServerSession(id, api.getClientId(), { discardStaged: wasStaged });
+    } catch (error) {
+      if (wasStaged) {
+        // A staged session that was not deleted keeps its work: never act
+        // as if it were gone.
+        showNotification('error', error.message || t('staged.delete_failed'));
+        return;
+      }
       // Ignore — the session may only ever have existed locally.
     }
     sessionStore.removeSession(id);
     if (id === sessionId) {
       // Deleting the active session: drop its content and switch into a fresh
-      // one (design 3.6). Other connected clients are notified via the
-      // server's session_deleted broadcast (handled once realtime lands).
-      dropIntoFreshSession({
-        freshId: api.generateVisualizationSessionId(),
-        clearVisualization,
-        resetSessionScopedState: resetSessionScopedUi,
-        setSessionId,
-        reflectSessionUrl,
-      });
-      showNotification('info', t('sessions.session_deleted'));
+      // one (design 3.6); a staged one into a staged one (§13). Other
+      // connected clients are notified via the server's session_deleted
+      // broadcast.
+      showNotification(
+        'info',
+        t(wasStaged ? 'staged.session_deleted' : 'sessions.session_deleted')
+      );
+      await leaveDeletedSession(id, wasStaged);
+    } else if (wasStaged) {
+      forgetStagedSession(id);
     }
     setSessionsVersion((v) => v + 1);
   }, [
     deleteSessionDialog,
     sessionId,
-    clearVisualization,
-    resetSessionScopedUi,
+    sessionWriteMode,
+    leaveDeletedSession,
+    forgetStagedSession,
     showNotification,
     t,
   ]);
+
+  // Start a new session. Where the backend can stage, the user chooses how it
+  // writes; a staged session is created on the server first (§5.1).
+  const startNewSession = useCallback(
+    async (mode) => {
+      setNewSessionDialogOpen(false);
+      if (mode !== 'staged') {
+        switchToSession(api.generateVisualizationSessionId(), { register: false });
+        showNotification('info', t('sessions.new_session_started'));
+        return;
+      }
+      try {
+        const created = await api.createSession(null, { writeMode: 'staged' });
+        if (created?.write_mode !== 'staged' || !created?.id) {
+          throw new Error(t('staged.create_failed'));
+        }
+        adoptWriteMode(created.id, 'staged');
+        switchToSession(created.id, { eagerConnect: true });
+        showNotification('info', t('staged.new_session_started'));
+      } catch (error) {
+        showNotification('error', error.message || t('staged.create_failed'));
+      }
+    },
+    [switchToSession, adoptWriteMode, showNotification, t]
+  );
+
+  // Switch the active session from direct to staged (§5.2): irreversible, so
+  // only after the user confirmed it. A session that so far exists only in
+  // this browser is created on the server first, as direct, then switched.
+  const confirmSwitchToStaged = useCallback(async () => {
+    setSwitchToStagedConfirm(false);
+    const targetId = sessionId;
+    const clientId = api.getClientId();
+    try {
+      let payload;
+      try {
+        payload = await api.setSessionWriteMode(targetId, 'staged', clientId);
+      } catch (error) {
+        if (error.status !== 404) throw error;
+        await api.renameServerSession(targetId, currentSessionName || null);
+        payload = await api.setSessionWriteMode(targetId, 'staged', clientId);
+      }
+      if (payload?.write_mode !== 'staged') throw new Error(t('staged.switch_failed'));
+      adoptWriteMode(targetId, 'staged');
+      ensureSyncConnected(targetId);
+      showNotification('info', t('staged.switched'));
+    } catch (error) {
+      showNotification('error', error.message || t('staged.switch_failed'));
+    }
+  }, [sessionId, currentSessionName, adoptWriteMode, ensureSyncConnected, showNotification, t]);
+
+  // After a merge or discard from the review: re-read what it touched (its op
+  // does the same when it arrives; this covers a stream that is down), and put
+  // nodes merged as new on the canvas.
+  const handleStagedLayerChanged = useCallback(
+    async (result) => {
+      refreshStagedDiff();
+      await refreshStagedEntities(
+        { removals: result?.removed_entries || [] },
+        { removeMissing: true }
+      );
+      const created = (result?.merged || [])
+        .map((item) => item?.new_entity_id)
+        .filter((id) => typeof id === 'string' && id);
+      if (!created.length) return;
+      const sessionAtStart = sessionId;
+      const found = await Promise.all(
+        created.map((id) => api.getNodeDetails(id).catch(() => null))
+      );
+      if (syncRef.current?.sessionId !== sessionAtStart) return;
+      const nodes = found.map((r) => r?.node).filter(Boolean);
+      if (nodes.length) {
+        addNodesToVisualization(
+          nodes,
+          found.flatMap((r) => r?.edges || [])
+        );
+      }
+    },
+    [refreshStagedDiff, refreshStagedEntities, sessionId, syncRef, addNodesToVisualization]
+  );
+
+  const closeStagedReview = useCallback(() => setStagedReviewOpen(false), []);
+
+  const stagedStateLabels = useMemo(
+    () => ({
+      created: t('staged.marker.created'),
+      updated: t('staged.marker.updated'),
+      orphaned: t('staged.marker.orphaned'),
+      deleted: t('staged.marker.deleted'),
+    }),
+    [t]
+  );
+
+  const stagedCanvasName = useCallback((kind, id) => {
+    const store = useGraphStore.getState();
+    if (kind === 'node') return store.nodes.find((n) => n.id === id)?.name || null;
+    const edge = store.edges.find((e) => e.id === id);
+    if (!edge) return null;
+    const name = (nid) => store.nodes.find((n) => n.id === nid)?.name || nid;
+    return `${name(edge.source)} → ${name(edge.target)}${edge.type ? ` (${edge.type})` : ''}`;
+  }, []);
 
   // Export full graph from backend API
   const handleExportGraph = useCallback(async () => {
@@ -2627,6 +2956,9 @@ function App() {
     connectDialogOpen ||
     renameDialog ||
     deleteSessionDialog ||
+    newSessionDialogOpen ||
+    stagedReviewOpen ||
+    switchToStagedConfirm ||
     clearConfirm ||
     createNodeType ||
     editingNode ||
@@ -2770,6 +3102,8 @@ function App() {
           nodePreviewEnabled={nodePreviewEnabled}
           schema={schema}
           onContextMenuAction={handleContextMenuAction}
+          stagedStates={sessionWriteMode === 'staged' ? stagedStates : null}
+          stagedStateLabels={stagedStateLabels}
           contextMenuLabels={{
             edit: t('context_menu.edit'),
             hide: t('context_menu.hide'),
@@ -3048,6 +3382,43 @@ function App() {
             ×
           </button>
         </div>
+      )}
+      <WriteModeBar
+        writeMode={sessionWriteMode}
+        stagedAvailable={stagedAvailable}
+        pendingCount={stagedPendingCount}
+        diffUnavailable={!!stagedDiffError}
+        onReview={() => setStagedReviewOpen(true)}
+        onSwitchToStaged={() => setSwitchToStagedConfirm(true)}
+      />
+      {newSessionDialogOpen && (
+        <NewSessionDialog
+          defaultMode={defaultWriteMode}
+          onChoose={startNewSession}
+          onCancel={() => setNewSessionDialogOpen(false)}
+        />
+      )}
+      {switchToStagedConfirm && (
+        <ConfirmDialog
+          title={t('staged.switch_title')}
+          message={t('staged.switch_message')}
+          confirmText={t('staged.switch_confirm')}
+          cancelText={t('common.cancel')}
+          onConfirm={confirmSwitchToStaged}
+          onCancel={() => setSwitchToStagedConfirm(false)}
+        />
+      )}
+      {stagedReviewOpen && sessionWriteMode === 'staged' && (
+        <StagedReviewDialog
+          sessionId={sessionId}
+          items={stagedItems}
+          diffError={stagedDiffError}
+          onRefresh={refreshStagedDiff}
+          onMerged={handleStagedLayerChanged}
+          onDiscarded={handleStagedLayerChanged}
+          onClose={closeStagedReview}
+          canvasName={stagedCanvasName}
+        />
       )}
       <SummonNotice
         notice={summonNotice}

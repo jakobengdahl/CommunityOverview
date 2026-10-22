@@ -67,6 +67,11 @@ export function useSharedSession({
   // Deliberately NOT invoked from applyServerSession — that path is reused by
   // same-session resync, which must keep the current session's assistant state.
   resetSessionScopedState,
+  // Told the session payload the server answered, before its content is
+  // applied, so the session's write mode (and with it the staged-session
+  // header, docs/SESSION_OVERLAY_CONTRACT.md §16.1) is known before anything
+  // is done in it. Optional.
+  onSessionPayload,
 }) {
   // Load a session's canvas content from the server (resolved node refs +
   // layout + group annotations) onto the store.
@@ -112,6 +117,7 @@ export function useSharedSession({
     async (targetId, { eagerConnect = false, onMissing = null } = {}) => {
       try {
         const payload = await api.getSession(targetId, { resolve: true });
+        onSessionPayload?.(targetId, payload);
         // Compute the sync baseline before touching the canvas: it runs the same
         // annotation-transform logic applyServerSession does internally, and
         // applyServerSession itself validates the resolved shape before its first
@@ -159,7 +165,14 @@ export function useSharedSession({
         }
       }
     },
-    [applyServerSession, clearVisualization, ensureSyncConnected, syncRef, resetSessionScopedState]
+    [
+      applyServerSession,
+      clearVisualization,
+      ensureSyncConnected,
+      syncRef,
+      resetSessionScopedState,
+      onSessionPayload,
+    ]
   );
 
   return { applyServerSession, loadSessionFromServer };

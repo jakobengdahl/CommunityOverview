@@ -1869,7 +1869,12 @@ export class SessionSyncClient {
         if (this.handlers.onSessionRenamed) this.handlers.onSessionRenamed(data.name);
         break;
       case 'session_deleted':
-        if (this.handlers.onSessionDeleted) this.handlers.onSessionDeleted(data.deleted_by);
+        // The notice carries the deleted session's write mode, so a client
+        // leaving a staged session replaces it with a staged one
+        // (docs/SESSION_OVERLAY_CONTRACT.md §13).
+        if (this.handlers.onSessionDeleted) {
+          this.handlers.onSessionDeleted(data.deleted_by, data.write_mode || null);
+        }
         break;
       case 'viewport_summoned':
         // "Bring everyone here" (ephemeral, never replayed): the summoner's own

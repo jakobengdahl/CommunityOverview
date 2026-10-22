@@ -203,11 +203,20 @@ function AppDialogs({
         <ConfirmDialog
           title={t('sessions.delete_session_title')}
           message={
-            deleteSessionDialog.connectedOthers > 0
+            (deleteSessionDialog.connectedOthers > 0
               ? t('sessions.delete_session_message_multi', {
                   count: deleteSessionDialog.connectedOthers,
                 })
-              : t('sessions.delete_session_message')
+              : t('sessions.delete_session_message')) +
+            (deleteSessionDialog.staged
+              ? `\n\n${
+                  typeof deleteSessionDialog.pending === 'number'
+                    ? t('staged.delete_staged_warning_count', {
+                        count: deleteSessionDialog.pending,
+                      })
+                    : t('staged.delete_staged_warning')
+                }`
+              : '')
           }
           confirmText={t('sessions.delete_confirm')}
           cancelText={t('common.cancel')}

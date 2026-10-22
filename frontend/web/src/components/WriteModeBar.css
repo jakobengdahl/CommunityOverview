@@ -1,0 +1,73 @@
+.write-mode-bar {
+  position: fixed;
+  bottom: 64px;
+  left: 56px;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: min(560px, calc(100vw - 32px));
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.4;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+.write-mode-bar--staged {
+  background: #4a3500;
+  border: 2px dashed #f0b429;
+  color: #ffe8b0;
+}
+
+.write-mode-bar--direct {
+  background: rgba(30, 30, 30, 0.85);
+  border: 1px solid #444;
+  color: #bbb;
+  font-size: 12px;
+  padding: 4px 10px;
+}
+
+.write-mode-bar-label {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.write-mode-bar--staged .write-mode-bar-label {
+  color: #f0b429;
+}
+
+.write-mode-bar-count {
+  font-weight: 600;
+}
+
+.write-mode-bar-button {
+  background: #f0b429;
+  color: #2a1d00;
+  border: none;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.write-mode-bar-link {
+  background: none;
+  border: none;
+  color: #8ab4f8;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+  font-size: inherit;
+}
+
+.app.is-mobile .write-mode-bar {
+  bottom: auto;
+  top: 60px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 12px;
+  padding: 4px 8px;
+}
