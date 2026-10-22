@@ -2471,26 +2471,20 @@ function App() {
         return;
       }
       adoptSessionPayload(created.id, created);
-      // As any switch into a server session: its stream connects now, so the
-      // first staged change is seen (marker, count) as it happens.
-      try {
-        await loadSessionFromServer(created.id, { eagerConnect: true });
-      } catch (error) {
-        console.error('Error loading the starting session:', error);
-        settleDirect();
-        return;
-      }
-      if (sessionIdRef.current !== startId) {
-        settleDirect();
-        return;
-      }
+      // New and empty, like the untouched canvas: entered at once, with no
+      // load to wait on that a switch by the user could overtake. Its stream
+      // connects now, so the first staged change shows as it happens.
       setSessionId(created.id);
       reflectSessionUrl(created.id);
       sessionStore.touchSession(created.id);
       setSessionsVersion((v) => v + 1);
+      ensureSyncConnected(created.id)?.setBaseline(
+        {},
+        { seq: typeof created.seq === 'number' ? created.seq : 0 }
+      );
       settleDirect();
     },
-    [adoptSessionPayload, loadSessionFromServer, setSessionId]
+    [adoptSessionPayload, ensureSyncConnected, setSessionId]
   );
   settleStartingSessionRef.current = settleStartingSession;
 

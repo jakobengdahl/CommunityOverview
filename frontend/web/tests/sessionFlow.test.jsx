@@ -2250,6 +2250,9 @@ describe('Server-backed session lifecycle', () => {
         true
       );
       await waitFor(() => expect(api.getStagedChanges).toHaveBeenCalledWith('9999-0001'));
+      // Entered without a load a user's own switch could overtake: it is new
+      // and empty.
+      expect(api.getSession).not.toHaveBeenCalledWith('9999-0001', { resolve: true });
       expect(new URLSearchParams(window.location.search).get('session')).toBe('9999-0001');
     });
 
