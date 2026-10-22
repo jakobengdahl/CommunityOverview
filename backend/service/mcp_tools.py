@@ -5715,31 +5715,39 @@ def register_mcp_tools(
     return tools_map
 
 
+def _finite(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
 def _group_origins(annotations: Any) -> Dict[str, Tuple[float, float]]:
     """``{member_node_id: (x, y)}`` of the group annotation each node belongs to.
 
-    Read the way the browser's ``annotationsToGroups`` reads a group (its
-    ``position``, else its ``geometry``), since that is where the canvas draws
-    it and therefore what a member's relative position is relative to.
+    Mirrors where the canvas draws a group — ``normalizeGeometry`` in
+    ``packages/ui-graph-canvas/src/utils/annotationModel.js`` — since that is
+    what a member's relative position is relative to: per coordinate,
+    ``geometry`` wins, then ``position`` (or ``geometry`` when there is no
+    ``position`` object), then 0.
     """
     origins: Dict[str, Tuple[float, float]] = {}
     for annotation in annotations if isinstance(annotations, list) else []:
         if not isinstance(annotation, dict) or annotation.get("type") != "group":
             continue
-        place = annotation.get("position")
-        if not isinstance(place, dict):
-            place = annotation.get("geometry")
-        if not isinstance(place, dict):
-            place = {}
-        x, y = place.get("x", 0), place.get("y", 0)
-        if not all(
-            isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
-            for v in (x, y)
-        ):
-            continue
+        geometry = annotation.get("geometry")
+        geometry = geometry if isinstance(geometry, dict) else {}
+        point = annotation.get("position")
+        point = point if isinstance(point, dict) else geometry
+        origin = []
+        for key in ("x", "y"):
+            fallback = point.get(key) if _finite(point.get(key)) else 0
+            value = geometry.get(key) if _finite(geometry.get(key)) else fallback
+            origin.append(float(value))
         for member in annotation.get("member_node_ids") or []:
             if isinstance(member, str):
-                origins[member] = (float(x), float(y))
+                origins[member] = (origin[0], origin[1])
     return origins
 
 

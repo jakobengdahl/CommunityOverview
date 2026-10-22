@@ -15,7 +15,11 @@ import pytest
 from backend.core import GraphStorage, Node
 from backend.core.session_manager import SessionManager
 from backend.core.session_store import InMemorySessionPersistenceBackend, SessionStore
-from backend.runtime.authorization import GRAPH_ACTION_MUTATE
+from backend.runtime.authorization import (
+    GRAPH_ACTION_MUTATE,
+    GRAPH_ACTION_READ,
+    GraphAuthorizationDecision,
+)
 from backend.service import GraphService, register_mcp_tools
 from backend.service.mcp_tools import _ASSUMED_NODE_SIZE, _INVALID_SESSION_ID_ERROR
 from backend.service.tests.test_authorization import FixedNarrowingHook
@@ -116,8 +120,9 @@ class TestSummonByBounds:
         assert _summons(sub) == []
 
     def test_needs_exactly_one_target(self, tmp_path):
-        tools, manager, _ = _tools(tmp_path)
-        session = manager.create_session()
+        tools, manager, storage = _tools(tmp_path)
+        # "a" is a valid target on its own, so only exclusivity can refuse it.
+        session = _canvas(manager, storage, {"a": (0, 0)})
         sub = _listen(manager, session.id)
 
         neither = tools["summon_session_viewport"](session_id=session.id)
@@ -134,9 +139,14 @@ class TestSummonByBounds:
         unknown = tools["summon_session_viewport"](
             session_id="1234-5678", bounds=BOUNDS
         )
+        unknown_by_ids = tools["summon_session_viewport"](
+            session_id="1234-5678", node_ids=["a"]
+        )
         invalid = tools["summon_session_viewport"](session_id="nope", bounds=BOUNDS)
 
         assert unknown["success"] is False and "not found" in unknown["error"]
+        assert unknown_by_ids["success"] is False
+        assert "not found" in unknown_by_ids["error"]
         assert invalid == {"success": False, "error": _INVALID_SESSION_ID_ERROR}
         assert manager.get_session("1234-5678") is None
 
@@ -185,6 +195,55 @@ class TestSummonByNodeIds:
 
         assert (grouped["bounds"]["x"], grouped["bounds"]["y"]) == (2040.0, 1560.0)
         assert (loose["bounds"]["x"], loose["bounds"]["y"]) == (10.0, 10.0)
+
+    @pytest.mark.parametrize(
+        "group, origin",
+        [
+            # The canvas draws a group at its geometry when the two disagree.
+            (
+                {"position": {"x": 1, "y": 2}, "geometry": {"x": 300, "y": 400}},
+                (300, 400),
+            ),
+            ({"geometry": {"x": 300, "y": 400}}, (300, 400)),
+            # Per coordinate: an unusable geometry value falls back to position.
+            (
+                {"position": {"x": 1, "y": 2}, "geometry": {"x": "5", "y": 400}},
+                (1, 400),
+            ),
+            ({"position": {"x": True, "y": math.inf}}, (0, 0)),
+        ],
+    )
+    def test_the_group_origin_is_read_the_way_the_canvas_draws_it(
+        self, tmp_path, group, origin
+    ):
+        tools, manager, storage = _tools(tmp_path)
+        session = _canvas(manager, storage, {"a": (40, 60)})
+        session.state["annotations"] = [
+            None,
+            {
+                "id": "note",
+                "type": "note",
+                "position": {"x": 9e3, "y": 9e3},
+                "member_node_ids": ["a"],
+            },
+            {"id": "g1", "type": "group", "member_node_ids": [None, "a"], **group},
+        ]
+
+        result = tools["summon_session_viewport"](session_id=session.id, node_ids=["a"])
+
+        assert (result["bounds"]["x"], result["bounds"]["y"]) == (
+            40.0 + origin[0],
+            60.0 + origin[1],
+        )
+
+    def test_annotations_that_are_not_a_list_add_no_offset(self, tmp_path):
+        tools, manager, storage = _tools(tmp_path)
+        session = _canvas(manager, storage, {"a": (40, 60)})
+        session.state["annotations"] = None
+
+        result = tools["summon_session_viewport"](session_id=session.id, node_ids=["a"])
+
+        assert (result["bounds"]["x"], result["bounds"]["y"]) == (40.0, 60.0)
 
     def test_a_stale_position_for_a_node_off_the_canvas_is_refused(self, tmp_path):
         tools, manager, storage = _tools(tmp_path)
@@ -277,6 +336,23 @@ class TestSummonByNodeIds:
 
 
 class TestAuthorization:
+    def test_node_ids_are_resolved_with_the_read_scope(self, tmp_path):
+        seen = []
+
+        class RecordingHook:
+            def evaluate(self, context):
+                seen.append((context.action, context.target))
+                return GraphAuthorizationDecision(
+                    allowed=True, mode="custom", source="test"
+                )
+
+        tools, manager, storage = _tools(tmp_path, RecordingHook())
+        session = _canvas(manager, storage, {"a": (0, 0)})
+
+        tools["summon_session_viewport"](session_id=session.id, node_ids=["a"])
+
+        assert (GRAPH_ACTION_READ, "summon_session_viewport") in seen
+
     def test_a_denied_caller_cannot_summon(self, tmp_path):
         hook = DenyAllRecordingHook()
         tools, manager, _ = _tools(tmp_path, hook)
