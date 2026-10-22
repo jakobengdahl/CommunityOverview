@@ -37,9 +37,9 @@ function newMergeId() {
  * follows live changes. A tick remembers the entry as it was on screen; one
  * that changes afterwards drops out. A merge or discard always names the
  * ticked entries — never `all` — and is sent only after a fresh read shows
- * each of them as it was ticked. The merge request cannot carry that version,
- * so a restage landing between that read and the merge itself still merges
- * (an open contract question); everything before it is caught here.
+ * each of them as it was ticked. Each entry goes with the version it was
+ * reviewed at, so the server refuses (merge_raced) one restaged after that
+ * read too (contract §11.4).
  */
 function StagedReviewDialog({
   sessionId,

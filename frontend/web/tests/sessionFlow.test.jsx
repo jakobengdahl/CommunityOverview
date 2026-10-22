@@ -2244,6 +2244,12 @@ describe('Server-backed session lifecycle', () => {
       // No write mode in the request: the installation's default, past the hook.
       expect(api.createSession).toHaveBeenCalledWith(null);
       expect(api.setSessionStaged).toHaveBeenCalledWith('9999-0001', true);
+      // Its stream connects at once, and the diff is read when it is ready,
+      // so staged changes made before then show too.
+      expect(FakeEventSource.instances.some((es) => es.url.includes('/9999-0001/stream'))).toBe(
+        true
+      );
+      await waitFor(() => expect(api.getStagedChanges).toHaveBeenCalledWith('9999-0001'));
       expect(new URLSearchParams(window.location.search).get('session')).toBe('9999-0001');
     });
 
@@ -2272,6 +2278,7 @@ describe('Server-backed session lifecycle', () => {
       await act(async () => answer({ id: '9999-0001', write_mode: 'staged' }));
       expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith(startId);
       expect(api.setSessionModeDirect).toHaveBeenCalledWith(startId);
+      expect(api.deleteServerSession).toHaveBeenCalledWith('9999-0001', 'client-test');
     });
 
     it('creates the session after a delete as the installation default says', async () => {

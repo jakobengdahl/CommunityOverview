@@ -712,6 +712,10 @@ def expected_versions(selection: Any) -> Dict[LayerKey, str]:
                 422,
             )
         key = (item.get("kind"), item.get("entity_id"))
+        if key[0] not in ("node", "edge") or not isinstance(key[1], str):
+            raise ReviewRefused(
+                INVALID_MERGE_REQUEST, "each entry names a kind and an entity_id", 422
+            )
         if pinned.get(key, version) != version:
             raise ReviewRefused(
                 INVALID_MERGE_REQUEST, "an entry is named with two versions", 422

@@ -117,6 +117,18 @@ def test_a_malformed_version_is_refused(world, version):
     assert ("node", "a") in world.layer(sid)
 
 
+def test_a_malformed_entry_with_a_version_is_refused_not_a_server_error(world):
+    svc, sid = world.service, world.staged_session()
+    _stage(world, sid, ("update_node", ("a",), {"updates": {"description": "x"}}))
+    entry = {"kind": "node", "entity_id": ["a"], "version": "v"}
+    assert svc.discard_staged_changes(sid, entries=[entry])["error"] == (
+        "invalid_merge_request"
+    )
+    assert svc.merge_staged_changes(sid, "m", entries=[entry])["error"] == (
+        "invalid_merge_request"
+    )
+
+
 @pytest.mark.parametrize("restage", [_restage_here, None], ids=["this", "another"])
 def test_a_discard_of_an_entry_restaged_since_its_review_is_refused(world, restage):
     svc, sid = world.service, world.staged_session()

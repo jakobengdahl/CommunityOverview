@@ -814,9 +814,9 @@ version. An entry restaged after the caller reviewed it, by any instance and
 even before the merge read the layer, refuses the merge with `merge_raced`, and
 nothing is written. A malformed version (not a non-empty string of at most 200
 characters, or two versions for one entry) is `invalid_merge_request`. A
-request without versions behaves as before. A refusal never carries an entry's
-version, so it tells a narrowed reader nothing about an entry outside its view;
-naming such an entry is answered as for any entry not staged.
+request without versions behaves as before. A refusal carries no version of an
+entry outside the caller's view, so it tells a narrowed reader nothing about
+such an entry; naming one is answered as for any entry not staged.
 
 The selection must be **closed under dependencies**. An entry depends on:
 

@@ -214,8 +214,8 @@ export function itemFingerprint(item) {
  * The entries whose fresh read no longer matches the fingerprint taken when
  * the user ticked them: restaged, merged or discarded meanwhile, or judged
  * differently against the main graph. A merge or discard is sent only when
- * this is empty. (The request cannot pin the version itself, so a restage
- * after this read still lands; see the dialog.)
+ * this is empty; the request then names each entry's version, so the server
+ * refuses a restage after this read (§11.4).
  * @param {Map<string, string>} prints - entry key -> fingerprint when ticked
  * @param {Array} fresh
  * @returns {string[]} entry keys

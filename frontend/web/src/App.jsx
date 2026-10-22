@@ -2465,15 +2465,32 @@ function App() {
       const untouched =
         sessionIdRef.current === startId && useGraphStore.getState().nodes.length === 0;
       if (!created?.id || !untouched) {
+        // Unused: nothing was written in it.
+        if (created?.id) api.deleteServerSession(created.id, api.getClientId()).catch(() => {});
         settleDirect();
         return;
       }
       adoptSessionPayload(created.id, created);
+      // As any switch into a server session: its stream connects now, so the
+      // first staged change is seen (marker, count) as it happens.
+      try {
+        await loadSessionFromServer(created.id, { eagerConnect: true });
+      } catch (error) {
+        console.error('Error loading the starting session:', error);
+        settleDirect();
+        return;
+      }
+      if (sessionIdRef.current !== startId) {
+        settleDirect();
+        return;
+      }
       setSessionId(created.id);
       reflectSessionUrl(created.id);
+      sessionStore.touchSession(created.id);
+      setSessionsVersion((v) => v + 1);
       settleDirect();
     },
-    [adoptSessionPayload, setSessionId]
+    [adoptSessionPayload, loadSessionFromServer, setSessionId]
   );
   settleStartingSessionRef.current = settleStartingSession;
 
@@ -2491,6 +2508,8 @@ function App() {
         const readyId = syncRef.current?.sessionId;
         api.setSessionOnServer(readyId);
         if (!readyId || !stagedAvailableRef.current) return;
+        // Staged changes made before the stream existed are not replayed.
+        refreshStagedDiff();
         api.getSession(readyId).then(
           (payload) => {
             if (sessionIdRef.current === readyId) adoptSessionPayload(readyId, payload);
