@@ -215,17 +215,6 @@ def test_the_delete_answer_is_the_mode_the_session_was_retired_in(client, monkey
     assert client.delete(f"/api/sessions/{sid}").json()["write_mode"] == "staged"
 
 
-def test_reading_a_deleted_staged_session_is_a_coded_refusal(client):
-    """Unlike a session not created yet, which materialises on first save."""
-    sid = _staged(client)
-    client.delete(f"/api/sessions/{sid}")
-    retired = client.get(f"/api/sessions/{sid}")
-    assert retired.status_code == 404
-    assert retired.json()["detail"]["error"] == "session_not_found"
-    never = client.get("/api/sessions/1234-5678")
-    assert never.status_code == 404 and never.json()["detail"] == "session not found"
-
-
 def test_staged_is_refused_where_staged_sessions_are_off(app_config, mock_llm_provider):
     with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
         client = TestClient(create_app(app_config))

@@ -2214,6 +2214,100 @@ describe('Server-backed session lifecycle', () => {
     await act(async () => created.forEach((resolve) => resolve()));
   });
 
+  describe('the starting session', () => {
+    const stagesByDefault = () =>
+      api.getUiCapabilities.mockImplementation(async () => ({
+        llm_available: false,
+        staged_sessions: true,
+        session_write_mode_default: 'staged',
+      }));
+
+    it('holds writes from the starting id until the capabilities are known', async () => {
+      renderApp();
+      const [startId] = api.setActiveSessionForRequests.mock.calls[0];
+      expect(api.setSessionModeUnknown).toHaveBeenCalledWith(startId);
+      // A direct default settles it as direct, without a server session.
+      await waitFor(() => expect(api.setSessionModeDirect).toHaveBeenCalledWith(startId));
+      expect(api.createSession).not.toHaveBeenCalled();
+    });
+
+    it('starts in a server-created session where the installation stages by default', async () => {
+      stagesByDefault();
+      api.createSession.mockImplementation(async () => ({
+        id: '9999-0001',
+        write_mode: 'staged',
+      }));
+      renderApp();
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('9999-0001')
+      );
+      // No write mode in the request: the installation's default, past the hook.
+      expect(api.createSession).toHaveBeenCalledWith(null);
+      expect(api.setSessionStaged).toHaveBeenCalledWith('9999-0001', true);
+      expect(new URLSearchParams(window.location.search).get('session')).toBe('9999-0001');
+    });
+
+    it('keeps the browser session, direct, when the server refuses to create one', async () => {
+      stagesByDefault();
+      api.createSession.mockRejectedValue(
+        Object.assign(new Error('forbidden'), { status: 403, code: 'forbidden' })
+      );
+      renderApp();
+      const [startId] = api.setActiveSessionForRequests.mock.calls[0];
+      await waitFor(() => expect(api.setSessionModeDirect).toHaveBeenCalledWith(startId));
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith(startId);
+      expect(api.setSessionStaged).not.toHaveBeenCalled();
+    });
+
+    it('keeps a start the user already works in', async () => {
+      stagesByDefault();
+      let answer;
+      api.createSession.mockImplementation(() => new Promise((resolve) => (answer = resolve)));
+      renderApp();
+      const [startId] = api.setActiveSessionForRequests.mock.calls[0];
+      await waitFor(() => expect(api.createSession).toHaveBeenCalled());
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A], []);
+      });
+      await act(async () => answer({ id: '9999-0001', write_mode: 'staged' }));
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith(startId);
+      expect(api.setSessionModeDirect).toHaveBeenCalledWith(startId);
+    });
+
+    it('creates the session after a delete as the installation default says', async () => {
+      stagesByDefault();
+      api.createSession
+        .mockImplementationOnce(async () => ({ id: '9999-0001', write_mode: 'staged' }))
+        .mockImplementationOnce(async () => ({ id: '9999-0002', write_mode: 'staged' }));
+      api.getSession.mockImplementation(async (id) => ({
+        id,
+        write_mode: id === '7777-8888' ? 'direct' : 'staged',
+        state: {},
+        resolved: { nodes: [], edges: [] },
+        roster: [],
+      }));
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('9999-0001')
+      );
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getAllByText('7777-8888').find((el) => el.closest('.session-drawer')));
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('7777-8888')
+      );
+      let row = screen.getAllByText('7777-8888').find((el) => el.closest('.session-drawer'));
+      while (!row.querySelector('[aria-label="Session actions"]')) row = row.parentElement;
+      fireEvent.click(row.querySelector('[aria-label="Session actions"]'));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Delete session' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Delete' }));
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('9999-0002')
+      );
+      expect(api.createSession).toHaveBeenLastCalledWith(null);
+    });
+  });
+
   it('a real load failure (non-404) shows an error notice and stays on the current session', async () => {
     // Distinguishes an actual backend/network error from a 404 ("session
     // doesn't exist yet", handled elsewhere as a normal empty session): only

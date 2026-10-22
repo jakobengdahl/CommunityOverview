@@ -1016,10 +1016,11 @@ before) or **Staged session**. A direct session can also be switched to staged
 with **Switch to staged…** in the small *Direct* label at the bottom of the
 canvas. The switch applies to everyone in the session and cannot be undone: a
 staged session never goes back to direct editing. To edit the graph directly
-again, start a new session. The session the app opens with, and the one it
-starts after a session is deleted, is direct unless the deleted one was
-staged; the installation's default write mode only preselects the choice in
-**Start new session**.
+again, start a new session. Where the installation stages by default, the
+session the app opens with, and the one it moves you to after a session is
+deleted, is a staged session too (unless you are not allowed to stage; then
+it is direct, and says so). Opening a link to a session always joins that
+session as it is.
 
 **Seeing what is staged.** A staged session shows a dashed amber **Staged
 session** bar at the bottom of the canvas (at the top on a phone) with the
@@ -1071,8 +1072,7 @@ discarded.
 
 Opening a link to a session shows *Loading how this session writes* until
 the session has loaded, and edits wait until then: the session may be staged.
-**Retry** loads it again if that failed. A link to a staged session that has
-since been deleted opens a new session instead. File attachments are not staged: an
+**Retry** loads it again if that failed. File attachments are not staged: an
 attachment added to a node in a staged session is stored at once.
 
 **Deleting a staged session** drops its unmerged changes with it, and the

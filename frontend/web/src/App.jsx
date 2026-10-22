@@ -228,7 +228,9 @@ function App() {
       : api.generateVisualizationSessionId();
     api.setActiveSessionForRequests(initial);
     // A linked session may be staged: hold graph writes until its load says.
-    if (initial === urlSession) api.setSessionModeUnknown(initial);
+    // So may the starting one, until the capabilities say whether the app
+    // starts in a server-created session of the installation's default mode.
+    api.setSessionModeUnknown(initial);
     return initial;
   });
   // Written together with the state, not from an effect: a switch bumps the
@@ -337,7 +339,13 @@ function App() {
   const [stagedAvailable, setStagedAvailable] = useState(false);
   const stagedAvailableRef = useRef(false);
   stagedAvailableRef.current = stagedAvailable;
+  // The browser-made id the app opened in without a ?session= link, until
+  // the capabilities settle how it starts (settleStartingSession).
+  const startingSessionRef = useRef(null);
+  const settleStartingSessionRef = useRef(null);
   const [defaultWriteMode, setDefaultWriteMode] = useState('direct');
+  const defaultWriteModeRef = useRef('direct');
+  defaultWriteModeRef.current = defaultWriteMode;
   const [newSessionDialogOpen, setNewSessionDialogOpen] = useState(false);
   const [stagedReviewOpen, setStagedReviewOpen] = useState(false);
   const [switchToStagedConfirm, setSwitchToStagedConfirm] = useState(false);
@@ -1182,6 +1190,10 @@ function App() {
   useEffect(() => {
     reflectSessionUrl(sessionId);
     const urlSession = _urlParams.get('session');
+    if (!sessionStore.isValidSessionId(urlSession)) {
+      startingSessionRef.current = sessionId;
+      markModeUnknown(sessionId);
+    }
     if (sessionStore.isValidSessionId(urlSession)) {
       markModeUnknown(urlSession);
       sessionStore.touchSession(urlSession);
@@ -1191,19 +1203,6 @@ function App() {
       urlSessionBootstrapRef.current = loadSessionFromServer(urlSession, {
         eagerConnect: true,
         onMissing: () => showNotification('info', t('sessions.link_not_found')),
-      }).catch((error) => {
-        if (error?.code !== 'session_not_found') throw error;
-        // A link to a deleted staged session: its id is never created again,
-        // so the tab moves to a fresh session rather than writing from it.
-        forgetStagedSession(urlSession);
-        dropIntoFreshSession({
-          freshId: api.generateVisualizationSessionId(),
-          clearVisualization,
-          resetSessionScopedState: resetSessionScopedUi,
-          setSessionId,
-          reflectSessionUrl,
-        });
-        showNotification('info', t('sessions.link_not_found'));
       });
     }
     setSessionsVersion((v) => v + 1);
@@ -1265,10 +1264,12 @@ function App() {
         setDefaultWriteMode(
           capabilitiesData.session_write_mode_default === 'staged' ? 'staged' : 'direct'
         );
+        settleStartingSessionRef.current?.(capabilitiesData);
       } catch (error) {
         console.error('Error loading configuration:', error);
         api.getGraphStats().then(setStats).catch(console.error);
         setLlmAvailable(false);
+        settleStartingSessionRef.current?.(null);
       }
     };
     loadConfig();
@@ -2360,6 +2361,26 @@ function App() {
   const leaveDeletedSession = useCallback(
     async (deletedId, wasStaged) => {
       if (!wasStaged) {
+        if (stagedAvailableRef.current && defaultWriteModeRef.current === 'staged') {
+          // The installation's default governs the new session: created on
+          // the server (the hook asked), with nothing written from the deleted
+          // id meanwhile. Refused or unreachable: today's browser session.
+          markModeUnknown(deletedId);
+          clearVisualization();
+          resetSessionScopedUi();
+          try {
+            const created = await api.createSession(null);
+            if (!created?.id) throw new Error('no session created');
+            await loadSessionFromServer(created.id, { eagerConnect: true });
+            setSessionId(created.id);
+            reflectSessionUrl(created.id);
+            sessionStore.touchSession(created.id);
+            forgetStagedSession(deletedId);
+            return true;
+          } catch (error) {
+            console.error('Error creating the new session:', error);
+          }
+        }
         forgetStagedSession(deletedId);
         dropIntoFreshSession({
           freshId: api.generateVisualizationSessionId(),
@@ -2401,6 +2422,7 @@ function App() {
     [
       forgetStagedSession,
       adoptWriteMode,
+      markModeUnknown,
       clearVisualization,
       resetSessionScopedUi,
       loadSessionFromServer,
@@ -2409,6 +2431,51 @@ function App() {
       t,
     ]
   );
+
+  // How the app starts without a ?session= link, once the capabilities are
+  // known (or failed): where the installation stages by default, in a session
+  // created on the server, so that default (and the hook) decide its mode;
+  // otherwise, or if that is refused or unreachable, in the browser-made id
+  // it opened with, which materialises direct on first save, as before. Until
+  // then the starting id holds graph writes, so nothing is written from a
+  // session about to be left, and nothing shows a staged one as direct.
+  const settleStartingSession = useCallback(
+    async (capabilities) => {
+      const startId = startingSessionRef.current;
+      if (!startId) return;
+      startingSessionRef.current = null;
+      const settleDirect = () => adoptSessionPayload(startId, null);
+      const stagesByDefault =
+        capabilities?.staged_sessions === true &&
+        capabilities?.session_write_mode_default === 'staged';
+      if (!stagesByDefault) {
+        settleDirect();
+        return;
+      }
+      let created;
+      try {
+        created = await api.createSession(null);
+      } catch (error) {
+        console.error('Error creating the starting session:', error);
+        settleDirect();
+        return;
+      }
+      // Only a start the user has not moved on from is replaced: a switch, or
+      // a canvas already in use, keeps the session the user is working in.
+      const untouched =
+        sessionIdRef.current === startId && useGraphStore.getState().nodes.length === 0;
+      if (!created?.id || !untouched) {
+        settleDirect();
+        return;
+      }
+      adoptSessionPayload(created.id, created);
+      setSessionId(created.id);
+      reflectSessionUrl(created.id);
+      settleDirect();
+    },
+    [adoptSessionPayload, setSessionId]
+  );
+  settleStartingSessionRef.current = settleStartingSession;
 
   // Keep the sync client's handlers pointed at the latest closures. A remote op
   // or resync triggers a debounced authoritative apply; a remote delete of the
@@ -2507,6 +2574,14 @@ function App() {
         }
         // Per tab, not per client id (shared by every tab of this browser).
         if (locallyDeletingRef.current.has(sessionId)) return;
+        if (stagedAvailableRef.current && defaultWriteModeRef.current === 'staged') {
+          // The new session is created as the installation's default says.
+          sessionStore.removeSession(sessionId);
+          setSessionsVersion((v) => v + 1);
+          showNotification('info', t('sessions.session_deleted_remote'));
+          leaveDeletedSession(sessionId, false).then(() => setSessionsVersion((v) => v + 1));
+          return;
+        }
         forgetStagedSession(sessionId);
         const dropped = receiveRemoteSessionDeleted({
           deletedBy: null,

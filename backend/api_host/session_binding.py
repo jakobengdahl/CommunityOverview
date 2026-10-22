@@ -124,21 +124,10 @@ class SessionBindingMiddleware:
         path = scope.get("path", "")
         path_session = self._path_session(path)
         if path_session is not None and self._is_retired(path_session):
-            # Refused with session_not_found (§5). Coded, unlike a session
-            # route's answer for an id it does not hold yet: a client must not
-            # take a retired id for a new session that materialises on save.
-            # A route that would create an unknown id tells the two apart
-            # anyway, by refusing the retired one.
-            await _send_json(
-                send,
-                404,
-                {
-                    "detail": {
-                        "error": "session_not_found",
-                        "message": "session not found",
-                    }
-                },
-            )
+            # Answered as the session routes answer an id they do not hold.
+            # A route that would create an unknown id still tells the two
+            # apart, by refusing the retired one: that is never recreating it.
+            await _send_json(send, 404, {"detail": "session not found"})
             return
 
         values = Headers(scope=scope).getlist(session_context.SESSION_ID_HEADER)
