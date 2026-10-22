@@ -151,3 +151,38 @@ describe('CustomNode pulse overlay', () => {
     expect(container.querySelector('.graph-node-pulse')).toBeNull();
   });
 });
+
+describe('CustomNode staged marker', () => {
+  it('draws a staged node apart from a graph node, badged with its state', () => {
+    render(
+      <CustomNode
+        id="node-1"
+        selected={false}
+        data={{
+          label: 'Draft',
+          nodeType: 'Actor',
+          color: '#3B82F6',
+          stagedState: 'created',
+          stagedLabel: 'Staged: new',
+        }}
+      />
+    );
+    const node = screen.getByText('Draft').closest('.graph-custom-node');
+    expect(node.className).toContain('staged');
+    expect(node.className).toContain('staged-created');
+    expect(screen.getByText('Staged: new').dataset.stagedState).toBe('created');
+  });
+
+  it('carries no marker for a node the session has not staged', () => {
+    render(
+      <CustomNode
+        id="node-2"
+        selected={false}
+        data={{ label: 'Plain', nodeType: 'Actor', color: '#3B82F6' }}
+      />
+    );
+    const node = screen.getByText('Plain').closest('.graph-custom-node');
+    expect(node.className).not.toContain('staged');
+    expect(document.querySelector('.graph-node-staged-badge')).toBeNull();
+  });
+});

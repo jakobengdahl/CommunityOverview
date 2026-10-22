@@ -106,6 +106,17 @@ const COMPACT_FIT_PADDING = 0.05;
 const FOCUS_CENTER = { x: 0, y: 0 };
 const FOCUS_MIN_RADIUS = 260;
 const FOCUS_RADIUS_PER_NEIGHBOUR = 55;
+
+// Staged-session markers: English defaults, translated by the host through
+// the `stagedStateLabels` prop.
+const DEFAULT_STAGED_STATE_LABELS = {
+  created: 'Staged: new',
+  updated: 'Staged: changed',
+  orphaned: 'Staged: deleted in graph',
+  deleted: 'Staged: deleted',
+};
+const STAGED_EDGE_COLOR = '#f0b429';
+const NO_STAGED_STATE_LABELS = {};
 // A drawn freehand stroke takes its colour/width/smoothing/opacity from the
 // options chosen in the toolbox's pen fold-out (defaults in
 // utils/freehandOptions.js), and all four stay editable afterwards through
@@ -461,6 +472,12 @@ function GraphCanvasInner({
   onRemoteAnnotationsApplied,
   remoteSelections = null,
   remoteLeases = null,
+  // Staged-session markers (docs/SESSION_OVERLAY_CONTRACT.md §8.1, §17):
+  // `{ nodes: {id: state}, edges: {id: state} }`, state one of created,
+  // updated, orphaned or deleted. A staged entity must never look like one the
+  // graph holds, so each one is drawn dashed and badged with its state.
+  stagedStates = null,
+  stagedStateLabels = NO_STAGED_STATE_LABELS,
   onBeginEditing,
   onEndEditing,
   federationDepth = 1,
@@ -1427,16 +1444,21 @@ function GraphCanvasInner({
     return count;
   }, [inputEdges, visibleNodes, nodesToRender, hiddenNodeIds, hiddenEdgeIds]);
 
+  const stagedLabels = useMemo(
+    () => ({ ...DEFAULT_STAGED_STATE_LABELS, ...stagedStateLabels }),
+    [stagedStateLabels]
+  );
+
   // Convert to React Flow edge format
   const reactFlowEdges = useMemo(() => {
     return visibleEdges.map((edge) => {
       const visuals = resolveEdgeVisuals(edge.metadata);
       const opacity = resolveEdgeOpacity(edgeIntensity, dimmedEdgeIds.includes(edge.id));
+      const staged = stagedStates?.edges?.[edge.id] ?? null;
       return {
         id: edge.id,
         source: edge.source,
         target: edge.target,
-        label: edge.type,
         type: 'floating',
         animated: visuals.animated,
         selectable: true,
@@ -1444,16 +1466,29 @@ function GraphCanvasInner({
         // the rf-edge-pulse keyframe (GraphCanvas.css) reads it via calc() so
         // an animated edge's pulse scales relative to this opacity instead of
         // the animation silently overriding it back to a fixed 1/0.35.
-        style: { ...visuals.style, strokeOpacity: opacity, '--edge-opacity': opacity },
+        style: {
+          ...visuals.style,
+          strokeOpacity: opacity,
+          '--edge-opacity': opacity,
+          ...(staged ? { strokeDasharray: '6 4', stroke: STAGED_EDGE_COLOR } : null),
+        },
         markerStart: visuals.markerStart,
         markerEnd: visuals.markerEnd,
-        className: visuals.className,
-        data: { type: edge.type, label: edge.label, metadata: edge.metadata || {} },
-        labelStyle: { fill: '#888', fontSize: 10, fontWeight: 500 },
+        className: staged
+          ? `${visuals.className || ''} staged-edge staged-edge-${staged}`.trim()
+          : visuals.className,
+        data: {
+          type: edge.type,
+          label: edge.label,
+          metadata: edge.metadata || {},
+          stagedState: staged,
+        },
+        label: staged ? `${edge.type || ''} · ${stagedLabels[staged] || staged}` : edge.type,
+        labelStyle: { fill: staged ? STAGED_EDGE_COLOR : '#888', fontSize: 10, fontWeight: 500 },
         labelBgStyle: { fill: '#1a1a1a', fillOpacity: 0.8 },
       };
     });
-  }, [visibleEdges, dimmedEdgeIds, edgeIntensity]);
+  }, [visibleEdges, dimmedEdgeIds, edgeIntensity, stagedStates, stagedLabels]);
 
   // Convert to React Flow node format with layout
   const reactFlowNodes = useMemo(() => {
@@ -1476,6 +1511,8 @@ function GraphCanvasInner({
           markLabel: mark?.label ?? null,
           pulse: pulsedNodeIds[node.id] ?? null,
           remoteSelection: remoteSelections?.[node.id] ?? null,
+          stagedState: stagedStates?.nodes?.[node.id] ?? null,
+          stagedLabel: stagedLabels[stagedStates?.nodes?.[node.id]] ?? null,
           previewEnabled: nodePreviewEnabled,
           onExpand: onExpand ? () => onExpand(node.id, node) : null,
           onEdit: onEdit ? () => onEdit(node.id, node) : null,
@@ -1520,6 +1557,8 @@ function GraphCanvasInner({
     nodeMarks,
     pulsedNodeIds,
     remoteSelections,
+    stagedStates,
+    stagedLabels,
     nodePreviewEnabled,
   ]);
 

@@ -23,6 +23,10 @@ import './CustomNode.css';
  * - onEdit: Callback when edit button clicked
  * - remoteSelection: { color, displayName } when another collaborator has this
  *   node selected in a shared session (design 3.5), else null
+ * - stagedState: 'created' | 'updated' | 'orphaned' | 'deleted' when the node
+ *   is staged in the active session and not (yet) what the graph holds
+ *   (docs/SESSION_OVERLAY_CONTRACT.md §8.1), else null; stagedLabel is its
+ *   translated badge text
  */
 function CustomNode({ data, id, selected }) {
   const [showButtons, setShowButtons] = useState(false);
@@ -32,6 +36,7 @@ function CustomNode({ data, id, selected }) {
 
   const isSkill = data.nodeType === 'Skill' || data.type === 'Skill';
   const remote = data.remoteSelection || null;
+  const staged = data.stagedState || null;
   const pulse = data.pulse || null;
   const pulseStyle = pulse
     ? ['glow', 'grow', 'marker'].includes(pulse.style)
@@ -56,7 +61,7 @@ function CustomNode({ data, id, selected }) {
   return (
     <div
       ref={nodeRef}
-      className={`graph-custom-node ${data.isHighlighted ? 'highlighted' : ''} ${selected ? 'selected' : ''} ${data.markColor ? 'marked' : ''} ${isSkill ? 'skill-node' : ''} ${remote ? 'remote-selected' : ''} ${data.isDimmed ? 'dimmed' : ''}`}
+      className={`graph-custom-node ${data.isHighlighted ? 'highlighted' : ''} ${selected ? 'selected' : ''} ${data.markColor ? 'marked' : ''} ${isSkill ? 'skill-node' : ''} ${remote ? 'remote-selected' : ''} ${data.isDimmed ? 'dimmed' : ''} ${staged ? `staged staged-${staged}` : ''}`}
       style={{
         borderColor: data.markColor || data.color,
         boxShadow: data.markColor
@@ -100,6 +105,12 @@ function CustomNode({ data, id, selected }) {
           title={remote.displayName}
         >
           {remote.displayName}
+        </div>
+      )}
+
+      {staged && (
+        <div className="graph-node-staged-badge" data-staged-state={staged}>
+          {data.stagedLabel || staged}
         </div>
       )}
 
