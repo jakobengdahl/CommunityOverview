@@ -2448,8 +2448,11 @@ function App() {
       const stagesByDefault =
         capabilities?.staged_sessions === true &&
         capabilities?.session_write_mode_default === 'staged';
-      // A ?view= link loads its view into the session it was opened in.
-      if (!stagesByDefault || _urlParams.get('view')) {
+      // A link that fills the canvas (?view=, ?node=) loads into the session
+      // it was opened in, rather than racing the create; a collection kiosk
+      // (?collect=, ?akc=) keeps writing its responses as before.
+      const linkedStart = ['view', 'node', 'collect', 'akc'].some((key) => _urlParams.get(key));
+      if (!stagesByDefault || linkedStart) {
         settleDirect();
         return;
       }
@@ -3049,7 +3052,10 @@ function App() {
       }
       if (payload?.write_mode !== 'staged') throw new Error(t('staged.switch_failed'));
       adoptWriteMode(targetId, 'staged');
-      ensureSyncConnected(targetId);
+      // Only while it is still the session the user is in: the stream must
+      // never be bound to one the user has left (its notices act on the
+      // active session).
+      if (sessionIdRef.current === targetId) ensureSyncConnected(targetId);
       showNotification('info', t('staged.switched'));
     } catch (error) {
       if (typeof error?.status !== 'number' || error.status >= 500) {
@@ -3058,7 +3064,7 @@ function App() {
         const now = await api.getSession(targetId).catch(() => null);
         if (now) adoptSessionPayload(targetId, now);
         if (now?.write_mode === 'staged') {
-          ensureSyncConnected(targetId);
+          if (sessionIdRef.current === targetId) ensureSyncConnected(targetId);
           showNotification('info', t('staged.switched'));
           return;
         }
@@ -3700,9 +3706,10 @@ function App() {
         onReview={() => setStagedReviewOpen(true)}
         onSwitchToStaged={() => setSwitchToStagedConfirm(true)}
         onRetryMode={() =>
-          loadSessionFromServer(sessionId, { eagerConnect: true }).catch(() =>
-            showNotification('error', t('sessions.connect_error'))
-          )
+          // As a switch to this session: a load that answers after the user
+          // moved on then moves the user back, consistently, rather than
+          // leaving canvas, stream and requests on different sessions.
+          switchToSession(sessionId, { register: false, eagerConnect: true })
         }
       />
       {newSessionDialogOpen && (

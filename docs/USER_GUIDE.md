@@ -1020,7 +1020,8 @@ again, start a new session. Where the installation stages by default, the
 session the app opens with, and the one it moves you to after a session is
 deleted, is a staged session too (unless you are not allowed to stage; then
 it is direct, and says so). Opening a link to a session always joins that
-session as it is; a link to a saved view opens in a direct session.
+session as it is; any other link that opens something (a saved view, a node,
+a collection form) opens in a direct session.
 
 **Seeing what is staged.** A staged session shows a dashed amber **Staged
 session** bar at the bottom of the canvas (at the top on a phone) with the

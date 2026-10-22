@@ -54,6 +54,9 @@ describe('needsSessionHeader', () => {
 
   it('names it on a graph write the backend cannot stage, so that write is refused, not applied', () => {
     expect(needsSessionHeader('POST', '/api/views/save')).toBe(true);
+    // Upload with analysis runs the assistant, which can write; extraction cannot.
+    expect(needsSessionHeader('POST', '/ui/upload')).toBe(true);
+    expect(needsSessionHeader('POST', '/ui/upload/extract')).toBe(false);
     expect(needsSessionHeader('DELETE', '/api/anything/else')).toBe(true);
   });
 

@@ -15,7 +15,7 @@
  *
  * Session routes are left out: they name their session in the path, and
  * creating a session is not a write in one. A few POSTs that never change the
- * graph (teleport resolution, document upload and analysis) are left out too,
+ * graph (teleport resolution, document text extraction) are left out too,
  * or the backend would refuse them in a staged session for no reason.
  */
 
@@ -57,7 +57,9 @@ const NON_GRAPH_POSTS = [
   /^\/api\/federation\/teleport$/,
   /^\/agents\/proposals\/[^/]+\/reject$/,
   /^\/ui\/propose-nodes$/,
-  /^\/ui\/upload(\/.*)?$/,
+  // Text extraction only: /ui/upload with analyze=true runs the assistant,
+  // whose tools can write.
+  /^\/ui\/upload\/extract$/,
 ];
 
 const SESSION_ROUTES = /^\/(api\/)?sessions(\/.*)?$/;

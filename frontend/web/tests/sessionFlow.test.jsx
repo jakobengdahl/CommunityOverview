@@ -71,6 +71,7 @@ vi.mock('../src/services/api', () => {
     renameServerSession: vi.fn(async () => ({})),
     deleteServerSession: vi.fn(async () => ({ deleted: true })),
     createSession: vi.fn(async () => ({ id: '9999-0001', write_mode: 'staged' })),
+    setSessionWriteMode: vi.fn(async (id) => ({ id, write_mode: 'staged' })),
     getSession: vi.fn(async (id, opts) => {
       if (id === '5555-6666' && opts?.resolve) {
         return {
@@ -2316,6 +2317,74 @@ describe('Server-backed session lifecycle', () => {
       );
       expect(api.createSession).toHaveBeenLastCalledWith(null);
     });
+  });
+
+  it('never binds the stream to a session the user left while switching it to staged', async () => {
+    api.getUiCapabilities.mockImplementation(async () => ({
+      llm_available: false,
+      staged_sessions: true,
+    }));
+    let answerSwitch;
+    api.setSessionWriteMode.mockImplementation(
+      (id) => new Promise((resolve) => (answerSwitch = () => resolve({ id, write_mode: 'staged' })))
+    );
+    sessionStore.touchSession('7777-8888');
+    renderApp();
+    const [startId] = api.setActiveSessionForRequests.mock.calls[0];
+    fireEvent.click(await screen.findByText('Switch to staged…'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Switch to staged' }));
+    await waitFor(() =>
+      expect(api.setSessionWriteMode).toHaveBeenCalledWith(startId, 'staged', 'client-test')
+    );
+    fireEvent.click(screen.getByTitle('Menu'));
+    fireEvent.click(screen.getAllByText('7777-8888').find((el) => el.closest('.session-drawer')));
+    await waitFor(() =>
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('7777-8888')
+    );
+    const streamsFor = (id) =>
+      FakeEventSource.instances.filter((es) => es.url.includes(`/${id}/stream`)).length;
+    const before = streamsFor(startId);
+    await act(async () => answerSwitch());
+    expect(streamsFor(startId)).toBe(before);
+  });
+
+  it('a mode retry answering after the user moved on leaves one consistent session', async () => {
+    api.getUiCapabilities.mockImplementation(async () => ({
+      llm_available: false,
+      staged_sessions: true,
+    }));
+    // The switch's answer is lost and the re-read fails: the mode is unknown.
+    api.setSessionWriteMode.mockRejectedValue(new TypeError('Failed to fetch'));
+    const defaultGetSession = api.getSession.getMockImplementation();
+    let startId;
+    let answerRetry = null;
+    api.getSession.mockImplementation(async (id, opts) => {
+      if (id === startId && !opts) throw new TypeError('Failed to fetch');
+      if (id === startId && opts?.resolve) {
+        return new Promise((resolve) => (answerRetry = () => resolve(defaultGetSession(id, opts))));
+      }
+      return defaultGetSession(id, opts);
+    });
+    sessionStore.touchSession('7777-8888');
+    renderApp();
+    [startId] = api.setActiveSessionForRequests.mock.calls[0];
+    fireEvent.click(await screen.findByText('Switch to staged…'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Switch to staged' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(answerRetry).not.toBeNull());
+    fireEvent.click(screen.getByTitle('Menu'));
+    fireEvent.click(screen.getAllByText('7777-8888').find((el) => el.closest('.session-drawer')));
+    await waitFor(() =>
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('7777-8888')
+    );
+    await act(async () => answerRetry());
+    // The late retry is a switch back: requests, stream and URL agree.
+    await waitFor(() => expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith(startId));
+    const lastStream = FakeEventSource.instances
+      .filter((es) => es.url.includes('/api/sessions/'))
+      .at(-1);
+    expect(lastStream.url).toContain(`/${startId}/stream`);
+    expect(new URLSearchParams(window.location.search).get('session')).toBe(startId);
   });
 
   it('a real load failure (non-404) shows an error notice and stays on the current session', async () => {
