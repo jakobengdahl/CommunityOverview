@@ -428,7 +428,8 @@ function App() {
   // When each edge was last removed by a remote op (a running count), so a
   // composed re-read still in flight does not put back an edge removed after
   // it started.
-  const edgeRemovalSeqRef = useRef({ seq: 0, removed: new Map(), inFlight: new Set() });
+  // inFlight counts the re-reads started at each seq (several can share one).
+  const edgeRemovalSeqRef = useRef({ seq: 0, removed: new Map(), inFlight: new Map() });
   const applyRemoteOp = useCallback(
     async (op) => {
       const store = useGraphStore.getState();
@@ -443,7 +444,7 @@ function App() {
         const sessionAtStart = syncRef.current?.sessionId;
         const removalsAtStart = edgeRemovalSeqRef.current.seq;
         const inFlight = edgeRemovalSeqRef.current.inFlight;
-        inFlight.add(removalsAtStart);
+        inFlight.set(removalsAtStart, (inFlight.get(removalsAtStart) || 0) + 1);
         const onCanvas = new Set(store.nodes.map((n) => n.id));
         const wanted = (op.edges || []).filter(
           (e) => e && e.id && onCanvas.has(e.source) && onCanvas.has(e.target)
@@ -453,7 +454,9 @@ function App() {
         try {
           reads = await Promise.all(sources.map((id) => api.getNodeDetails(id).catch(() => null)));
         } finally {
-          inFlight.delete(removalsAtStart);
+          const left = inFlight.get(removalsAtStart) - 1;
+          if (left > 0) inFlight.set(removalsAtStart, left);
+          else inFlight.delete(removalsAtStart);
         }
         if (syncRef.current?.sessionId !== sessionAtStart) return false; // switched away while fetching
         const listed = new Map(reads.flatMap((r) => r?.edges || []).map((e) => [e.id, e]));
@@ -559,7 +562,7 @@ function App() {
           if (removals.removed.size > 1000) {
             // Forget only removals no re-read still in flight could compare
             // against.
-            const oldest = Math.min(removals.seq, ...removals.inFlight);
+            const oldest = Math.min(removals.seq, ...removals.inFlight.keys());
             for (const [id, seq] of removals.removed) {
               if (seq <= oldest) removals.removed.delete(id);
             }

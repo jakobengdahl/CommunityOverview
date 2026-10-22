@@ -6,7 +6,7 @@
 
 import {
   SESSION_ID_HEADER,
-  isSessionAware,
+  directSessionNames,
   mayWriteGraph,
   needsSessionHeader,
   pathBelowRoot,
@@ -190,7 +190,7 @@ function sessionHeaders(url, method) {
     _stagingAvailable &&
     _activeSessionId &&
     _serverSessions.has(_activeSessionId) &&
-    isSessionAware(method, path)
+    directSessionNames(method, path)
   ) {
     return { [SESSION_ID_HEADER]: _activeSessionId };
   }

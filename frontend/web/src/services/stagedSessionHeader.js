@@ -101,6 +101,22 @@ export function mayWriteGraph(method, path) {
   return needsSessionHeader(verb, path);
 }
 
+// Session-aware routes that bind the request to a session of their own, so a
+// direct session must not name itself on them: approving an agent proposal
+// applies it in the session the proposal was made in, and naming another is
+// refused (session_mismatch). In a staged session that refusal is wanted.
+const OWN_SESSION_ROUTES = [/^\/agents\/proposals\/[^/]+\/approve$/];
+
+/**
+ * Whether a direct session the server holds names itself on this request:
+ * the routes that stage or compose, except those that bind their own session.
+ * @param {string} method
+ * @param {string} path
+ */
+export function directSessionNames(method, path) {
+  return isSessionAware(method, path) && !OWN_SESSION_ROUTES.some((re) => re.test(path));
+}
+
 /**
  * Whether the backend stages or composes on this route: the header is safe
  * on it in a direct session too, where it changes nothing.

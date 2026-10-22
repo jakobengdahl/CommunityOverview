@@ -154,6 +154,15 @@ describe('a direct session the server holds, where staging exists', () => {
     expect(headerOf(calls[1])).toBeUndefined();
   });
 
+  it('leaves an agent proposal approval to the session it was made in', async () => {
+    const calls = mockFetch();
+    api.setStagingAvailable(true);
+    api.setActiveSessionForRequests('5555-6666-7777-8888');
+    api.setSessionOnServer('5555-6666-7777-8888');
+    await api.decideAgentProposal('p1', 'approve');
+    expect(headerOf(calls[0])).toBeUndefined();
+  });
+
   it('names no session the server does not hold, nor any where staging is off', async () => {
     const calls = mockFetch();
     api.setActiveSessionForRequests('5555-6666-7777-8888');
