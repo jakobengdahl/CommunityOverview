@@ -916,3 +916,20 @@ export async function undoSessionAction(sessionId, clientId) {
     body: JSON.stringify({ client_id: clientId }),
   });
 }
+
+/**
+ * Summon every client connected to the session to a model-space region
+ * ("Bring everyone here"). Ephemeral: nothing is stored, and only clients
+ * connected right now move. The server names the summoner by this client's
+ * presence entry. Throws with `status` 400 (invalid bounds), 403, 404 or 429.
+ * @param {string} sessionId
+ * @param {string} clientId
+ * @param {{x: number, y: number, width: number, height: number}} bounds
+ * @returns {Promise<{bounds: Object, connected_clients: number}>}
+ */
+export async function summonSessionViewport(sessionId, clientId, bounds) {
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/summon`, {
+    method: 'POST',
+    body: JSON.stringify({ client_id: clientId, bounds }),
+  });
+}

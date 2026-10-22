@@ -650,7 +650,8 @@ export class SessionSyncClient {
    *   does, is protected by construction rather than needing its own version
    *   check — see `_handleEvent`'s `'op'` case), onPresence, onSelections,
    *   onLeases, onPresenceJoined, onPresenceLeft, onSessionRenamed,
-   *   onSessionDeleted, onDropped, onCommand, onLocalAnnotationsApplied (fired
+   *   onSessionDeleted, onDropped, onCommand, onViewportSummoned,
+   *   onLocalAnnotationsApplied (fired
    *   with the acked annotation_created/annotation_updated `applied` entries
    *   after this client's own op batch lands, so the caller can thread the
    *   server's confirmed version/field_versions back onto the live canvas —
@@ -1869,6 +1870,18 @@ export class SessionSyncClient {
         break;
       case 'session_deleted':
         if (this.handlers.onSessionDeleted) this.handlers.onSessionDeleted(data.deleted_by);
+        break;
+      case 'viewport_summoned':
+        // "Bring everyone here" (ephemeral, never replayed): the summoner's own
+        // echo is skipped — it is already looking at the region.
+        if (data.client_id === this.clientId) break;
+        if (this.handlers.onViewportSummoned) {
+          this.handlers.onViewportSummoned({
+            bounds: data.bounds,
+            summonedBy: data.summoned_by || null,
+            sessionId: this.sessionId,
+          });
+        }
         break;
       case 'command':
         // MCP visualization push, broadcast to every subscriber (design §3.8),

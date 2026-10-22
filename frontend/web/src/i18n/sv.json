@@ -795,5 +795,14 @@
       "generic": "Begäran misslyckades. Försök igen.",
       "generic_with_detail": "Begäran misslyckades: {detail}"
     }
+  },
+  "summon": {
+    "bring_everyone": "Samla alla här",
+    "bring_everyone_tooltip": "Flytta alla i sessionen till det du tittar på",
+    "sent": "Flyttade {count} till din vy",
+    "failed": "Kunde inte samla alla här",
+    "notice": "{name} tog dig hit",
+    "notice_anonymous": "Någon tog dig hit",
+    "return": "Tillbaka"
   }
 }

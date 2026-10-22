@@ -475,6 +475,22 @@ describe('SessionSyncClient', () => {
     expect(onCommand).toHaveBeenCalledWith(command);
   });
 
+  it('forwards a summon from another client and skips its own echo', () => {
+    const onViewportSummoned = vi.fn();
+    const { client } = makeClient({ handlers: { onViewportSummoned } });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    const bounds = { x: 1, y: 2, width: 300, height: 200 };
+    es.emit({ type: 'viewport_summoned', client_id: 'client-me', summoned_by: 'Me', bounds });
+    expect(onViewportSummoned).not.toHaveBeenCalled();
+    es.emit({ type: 'viewport_summoned', client_id: 'client-other', summoned_by: 'Ada', bounds });
+    expect(onViewportSummoned).toHaveBeenCalledWith({
+      bounds,
+      summonedBy: 'Ada',
+      sessionId: '1234-5678',
+    });
+  });
+
   it('forwards remote ops but suppresses echoes of its own client', async () => {
     const onRemoteOps = vi.fn();
     const { client } = makeClient({ handlers: { onRemoteOps } });

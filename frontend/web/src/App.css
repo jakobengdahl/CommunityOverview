@@ -15,7 +15,10 @@
   left: 0;
 }
 
-.app.fullscreen-canvas-mode > :not(.app-canvas):not(.fullscreen-canvas-exit) {
+/* The summon notice stays: a fullscreen viewer is still moved by a summon
+   and must still see who moved them and be able to Return. */
+.app.fullscreen-canvas-mode
+  > :not(.app-canvas):not(.fullscreen-canvas-exit):not(.app-summon-notice) {
   display: none !important;
 }
 
@@ -98,6 +101,27 @@
 
 .app-notification button:hover {
   color: #999;
+}
+
+/* Sits above the regular notification so a summon notice and its Return
+   action are never hidden behind an unrelated toast. */
+.app-summon-notice {
+  bottom: 76px;
+  bottom: calc(76px + env(safe-area-inset-bottom));
+}
+
+.app-notification button.app-summon-return {
+  color: #8b93ff;
+  font-size: 0.9rem;
+  font-weight: 600;
+  border: 1px solid #646cff;
+  border-radius: 6px;
+  padding: 4px 10px;
+}
+
+.app-notification button.app-summon-return:hover {
+  color: #fff;
+  background: rgba(100, 108, 255, 0.25);
 }
 
 .app-offline-banner {
