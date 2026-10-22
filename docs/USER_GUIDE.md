@@ -1016,7 +1016,10 @@ before) or **Staged session**. A direct session can also be switched to staged
 with **Switch to staged…** in the small *Direct* label at the bottom of the
 canvas. The switch applies to everyone in the session and cannot be undone: a
 staged session never goes back to direct editing. To edit the graph directly
-again, start a new session.
+again, start a new session. The session the app opens with, and the one it
+starts after a session is deleted, is direct unless the deleted one was
+staged; the installation's default write mode only preselects the choice in
+**Start new session**.
 
 **Seeing what is staged.** A staged session shows a dashed amber **Staged
 session** bar at the bottom of the canvas (at the top on a phone) with the

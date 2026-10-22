@@ -909,6 +909,17 @@
     "ticks_dropped": "{count} ticked change(s) changed since you ticked them and were unticked; check them and tick again",
     "recheck_first": "These changed since you ticked them; check them and tick them first: {names}",
     "write_held": "This session's write mode is not known yet, so nothing is written until it has loaded.",
-    "approve_session_changed": "The session changed while approving; approve again."
+    "approve_session_changed": "The session changed while approving; approve again.",
+    "refusal": {
+      "invalid_merge_request": "The merge request was not accepted. Read the changes again and choose anew.",
+      "merge_id_taken": "That merge was already used for other changes. Merge again.",
+      "session_not_staged": "This session is not staged, so it has no changes to merge or discard.",
+      "session_not_found": "The session no longer exists.",
+      "session_not_supported": "This action cannot be staged, so it is not done in a staged session.",
+      "session_mismatch": "The request named another session than the one it belongs to.",
+      "staged_unsupported": "Staged sessions are not available on this server.",
+      "layer_full": "The session holds as many staged changes as it can. Merge or discard some first.",
+      "layer_not_empty": "The session still holds staged changes. Merge or discard them first."
+    }
   }
 }

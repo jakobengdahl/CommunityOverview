@@ -206,6 +206,15 @@ def test_deleting_a_session_answers_the_mode_it_was_deleted_in(client):
     assert client.delete(f"/api/sessions/{plain}").json()["write_mode"] == "direct"
 
 
+def test_the_delete_answer_is_the_mode_the_session_was_retired_in(client, monkeypatch):
+    """A switch to staged that lands between the route's early mode read and
+    the delete (it held the session lock) still answers staged."""
+    sid = _staged(client)
+    modes = client.app.state.session_manager.write_modes
+    monkeypatch.setattr(modes, "mode_of", lambda _sid: "direct")
+    assert client.delete(f"/api/sessions/{sid}").json()["write_mode"] == "staged"
+
+
 def test_staged_is_refused_where_staged_sessions_are_off(app_config, mock_llm_provider):
     with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
         client = TestClient(create_app(app_config))

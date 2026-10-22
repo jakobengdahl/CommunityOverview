@@ -112,9 +112,11 @@ export function useStagedSession(sessionId) {
     const seq = ++requestSeqRef.current;
     try {
       const result = await api.getStagedChanges(target);
-      if (seq !== requestSeqRef.current || activeRef.current !== target) return null;
+      if (activeRef.current !== target) return null;
       const items = Array.isArray(result?.items) ? result.items : [];
-      setDiff({ sessionId: target, items, error: null });
+      // A newer read owns what is shown; this one still answers its caller
+      // (a merge's drift check), since it was read after the ticks.
+      if (seq === requestSeqRef.current) setDiff({ sessionId: target, items, error: null });
       return items;
     } catch (error) {
       if (seq !== requestSeqRef.current || activeRef.current !== target) return null;

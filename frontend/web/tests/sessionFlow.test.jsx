@@ -70,6 +70,7 @@ vi.mock('../src/services/api', () => {
     listServerSessions: vi.fn(async () => ({ sessions: [] })),
     renameServerSession: vi.fn(async () => ({})),
     deleteServerSession: vi.fn(async () => ({ deleted: true })),
+    createSession: vi.fn(async () => ({ id: '9999-0001', write_mode: 'staged' })),
     getSession: vi.fn(async (id, opts) => {
       if (id === '5555-6666' && opts?.resolve) {
         return {
@@ -2109,6 +2110,38 @@ describe('Server-backed session lifecycle', () => {
     await waitFor(() => expect(api.setSessionOnServer).toHaveBeenCalled());
     const [sessionId] = api.setSessionOnServer.mock.calls.at(-1);
     await waitFor(() => expect(api.setSessionStaged).toHaveBeenCalledWith(sessionId, true));
+  });
+
+  it('replaces a session the delete answer says was staged with a staged one', async () => {
+    // Switched to staged after the delete dialog opened; the switch notice
+    // has not reached this tab, only the delete answer says so.
+    api.getUiCapabilities.mockImplementation(async () => ({
+      llm_available: false,
+      staged_sessions: true,
+    }));
+    api.deleteServerSession.mockImplementation(async (id) => ({
+      deleted: true,
+      id,
+      write_mode: 'staged',
+    }));
+    sessionStore.touchSession('7777-8888');
+    renderApp();
+    await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+    fireEvent.click(screen.getByTitle('Menu'));
+    fireEvent.click(screen.getByText('7777-8888'));
+    await waitFor(() =>
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('7777-8888')
+    );
+    // The drawer stays open after picking a session.
+    const rows = await screen.findAllByText('7777-8888');
+    let row = rows.find((el) => el.closest('.session-drawer'));
+    while (!row.querySelector('[aria-label="Session actions"]')) row = row.parentElement;
+    fireEvent.click(row.querySelector('[aria-label="Session actions"]'));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete session' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete' }));
+    await waitFor(() =>
+      expect(api.createSession).toHaveBeenCalledWith(null, { writeMode: 'staged' })
+    );
   });
 
   it('a real load failure (non-404) shows an error notice and stays on the current session', async () => {

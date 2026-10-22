@@ -1495,7 +1495,15 @@ def _register_session_endpoints(
             raise HTTPException(status_code=404, detail="session not found")
         # The mode the session was deleted in, so the deleting client replaces
         # a staged session with a staged one even before its notice arrives.
-        return {"deleted": True, "id": session_id, "write_mode": write_mode}
+        # Read after the delete: a switch to staged that held the session lock
+        # when the mode was read above was retired with it. Only a staged
+        # session's delete retires its id.
+        retired = session_manager.write_modes.is_retired(session_id)
+        return {
+            "deleted": True,
+            "id": session_id,
+            "write_mode": WRITE_MODE_STAGED if retired else "direct",
+        }
 
     @router.get("/sessions/{session_id}/staged")
     async def get_staged_changes(

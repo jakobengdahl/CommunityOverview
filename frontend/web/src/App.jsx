@@ -62,6 +62,7 @@ import { createAnnotationChangeScheduler } from './utils/annotationChangeSchedul
 import { createSelfEchoDedup } from './utils/selfEchoDedup';
 import { applyIngestedImageOptimistically } from './utils/imageIngestApply';
 import { shouldPersistSnapshot } from './utils/sessionSnapshotGuard';
+import { refusalText } from './utils/stagedReview';
 import './App.css';
 
 // Ceiling on how long one resyncFromServer call may stay in flight before its
@@ -343,6 +344,14 @@ function App() {
   // Sessions this tab is deleting, so its own delete notice is told apart from
   // one another tab of the same browser (same client id) caused.
   const locallyDeletingRef = useRef(new Set());
+  // A deleted direct id can be opened again (a link recreates it): once this
+  // tab switches to it, a later delete of it is someone else's again.
+  const previousSessionIdRef = useRef(sessionId);
+  useEffect(() => {
+    if (previousSessionIdRef.current === sessionId) return;
+    previousSessionIdRef.current = sessionId;
+    locallyDeletingRef.current.delete(sessionId);
+  }, [sessionId]);
   // Sessions this tab is deleting that the server's notice says were staged,
   // even if this tab had not learnt it: they are replaced by staged ones.
   const deletedStagedRef = useRef(new Set());
@@ -2846,7 +2855,7 @@ function App() {
         // A session that was not deleted keeps its work: never act as if it
         // were gone.
         locallyDeletingRef.current.delete(id);
-        showNotification('error', error.message || t('staged.delete_failed'));
+        showNotification('error', refusalText(t, error, 'staged.delete_failed'));
         return;
       }
       // 404: the session only ever existed locally.
@@ -2906,7 +2915,7 @@ function App() {
         switchToSession(created.id, { eagerConnect: true });
         showNotification('info', t('staged.new_session_started'));
       } catch (error) {
-        showNotification('error', error.message || t('staged.create_failed'));
+        showNotification('error', refusalText(t, error, 'staged.create_failed'));
       }
     },
     [switchToSession, adoptWriteMode, showNotification, t]
@@ -2949,7 +2958,7 @@ function App() {
           markModeUnknown(targetId);
         }
       }
-      showNotification('error', error.message || t('staged.switch_failed'));
+      showNotification('error', refusalText(t, error, 'staged.switch_failed'));
     }
   }, [
     sessionId,

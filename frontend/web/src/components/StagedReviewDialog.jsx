@@ -18,6 +18,7 @@ import {
   nextMergeAttempt,
   parseManualValue,
   itemFingerprint,
+  refusalText,
   reviewDrift,
   unresolvedKeys,
 } from '../utils/stagedReview';
@@ -161,12 +162,13 @@ function StagedReviewDialog({
     // other entry's resolution can change them, so they no longer hold.
     if (!blockedStatus.has(key)) setBlockedStatus(new Map());
     setResolutions((prev) => ({ ...prev, [key]: { choice } }));
-    if (choice === 'manual' && !manualText[key]) {
+    if (choice === 'manual') {
+      // Seed each conflicting field not yet typed in, keeping what was typed.
       const seeded = {};
       for (const field of conflictingFields(item)) {
         seeded[field] = formatValue(item.fields[field]?.staged);
       }
-      setManualText((prev) => ({ ...prev, [key]: seeded }));
+      setManualText((prev) => ({ ...prev, [key]: { ...seeded, ...prev[key] } }));
     }
   };
 
@@ -182,7 +184,11 @@ function StagedReviewDialog({
       if (!item) continue;
       const values = {};
       for (const field of conflictingFields(item)) {
-        const parsed = parseManualValue(manualText[key]?.[field] ?? '', item.fields[field]?.staged);
+        const text = manualText[key]?.[field];
+        // A field that came to conflict after 'manual' was chosen has no value
+        // the user saw or typed: leave it unresolved rather than send ''.
+        if (text === undefined) continue;
+        const parsed = parseManualValue(text, item.fields[field]?.staged);
         if (!parsed.ok) {
           setMessage({ kind: 'error', text: t('staged.manual_invalid', { field }) });
           return null;
@@ -308,7 +314,7 @@ function StagedReviewDialog({
         return;
       }
       default:
-        setMessage({ kind: 'error', text: error.message || t('staged.merge_failed') });
+        setMessage({ kind: 'error', text: refusalText(t, error, 'staged.merge_failed') });
     }
   };
 
@@ -340,7 +346,7 @@ function StagedReviewDialog({
       });
       onDiscarded?.(result);
     } catch (error) {
-      setMessage({ kind: 'error', text: error.message || t('staged.discard_failed') });
+      setMessage({ kind: 'error', text: refusalText(t, error, 'staged.discard_failed') });
     } finally {
       setBusy(false);
     }

@@ -164,6 +164,45 @@ describe('StagedReviewDialog', () => {
     ]);
   });
 
+  it('never merges a manual value for a field that came to conflict after it was chosen', async () => {
+    const twoConflicts = {
+      ...CONFLICT,
+      fields: {
+        ...CONFLICT.fields,
+        name: { base: 'n', staged: 'mine', main: 'theirs', conflict: true },
+      },
+      session_seq: 5,
+    };
+    const { rerender } = renderDialog({
+      onRefresh: vi.fn(async () => [CREATE, EDGE, twoConflicts]),
+    });
+    fireEvent.click(checkbox('node:n2'));
+    fireEvent.change(screen.getByTestId('resolution-node:n2'), { target: { value: 'manual' } });
+    rerender([CREATE, EDGE, twoConflicts]);
+    // The tick dropped when the entry changed; the user ticks it again.
+    expect(checkbox('node:n2').checked).toBe(false);
+    fireEvent.click(checkbox('node:n2'));
+    fireEvent.click(screen.getByTestId('staged-merge'));
+    await waitFor(() => expect(screen.getByText('staged.needs_decision')).toBeTruthy());
+    expect(api.mergeStagedChanges).not.toHaveBeenCalled();
+  });
+
+  it('names a known refusal in the UI language', async () => {
+    api.mergeStagedChanges.mockRejectedValue(
+      Object.assign(new Error('invalid merge request (English)'), {
+        status: 422,
+        code: 'invalid_merge_request',
+        data: {},
+      })
+    );
+    renderDialog();
+    fireEvent.click(checkbox('node:n1'));
+    fireEvent.click(screen.getByTestId('staged-merge'));
+    await waitFor(() =>
+      expect(screen.getByText('staged.refusal.invalid_merge_request')).toBeTruthy()
+    );
+  });
+
   it('retries a merge whose outcome is unknown under the same merge id', async () => {
     api.mergeStagedChanges
       .mockRejectedValueOnce(new TypeError('Failed to fetch'))

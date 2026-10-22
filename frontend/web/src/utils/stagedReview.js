@@ -290,6 +290,31 @@ export function parseManualValue(text, stagedValue) {
   }
 }
 
+// Refusals the staged-session routes answer with a code the UI can name in
+// the user's language; any other keeps the server's (English) message.
+export const KNOWN_REFUSALS = [
+  'invalid_merge_request',
+  'merge_id_taken',
+  'session_not_staged',
+  'session_not_found',
+  'session_not_supported',
+  'session_mismatch',
+  'staged_unsupported',
+  'layer_full',
+  'layer_not_empty',
+];
+
+/**
+ * The text to show for a failed staged-session request.
+ * @param {(key: string, params?: Object) => string} t
+ * @param {Error & {code?: string}} error
+ * @param {string} fallbackKey - shown when the error carries no message
+ */
+export function refusalText(t, error, fallbackKey) {
+  if (KNOWN_REFUSALS.includes(error?.code)) return t(`staged.refusal.${error.code}`);
+  return error?.message || t(fallbackKey);
+}
+
 /** Render a field value for display. */
 export function formatValue(value) {
   if (value === null || value === undefined) return '';

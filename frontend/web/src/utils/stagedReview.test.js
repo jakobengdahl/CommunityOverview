@@ -11,6 +11,7 @@ import {
   mergeOutcomeUnknown,
   nextMergeAttempt,
   parseManualValue,
+  refusalText,
   reviewDrift,
   stagedStatesFromDiff,
   unresolvedKeys,
@@ -268,6 +269,20 @@ describe('display helpers', () => {
     expect(itemLabel(nodeCreate)).toBe('New one');
     expect(itemLabel(edgeCreate, () => 'A → B')).toBe('A → B');
     expect(itemLabel(edgeCreate, () => null)).toBe('e1');
+  });
+
+  it('names a known refusal in the UI language and keeps the server text otherwise', () => {
+    const t = (key) => `t:${key}`;
+    const refused = (code, message) => Object.assign(new Error(message), { code });
+    expect(refusalText(t, refused('layer_full', 'English'), 'staged.merge_failed')).toBe(
+      't:staged.refusal.layer_full'
+    );
+    expect(refusalText(t, refused('something_new', 'Server says'), 'staged.merge_failed')).toBe(
+      'Server says'
+    );
+    expect(refusalText(t, refused(undefined, ''), 'staged.merge_failed')).toBe(
+      't:staged.merge_failed'
+    );
   });
 
   it('parses a manual value as text for a text field and as JSON otherwise', () => {

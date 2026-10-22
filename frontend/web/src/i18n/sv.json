@@ -909,6 +909,17 @@
     "ticks_dropped": "{count} markerade ändring(ar) har ändrats sedan du markerade dem och avmarkerades; kontrollera och markera igen",
     "recheck_first": "De här har ändrats sedan du markerade dem; kontrollera och markera dem först: {names}",
     "write_held": "Det är ännu inte känt hur sessionen skriver, så inget skrivs förrän den har lästs in.",
-    "approve_session_changed": "Sessionen byttes under godkännandet; godkänn igen."
+    "approve_session_changed": "Sessionen byttes under godkännandet; godkänn igen.",
+    "refusal": {
+      "invalid_merge_request": "Sammanslagningen godtogs inte. Läs in ändringarna igen och välj på nytt.",
+      "merge_id_taken": "Den sammanslagningen användes redan för andra ändringar. Slå samman igen.",
+      "session_not_staged": "Sessionen är inte granskad, så den har inga ändringar att slå samman eller kasta.",
+      "session_not_found": "Sessionen finns inte längre.",
+      "session_not_supported": "Åtgärden kan inte vänta på granskning och görs därför inte i en granskad session.",
+      "session_mismatch": "Begäran angav en annan session än den den hör till.",
+      "staged_unsupported": "Granskade sessioner finns inte på den här servern.",
+      "layer_full": "Sessionen rymmer inte fler väntande ändringar. Slå samman eller kasta några först.",
+      "layer_not_empty": "Sessionen har fortfarande väntande ändringar. Slå samman eller kasta dem först."
+    }
   }
 }

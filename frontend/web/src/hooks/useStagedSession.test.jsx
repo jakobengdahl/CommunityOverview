@@ -116,6 +116,27 @@ describe('useStagedSession', () => {
     expect(api.getStagedChanges).toHaveBeenCalledWith('1111-2222');
   });
 
+  it('answers a read superseded by a newer one, so a merge check is not refused', async () => {
+    let resolveFirst;
+    api.getStagedChanges.mockResolvedValue({ items: [] });
+    const { result } = renderHook(() => useStagedSession('1111-2222'));
+    act(() => result.current.adoptSessionPayload('1111-2222', { write_mode: 'staged' }));
+    await act(async () => {});
+    api.getStagedChanges.mockImplementationOnce(
+      () => new Promise((resolve) => (resolveFirst = resolve))
+    );
+    api.getStagedChanges.mockResolvedValueOnce({ items: [] });
+    let first;
+    await act(async () => {
+      first = result.current.refreshDiff();
+      await result.current.refreshDiff(); // a newer read, e.g. after a staged op
+    });
+    await act(async () => resolveFirst({ items: [ITEM] }));
+    expect(await first).toEqual([ITEM]);
+    // The newer read owns what is shown.
+    expect(result.current.items).toEqual([]);
+  });
+
   it('holds a linked session as unknown until the server answers, either way', () => {
     const { result } = renderHook(() => useStagedSession('1111-2222'));
     act(() => result.current.markModeUnknown('1111-2222'));
