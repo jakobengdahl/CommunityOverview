@@ -1508,7 +1508,7 @@ class GraphStorage:
         # The store's own error text stays in the log: it can name hosts,
         # roles and schemas, and the caller is owed only the outcome.
         logger.warning(f"a write failed: {failure}")
-        if readings and len(readings) == 2 and all(unchanged(r) for r in readings):
+        if readings and all(unchanged(r) for r in readings):
             self._undo(undo)
             raise GraphWriteFailed("the write did not land") from failure
 
