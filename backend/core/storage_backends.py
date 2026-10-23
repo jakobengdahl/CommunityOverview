@@ -794,6 +794,7 @@ class FileGraphPersistenceBackend:
         self._sessions: Dict[str, Dict[str, Any]] = {}
         self._merges: Dict[str, Dict[str, Any]] = {}
         self._layers_loaded = False
+        self._merge_log_needs_repair = False
         # The merge whose write-ahead record is durable and whose outcome is
         # not yet: settled before any other write (see merge).
         self._pending_merge: Optional[Dict[str, Any]] = None
@@ -882,6 +883,8 @@ class FileGraphPersistenceBackend:
 
     def checkpoint(self) -> None:
         with self._lock:
+            if self._staged_sessions and not self._mirrored and self.json_path.exists():
+                self._load_locked()
             if self._journaled:
                 self._checkpoint_locked()
 
@@ -1139,9 +1142,16 @@ class FileGraphPersistenceBackend:
                 self._append_merge_log_locked(
                     {"merge_id": merge_id, "status": _layer.MERGE_PENDING, **pending}
                 )
-            except BaseException:
+            except BaseException as exc:
                 self._mirrored = False
                 self._layers_loaded = False
+                # Without graph operations the pending line is the commit
+                # point. Report an ordinary append error by its disk outcome,
+                # just as step 2 does for a merge that changes the graph.
+                if not journal_ops and isinstance(exc, Exception):
+                    landed = self._reload_after_failed_commit_locked(merge_id)
+                    if landed is not None:
+                        return _layer.MergeResult(record=_layer.json_copy(landed))
                 raise
             self._pending_merge = pending
             # Step 2, the commit point.
@@ -1315,9 +1325,8 @@ class FileGraphPersistenceBackend:
     ) -> Tuple[Dict[str, Dict[str, Any]], Optional[Dict[str, Any]]]:
         """Every merge record the log holds, and the one still pending.
 
-        Read like the journal: an incomplete last line is the append a crash
-        interrupted and is cut off; a damaged line anywhere else stops the
-        load.
+        An unterminated last line is the append a crash interrupted and is
+        cut off; a damaged complete line stops the load.
         """
         merges: Dict[str, Dict[str, Any]] = {}
         pending: Optional[Dict[str, Any]] = None
@@ -1332,10 +1341,7 @@ class FileGraphPersistenceBackend:
         last = len(lines) - 1
         last_mark: Optional[Tuple[str, str]] = None
         for index, line in enumerate(lines):
-            # Only a line a crash could have left - unterminated or not
-            # parseable - is dropped, and only as the last one. A complete,
-            # well-formed line that does not fit the sequence is damage
-            # wherever it is.
+            # Only an unterminated last line can be an interrupted append.
             try:
                 if index == last and not complete:
                     raise ValueError("incomplete line")
@@ -1343,7 +1349,7 @@ class FileGraphPersistenceBackend:
                 merge_id = parsed["merge_id"]
                 status = parsed["status"]
             except (ValueError, KeyError, TypeError) as exc:
-                if index == last:
+                if index == last and not complete:
                     logger.warning(
                         f"dropping the incomplete last record of "
                         f"{self.merge_log_path} (interrupted write): {exc}"
@@ -1362,6 +1368,17 @@ class FileGraphPersistenceBackend:
                     pending_line = {k: v for k, v in parsed.items() if k != "status"}
                     if pending is not None and pending != pending_line:
                         raise ValueError("two merges pending at once")
+                    _layer.check_merge_id(merge_id)
+                    _layer.check_session_id(parsed["session_id"])
+                    record = parsed["record"]
+                    if (
+                        record["merge_id"] != merge_id
+                        or record["session_id"] != parsed["session_id"]
+                        or record["status"] != _layer.MERGE_APPLIED
+                    ):
+                        raise ValueError("pending merge does not match its record")
+                    if merge_id in merges:
+                        raise ValueError("pending merge id is already applied")
                     if pending is None:
                         # A mark may only repeat the line right before it.
                         last_mark = None
@@ -1391,6 +1408,11 @@ class FileGraphPersistenceBackend:
         return merges, pending
 
     def _append_merge_log_locked(self, line: Dict[str, Any]) -> None:
+        if self._merge_log_needs_repair:
+            # A failed rollback may have left a fragment. Repair it before
+            # another append can glue a complete line onto that fragment.
+            self._read_merge_log()
+            self._merge_log_needs_repair = False
         payload = (dumps_storable(line) + "\n").encode("utf-8")
         self.merge_log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.merge_log_path, "ab", buffering=0) as f:
@@ -1404,7 +1426,8 @@ class FileGraphPersistenceBackend:
                             f"short merge log write: {written} of {len(payload)} bytes"
                         )
                     os.fsync(f.fileno())
-                except Exception:
+                except BaseException:
+                    self._merge_log_needs_repair = True
                     os.ftruncate(f.fileno(), start)
                     raise
             finally:
