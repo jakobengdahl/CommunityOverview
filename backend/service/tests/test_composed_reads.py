@@ -13,11 +13,6 @@ import pytest
 
 from backend.core import GraphStorage, Node, layer_vectors
 from backend.core.storage_backends import FileGraphPersistenceBackend
-from backend.core.tests.test_persistence_contract_postgres import (
-    DSN,
-    _server_reachable,
-    psycopg,
-)
 from backend.runtime.authorization import (
     GraphAccessNarrowing,
     GraphAuthorizationDecision,
@@ -82,6 +77,12 @@ def make_world(request, tmp_path):
         yield w
         storage.shutdown_events()
         return
+    from backend.core.tests.test_persistence_contract_postgres import (
+        DSN,
+        _server_reachable,
+        psycopg,
+    )
+
     if not _server_reachable():
         pytest.skip("no PostgreSQL server configured")
     from backend.core.postgres_backend import PostgresGraphPersistenceBackend
@@ -374,7 +375,11 @@ def test_semantic_search_drops_superseded_and_tombstoned_main_vectors(world):
     assert _states(result["nodes"]) == {"n": "created"}
 
 
-def test_without_a_session_semantic_search_reads_the_main_index_only(world):
+def test_without_a_session_semantic_search_reads_the_main_index_only(
+    world, monkeypatch
+):
+    # Isolate what the read embeds from the separately tested background work.
+    monkeypatch.setattr(layer_vectors, "embeddings_installed", lambda: False)
     embedder = FakeEmbedder()
     embedder.install(world.storage.vector_store, [("a", 0.95)])
     sid = world.staged_session()
@@ -499,6 +504,7 @@ def test_a_staged_saved_view_resolves_in_the_session(world):
     assert _states(view["nodes"]) == {"a": "none", "n": "created"}
     assert _states(view["edges"]) == {"an": "created"}
     assert [v["name"] for v in listed["views"]] == ["Plan"]
+    assert _states(listed["views"]) == {"v": "created"}
     assert world.service.get_saved_view("Plan")["success"] is False
 
 

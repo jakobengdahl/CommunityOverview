@@ -228,7 +228,7 @@ def _message_session(request) -> Optional[str]:
 def _session_aware(
     func: Callable,
     is_retired: Callable[[str], bool],
-    staged_status,
+    is_staged: Callable[[str], bool],
     message_request: Callable[[], Tuple[bool, Any]] = lambda: (False, None),
     sessions_unreadable: Callable[[], bool] = lambda: False,
 ):
@@ -244,7 +244,8 @@ def _session_aware(
     The three read tools already took `visualization_session_id` as a push
     target before sessions could stage, and a push may go to a session with no
     stored state yet. So on them the argument binds the session only when it
-    names a staged-session record; otherwise it stays a push target.
+    names a staged-session record or a document whose mode is staged;
+    otherwise it stays a push target.
     """
     name = func.__name__
     params = inspect.signature(func).parameters
@@ -280,12 +281,7 @@ def _session_aware(
             # reading it as none would turn a staged write into a direct one.
             raise session_context.not_found(named)
         session = session_context.reconcile(bound, named)
-        if (
-            name in _PUSHING_TOOLS
-            and bound is None
-            and named
-            and staged_status(named) == layer_store.STATUS_NONE
-        ):
+        if name in _PUSHING_TOOLS and bound is None and named and not is_staged(named):
             return func(*args, **kwargs)
         with session_context.bind_session(session):
             return func(*args, **kwargs)
@@ -551,7 +547,7 @@ def register_mcp_tools(
         wrapped = _session_aware(
             func,
             lambda sid: _staged_status(sid) == layer_store.STATUS_RETIRED,
-            _staged_status,
+            service.session_gate.is_staged,
             lambda: _message_request(mcp),
             _sessions_unreadable,
         )
@@ -714,7 +710,7 @@ def register_mcp_tools(
         _session_aware(
             show_graph_widget,
             lambda sid: _staged_status(sid) == layer_store.STATUS_RETIRED,
-            _staged_status,
+            service.session_gate.is_staged,
             lambda: _message_request(mcp),
             _sessions_unreadable,
         )
