@@ -804,7 +804,8 @@ A merge request names:
 The selection must be **closed under dependencies**. An entry depends on:
 
 - for an edge create: the create entries of its endpoints, where they have them;
-- for a node delete: the tombstones of its incident edges;
+- for a node delete or an update staging a new node type: the tombstones of
+  its incident edges;
 - for an `as_new` node: the edge creates in the layer that name the old id.
 
 A selection that leaves out a dependency is refused with `merge_incomplete`,

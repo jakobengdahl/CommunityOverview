@@ -56,3 +56,20 @@ def test_endpoint_locks_are_sorted_deduplicated_and_exclude_upserted_nodes(backe
     assert [call.args[1] for call in conn.execute.call_args_list] == [
         (endpoint,) for endpoint in "abcdefghijklmnopqrstuvwxy"
     ]
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+def test_a_refused_node_upsert_never_reports_the_stored_type(backend, scoped):
+    from backend.core.storage_backends import NodeTypeChanged
+
+    backend._scope_column = scoped
+    backend._scope = "test" if scoped else None
+    conn = MagicMock()
+    conn.execute.return_value.fetchone.side_effect = [None, ("HiddenStoredType",)]
+    operation = EntityOperation(
+        "node", "upsert", "a", {"id": "a", "type": "Actor", "name": "Edited"}
+    )
+    with pytest.raises(NodeTypeChanged) as refused:
+        backend._apply_one(conn, operation, "write")
+    assert "HiddenStoredType" not in str(refused.value)
+    assert refused.value.current_revision is None
