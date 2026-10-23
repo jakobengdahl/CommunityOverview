@@ -983,6 +983,7 @@ function App() {
     const scope = captureCanvasScope();
     let expired = false;
     let timer;
+    let settleBootstrapWait;
     if (sessionStore.isValidSessionId(urlSession)) {
       sessionStore.touchSession(urlSession);
       // This id came in via a ?session= deep link, so a 404 means the linked
@@ -998,6 +999,7 @@ function App() {
       urlSessionBootstrapRef.current = Promise.race([
         load,
         new Promise((resolve) => {
+          settleBootstrapWait = resolve;
           timer = setTimeout(() => {
             expired = true;
             resolve();
@@ -1011,6 +1013,9 @@ function App() {
     return () => {
       expired = true;
       clearTimeout(timer);
+      // StrictMode may already have a saved-view effect awaiting this promise.
+      // Release that waiter when retiring this bootstrap, even if fetch hangs.
+      settleBootstrapWait?.();
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, screen, cleanup, act } from '@testing-library/react';
+import { StrictMode } from 'react';
 
 // App captures URL session parameters at module load, before the first render.
 vi.hoisted(() => {
@@ -107,13 +108,14 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-async function renderApp() {
+async function renderApp({ strict = false } = {}) {
+  const app = (
+    <I18nProvider>
+      <App />
+    </I18nProvider>
+  );
   await act(async () => {
-    render(
-      <I18nProvider>
-        <App />
-      </I18nProvider>
-    );
+    render(strict ? <StrictMode>{app}</StrictMode> : app);
   });
 }
 
@@ -185,6 +187,25 @@ describe('App URL session bootstrap', () => {
       bootstrap.resolve(payload('session-node'));
     });
     expect(api.getSavedView).toHaveBeenCalledWith('Overview');
+    expect(store().nodes.map((n) => n.id)).toEqual(['view-node', 'focus-node']);
+    expect(store().focusNodeId).toBe('focus-node');
+  });
+
+  it('releases the original bootstrap waiter during StrictMode cleanup', async () => {
+    // Make the saved-view effect start awaiting the first bootstrap before
+    // StrictMode cleans it up and creates the second bootstrap promise.
+    store().setStats({ total_nodes: 0, total_edges: 0 });
+    await renderApp({ strict: true });
+    expect(api.getSession).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(DEFAULT_REQUEST_TIMEOUT_MS);
+    });
+    expect(api.getSavedView).toHaveBeenCalledWith('Overview');
+    expect(store().nodes.map((n) => n.id)).toEqual(['view-node', 'focus-node']);
+    expect(store().focusNodeId).toBe('focus-node');
+    await act(async () => {
+      bootstrap.resolve(payload('old-session-node'));
+    });
     expect(store().nodes.map((n) => n.id)).toEqual(['view-node', 'focus-node']);
     expect(store().focusNodeId).toBe('focus-node');
   });
