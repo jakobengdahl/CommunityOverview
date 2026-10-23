@@ -198,6 +198,12 @@ def _dsn_as_role(user: str, password: str) -> str:
     return psycopg.conninfo.make_conninfo(**parts)
 
 
+def _dsn_defaulting_to_repeatable_read() -> str:
+    parts = psycopg.conninfo.conninfo_to_dict(DSN)
+    parts["options"] = "-c default_transaction_isolation=repeatable\\ read"
+    return psycopg.conninfo.make_conninfo(**parts)
+
+
 def _redacted_dsn(dsn: str) -> str:
     """`dsn` with its password removed, for a message that reaches a log.
 
@@ -1283,11 +1289,23 @@ class TestPostgresConcurrentSavesDoNotMerge:
         assert holder, "the stalled save never issued its own advisory lock statement"
         return thread, holder[0]
 
+    @pytest.mark.parametrize(
+        "repeatable_read", [False, True], ids=["server-default", "repeatable-read"]
+    )
     def test_overlapping_saves_leave_one_writers_graph(
-        self, schema, backends, monkeypatch
+        self, schema, backends, monkeypatch, repeatable_read
     ):
-        first = PostgresGraphPersistenceBackend(DSN, schema=schema, graph_name="a")
-        second = PostgresGraphPersistenceBackend(DSN, schema=schema, graph_name="a")
+        # An inherited REPEATABLE READ snapshot predates the lock wait, so
+        # the waiting writer would fail instead of replacing the first save.
+        dsn = _dsn_defaulting_to_repeatable_read() if repeatable_read else DSN
+        if repeatable_read:
+            with psycopg.connect(dsn) as check:
+                assert (
+                    check.execute("SHOW transaction_isolation").fetchone()[0]
+                    == "repeatable read"
+                ), "the fixture did not establish a non-default level"
+        first = PostgresGraphPersistenceBackend(dsn, schema=schema, graph_name="a")
+        second = PostgresGraphPersistenceBackend(dsn, schema=schema, graph_name="a")
         backends.extend([first, second])
         first.save_graph_data(snapshot([node_payload("seed")]))
 
@@ -1337,10 +1355,9 @@ class TestPostgresConcurrentSavesDoNotMerge:
         assert errors == [], f"the second save failed: {errors}"
         assert self.stall_errors == [], f"the first save failed: {self.stall_errors}"
         landed = {n["id"] for n in second.load_graph_data()["nodes"]}
-        assert landed in (
-            {"shared", "only_first"},
-            {"shared", "only_second"},
-        ), f"the store holds a graph neither writer saved: {sorted(landed)}"
+        assert landed == {"shared", "only_second"}, (
+            f"the waiting writer did not replace the first writer's graph: {sorted(landed)}"
+        )
 
     def test_a_save_on_a_different_schema_does_not_wait_for_this_ones_lock(
         self, schema, backends, monkeypatch
@@ -2257,15 +2274,10 @@ class TestPostgresSaveIsolation:
     lock exists for.
     """
 
-    def _dsn_defaulting_to_repeatable_read(self) -> str:
-        parts = psycopg.conninfo.conninfo_to_dict(DSN)
-        parts["options"] = "-c default_transaction_isolation=repeatable\\ read"
-        return psycopg.conninfo.make_conninfo(**parts)
-
     def test_the_save_runs_read_committed_under_a_repeatable_read_default(
         self, schema, backends, monkeypatch
     ):
-        dsn = self._dsn_defaulting_to_repeatable_read()
+        dsn = _dsn_defaulting_to_repeatable_read()
         with psycopg.connect(dsn) as check:
             assert (
                 check.execute("SHOW transaction_isolation").fetchone()[0]
@@ -2324,7 +2336,7 @@ class TestPostgresSaveIsolation:
         may turn that into a silent no-op: the caller must see the error, or
         it believes a write landed that the store never took.
         """
-        dsn = self._dsn_defaulting_to_repeatable_read()
+        dsn = _dsn_defaulting_to_repeatable_read()
         backend = PostgresGraphPersistenceBackend(dsn, schema=schema, pool_size=1)
         backends.append(backend)
         backend.save_graph_data(snapshot([node_payload("contested")]))
@@ -2676,7 +2688,7 @@ class TestPostgresEntityWritesTouchOneRow:
         "write", ["upsert_node", "upsert_edge", "batch", "batch_many"]
     )
     def test_an_entity_write_does_not_lose_a_row_written_while_it_runs(
-        self, schema, backends, write
+        self, schema, backends, write, monkeypatch
     ):
         """The property a read-modify-write quietly breaks.
 
@@ -2720,8 +2732,8 @@ class TestPostgresEntityWritesTouchOneRow:
                     )
             return real_execute(conn, query, *args, **kwargs)
 
-        psycopg.Connection.execute = spy
-        try:
+        with monkeypatch.context() as patch:
+            patch.setattr(psycopg.Connection, "execute", spy)
             if write == "upsert_node":
                 backend.upsert_node(node_payload("n0", name="Renamed"))
             elif write == "upsert_edge":
@@ -2744,9 +2756,6 @@ class TestPostgresEntityWritesTouchOneRow:
                         ),
                     ]
                 )
-        finally:
-            psycopg.Connection.execute = real_execute
-
         assert injected, "the other instance's write never happened"
         loaded = backend.load_graph_data()
         assert "elsewhere" in by_id(loaded, "nodes"), (
@@ -3756,34 +3765,39 @@ class TestPostgresEntityWritesAgainstAWholeGraphSave:
     """
 
     def _save_paused_before_commit(
-        self, backend, graph, paused, release, errors, holder
+        self, backend, graph, paused, release, errors, holder, monkeypatch
     ):
         """Run a whole-graph save, held open after its DELETEs.
 
         `holder` receives the paused connection's backend pid, so the
         caller can ask the server whether the entity write is blocked on
         *this* save rather than on anything at all.
+
+        The test owns the patch, so a stalled daemon cannot leave it behind
+        after teardown or restore it over a later test's patch.
         """
         real_execute = psycopg.Connection.execute
 
         def spy(conn, query, *args, **kwargs):
             result = real_execute(conn, query, *args, **kwargs)
             text = " ".join(str(query).split())
-            if "DELETE" in text.upper() and "graph_edges" in text:
+            if (
+                threading.current_thread() is thread
+                and "DELETE" in text.upper()
+                and "graph_edges" in text
+            ):
                 holder.append(conn.info.backend_pid)
                 paused.set()
                 release.wait(30)
             return result
 
         def run():
-            psycopg.Connection.execute = spy
             try:
                 backend.save_graph_data(graph)
             except Exception as exc:
                 errors.append(f"save: {type(exc).__name__}: {exc}")
-            finally:
-                psycopg.Connection.execute = real_execute
 
+        monkeypatch.setattr(psycopg.Connection, "execute", spy)
         thread = threading.Thread(target=run, daemon=True)
         thread.start()
         assert paused.wait(30), "the save never reached its DELETEs"
@@ -3793,7 +3807,7 @@ class TestPostgresEntityWritesAgainstAWholeGraphSave:
         "operation", ["delete", "upsert", "insert_new", "delete_edge", "batch_many"]
     )
     def test_an_entity_write_committing_after_a_save_is_not_swallowed(
-        self, schema, backends, operation
+        self, schema, backends, operation, monkeypatch
     ):
         print(_pg_length_seed_banner())
         saver = PostgresGraphPersistenceBackend(DSN, schema=schema)
@@ -3819,6 +3833,7 @@ class TestPostgresEntityWritesAgainstAWholeGraphSave:
             release,
             errors,
             holder,
+            monkeypatch,
         )
         assert holder, "the save never reported the connection it paused on"
 
@@ -6844,7 +6859,9 @@ class TestPostgresSubscribesBeforeItReloads:
     on a slow machine for the wrong reason.
     """
 
-    def test_listen_is_registered_before_the_reconnect_reports(self, schema, backends):
+    def test_listen_is_registered_before_the_reconnect_reports(
+        self, schema, backends, monkeypatch
+    ):
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
         events = []
@@ -6861,7 +6878,7 @@ class TestPostgresSubscribesBeforeItReloads:
             events.append("report")
             collector(change)
 
-        psycopg.Connection.execute = note_listen
+        monkeypatch.setattr(psycopg.Connection, "execute", note_listen)
         try:
             backend.start_change_notification(note_report)
             with psycopg.connect(DSN, autocommit=True) as killer:
@@ -6871,7 +6888,6 @@ class TestPostgresSubscribesBeforeItReloads:
                 )
             collector.wait_for(1, timeout=60)
         finally:
-            psycopg.Connection.execute = real_execute
             backend.stop_change_notification()
 
         assert events[:1] == ["listen"], f"unexpected first event: {events[:3]}"
