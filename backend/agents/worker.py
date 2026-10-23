@@ -115,6 +115,7 @@ class AgentWorker:
         # Worker thread
         self._thread: Optional[threading.Thread] = None
         self._running = False
+        self._stop_event = threading.Event()
         self._lock = threading.Lock()
         self._guard_lock = threading.Lock()
         self._event_admissions: deque[float] = deque()
@@ -156,6 +157,7 @@ class AgentWorker:
                 logger.warning(f"Worker {self.agent_id} already running")
                 return
 
+            self._stop_event.clear()
             self._running = True
             self._thread = threading.Thread(
                 target=self._process_loop,
@@ -178,6 +180,7 @@ class AgentWorker:
                 return
 
             self._running = False
+            self._stop_event.set()
             # Send sentinel to unblock the queue
             self._queue.put(None)
 
@@ -396,8 +399,14 @@ class AgentWorker:
 
     def _process_event(self, item: EventItem) -> None:
         """Process a single event."""
-        while delay := self._processing_delay():
-            time.sleep(min(delay, 1.0))
+        while not self._stop_event.is_set():
+            delay = self._processing_delay()
+            if not delay:
+                break
+            if self._stop_event.wait(min(delay, 1.0)):
+                return
+        if self._stop_event.is_set():
+            return
         start_time = time.time()
         event_payload = item.payload
         event_id = item.event_id

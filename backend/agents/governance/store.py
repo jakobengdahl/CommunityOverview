@@ -478,5 +478,7 @@ class SqliteProposalStore:
         p.updated_at = _from_epoch(row["updated_at"])
         p.decided_at = _from_epoch(row["decided_at"])
         p.session_id = row["session_id"]
-        p.causation_depth = row["causation_depth"]
+        p.causation_depth = (
+            row["causation_depth"] if "causation_depth" in row.keys() else 1
+        )
         return p
