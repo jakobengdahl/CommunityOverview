@@ -643,8 +643,11 @@ describe('MultiNodeContextMenu', () => {
       />
     );
     fireEvent.click(screen.getByRole('button', { name: /^organize$/i }));
-    fireEvent.click(screen.getByRole('button', { name: /sort by date – vertical/i }));
-    expect(onOrganize).toHaveBeenCalledWith('dateVertical', { dateField: 'start_date' });
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by date – horizontal' }));
+    expect(onOrganize).toHaveBeenNthCalledWith(1, 'dateHorizontal', { dateField: 'start_date' });
+    fireEvent.click(screen.getByRole('button', { name: /^organize$/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by date – vertical' }));
+    expect(onOrganize).toHaveBeenNthCalledWith(2, 'dateVertical', { dateField: 'start_date' });
     unmount();
     render(
       <MultiNodeContextMenu
@@ -674,12 +677,20 @@ describe('MultiNodeContextMenu', () => {
         onClose={vi.fn()}
       />
     );
-    fireEvent.click(screen.getByRole('button', { name: /^organize$/i }));
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by date – horizontal (due)' }));
-    expect(onOrganize).toHaveBeenLastCalledWith('dateHorizontal', { dateField: 'metadata.due' });
-    fireEvent.click(screen.getByRole('button', { name: /^organize$/i }));
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by date – vertical (start_date)' }));
-    expect(onOrganize).toHaveBeenLastCalledWith('dateVertical', { dateField: 'start_date' });
+    for (const [suffix, dateField] of [
+      ['due', 'metadata.due'],
+      ['start_date', 'start_date'],
+    ]) {
+      for (const [axis, mode] of [
+        ['horizontal', 'dateHorizontal'],
+        ['vertical', 'dateVertical'],
+      ]) {
+        fireEvent.click(screen.getByRole('button', { name: /^organize$/i }));
+        expect(screen.getAllByRole('button', { name: /^Sort by date/ })).toHaveLength(4);
+        fireEvent.click(screen.getByRole('button', { name: `Sort by date – ${axis} (${suffix})` }));
+        expect(onOrganize).toHaveBeenLastCalledWith(mode, { dateField });
+      }
+    }
   });
 
   it('disables both date entries, with the explanation, when fewer than two nodes are dated', () => {

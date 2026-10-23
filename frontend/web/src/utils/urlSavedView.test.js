@@ -36,6 +36,7 @@ function harness() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  useGraphStore.getState().clearVisualization();
   currentSession = 's1';
 });
 
@@ -109,5 +110,41 @@ describe('loadUrlSavedView', () => {
     const h = harness();
     const session = Promise.resolve().then(() => switchSession());
     expect(await loadUrlSavedView({ name: 'v', sessionBootstrap: session, ...h })).toBe(true);
+  });
+
+  it.each([
+    ['canvas clear', () => useGraphStore.getState().clearVisualization()],
+    ['node addition', () => useGraphStore.getState().addNodesToVisualization([{ id: 'edit' }])],
+    ['visibility edit', () => useGraphStore.getState().setHiddenNodeIds(['edit'])],
+    ['dimming edit', () => useGraphStore.getState().setDimmedNodeIds(['edit'])],
+    ['edge intensity edit', () => useGraphStore.getState().setEdgeIntensity(0.3)],
+    ['annotation restore', () => useGraphStore.getState().setPendingAnnotations([{ id: 'note' }])],
+  ])('preserves a %s made while fetching the view', async (_label, edit) => {
+    const h = harness();
+    const reply = deferred();
+    h.getSavedView.mockReturnValue(reply.promise);
+    const done = loadUrlSavedView({ name: 'v', sessionBootstrap: null, ...h });
+    await vi.waitFor(() => expect(h.getSavedView).toHaveBeenCalled());
+    edit();
+    reply.release(view);
+    expect(await done).toBe(false);
+    expect(h.applyView).not.toHaveBeenCalled();
+  });
+
+  it('allows selection and consumption of bootstrap annotations while fetching the view', async () => {
+    const s = useGraphStore.getState();
+    s.setPendingAnnotations([{ id: 'bootstrap-note' }]);
+    s.setPendingGroups({ groups: [{ id: 'bootstrap-group' }], parentIds: {} });
+    const h = harness();
+    const reply = deferred();
+    h.getSavedView.mockReturnValue(reply.promise);
+    const done = loadUrlSavedView({ name: 'v', sessionBootstrap: null, ...h });
+    await vi.waitFor(() => expect(h.getSavedView).toHaveBeenCalled());
+    s.setSelectedNodeId('v1');
+    s.setPendingAnnotations(null);
+    s.setPendingGroups(null);
+    reply.release(view);
+    expect(await done).toBe(true);
+    expect(h.applyView).toHaveBeenCalledWith(view);
   });
 });
