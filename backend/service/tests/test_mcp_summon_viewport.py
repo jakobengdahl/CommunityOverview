@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, Mock
 import pytest
 
 from backend.core import GraphStorage, Node
-from backend.core.session_manager import SessionManager
+from backend.core.session_manager import SessionManager, _TokenBucket
 from backend.core.session_store import InMemorySessionPersistenceBackend, SessionStore
 from backend.runtime.authorization import (
     GRAPH_ACTION_MUTATE,
@@ -211,6 +211,8 @@ class TestSummonByNodeIds:
                 (1, 400),
             ),
             ({"position": {"x": True, "y": math.inf}}, (0, 0)),
+            ({"geometry": {"x": math.nan, "y": math.inf}}, (0, 0)),
+            ({"geometry": {"x": -math.inf, "y": math.nan}}, (0, 0)),
             ({"geometry": {"x": 10**400, "y": 7}}, (0, 7)),
         ],
     )
@@ -398,6 +400,29 @@ class TestSummonByNodeIds:
         )
 
         assert result["error"] == "too_large"
+
+
+class TestRateLimit:
+    @pytest.mark.parametrize("target", ["bounds", "node_ids"])
+    def test_a_spent_summon_mcp_budget_refuses_without_broadcasting(
+        self, tmp_path, target
+    ):
+        tools, manager, storage = _tools(tmp_path)
+        session = _canvas(manager, storage, {"a": (0, 0)})
+        sub = _listen(manager, session.id)
+        manager._mcp_bucket = _TokenBucket(1.0, 0.0)
+        assert manager._mcp_bucket.consume("mcp-agent:summon_session_viewport", 1.0)
+
+        result = tools["summon_session_viewport"](
+            session_id=session.id, **{target: BOUNDS if target == "bounds" else ["a"]}
+        )
+
+        assert result == {
+            "success": False,
+            "error": "rate_limited",
+            "message": "Too many summons; slow down and retry.",
+        }
+        assert _summons(sub) == []
 
 
 class TestAuthorization:

@@ -564,6 +564,36 @@ describe('sort by date', () => {
     expect(findDateFields([nodes[0], nodes[2]])).toEqual([]);
   });
 
+  it('lists date fields by descending date count, breaking ties alphabetically', () => {
+    const nodes = [
+      mk('a', 'A', '2026-01-01', { shipped: '2026-02-01', due: '2026-03-01' }),
+      mk('b', 'B', '2026-01-02', { shipped: '2026-02-02', due: '2026-03-02' }),
+      mk('c', 'C', undefined, { shipped: '2026-02-03' }),
+    ];
+    expect(findDateFields(nodes)).toEqual(['shipped', 'due', 'start_date']);
+  });
+
+  it.each([
+    '2026-00-01',
+    '2026-13-01',
+    '2026-01-00',
+    '2026-04-31',
+    '2025-02-29',
+    '2026-10-21T23:60',
+    '2026-10-21T23:59:60',
+    '2026-10-21T08:30+24:00',
+    '2026-10-21T08:30+00:60',
+    '2026-10-21 trailing text',
+  ])('rejects invalid ISO calendar or clock values: %s', (value) => {
+    expect(parseIsoDate(value)).toBeNull();
+  });
+
+  it('accepts leap days and the upper clock and offset boundaries', () => {
+    expect(parseIsoDate('2024-02-29')).toBe(Date.UTC(2024, 1, 29));
+    expect(parseIsoDate('2026-10-21T23:59:59Z')).toBe(Date.UTC(2026, 9, 21, 23, 59, 59));
+    expect(parseIsoDate('2026-10-21T23:59+23:59')).toBe(Date.UTC(2026, 9, 21));
+  });
+
   it('rejects loose or padded-garbage date strings and accepts surrounding whitespace', () => {
     for (const bad of ['March 3 2026', '2026/10/21', 'x2026-10-21', '2026-10-21T24:00'])
       expect(parseIsoDate(bad)).toBeNull();
