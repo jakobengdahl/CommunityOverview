@@ -317,8 +317,7 @@ class AgentRegistry:
                 logger.warning(f"No worker found for agent {agent_id}")
                 return False
 
-            worker.enqueue(event_payload)
-            return True
+            return worker.enqueue(event_payload) is not False
 
     def enqueue_for_subscription(
         self,
@@ -348,7 +347,8 @@ class AgentRegistry:
                 )
                 return False
 
-            worker.enqueue(event_payload)
+            if worker.enqueue(event_payload) is False:
+                return False
             logger.debug(
                 f"Routed event to agent {agent_id} via subscription {subscription_id}"
             )
@@ -657,7 +657,8 @@ class AgentRegistry:
             return False
 
         payload = _build_payload(config, datetime.now(timezone.utc))
-        worker.enqueue(payload)
+        if worker.enqueue(payload) is False:
+            return False
         logger.info(
             "External trigger: enqueued scheduled_trigger for agent %s", agent_id
         )
