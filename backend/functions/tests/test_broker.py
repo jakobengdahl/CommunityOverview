@@ -837,6 +837,33 @@ def test_an_edge_endpoint_naming_a_node_created_in_the_same_call_is_allowed(
     assert not any(e.target.startswith("federated::") for e in storage.edges.values())
 
 
+@pytest.mark.parametrize("end", ["source", "target"])
+def test_a_same_call_node_id_shared_with_a_reference_name_resolves_locally(
+    service, storage, end
+):
+    storage.add_nodes(
+        [Node(id="federated::g2::n1", name="Remote Ref", type=NodeType.ACTOR)], []
+    )
+    other = "source" if end == "target" else "target"
+    edge = {end: "Remote Ref", other: "local-other", "type": "RELATES_TO"}
+    response = call(
+        make_broker(service),
+        "graph.add",
+        {
+            "nodes": [
+                {"id": "Remote Ref", "name": "Local by id", "type": "Actor"},
+                {"id": "local-other", "name": "Other", "type": "Actor"},
+            ],
+            "edges": [edge],
+        },
+    )
+    assert "result" in response, response
+    (stored_edge,) = storage.edges.values()
+    assert getattr(stored_edge, end) == "Remote Ref"
+    assert getattr(stored_edge, other) == "local-other"
+    assert storage.get_node(getattr(stored_edge, end)).name == "Local by id"
+
+
 def test_reference_node_names_cannot_be_probed_without_write_access(storage):
     storage.add_nodes(
         [Node(id="federated::g2::n1", name="Secret Ref", type=NodeType.ACTOR)], []
