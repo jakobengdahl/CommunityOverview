@@ -202,38 +202,39 @@ class AgentWorker:
 
     def _admit_event(self, event_payload: Dict[str, Any]) -> bool:
         """Bound agent chains and bursts before they can consume LLM capacity."""
-        with self._guard_lock:
-            if self._pause_reason is not None:
-                return False
-            origin = event_payload.get("origin") or {}
-            depth = (
-                origin.get("event_causation_depth", 0)
-                if isinstance(origin, dict)
-                else -1
+        origin = event_payload.get("origin") or {}
+        depth = (
+            origin.get("event_causation_depth", 0) if isinstance(origin, dict) else -1
+        )
+        if type(depth) is int and 0 <= depth < MAX_AGENT_CAUSATION_DEPTH:
+            return True
+        reason = "Event rejected: causation depth limit exceeded or invalid."
+        logger.warning("Agent %s: %s", self.agent_id, reason)
+        if self._run_recorder is not None:
+            run_id = self._run_recorder.record_start(
+                self.agent_id, self.config.name, event_payload
             )
+            self._run_recorder.record_failure(run_id, reason)
+        return False
+
+    def _processing_delay(self) -> float:
+        """Reserve processing capacity; queued events survive temporary throttling."""
+        with self._guard_lock:
             now = time.monotonic()
             while (
                 self._event_admissions
                 and now - self._event_admissions[0] >= AGENT_EVENT_RATE_WINDOW_SECONDS
             ):
                 self._event_admissions.popleft()
-            if type(depth) is not int or not 0 <= depth < MAX_AGENT_CAUSATION_DEPTH:
-                reason = f"Agent paused: causation depth limit ({MAX_AGENT_CAUSATION_DEPTH}) exceeded or invalid."
-            elif len(self._event_admissions) >= AGENT_EVENT_RATE_LIMIT:
-                reason = f"Agent paused: event rate limit ({AGENT_EVENT_RATE_LIMIT} per {AGENT_EVENT_RATE_WINDOW_SECONDS} seconds) exceeded."
-            else:
-                self._event_admissions.append(now)
-                return True
-            self._pause_reason = reason + " Edit the agent configuration to resume."
-
-        logger.warning("Agent %s: %s", self.agent_id, self._pause_reason)
-        # Reuse the run-history UI so a trip is visible even after a process restart.
-        if self._run_recorder is not None:
-            run_id = self._run_recorder.record_start(
-                self.agent_id, self.config.name, event_payload
-            )
-            self._run_recorder.record_failure(run_id, self._pause_reason)
-        return False
+            if len(self._event_admissions) >= AGENT_EVENT_RATE_LIMIT:
+                self._pause_reason = "Agent temporarily paused: event rate limit; queued events resume automatically."
+                return max(
+                    0.0,
+                    self._event_admissions[0] + AGENT_EVENT_RATE_WINDOW_SECONDS - now,
+                )
+            self._pause_reason = None
+            self._event_admissions.append(now)
+            return 0.0
 
     def reload_config(self, new_config: AgentConfig) -> None:
         """
@@ -395,8 +396,8 @@ class AgentWorker:
 
     def _process_event(self, item: EventItem) -> None:
         """Process a single event."""
-        if self._pause_reason is not None:
-            return
+        while delay := self._processing_delay():
+            time.sleep(min(delay, 1.0))
         start_time = time.time()
         event_payload = item.payload
         event_id = item.event_id
@@ -691,8 +692,8 @@ class AgentWorker:
             "queue_size": self.queue_size,
             "events_processed": self.events_processed,
             "events_failed": self.events_failed,
-            "last_event_at": self.last_event_at.isoformat()
-            if self.last_event_at
-            else None,
+            "last_event_at": (
+                self.last_event_at.isoformat() if self.last_event_at else None
+            ),
             "mcp_integrations": self.config.mcp_integration_ids,
         }

@@ -567,9 +567,21 @@ class AgentRegistry:
     def _build_apply_executor(self, agent_id: str):
         """Raw (ungated) tool executor used to apply an approved proposal."""
         self._ensure_initialized()
-        return self._mcp_loader.create_tool_executor(
+        raw = self._mcp_loader.create_tool_executor(
             graph_service=self._service, agent_id=agent_id
         )
+
+        def apply(tool, arguments):
+            worker = self._workers.get(agent_id)
+            if worker is None or not worker.config.enabled:
+                raise ValueError("Agent is unavailable or disabled")
+            if worker.get_status()["paused"]:
+                raise ValueError(
+                    "Agent is paused; retry with a new proposal after recovery"
+                )
+            return raw(tool, arguments)
+
+        return apply
 
     def list_proposals(
         self,

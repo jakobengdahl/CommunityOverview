@@ -97,6 +97,7 @@ class Proposal:
     # §9.1): approving it acts in that same session, so an action made in a
     # staged session stages, never skipping the layer.
     session_id: Optional[str] = None
+    causation_depth: int = 1
 
     def __post_init__(self) -> None:
         if not isinstance(self.autonomy_level, AutonomyLevel):
@@ -132,6 +133,7 @@ class Proposal:
             "updated_at": _iso(self.updated_at),
             "decided_at": _iso(self.decided_at),
             "session_id": self.session_id,
+            "causation_depth": self.causation_depth,
         }
 
     @classmethod
@@ -154,6 +156,7 @@ class Proposal:
         prop.updated_at = _parse(data.get("updated_at")) or prop.updated_at
         prop.decided_at = _parse(data.get("decided_at"))
         prop.session_id = data.get("session_id")
+        prop.causation_depth = data.get("causation_depth", 1)
         return prop
 
 

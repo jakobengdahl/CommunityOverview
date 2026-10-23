@@ -23,7 +23,7 @@ from typing import List, Optional, Protocol, Sequence, Union, runtime_checkable
 
 from .models import Proposal, ProposalStatus, utcnow
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 _CREATE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS proposals (
@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS proposals (
     created_at      REAL NOT NULL,
     updated_at      REAL NOT NULL,
     decided_at      REAL,
-    session_id      TEXT
+    session_id      TEXT,
+    causation_depth INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_proposals_created ON proposals (created_at);
 CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals (status);
@@ -241,6 +242,10 @@ class SqliteProposalStore:
                     self._conn.execute(
                         "ALTER TABLE proposals ADD COLUMN session_id TEXT"
                     )
+                if "causation_depth" not in columns:
+                    self._conn.execute(
+                        "ALTER TABLE proposals ADD COLUMN causation_depth INTEGER NOT NULL DEFAULT 1"
+                    )
                 self._conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
                 self._conn.commit()
 
@@ -255,8 +260,8 @@ class SqliteProposalStore:
                 INSERT INTO proposals (
                     id, agent_id, agent_name, tool, input_args, autonomy_level,
                     status, run_id, correlation_id, decided_by, apply_result,
-                    apply_error, created_at, updated_at, decided_at, session_id
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    apply_error, created_at, updated_at, decided_at, session_id, causation_depth
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 self._to_row(proposal),
             )
@@ -282,9 +287,11 @@ class SqliteProposalStore:
                     proposal.run_id,
                     proposal.correlation_id,
                     proposal.decided_by,
-                    json.dumps(proposal.apply_result)
-                    if proposal.apply_result is not None
-                    else None,
+                    (
+                        json.dumps(proposal.apply_result)
+                        if proposal.apply_result is not None
+                        else None
+                    ),
                     proposal.apply_error,
                     _to_epoch(proposal.updated_at),
                     _to_epoch(proposal.decided_at),
@@ -446,6 +453,7 @@ class SqliteProposalStore:
             _to_epoch(p.updated_at),
             _to_epoch(p.decided_at),
             p.session_id,
+            p.causation_depth,
         )
 
     @staticmethod
@@ -470,4 +478,5 @@ class SqliteProposalStore:
         p.updated_at = _from_epoch(row["updated_at"])
         p.decided_at = _from_epoch(row["decided_at"])
         p.session_id = row["session_id"]
+        p.causation_depth = row["causation_depth"]
         return p

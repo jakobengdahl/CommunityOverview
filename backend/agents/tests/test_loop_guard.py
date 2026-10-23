@@ -77,9 +77,9 @@ def test_agent_mutation_chains_terminate_at_default_hop_limit(agent_ids):
                 "delivery": {
                     "webhook_url": f"internal://agent/{agent_id}",
                     # Ping-pong excludes self; self-retrigger deliberately does not.
-                    "ignore_origins": [f"agent:{agent_id}"]
-                    if len(agent_ids) > 1
-                    else [],
+                    "ignore_origins": (
+                        [f"agent:{agent_id}"] if len(agent_ids) > 1 else []
+                    ),
                 },
             },
         )
@@ -158,40 +158,29 @@ def test_agent_mutation_chains_terminate_at_default_hop_limit(agent_ids):
         range(1, MAX_AGENT_CAUSATION_DEPTH + 1)
     )
     assert {ctx.event_correlation_id for ctx in storage.contexts} == {"seed"}
-    assert any(worker.get_status()["paused"] for worker in workers.values())
+    assert not any(worker.get_status()["paused"] for worker in workers.values())
     failed_runs = [run for run in history.list_runs() if run["status"] == "failed"]
     assert len(failed_runs) == 1
     assert "causation depth limit" in failed_runs[0]["error"]
 
 
-def test_event_rate_breaker_pauses_and_records_visible_reason_until_config_reload(
-    monkeypatch,
-):
-    history = AgentRunRecorder(
-        InMemoryExecutionStore(retry_policy=RetryPolicy(max_attempts=1))
-    )
-    worker = AgentWorker(
-        AgentConfig(agent_id="a", name="A", enabled=True),
-        AgentsSettings(),
-        None,
-        run_recorder=history,
-    )
-    monkeypatch.setattr("backend.agents.worker.time.monotonic", lambda: 100)
-    for i in range(AGENT_EVENT_RATE_LIMIT):
-        assert worker.enqueue({"event_id": f"e-{i}"})
-    assert not worker.enqueue({"event_id": "trip"})
+def test_burst_preserves_queue_and_throttles_temporarily(monkeypatch):
+    worker = AgentWorker(AgentConfig(agent_id="a", name="A"), AgentsSettings(), None)
+    clock = [100.0]
+    monkeypatch.setattr("backend.agents.worker.time.monotonic", lambda: clock[0])
+    for i in range(AGENT_EVENT_RATE_LIMIT + 5):
+        assert worker.enqueue({"event_id": str(i)})
+    for _ in range(AGENT_EVENT_RATE_LIMIT):
+        assert worker._processing_delay() == 0
+    assert worker._processing_delay() == AGENT_EVENT_RATE_WINDOW_SECONDS
     assert worker.get_status()["paused"]
-    assert "event rate limit" in worker.get_status()["pause_reason"]
-    assert history.list_runs()[0]["status"] == "failed"
-    assert "event rate limit" in history.list_runs()[0]["error"]
-    monkeypatch.setattr("backend.agents.worker.time.monotonic", lambda: 1000)
-    assert not worker.enqueue({"event_id": "still-paused"})
-    worker._create_llm_client = MagicMock()
-    worker._process_event(worker._queue.get_nowait())
-    worker._create_llm_client.assert_not_called()
-    worker.reload_config(worker.config)
-    assert worker.enqueue({"event_id": "resumed"})
+    assert worker.queue_size == AGENT_EVENT_RATE_LIMIT + 5
+    clock[0] += AGENT_EVENT_RATE_WINDOW_SECONDS
+    assert worker._processing_delay() == 0
     assert not worker.get_status()["paused"]
+    assert [worker._queue.get_nowait().event_id for _ in range(worker.queue_size)] == [
+        str(i) for i in range(AGENT_EVENT_RATE_LIMIT + 5)
+    ]
 
 
 def test_event_rate_window_expires_without_pausing(monkeypatch):
@@ -212,7 +201,8 @@ def test_invalid_or_exhausted_depth_never_reaches_llm(depth):
     worker = AgentWorker(AgentConfig(agent_id="a", name="A"), AgentsSettings(), None)
     assert not worker.enqueue({"origin": {"event_causation_depth": depth}})
     assert worker.queue_size == 0
-    assert worker.get_status()["paused"]
+    assert not worker.get_status()["paused"]
+    assert worker.enqueue({"event_id": "unrelated"})
 
 
 def test_agent_context_cannot_be_reset_by_tool_arguments_and_does_not_leak():
