@@ -54,8 +54,14 @@ export default function AgentRunsDialog({ agentId = null, onClose }) {
 
   return (
     <div className="dialog-overlay" onClick={onClose}>
-      <div className="dialog-content subscription-dialog" onClick={(e) => e.stopPropagation()}>
-        <h2>{t('agent_runs.title')}</h2>
+      <div
+        className="dialog-content subscription-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="agent-runs-title"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 id="agent-runs-title">{t('agent_runs.title')}</h2>
         <p className="dialog-description">{t('agent_runs.description')}</p>
 
         <div className="form-section">

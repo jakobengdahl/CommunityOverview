@@ -1,3 +1,6 @@
 ## 2024-09-26 - Add Tooltips to Icon-Only Buttons
 **Learning:** Icon-only buttons often have `aria-label`s for screen reader support but lack native visual tooltips for sighted users. The lack of `title` attributes makes it harder for users to understand what icons mean, reducing the intuitiveness of the UX.
 **Action:** Always ensure that icon-only interactive elements (like custom dialog close buttons, zoom controls, etc.) carry a `title` attribute reflecting the same information as the `aria-label`. Use the standard translation function where applicable (`title={t('key')}`).
+## 2025-02-12 - Accessibility of Custom Dialog Components
+**Learning:** In this codebase, the `dialog-content` class is used extensively to create custom modals (especially `.subscription-dialog` derivatives like CreateAgentDialog, AgentRunsDialog, etc.). These elements visually behave as modals but inherently lack the `role="dialog"`, `aria-modal="true"`, and `aria-labelledby` attributes, rendering them inaccessible to screen readers without explicit ARIA definitions.
+**Action:** Always ensure that custom dialog containers using `.dialog-content` or `.subscription-dialog` include `role="dialog"`, `aria-modal="true"`, and link an `aria-labelledby` attribute to an `id` on the main title element (e.g., `<h2>`).
