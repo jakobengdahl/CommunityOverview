@@ -3476,13 +3476,37 @@ class GraphStorage:
         longer live, and it must report itself as superseded rather than
         succeeded. ``generation`` of ``None`` always commits (an older/foreign
         caller that never captured a generation to check against).
+
+        Incremental stores receive only the embedded nodes, with the revisions
+        this instance holds as expectations. A whole-graph save here would
+        overwrite writes from other instances that have not reached us yet.
         """
         with self._lock:
             if generation is not None and self._generation != generation:
                 return False
             if vectors:
-                self.vector_store.absorb_embeddings(vectors)
-                self.save().result()
+                if self._backend_capabilities.incremental_writes:
+                    nodes = [
+                        self.nodes[node_id]
+                        for node_id in vectors
+                        if node_id in self.nodes
+                    ]
+                    if nodes:
+                        undo = self._capture(node_ids=[node.id for node in nodes])
+                        expectations = {
+                            ("node", node.id): node.revision for node in nodes
+                        }
+                        self.vector_store.absorb_embeddings(
+                            {node.id: vectors[node.id] for node in nodes}
+                        )
+                        self._commit(
+                            [("node", "upsert", node) for node in nodes],
+                            undo,
+                            expectations,
+                        )
+                else:
+                    self.vector_store.absorb_embeddings(vectors)
+                    self.save().result()
             return True
 
     @property
