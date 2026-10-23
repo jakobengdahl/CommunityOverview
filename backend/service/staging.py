@@ -187,6 +187,10 @@ class Layer:
             (e["kind"], e["entity_id"]): e for e in entries
         }
         self._changed: Dict[LayerKey, Optional[Dict[str, Any]]] = {}
+        # Visibility, validation, the base and the answer must use the same
+        # main entity even if a direct write lands while this op is running.
+        self._main_nodes: Dict[str, Optional[Dict[str, Any]]] = {}
+        self._main_edges: Dict[str, Optional[Dict[str, Any]]] = {}
         # What the op's decision read of the layer: the keys it looked up, and
         # whether it scanned every entry. The store refuses the op if any of
         # that changed before it lands (``expected``).
@@ -245,12 +249,20 @@ class Layer:
     # -- the main graph ---------------------------------------------------------
 
     def main_node(self, node_id: str) -> Optional[Dict[str, Any]]:
-        node = self._storage.get_node(node_id)
-        return _doc(node) if node is not None else None
+        if node_id not in self._main_nodes:
+            node = self._storage.get_node(node_id)
+            self._main_nodes[node_id] = (
+                json_copy(_doc(node)) if node is not None else None
+            )
+        return self._main_nodes[node_id]
 
     def main_edge(self, edge_id: str) -> Optional[Dict[str, Any]]:
-        edge = self._storage.edges.get(edge_id)
-        return _doc(edge) if edge is not None else None
+        if edge_id not in self._main_edges:
+            edge = self._storage.edges.get(edge_id)
+            self._main_edges[edge_id] = (
+                json_copy(_doc(edge)) if edge is not None else None
+            )
+        return self._main_edges[edge_id]
 
     # -- the composed view (§8.1) -------------------------------------------------
 
@@ -290,9 +302,11 @@ class Layer:
     def nodes(self) -> Iterable[Dict[str, Any]]:
         """Every node of the composed view."""
         entries = self.current_entries()
-        for node_id, node in self._storage.nodes.items():
+        for node_id in self._storage.nodes:
             if ("node", node_id) not in entries:
-                yield _doc(node)
+                doc = self.main_node(node_id)
+                if doc is not None:
+                    yield doc
         for (kind, entity_id), entry in entries.items():
             if kind == "node":
                 doc = compose(entry, self.main_node(entity_id))
@@ -643,7 +657,9 @@ class StagedWrite:
                             **failure,
                             "success": False,
                             "message": (
-                                f"{role} node '{value}' does not exist "
+                                "Could not add edge (source or target not found)"
+                                if graph_access.enabled
+                                else f"{role} node '{value}' does not exist "
                                 "(not found by ID or name)"
                             ),
                         }
@@ -998,11 +1014,18 @@ class StagedWrite:
 
     # -- federation adoption --------------------------------------------------------
 
-    def find_adopted(self, federated_node_id: str) -> Optional[Node]:
+    def find_adopted(
+        self, federated_node_id: str, graph_access: GraphAccessNarrowing
+    ) -> Optional[Node]:
         """The composed view's node already adopted from ``federated_node_id``."""
-        for doc in self._load().nodes():
+        layer = self._load()
+        for doc in layer.nodes():
             adopted_from = (doc.get("metadata") or {}).get("adopted_from") or {}
             if adopted_from.get("federated_node_id") == federated_node_id:
+                if graph_access.enabled and not self._shown(
+                    layer, doc["id"], graph_access
+                ):
+                    raise StagingRefused("not_found", "Local adopted node not found")
                 return _node(doc)
         return None
 

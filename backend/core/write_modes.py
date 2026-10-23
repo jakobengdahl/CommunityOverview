@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
 from typing import Any, Callable, Optional, Set, Tuple
 
 from . import layer_store
@@ -37,10 +36,6 @@ SOURCE_INHERITED = "inherited"
 
 # §6.4 and §20 item 2: ample for a workshop, cheap to compose.
 DEFAULT_LAYER_MAX_ENTRIES = 1000
-
-# How long an instance with staged sessions off trusts its last "the store
-# holds no staged sessions" before asking again.
-UNREADABLE_RECORDS_RECHECK_SECONDS = 30.0
 
 STAGED_UNSUPPORTED = "staged_unsupported"
 WRITE_MODE_IRREVERSIBLE = "write_mode_irreversible"
@@ -121,7 +116,6 @@ class WriteModes:
         self._lock = threading.Lock()
         self._unreadable_records = unreadable_records
         self._saw_unreadable = False
-        self._unreadable_checked_at: Optional[float] = None
 
     @property
     def supports_staged(self) -> bool:
@@ -133,25 +127,21 @@ class WriteModes:
 
         Asked when a request names a session, not only at boot: an instance
         started before any record existed would otherwise go on writing those
-        sessions as direct. The store is asked at most once per
-        ``UNREADABLE_RECORDS_RECHECK_SECONDS``, so an instance with staging
-        off (the default) does not query it on every session request; a
-        failed check keeps the last answer. Once true it stays true, as
-        records are never removed.
+        sessions as direct. A negative answer is never cached: another
+        instance may create a record before the next request. A failed check
+        refuses session requests until the store can be checked again. Once
+        true it stays true, as records are never removed.
         """
         if self._store is not None or self._unreadable_records is None:
             return False
         if self._saw_unreadable:
             return True
-        now = time.monotonic()
-        checked = self._unreadable_checked_at
-        if checked is not None and now - checked < UNREADABLE_RECORDS_RECHECK_SECONDS:
-            return False
-        self._unreadable_checked_at = now
         try:
-            self._saw_unreadable = bool(self._unreadable_records())
+            if self._unreadable_records():
+                self._saw_unreadable = True
         except Exception:
             logger.warning("could not ask the graph store for staged sessions")
+            return True
         return self._saw_unreadable
 
     @property
