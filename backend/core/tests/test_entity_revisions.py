@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from typing import Any, Dict, List
+from unittest.mock import Mock
 
 import pytest
 
@@ -23,6 +24,7 @@ from backend.core import (
     capabilities_of,
 )
 from backend.core.events.models import EventType
+from backend.core.models import AddNodesResult
 from backend.runtime.authorization import DefaultGraphAuthorizationHook
 from backend.service import mutations
 
@@ -264,31 +266,73 @@ def test_the_journal_never_carries_an_expectation(make_storage):
             assert set(op) == {"kind", "action", "entity_id", "payload"}
 
 
-def test_a_plain_create_on_a_single_writer_store_carries_no_expectation(
-    make_storage,
+@pytest.mark.parametrize("kind", ["node", "edge"])
+@pytest.mark.parametrize("expect_absent", [False, True])
+def test_a_single_writer_create_waits_only_when_it_carries_an_expectation(
+    make_storage, monkeypatch, kind, expect_absent
 ):
     # The shared store's refusal of an unseen id is not this store's: here
     # the instance's own model is the whole graph, and a plain create stays
     # the fire-and-forget write it always was.
     storage = make_storage()
+    storage.add_nodes([_node("a"), _node("b")], [])
     sent: List[Any] = []
+    futures: List[Any] = []
     persist = storage._persist
 
     def spy(operations):
-        sent.append(list(operations))
-        return persist(operations)
+        sent.extend(operations)
+        future = Mock(wraps=persist(operations))
+        futures.append(future)
+        return future
 
-    storage._persist = spy  # type: ignore[method-assign]
-    storage.add_nodes([_node("a")], [Edge(id="e", source="a", target="a")])
-    storage.add_nodes([_node("b")], [], expect_absent=True)
-    storage.add_edge(Edge(id="f", source="a", target="b"))
-    storage.add_edge(Edge(id="g", source="b", target="a"), expect_absent=True)
+    monkeypatch.setattr(storage, "_persist", spy)
+    if kind == "node":
+        result = storage.add_nodes(
+            [_node("c")],
+            [Edge(id="e", source="c", target="a")],
+            expect_absent=expect_absent,
+        )
+        assert result.success
+        expected_entities = {("node", "c"), ("edge", "e")}
+    else:
+        result = storage.add_edge(
+            Edge(id="e", source="a", target="b"), expect_absent=expect_absent
+        )
+        assert result == "e"
+        expected_entities = {("edge", "e")}
 
-    plain, expecting, plain_edge, expecting_edge = sent
-    assert [op.expect_absent for op in plain] == [False, False]
-    assert [op.expect_absent for op in expecting] == [True]
-    assert [op.expect_absent for op in plain_edge] == [False]
-    assert [op.expect_absent for op in expecting_edge] == [True]
+    assert {(op.kind, op.entity_id) for op in sent} == expected_entities
+    assert all(op.expect_absent is expect_absent for op in sent)
+    assert any(future.result.called for future in futures) is expect_absent
+
+
+@pytest.mark.parametrize("failure", ["duplicate_node", "duplicate_edge"])
+def test_a_locally_failing_batch_keeps_landed_nodes_when_persistence_raises(
+    make_storage, monkeypatch, failure
+):
+    storage = make_storage()
+    storage.add_nodes(
+        [_node("held")], [Edge(id="held_edge", source="held", target="held")]
+    )
+    commit = Mock(side_effect=RuntimeError("executor shut down"))
+    monkeypatch.setattr(storage, "_commit", commit)
+    nodes = [_node("new")]
+    edges = []
+    if failure == "duplicate_node":
+        nodes.append(_node("held"))
+    else:
+        edges.append(Edge(id="held_edge", source="new", target="held"))
+
+    result = storage.add_nodes(nodes, edges)
+
+    assert isinstance(result, AddNodesResult)
+    assert result.success is False
+    assert "already exists" in result.message
+    assert result.added_node_ids == [] and result.added_edge_ids == []
+    assert result.landed_node_ids == ["new"]
+    assert storage.nodes["new"] is nodes[0]
+    commit.assert_called_once()
 
 
 def test_a_backend_declaring_revision_enforcement_must_implement_it():
@@ -380,18 +424,31 @@ def test_a_shared_store_without_enforcement_never_persists_a_reservation():
         storage.shutdown_events()
 
 
-def test_a_create_conflict_never_reports_the_taken_entitys_revision(make_storage):
+@pytest.mark.parametrize("staged", [False, True])
+def test_a_create_conflict_never_reports_the_taken_entitys_revision(
+    make_storage, staged
+):
     storage = make_storage()
     storage.add_nodes([_node("taken")], [])
+    staging = None
+    if staged:
+        staging = Mock()
+        staging.add_nodes.side_effect = EntityRevisionConflict(
+            "node", "taken", None, storage.nodes["taken"].revision
+        )
     result = mutations.add_nodes(
         storage,
         DefaultGraphAuthorizationHook(),
         [{"id": "taken", "type": "Actor", "name": "again"}],
         [],
         expect_absent=True,
+        staging=staging,
     )
+    assert result["success"] is False
     assert result["error"] == "entity_revision_conflict"
     assert result["current_revision"] is None
+    assert result["message"] == "node 'taken' already exists"
+    assert result["added_node_ids"] == [] and result["added_edge_ids"] == []
     assert str(storage.nodes["taken"].revision) not in result["message"]
 
 

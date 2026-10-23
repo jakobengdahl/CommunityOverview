@@ -1,4 +1,17 @@
 import { captureCanvasScope } from './sessionScopedGraphEdits';
+import useGraphStore from '../store/graphStore';
+
+// Content replaced by applying a view. Selection and other transient UI state
+// do not count as edits; node moves and canvas-local annotations use the epoch.
+const VIEW_CONTENT_FIELDS = [
+  'nodes',
+  'edges',
+  'hiddenNodeIds',
+  'hiddenEdgeIds',
+  'dimmedNodeIds',
+  'dimmedEdgeIds',
+  'edgeIntensity',
+];
 
 /**
  * Load the saved view named by a `?view=` URL parameter.
@@ -17,6 +30,7 @@ import { captureCanvasScope } from './sessionScopedGraphEdits';
  * @param {string} params.sessionId  The session the URL was opened into.
  * @param {Function} params.getCurrentSessionId  Reads the active session id.
  * @param {Function} params.getSavedView  API call: fetch one saved view.
+ * @param {Function} [params.getCanvasEditEpoch]  Tracks canvas-local edits.
  * @param {Function} params.applyView  Applies a fetched view to the canvas.
  * @returns {Promise<boolean>} Whether the view was applied.
  */
@@ -26,6 +40,7 @@ export async function loadUrlSavedView({
   sessionId,
   getCurrentSessionId,
   getSavedView,
+  getCanvasEditEpoch = () => 0,
   applyView,
 }) {
   // A failed bootstrap load only means "settled" here; its error is logged by
@@ -35,8 +50,21 @@ export async function loadUrlSavedView({
   // the epoch captured below would not show that, as it is taken after the move.
   if (getCurrentSessionId() !== sessionId) return false;
   const scope = captureCanvasScope();
+  const canvas = useGraphStore.getState();
+  const editEpoch = getCanvasEditEpoch();
   const result = await getSavedView(name);
-  if (scope.sessionChanged()) return false;
+  if (scope.canvasReplaced() || getCurrentSessionId() !== sessionId) return false;
+  if (getCanvasEditEpoch() !== editEpoch) return false;
+  const currentCanvas = useGraphStore.getState();
+  if (VIEW_CONTENT_FIELDS.some((key) => currentCanvas[key] !== canvas[key])) return false;
+  // Clearing a restore queue only acknowledges content the bootstrap already
+  // supplied; queuing new content during the fetch must still invalidate it.
+  if (
+    ['pendingGroups', 'pendingAnnotations'].some(
+      (key) => currentCanvas[key] != null && currentCanvas[key] !== canvas[key]
+    )
+  )
+    return false;
   if (!result?.success || !result.nodes?.length) return false;
   applyView(result);
   return true;
