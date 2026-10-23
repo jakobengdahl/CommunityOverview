@@ -145,6 +145,59 @@ def test_the_store_assigns_revisions_unique_across_instances(instances, schema):
     assert _stored(schema, "graph_edges", "e")["revision"] == b.edges["e"].revision
 
 
+def test_import_embedding_commit_preserves_unseen_shared_store_writes(
+    instances, schema, monkeypatch
+):
+    importing = instances(deaf=True)
+    importing.replace_all_nodes_and_edges([_node("a"), _node("b")], [])
+    other = instances(deaf=True)
+    other.update_node("b", {"name": "remote edit"})
+    other.add_nodes([_node("remote")], [Edge(id="e", source="b", target="remote")])
+    untouched = _stored(schema, "graph_nodes", "b")
+    edge = _stored(schema, "graph_edges", "e")
+    assert "remote" not in importing.nodes
+    assert importing.nodes["a"].revision == 0
+
+    def unexpected(data):
+        pytest.fail("embedding commit must not replace the shared graph")
+
+    monkeypatch.setattr(importing._persistence_backend, "save_graph_data", unexpected)
+    assert importing.commit_generation_embeddings(
+        importing.generation, {"a": [1.0, 0.0]}
+    )
+
+    assert _stored(schema, "graph_nodes", "b") == untouched
+    assert _stored(schema, "graph_edges", "e") == edge
+    assert _stored(schema, "graph_nodes", "remote") is not None
+    embedded = _stored(schema, "graph_nodes", "a")
+    assert embedded["embedding"] == [1.0, 0.0]
+    assert embedded["revision"] == importing.nodes["a"].revision > 0
+
+
+@pytest.mark.parametrize("deleted", [False, True])
+def test_import_embedding_commit_refuses_an_unseen_conflicting_node(
+    instances, schema, deleted
+):
+    importing = instances(deaf=True)
+    importing.replace_all_nodes_and_edges([_node("a"), _node("b")], [])
+    other = instances(deaf=True)
+    if deleted:
+        other.delete_nodes(["b"], confirmed=True)
+    else:
+        other.update_node("b", {"name": "remote edit"})
+    before = [_stored(schema, "graph_nodes", node_id) for node_id in ("a", "b")]
+
+    with pytest.raises(EntityRevisionConflict):
+        importing.commit_generation_embeddings(
+            importing.generation, {"a": [1.0, 0.0], "b": [0.0, 1.0]}
+        )
+
+    assert [_stored(schema, "graph_nodes", node_id) for node_id in ("a", "b")] == before
+    assert not importing.vector_store.has_embedding("a")
+    assert not importing.vector_store.has_embedding("b")
+    assert not importing._resync_pending
+
+
 def test_the_store_refuses_a_stale_expectation_the_instance_could_not_see(
     instances, schema
 ):
