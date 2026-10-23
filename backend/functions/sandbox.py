@@ -540,18 +540,23 @@ def supervise(spec, status_fd):
             return
         _report(status_fd, {"started": child})
         signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
-        while True:
-            pid, status = os.waitpid(-1, 0)
-            if pid == child:
-                if os.WIFSIGNALED(status):
-                    exit_signal = os.WTERMSIG(status)
-                else:
-                    exit_code = os.WEXITSTATUS(status)
-                break
+        try:
+            while True:
+                pid, status = os.waitpid(-1, 0)
+                if pid == child:
+                    if os.WIFSIGNALED(status):
+                        exit_signal = os.WTERMSIG(status)
+                    else:
+                        exit_code = os.WEXITSTATUS(status)
+                    break
+        except ChildProcessError:
+            pass
+        # EOF can make the host ask to stop after the child has exited. Ignore
+        # that request while still protected by the _Stop handler, so it cannot
+        # interrupt the handoff to cleanup and lose the final report.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
     except _Stop:
         stopped = True
-    except ChildProcessError:
-        pass
     _reap_all()
     usage = resource.getrusage(resource.RUSAGE_CHILDREN)
     _report(
