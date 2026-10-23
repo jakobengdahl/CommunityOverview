@@ -6,8 +6,10 @@ graph service decides whether a write stages, and the layer store holds it.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -421,6 +423,85 @@ def test_a_session_materialised_under_a_staged_default_stays_direct(tmp_path):
     assert created
     assert storage.layer_store.staged_status(session.id) == "none"
     assert world.manager.write_mode_of(session)["write_mode"] == "direct"
+    assert session.write_mode_source == "explicit"
+    assert world.manager.store.get(session.id).write_mode_source == "explicit"
+
+
+@pytest.mark.asyncio
+async def test_delete_authorizes_the_mode_after_a_queued_switch_to_staged(world):
+    sid = world.manager.create_session("direct").id
+    asked = []
+
+    def deny():
+        assert world.manager._lock(sid).locked()
+        asked.append(sid)
+        raise PermissionError("discard denied")
+
+    async with world.manager._lock(sid):
+        switch = asyncio.create_task(world.manager.set_write_mode(sid, "staged"))
+        delete = asyncio.create_task(
+            world.manager.delete_session(
+                sid, discard_staged=True, authorize_staged=deny
+            )
+        )
+        await asyncio.sleep(0)
+        assert asked == []
+    await switch
+    with pytest.raises(PermissionError, match="discard denied"):
+        await delete
+    assert asked == [sid]
+    assert world.manager.get_session(sid) is not None
+    assert world.write_modes.staged_status(sid) == "active"
+
+
+@pytest.mark.parametrize("kind", ["node", "edge"])
+def test_a_staged_answer_uses_the_main_snapshot_that_was_checked(
+    world, monkeypatch, kind
+):
+    from backend.service.staging import StagedWrite
+
+    sid = world.staged_session()
+    original = StagedWrite._commit
+
+    def commit_then_change_main(writer, layer):
+        result = original(writer, layer)
+        if kind == "node":
+            world.storage.update_node("a", {"name": "Unchecked main content"})
+        else:
+            world.storage.update_edge("ab", {"label": "Unchecked main content"})
+        return result
+
+    monkeypatch.setattr(StagedWrite, "_commit", commit_then_change_main)
+    with bind_session(sid):
+        result = (
+            world.service.update_node("a", {"description": "staged"})
+            if kind == "node"
+            else world.service.update_edge("ab", {"weight": 2})
+        )
+    assert result["success"] is True, result
+    assert "Unchecked main content" not in json.dumps(result)
+    assert "Unchecked main content" not in json.dumps(list(world.layer(sid).values()))
+
+
+def test_visibility_and_staging_use_the_same_main_snapshot(world, monkeypatch):
+    sid = _narrowed(world)
+    original = world.storage.get_node
+    reads = []
+
+    def node_then_hidden(node_id):
+        node = original(node_id)
+        if node_id == "v":
+            reads.append(node_id)
+            if len(reads) > 1:
+                return Node(id="v", type="Actor", name="Hidden", metadata={"secret": 1})
+        return node
+
+    monkeypatch.setattr(world.storage, "get_node", node_then_hidden)
+    with bind_session(sid):
+        result = world.service.update_node("v", {"description": "staged"})
+    assert result["success"] is True, result
+    assert "Hidden" not in json.dumps(result)
+    assert "secret" not in json.dumps(list(world.layer(sid).values()))
 
 
 def test_a_stale_expected_session_seq_stages_nothing(world):
@@ -671,19 +752,15 @@ def test_an_instance_without_staging_refuses_sessions_once_the_store_holds_recor
         assert len(asked) == 1  # sticky once seen
     else:
         assert storage.get_node("a").name == "A2"
-        assert len(asked) == 1  # trusted for the re-check interval
+        assert len(asked) == 2  # negative answers cannot outlive a request
     # Without a session the instance writes as before, and asks nothing.
     asked.clear()
     assert service.update_node("b", {"name": "B1"})["success"] is True
     assert asked == []
 
 
-def test_the_store_is_asked_again_after_the_interval_and_a_failed_check_keeps_the_answer(
-    monkeypatch,
-):
-    import backend.core.write_modes as wm
-
-    answers = iter([False, RuntimeError("store down"), True])
+def test_new_records_are_seen_on_the_next_request_and_a_failed_check_refuses():
+    answers = iter([False, RuntimeError("store down"), False, True])
     asked = []
 
     def records():
@@ -693,20 +770,13 @@ def test_the_store_is_asked_again_after_the_interval_and_a_failed_check_keeps_th
             raise answer
         return answer
 
-    clock = [1000.0]
-    monkeypatch.setattr(wm.time, "monotonic", lambda: clock[0])
     write_modes = WriteModes(None, unreadable_records=records)
     assert write_modes.store_holds_unreadable_records() is False
-    clock[0] += wm.UNREADABLE_RECORDS_RECHECK_SECONDS - 1
-    assert write_modes.store_holds_unreadable_records() is False
-    assert len(asked) == 1
-    clock[0] += 2
-    assert write_modes.store_holds_unreadable_records() is False  # failed check
-    clock[0] += wm.UNREADABLE_RECORDS_RECHECK_SECONDS
     assert write_modes.store_holds_unreadable_records() is True
-    clock[0] += wm.UNREADABLE_RECORDS_RECHECK_SECONDS
+    assert write_modes.store_holds_unreadable_records() is False  # recovery
     assert write_modes.store_holds_unreadable_records() is True
-    assert len(asked) == 3
+    assert write_modes.store_holds_unreadable_records() is True
+    assert len(asked) == 4
 
 
 def test_a_staged_session_whose_record_was_lost_is_never_written_directly(world):
@@ -934,6 +1004,29 @@ def _narrowed(world):
     sid = world.staged_session()
     world.service._authorization_hook = Narrow()
     return sid
+
+
+def test_unknown_and_hidden_endpoint_names_get_the_same_staged_refusal(world):
+    sid = _narrowed(world)
+    results = []
+    with bind_session(sid):
+        for endpoint in ("Alpha", "Unknown"):
+            results.append(
+                world.service.add_nodes(
+                    [],
+                    [
+                        {
+                            "id": "new",
+                            "source": "v",
+                            "target": endpoint,
+                            "type": "RELATES_TO",
+                        }
+                    ],
+                )
+            )
+    assert results[0] == results[1]
+    assert results[0]["success"] is False
+    assert world.layer(sid) == {}
 
 
 def test_staged_update_of_a_node_outside_the_narrowing_is_not_found(world):
@@ -1214,6 +1307,43 @@ def test_adopting_twice_in_a_staged_session_finds_the_layer_copy(world, tmp_path
         second = world.service.adopt_federated_node("federated::esam-main::remote-1")
     assert first["success"] is True
     assert "already adopted" in second["message"]
+
+
+@pytest.mark.parametrize("staged", [False, True])
+def test_already_adopted_never_returns_a_local_copy_outside_the_narrowing(
+    world, tmp_path, staged
+):
+    from backend.service.tests.test_federated_adoption import (
+        _service_with_cached_federated_node,
+    )
+
+    class FederatedOnly:
+        def evaluate(self, context):
+            return GraphAuthorizationDecision(
+                allowed=True,
+                graph_access=GraphAccessNarrowing(
+                    enabled=True,
+                    allow_local_graph=False,
+                    include_graph_ids=("esam-main",),
+                ),
+            )
+
+    (tmp_path / "fed").mkdir()
+    fed = _service_with_cached_federated_node(tmp_path / "fed")
+    world.service._federation_manager = fed._federation_manager
+    sid = world.staged_session() if staged else None
+    with bind_session(sid) if staged else nullcontext():
+        first = world.service.adopt_federated_node(
+            "federated::esam-main::remote-1", local_name="Hidden local copy"
+        )
+        assert first["success"] is True, first
+        before = world.layer(sid) if staged else world.main()
+        world.service._authorization_hook = FederatedOnly()
+        second = world.service.adopt_federated_node("federated::esam-main::remote-1")
+    assert second["success"] is False
+    assert second["error"] == "not_found"
+    assert "Hidden local copy" not in json.dumps(second)
+    assert (world.layer(sid) if staged else world.main()) == before
 
 
 @pytest.mark.parametrize(

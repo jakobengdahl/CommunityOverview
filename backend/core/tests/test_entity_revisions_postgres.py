@@ -237,6 +237,35 @@ def test_a_create_expecting_absence_is_refused_when_another_instance_has_it(
     assert _stored(schema, "graph_nodes", "dup")["name"] == "first"
 
 
+@pytest.mark.parametrize("action", ["delete", "archive"])
+def test_bulk_edge_expectations_are_enforced_by_the_store(instances, schema, action):
+    current = instances()
+    behind = instances(deaf=True)
+    current.add_nodes(
+        [_node("a")],
+        [Edge(id="e", source="a", target="a"), Edge(id="f", source="a", target="a")],
+    )
+    behind.load()
+    expected = {edge_id: edge.revision for edge_id, edge in behind.edges.items()}
+    before = {edge_id: edge.to_dict() for edge_id, edge in behind.edges.items()}
+    current.update_edge("f", {"label": "moved on"})
+    events = _events(behind)
+
+    with pytest.raises(EntityRevisionConflict) as refused:
+        if action == "delete":
+            behind.delete_edges(["e", "f"], expected_revisions=expected)
+        else:
+            behind.set_edges_archived(["e", "f"], True, expected_revisions=expected)
+
+    assert refused.value.entity_id == "f"
+    assert refused.value.current_revision == current.edges["f"].revision
+    assert {edge_id: edge.to_dict() for edge_id, edge in behind.edges.items()} == before
+    assert _stored(schema, "graph_edges", "e")["revision"] == expected["e"]
+    assert _stored(schema, "graph_edges", "f")["label"] == "moved on"
+    assert not _stored(schema, "graph_edges", "e")["archived"]
+    assert events == []
+
+
 def test_a_plain_create_over_an_id_another_instance_created_is_refused(
     instances, schema
 ):

@@ -105,7 +105,7 @@ class SessionRegistry:
 
     @staticmethod
     def is_valid_session_id(session_id: str) -> bool:
-        return bool(SESSION_ID_RE.match(session_id))
+        return bool(SESSION_ID_RE.fullmatch(session_id))
 
     # ------------------------------------------------------------------
     # Session lifecycle

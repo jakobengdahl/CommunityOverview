@@ -14,7 +14,6 @@ from fastapi.testclient import TestClient
 from backend.api_host.server import create_app
 from backend.api_host.session_binding import SessionBindingMiddleware
 from backend.core import Edge, Node
-from backend.core import write_modes as wm
 from backend.core.write_modes import WriteModes
 from backend.runtime import session_context
 from backend.runtime.authorization import (
@@ -242,8 +241,11 @@ def test_a_retired_id_is_not_found_even_when_something_still_listens_on_it(world
 # -- write_modes.store_holds_unreadable_records ---------------------------------
 
 
-def test_the_recheck_interval_is_short_enough_to_notice_new_records():
-    assert 0 < wm.UNREADABLE_RECORDS_RECHECK_SECONDS <= 60
+def test_a_negative_record_check_is_not_reused_for_the_next_request():
+    records = [False, True]
+    modes = WriteModes(None, unreadable_records=lambda: records.pop(0))
+    assert modes.store_holds_unreadable_records() is False
+    assert modes.store_holds_unreadable_records() is True
 
 
 def test_an_instance_with_no_store_check_does_not_log_a_failed_check(caplog):

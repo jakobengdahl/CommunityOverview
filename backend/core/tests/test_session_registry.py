@@ -48,6 +48,10 @@ class TestSessionIdValidation:
     def test_empty_string_rejected(self):
         assert not SessionRegistry.is_valid_session_id("")
 
+    @pytest.mark.parametrize("session_id", ["1234-5678\n", "1234-5678-9012-3456\n"])
+    def test_trailing_newline_rejected(self, session_id):
+        assert not SessionRegistry.is_valid_session_id(session_id)
+
 
 class TestSessionLifecycle:
     """session creation and existence checks."""

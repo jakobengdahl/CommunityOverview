@@ -1465,7 +1465,8 @@ def _register_session_endpoints(
     ) -> Dict[str, Any]:
         if not is_valid_session_id(session_id):
             raise HTTPException(status_code=400, detail="invalid session_id format")
-        if session_manager.write_modes.mode_of(session_id) == WRITE_MODE_STAGED:
+
+        def authorize_staged() -> None:
             # Retiring a staged session's record, and with discard_staged
             # dropping its layer, is a change to the layer (§13, §14).
             _authorize_session_change(
@@ -1474,9 +1475,13 @@ def _register_session_endpoints(
                 session_id,
                 "discard" if discard_staged else "",
             )
+
         try:
             existed = await session_manager.delete_session(
-                session_id, deleted_by=client_id, discard_staged=discard_staged
+                session_id,
+                deleted_by=client_id,
+                discard_staged=discard_staged,
+                authorize_staged=authorize_staged,
             )
         except LayerNotEmpty as exc:
             raise HTTPException(
