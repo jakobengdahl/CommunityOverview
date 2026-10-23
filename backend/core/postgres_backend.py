@@ -1699,22 +1699,37 @@ class PostgresGraphPersistenceBackend:
             # holds the same row for share (§11.3).
             scope, scope_params = self._and_scope()
             if operation.expected_revision is None:
-                conn.execute(
+                cursor = conn.execute(
                     sql.SQL("DELETE FROM {} WHERE id = %s{}").format(
                         self._table(table), scope
                     ),
                     (operation.entity_id, *scope_params),
                 )
-                return None
-            cursor = conn.execute(
-                sql.SQL(
-                    "DELETE FROM {} WHERE id = %s"
-                    " AND COALESCE((doc->>'revision')::bigint, 0) = %s{}"
-                ).format(self._table(table), scope),
-                (operation.entity_id, operation.expected_revision, *scope_params),
-            )
-            if cursor.rowcount == 0:
-                raise self._refuse(conn, table, operation)
+            else:
+                cursor = conn.execute(
+                    sql.SQL(
+                        "DELETE FROM {} WHERE id = %s"
+                        " AND COALESCE((doc->>'revision')::bigint, 0) = %s{}"
+                    ).format(self._table(table), scope),
+                    (operation.entity_id, operation.expected_revision, *scope_params),
+                )
+                if cursor.rowcount == 0:
+                    raise self._refuse(conn, table, operation)
+            if operation.kind == "node" and cursor.rowcount:
+                # A separate statement sees edges committed while DELETE
+                # waited for their endpoint locks. The deleted node stays
+                # locked until commit, excluding further edge writes to it.
+                cascaded = conn.execute(
+                    sql.SQL(
+                        "DELETE FROM {} WHERE "
+                        "(doc->>'source' = %s OR doc->>'target' = %s){}"
+                    ).format(self._table("graph_edges"), scope),
+                    (operation.entity_id, operation.entity_id, *scope_params),
+                )
+                if cascaded.rowcount:
+                    # These edges were not named by the caller. Reload peers
+                    # even if the node has been recreated by their next read.
+                    self._announce(conn, None)
             return None
 
         # The stored doc is the payload with the store's own revision and
@@ -2529,8 +2544,8 @@ class PostgresGraphPersistenceBackend:
         not happen, and never told twice about one that did - a batch that
         deadlocks and retries announces only from the attempt that committed.
 
-        `operations` is None for a whole-graph save, which replaced rows it
-        never named and so cannot describe itself.
+        `operations` is None for a whole-graph save or a node delete's
+        store-side cascade, which changed rows the caller never named.
         """
         conn.execute(
             "SELECT pg_notify(%s, %s)", (self._channel, self._encode(operations))
