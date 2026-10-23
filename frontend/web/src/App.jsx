@@ -41,6 +41,7 @@ import {
   agentCreateToCanvas,
   agentUpdateEntries,
   applyEdgeUpdate,
+  captureCanvasScope,
   confirmNodeDelete,
   connectNodes,
   createDialogNode,
@@ -170,6 +171,7 @@ function App() {
   // The in-flight ?session= bootstrap load, so a ?view= in the same URL can wait
   // for it and be applied on top.
   const urlSessionBootstrapRef = useRef(null);
+  const canvasEditEpochRef = useRef(0);
   const urlFocusNodeLoadedRef = useRef(false);
   // The saved-view load clears the canvas after its own await, so focusing a
   // ?node= before it settles can have the node wiped out from under the focus.
@@ -978,17 +980,43 @@ function App() {
   useEffect(() => {
     reflectSessionUrl(sessionId);
     const urlSession = _urlParams.get('session');
+    const scope = captureCanvasScope();
+    let expired = false;
+    let timer;
+    let settleBootstrapWait;
     if (sessionStore.isValidSessionId(urlSession)) {
       sessionStore.touchSession(urlSession);
       // This id came in via a ?session= deep link, so a 404 means the linked
       // session is gone/expired (not a brand-new local one) — surface it rather
       // than silently opening an empty canvas (contract §5.3).
-      urlSessionBootstrapRef.current = loadSessionFromServer(urlSession, {
+      const load = loadSessionFromServer(urlSession, {
         eagerConnect: true,
+        isStale: () => expired || scope.canvasReplaced(),
         onMissing: () => showNotification('info', t('sessions.link_not_found')),
       });
+      // Bound the wait even if fetch never settles. Invalidate the load itself
+      // too, so a late reply cannot undo the view/focus that proceeds afterward.
+      urlSessionBootstrapRef.current = Promise.race([
+        load,
+        new Promise((resolve) => {
+          settleBootstrapWait = resolve;
+          timer = setTimeout(() => {
+            expired = true;
+            resolve();
+          }, SYNC_REQUEST_TIMEOUT_MS);
+        }),
+      ])
+        .catch(() => {}) // The loader logs errors; URL view/focus may still proceed.
+        .finally(() => clearTimeout(timer));
     }
     setSessionsVersion((v) => v + 1);
+    return () => {
+      expired = true;
+      clearTimeout(timer);
+      // StrictMode may already have a saved-view effect awaiting this promise.
+      // Release that waiter when retiring this bootstrap, even if fetch hangs.
+      settleBootstrapWait?.();
+    };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Refresh recent-session names from the server whenever the drawer opens
@@ -1085,6 +1113,7 @@ function App() {
           sessionId: urlSessionIdRef.current,
           getCurrentSessionId: () => sessionIdRef.current,
           getSavedView: api.getSavedView,
+          getCanvasEditEpoch: () => canvasEditEpochRef.current,
           applyView: (result) => {
             const positioned = result.nodes.map((n) =>
               result.positions?.[n.id] ? { ...n, _savedPosition: result.positions[n.id] } : n
@@ -1760,6 +1789,7 @@ function App() {
     });
   }
   const publishAnnotationChange = useCallback((kind) => {
+    canvasEditEpochRef.current += 1;
     annotationSchedulerRef.current.schedule(kind);
   }, []);
 
@@ -1780,6 +1810,7 @@ function App() {
   // annotation geometry publishes immediately at this release-time call.
   const handleNodePositionChange = useCallback(
     (_nodeId, _position, nodeType) => {
+      canvasEditEpochRef.current += 1;
       if (nodeType && CANVAS_ANNOTATION_TYPES.has(nodeType)) {
         publishAnnotationChange('geometry');
         return;

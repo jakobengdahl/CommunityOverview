@@ -25,7 +25,7 @@ the decision. Nothing was changed from the recommendations.
 
 | Point | Decision |
 |---|---|
-| §1 ID-collision policy | Default `fail` for nodes and edges; granularity (b), one default plus per-type overrides; type and endpoint mismatch (ii), a conflict under every policy except `rename`; subtype change under overwrite (a), re-judge live incident edges |
+| §1 ID-collision policy | Default `fail` for nodes and edges; granularity (b), one default plus per-type overrides; node-type and edge-endpoint mismatch (ii), a conflict under every policy except `rename`; subtype change under overwrite (a), re-judge live incident edges |
 | §2 Edge handling | Endpoints in the live graph allowed; dangling rejected; archived live endpoint allowed and reported; edges of skipped nodes (a), attached to the live node; duplicate triples (b), skipped and reported; live edges never deleted |
 | §3 Preview and binding | (c) stateless digest, with expectations and checks on every commit; a commit without a digest only when every policy is `fail`/`skip` and `include_system_types` is false |
 | §4 Atomicity | (a) all-or-nothing through a new `GraphStorage` method; backup (a), the v1 whole-graph backup before every merge; `generation` not bumped |
@@ -359,26 +359,32 @@ failure being a conflict; (b) accept it, as `update_node` does today for a
 direct subtype change. Recommendation: **(a)** — the plan already lists the
 node's changed fields, and a merge should not leave edges behind that the same
 edge could not be created under.
+The commit must also cover incident edges added after planning: re-judge
+inside the locked unit, as slice 2 does, or verify that the incident edges
+are still exactly as listed (§3).
 
 **Edge collisions** (same edge id): the same options apply, with `rename`
 meaning "new edge id" (the session contract's `as_new` is for nodes only; this
 extends it to edges). An edge whose endpoints differ from the live edge with
 that id is treated like a type mismatch — an edge's endpoints never change
 (`SESSION_OVERLAY_CONTRACT.md` §6.3).
+With the same id and endpoints, a different relationship type may be taken
+under `overwrite`, but its applicability must be re-judged against the
+resulting endpoint types and subtypes; an inapplicable overwrite is blocked.
 
 **Recommendation.** Default policy **`fail`** for nodes and edges, so nothing
 is overwritten or duplicated without an explicit choice; granularity **(b)** in
 the first implementation, with **(c)** left for a later slice once the preview
-exists; type and endpoint mismatch **(ii)** — a conflict under every policy
-except `rename`. Retyping a node silently invalidates edges whose applicability
-was judged against the old type, which is too much to hide behind
+exists; node-type and edge-endpoint mismatch **(ii)** — a conflict under every
+policy except `rename`. Retyping a node silently invalidates edges whose
+applicability was judged against the old type, which is too much to hide behind
 `overwrite`, and needs a write path the core does not have.
 
 ### 2. Decision point — Edge handling
 
 Every document edge falls into one of these cases, judged against **the live
-graph plus the nodes this merge will create** (not the document alone, as
-replace does, and not the live graph alone):
+graph plus the nodes this merge will create or overwrite** (not the document
+alone, as replace does, and not the live graph alone):
 
 | Endpoints | Proposed outcome |
 |---|---|
@@ -468,10 +474,12 @@ response.
   `include_system_types`, `stamp_provenance`) and the full, uncapped
   canonical plan (not the capped report): every outcome that determines a
   write, the full content of every document entity the commit writes
-  (renamed creates included), *the live revision of every entity it reads
-  or expects absent, and the graph's `generation`* — sampled before the
-  first entity is read and re-checked after the last, so a replace landing
-  mid-plan restarts the plan rather than producing a mixed one.
+  (renamed creates included, under their document ids or deterministic
+  placeholders, with rewritten endpoint references using the same convention;
+  never under the fresh ids minted at commit), *the live revision of every
+  entity it reads or expects absent, and the graph's `generation`* — sampled
+  before the first entity is read and re-checked after the last, so a replace
+  landing mid-plan restarts the plan rather than producing a mixed one.
   Informational counts that do not determine a write (the embeddings
   backlog, the event count) are reported but left out of the digest, since
   they change without anything the commit writes changing. Commit sends the
@@ -520,10 +528,17 @@ not by itself close it. It is closed the way `SESSION_OVERLAY_CONTRACT.md`
   is to accept the subtype race on attach targets as today's direct-write
   semantics — `add_edge` does not hold its endpoints against updates
   either — and check existence only; the reviewer may prefer that.)
+- **incident edges as listed** for every overwritten node whose subtypes
+  change: checking only previously read edges misses an edge added after
+  planning. Verify the incident-edge set inside the same unit, or recompute
+  the plan and re-judge all current incident edges under the lock before
+  comparing the bound digest, as slice 2 does. In PostgreSQL mode the store
+  must also guard against concurrent incident-edge inserts; locking only
+  the previously listed edge rows does not cover that absence.
 
-Revisions make the check cheap: what the commit verifies inside the unit is
-revisions, existence and `generation`, not entity content (the digest itself
-covers the plan, field values included).
+Revisions make entity checks cheap; the unit must also verify incident-edge
+membership and `generation`. The digest itself covers the plan, field values
+included.
 
 **Recommendation:** **(c)**, with expectations and checks on every commit. It
 needs no new plan storage, works across instances sharing a PostgreSQL store
@@ -578,9 +593,11 @@ shape is a new, narrow `GraphStorage` method (working name
    only upserts, so every touched entity carries the write token as evidence.
    On the file backend a write that fails after hand-over is not undone
    either: the existing landing path keeps memory as it is and re-saves the
-   whole graph (`_await_landing`), and the merge inherits that; if that
-   re-save itself fails, memory keeps the merge, no events fire, and the
-   response is `write_outcome_unknown`.
+   whole graph (`_await_landing`), and the merge inherits that. If that
+   re-save itself fails, `_await_landing` re-raises the raw recovery exception;
+   `apply_import_merge` maps it to `write_outcome_unknown`. That mapping is
+   new merge behaviour, not inherited from the landing path: memory keeps
+   the merge and no events fire.
 
 **Order.** Recompute the plan and check the digest, then write the pre-merge
 backup (below), then run the locked unit — the backup outside the lock, as v1
@@ -933,11 +950,12 @@ If accepted as recommended:
 
 - Two import modes exist side by side; REPLACE is unchanged and remains the
   default of the existing routes.
-- The core gains its first write path that applies a caller-supplied batch
-  all-or-nothing on top of the live graph with per-entity expectations. The
-  staged-session merge (session contract S5) solves the same problem for a
-  session layer; whichever lands second should reuse the first's commit
-  method rather than add a third.
+- The core gains its first all-or-nothing batch of mixed creates and updates
+  on top of the live graph with per-entity expectations. `set_nodes_archived`
+  and `delete_nodes` already accept `expected_revisions` for atomic batches
+  of their respective operations. The staged-session merge (session contract
+  S5) solves the same problem for a session layer; whichever lands second
+  should reuse the first's commit method rather than add a third.
 - Large merges produce event volume proportional to their size.
 - `docs/DATA_MANAGEMENT.md`, `backend/DEVELOPMENT.md` and `docs/USER_GUIDE.md`
   are updated by the slices that ship the routes, not by this ADR.

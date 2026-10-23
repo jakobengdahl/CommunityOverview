@@ -1,8 +1,14 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';
+import { LONG_PRESS_DELAY_MS } from '../src/utils/longPress';
 
-const hoisted = vi.hoisted(() => ({ onNodesChange: null, selectionOnChange: null }));
+const hoisted = vi.hoisted(() => ({
+  onNodesChange: vi.fn(),
+  onEdgesChange: vi.fn(),
+  selectionOnChange: null,
+  selected: false,
+}));
 
 // d3-zoom/d3-drag stop a mousedown from bubbling in real ReactFlow, so the mock does too.
 const stopBubble = (event) => event.stopPropagation();
@@ -16,8 +22,13 @@ vi.mock('reactflow', () => {
     onNodeContextMenu,
     onPaneContextMenu,
     onSelectionContextMenu,
+    panOnDrag,
   }) => (
-    <div data-testid="react-flow" className="react-flow">
+    <div
+      data-testid="react-flow"
+      className="react-flow"
+      data-pan-on-drag={JSON.stringify(panOnDrag)}
+    >
       <div
         data-testid="pane"
         onMouseDown={stopBubble}
@@ -71,10 +82,17 @@ vi.mock('reactflow', () => {
     ReactFlow: MockReactFlow,
     ReactFlowProvider: ({ children }) => <div>{children}</div>,
     useNodesState: (initialNodes) => {
-      if (!hoisted.onNodesChange) hoisted.onNodesChange = vi.fn();
-      return [initialNodes || [], vi.fn(), hoisted.onNodesChange];
+      const nodes = (initialNodes || []).map((n) => ({
+        ...n,
+        selected: hoisted.selected && n.id === 'node-1',
+      }));
+      return [nodes, vi.fn(), hoisted.onNodesChange];
     },
-    useEdgesState: (initialEdges) => [initialEdges || [], vi.fn(), vi.fn()],
+    useEdgesState: (initialEdges) => [
+      (initialEdges || []).map((e) => ({ ...e, selected: hoisted.selected })),
+      vi.fn(),
+      hoisted.onEdgesChange,
+    ],
     useReactFlow: () => ({
       fitView: vi.fn(),
       getNodes: () => [],
@@ -116,9 +134,15 @@ function rightGesture(testId, { moveBy = 0, moveByY = 0, pressOn = 'pane' } = {}
 // Every menu variant (node, edge, pane, selection) renders .graph-context-menu.
 const menuOpen = () => document.querySelector('.graph-context-menu') !== null;
 
+beforeEach(() => {
+  vi.clearAllMocks();
+  hoisted.selected = false;
+});
+
+afterEach(() => vi.useRealTimers());
+
 describe('GraphCanvas right-drag pan does not open a context menu', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
     render(<GraphCanvas nodes={nodes} edges={edges} />);
     act(() =>
       hoisted.selectionOnChange?.({ nodes: [{ id: 'node-1', type: 'custom' }], edges: [] })
@@ -143,6 +167,10 @@ describe('GraphCanvas right-drag pan does not open a context menu', () => {
 
   it.each([
     ['5px right (at tolerance)', { moveBy: 5 }, true],
+    ['5px down (at tolerance)', { moveByY: 5 }, true],
+    ['5px up (at tolerance)', { moveByY: -5 }, true],
+    ['5px diagonally (per-axis tolerance)', { moveBy: 5, moveByY: 5 }, true],
+    ['6px diagonally', { moveBy: 6, moveByY: 6 }, false],
     ['6px right', { moveBy: 6 }, false],
     ['6px left', { moveBy: -6 }, false],
     ['6px down', { moveByY: 6 }, false],
@@ -166,10 +194,33 @@ describe('GraphCanvas right-drag pan does not open a context menu', () => {
     expect(menuOpen()).toBe(true);
   });
 
-  it('ignores left-button presses when deciding whether a drag happened', () => {
+  it('resets after a gated contextmenu even without another press', () => {
+    rightGesture('node-node-1', { moveBy: 40 });
+    expect(menuOpen()).toBe(false);
+    fireEvent.contextMenu(screen.getByTestId('node-node-1'), {
+      button: 2,
+      clientX: 300,
+      clientY: 300,
+    });
+    expect(menuOpen()).toBe(true);
+  });
+
+  it('ignores left-button pane presses before a button-2 contextmenu', () => {
     const el = screen.getByTestId('node-node-1');
-    fireEvent.mouseDown(el, { button: 0, clientX: 100, clientY: 100 });
-    fireEvent.contextMenu(el, { clientX: 300, clientY: 300 });
+    fireEvent.mouseDown(screen.getByTestId('pane'), { ...rightDown, button: 0 });
+    fireEvent.contextMenu(el, { button: 2, clientX: 300, clientY: 300 });
+    expect(menuOpen()).toBe(true);
+  });
+
+  it.each([0, 1])('a button-%s press disarms an earlier right-press', (button) => {
+    const pane = screen.getByTestId('pane');
+    fireEvent.mouseDown(pane, rightDown);
+    fireEvent.mouseDown(pane, { ...rightDown, button });
+    fireEvent.contextMenu(screen.getByTestId('node-node-1'), {
+      button: 2,
+      clientX: 300,
+      clientY: 300,
+    });
     expect(menuOpen()).toBe(true);
   });
 
@@ -180,12 +231,87 @@ describe('GraphCanvas right-drag pan does not open a context menu', () => {
     fireEvent.contextMenu(node, { button: 0, clientX: 600, clientY: 400 });
     expect(menuOpen()).toBe(true);
   });
+
+  it('allows a pen long-press after an armed right-press', () => {
+    vi.useFakeTimers();
+    const pane = screen.getByTestId('pane');
+    fireEvent.mouseDown(pane, rightDown);
+    // jsdom has no PointerEvent; supply the fields read by the detector.
+    const press = new MouseEvent('pointerdown', {
+      bubbles: true,
+      clientX: 300,
+      clientY: 300,
+    });
+    Object.defineProperties(press, {
+      pointerType: { value: 'pen' },
+      pointerId: { value: 1 },
+    });
+    fireEvent(pane, press);
+    act(() => vi.advanceTimersByTime(LONG_PRESS_DELAY_MS));
+    expect(document.querySelector('.pane-context-menu')).not.toBeNull();
+  });
 });
 
 describe('GraphCanvas right-drag gate follows what can actually pan', () => {
+  it('enables right-button panning on desktop', () => {
+    render(<GraphCanvas nodes={nodes} edges={edges} touchMode="off" />);
+    expect(screen.getByTestId('react-flow')).toHaveAttribute('data-pan-on-drag', '[0,2]');
+  });
+
   it('does not suppress menus in touch mode, where the right button never pans', () => {
     render(<GraphCanvas nodes={nodes} edges={edges} touchMode="on" />);
     rightGesture('node-node-1', { moveBy: 40 });
     expect(menuOpen()).toBe(true);
+  });
+
+  it.each(['Freehand', 'Eraser'])('does not gate drift while %s disables panning', (tool) => {
+    render(<GraphCanvas nodes={nodes} edges={edges} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: tool, exact: true }));
+    expect(screen.getByTestId('react-flow')).toHaveAttribute('data-pan-on-drag', 'false');
+    rightGesture('node-node-1', { moveBy: 40 });
+    expect(menuOpen()).toBe(true);
+  });
+
+  it.each([
+    ['Shift', { shiftKey: true }],
+    ['Control', { ctrlKey: true }],
+    ['Space', {}],
+  ])('does not gate drift when %s prevents right-button panning', (code, modifiers) => {
+    render(<GraphCanvas nodes={nodes} edges={edges} />);
+    fireEvent.keyDown(document, { key: code === 'Space' ? ' ' : code, code, ...modifiers });
+    fireEvent.mouseDown(screen.getByTestId('pane'), { ...rightDown, ...modifiers });
+    fireEvent.contextMenu(screen.getByTestId('node-node-1'), {
+      button: 2,
+      clientX: 300,
+      clientY: 300,
+      ...modifiers,
+    });
+    expect(menuOpen()).toBe(true);
+    fireEvent.keyUp(document, { key: code === 'Space' ? ' ' : code, code });
+  });
+
+  it.each(['keyup', 'blur'])('gates right-drag again after Space is cleared by %s', (reset) => {
+    render(<GraphCanvas nodes={nodes} edges={edges} />);
+    fireEvent.keyDown(document, { key: ' ', code: 'Space' });
+    if (reset === 'keyup') fireEvent.keyUp(document, { key: ' ', code: 'Space' });
+    else fireEvent.blur(window);
+    rightGesture('node-node-1', { moveBy: 40 });
+    expect(menuOpen()).toBe(false);
+  });
+
+  it('clears selected nodes and edges after a moved pane press', () => {
+    hoisted.selected = true;
+    render(<GraphCanvas nodes={nodes} edges={edges} />);
+    rightGesture('pane', { moveBy: 40 });
+    expect(menuOpen()).toBe(false);
+    expect(hoisted.onNodesChange).toHaveBeenCalledTimes(1);
+    expect(hoisted.onNodesChange).toHaveBeenCalledWith([
+      { id: 'node-1', type: 'select', selected: false },
+    ]);
+    expect(hoisted.onEdgesChange).toHaveBeenCalledTimes(1);
+    expect(hoisted.onEdgesChange).toHaveBeenCalledWith([
+      { id: 'edge-1', type: 'select', selected: false },
+    ]);
   });
 });
