@@ -109,9 +109,10 @@ export function useSharedSession({
   );
 
   const loadSessionFromServer = useCallback(
-    async (targetId, { eagerConnect = false, onMissing = null } = {}) => {
+    async (targetId, { eagerConnect = false, onMissing = null, isStale = () => false } = {}) => {
       try {
         const payload = await api.getSession(targetId, { resolve: true });
+        if (isStale()) return;
         // Compute the sync baseline before touching the canvas: it runs the same
         // annotation-transform logic applyServerSession does internally, and
         // applyServerSession itself validates the resolved shape before its first
@@ -134,6 +135,7 @@ export function useSharedSession({
           console.error('Error connecting sync client:', syncError);
         }
       } catch (error) {
+        if (isStale()) return;
         // Session does not exist server-side yet — new / not-yet-saved share URL.
         if (error?.status === 404) {
           clearVisualization();

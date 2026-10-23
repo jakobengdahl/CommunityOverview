@@ -220,13 +220,7 @@ def add_nodes(
                 graph_access=decision.graph_access,
             )
         except EntityRevisionConflict as e:
-            return write_error_result(
-                EntityRevisionConflict(e.kind, e.entity_id, None, None),
-                message=f"{e.kind} {e.entity_id!r} already exists",
-                current_revision=None,
-                added_node_ids=[],
-                added_edge_ids=[],
-            )
+            return _create_conflict_result(e, added_node_ids=[], added_edge_ids=[])
 
     event_context = access.build_event_context(
         target="add_nodes",

@@ -362,28 +362,23 @@ class FunctionBroker:
         """Refuse edge endpoints that name a federated reference node.
 
         Storage resolves an endpoint that is not a node id by name, across all
-        nodes, so a name can land on a host-managed reference node. Names of
-        nodes created in the same call are fine: storage resolves those to the
-        new nodes. Any other name shared with a reference node is refused,
+        nodes, so a name can land on a host-managed reference node. Names and
+        ids of nodes created in the same call are fine: storage resolves those
+        to the new nodes. Any other name shared with a reference node is refused,
         whichever node the name would resolve to.
         """
         edges = arguments.get("edges") or []
-        names = {
-            edge.get(end)
-            for edge in edges
-            if isinstance(edge, Mapping)
-            for end in ("source", "target")
-            if isinstance(edge.get(end), str)
-        }
+        names = {edge[end] for edge in edges for end in ("source", "target")}
         if not names:
             return
         nodes = self._service.storage.nodes
-        new_names = {
-            node.get("name")
+        new_endpoints = {
+            node[key]
             for node in arguments.get("nodes") or []
-            if isinstance(node, Mapping) and isinstance(node.get("name"), str)
+            for key in ("name", "id")
+            if isinstance(node.get(key), str)
         }
-        candidates = {n for n in names if n not in nodes and n not in new_names}
+        candidates = {n for n in names if n not in nodes and n not in new_endpoints}
         if not candidates:
             return
         for node_id, node in list(nodes.items()):
