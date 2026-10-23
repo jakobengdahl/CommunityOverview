@@ -970,13 +970,21 @@ def adopt_federated_node(
 
     if not create_new_copy:
         if staging is not None:
-            already = staging.find_adopted(source_node.id)
+            already = staging.find_adopted(source_node.id, decision.graph_access)
             adopted_nodes = [already] if already is not None else []
         else:
             adopted_nodes = list(storage.nodes.values())
         for local_node in adopted_nodes:
             adopted_from = (local_node.metadata or {}).get("adopted_from") or {}
             if adopted_from.get("federated_node_id") == source_node.id:
+                if not access.is_node_visible(local_node, decision.graph_access):
+                    return {
+                        "success": False,
+                        "error": "not_found",
+                        "message": "Local adopted node not found",
+                        "added_node_ids": [],
+                        "added_edge_ids": [],
+                    }
                 return {
                     "success": True,
                     "message": "Federated node already adopted",
