@@ -1,6 +1,7 @@
 """Agent chains must terminate even without subscription self-exclusion."""
 
 from collections import deque
+from threading import RLock
 from unittest.mock import MagicMock
 
 import pytest
@@ -33,6 +34,8 @@ class LoopStorage:
     """Emit updates through the real service, dispatcher, and agent executor."""
 
     def __init__(self, subscriptions):
+        # Match GraphStorage's reentrant lock shared by service and storage writes.
+        self.write_lock = RLock()
         target = Node(id="target", name="Target", type="Initiative")
         self.nodes = {node.id: node for node in [target, *subscriptions]}
         self.contexts = []
@@ -43,21 +46,22 @@ class LoopStorage:
         return self.nodes.get(node_id)
 
     def update_node(self, node_id, updates, *, event_context, **kwargs):
-        self.nodes[node_id] = self.nodes[node_id].model_copy(update=updates)
-        self.contexts.append(event_context)
-        self.dispatcher.dispatch(
-            Event(
-                event_type=EventType.NODE_UPDATE,
-                origin=event_context,
-                entity=EntityData(
-                    kind=EntityKind.NODE,
-                    id=node_id,
-                    type="Initiative",
-                    after=self.nodes[node_id].to_dict(),
-                ),
+        with self.write_lock:
+            self.nodes[node_id] = self.nodes[node_id].model_copy(update=updates)
+            self.contexts.append(event_context)
+            self.dispatcher.dispatch(
+                Event(
+                    event_type=EventType.NODE_UPDATE,
+                    origin=event_context,
+                    entity=EntityData(
+                        kind=EntityKind.NODE,
+                        id=node_id,
+                        type="Initiative",
+                        after=self.nodes[node_id].to_dict(),
+                    ),
+                )
             )
-        )
-        return self.nodes[node_id]
+            return self.nodes[node_id]
 
 
 @pytest.mark.parametrize(
