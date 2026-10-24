@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from backend.api_host.tests import test_staged_review_routes as _routes
 from backend.api_host.tests.test_staged_review_routes import (
     _staged,
@@ -107,3 +109,60 @@ def test_mcp_discard_honours_entries_and_merge_honours_resolutions(client):
     )
     assert m["success"] is True, m
     assert _storage(client).get_node("t").name == "Mine"
+
+
+@pytest.mark.parametrize(
+    "method,suffix,body,action,target,operation",
+    [
+        ("GET", "staged", None, "read", "get_staged_changes", ""),
+        (
+            "POST",
+            "staged/merge",
+            {"merge_id": "m"},
+            "mutate",
+            "merge_staged_changes",
+            "merge",
+        ),
+        ("POST", "staged/discard", {}, "mutate", "discard_staged_changes", "discard"),
+    ],
+)
+def test_review_routes_authorize_using_each_requests_headers(
+    client, method, suffix, body, action, target, operation
+):
+    from backend.runtime.authorization import GraphAuthorizationDecision
+
+    sid = _staged(client)
+    _stage_node(client, sid)
+    seen = []
+
+    class HeaderHook:
+        def evaluate(self, context):
+            seen.append(context)
+            return GraphAuthorizationDecision(
+                allowed=context.actor["actor_id"] == "reader"
+            )
+
+    client.app.state.graph_service._authorization_hook = HeaderHook()
+    for session in (sid, "9999-9999-9999-9999"):
+        refused = client.request(
+            method,
+            f"/api/sessions/{session}/{suffix}",
+            json=body,
+            headers={"x-communityoverview-actor-id": "denied"},
+        )
+        assert refused.status_code == 403, refused.text
+        context = seen[-1]
+        assert (
+            context.action,
+            context.target,
+            context.graph_operation,
+            context.session_id,
+        ) == (action, target, operation, session)
+    assert _storage(client).get_node("s1") is None
+    allowed = client.request(
+        method,
+        f"/api/sessions/{sid}/{suffix}",
+        json=body,
+        headers={"x-communityoverview-actor-id": "reader"},
+    )
+    assert allowed.status_code == 200, allowed.text

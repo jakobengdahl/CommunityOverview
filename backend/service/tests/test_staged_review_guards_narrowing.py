@@ -113,3 +113,100 @@ def test_a_manual_value_for_a_field_that_does_not_conflict_is_ignored(world):
     assert res["success"] is True, res
     node = world.storage.get_node("a")
     assert (node.description, node.summary) == ("final", "s")
+
+
+def test_a_node_with_a_hidden_base_stays_hidden_after_main_enters_the_view(world):
+    svc, sid = world.service, world.staged_session()
+    _stage(world, sid, ("update_node", ("r",), {"updates": {"description": "mine"}}))
+    world.storage.update_node("r", {"metadata": {}})
+    world.hook.narrow = True
+    assert svc.get_staged_changes(sid)["items"] == []
+    result = svc.merge_staged_changes(
+        sid, "m", entries=[{"kind": "node", "entity_id": "r"}]
+    )
+    assert result["error"] == "merge_raced"
+    assert ("node", "r") in world.layer(sid)
+
+
+@pytest.mark.parametrize("endpoint", ["r", "Remote Rho", "missing"])
+def test_a_narrowed_batch_cannot_create_an_edge_to_an_unseen_endpoint(world, endpoint):
+    world.hook.narrow = True
+    result = world.service.add_nodes(
+        [{"id": "n", "type": "Actor", "name": "New"}], [_edge("nr", "n", endpoint)]
+    )
+    assert result["success"] is False
+    assert result["message"] == "Could not add edge (source or target not found)"
+    assert world.storage.get_node("n") is None
+    assert "nr" not in world.storage.edges
+
+
+@pytest.mark.parametrize("metadata", [{}, {"origin_graph_id": "remote"}])
+def test_a_narrowed_batch_can_use_new_nodes_and_visible_names(world, metadata):
+    world.hook.narrow = True
+    result = world.service.add_nodes(
+        [{"id": "n", "type": "Actor", "name": "New", "metadata": metadata}],
+        [_edge("an", "Alpha", "New")],
+    )
+    assert result["success"] is True, result
+    assert (world.storage.edges["an"].source, world.storage.edges["an"].target) == (
+        "a",
+        "n",
+    )
+
+
+def test_a_narrowed_update_waits_for_visibility_changes_under_the_write_lock(
+    world, monkeypatch
+):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    world.hook.narrow = True
+    entered = threading.Event()
+    original = world.hook.evaluate
+
+    def evaluate(context):
+        decision = original(context)
+        if context.target == "update_node":
+            entered.set()
+        return decision
+
+    world.hook.evaluate = evaluate
+    storage = world.storage
+    get_node = storage.get_node
+
+    def locked_get_node(node_id):
+        assert storage.write_lock._is_owned()
+        return get_node(node_id)
+
+    monkeypatch.setattr(storage, "get_node", locked_get_node)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with storage.write_lock:
+            pending = pool.submit(
+                world.service.update_node, "c", {"description": "must not land"}
+            )
+            assert entered.wait(5)
+            storage.update_node("c", {"metadata": {"origin_graph_id": "remote"}})
+        result = pending.result(timeout=5)
+    assert result == {"success": False, "error": "Node with ID c not found"}
+    assert get_node("c").description == ""
+
+
+def test_a_retype_with_both_visible_and_hidden_main_edges_cannot_be_selected(world):
+    from backend.service.tests.test_staged_review import _recreate_legislation_as_actor
+
+    svc, sid = world.service, _recreate_legislation_as_actor(world)
+    world.storage.add_nodes(
+        [],
+        [
+            Edge(id="visible", source="i", target="l", type="IMPLEMENTS"),
+            Edge(id="hidden", source="h", target="l", type="IMPLEMENTS"),
+        ],
+    )
+    world.hook.narrow = True
+    assert ("node", "l") not in _items(svc.get_staged_changes(sid))
+    refused = svc.merge_staged_changes(
+        sid, "m", entries=[{"kind": "node", "entity_id": "l"}]
+    )
+    assert refused["error"] == "merge_raced", refused
+    assert "hidden" not in str(refused)
+    assert world.storage.get_node("l").type_str == "Legislation"

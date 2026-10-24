@@ -230,12 +230,39 @@ def add_nodes(
     )
 
     try:
-        result = storage.add_nodes(
-            node_objects,
-            edge_objects,
-            event_context=event_context,
-            expect_absent=expect_absent,
-        )
+        with storage.write_lock:
+            if decision.graph_access.enabled and edge_objects:
+                endpoints = dict(storage.nodes)
+                created = {node.id for node in node_objects if node.id not in endpoints}
+                for node in node_objects:
+                    endpoints.setdefault(node.id, node)
+                by_name = {node.name: node for node in endpoints.values()}
+
+                def shown(end):
+                    node = endpoints.get(end) or by_name.get(end)
+                    # A new node carries no existing endpoint data, as on the staged path.
+                    return node is not None and (
+                        node.id in created
+                        or access.is_node_visible(node, decision.graph_access)
+                    )
+
+                if any(
+                    not shown(end)
+                    for edge in edge_objects
+                    for end in (edge.source, edge.target)
+                ):
+                    return {
+                        "success": False,
+                        "message": "Could not add edge (source or target not found)",
+                        "added_node_ids": [],
+                        "added_edge_ids": [],
+                    }
+            result = storage.add_nodes(
+                node_objects,
+                edge_objects,
+                event_context=event_context,
+                expect_absent=expect_absent,
+            )
     except EntityRevisionConflict as e:
         return _create_conflict_result(e, added_node_ids=[], added_edge_ids=[])
     except _WRITE_ERRORS as e:
@@ -306,59 +333,61 @@ def update_node(
                 "error": f"Error validating input: {e}",
                 "error_code": VALIDATION_ERROR_CODE,
             }
-    target_node = storage.get_node(node_id)
-    if decision.graph_access.enabled and not access.is_node_visible(
-        target_node, decision.graph_access
-    ):
-        return {"success": False, "error": f"Node with ID {node_id} not found"}
+    # Visibility and the write must use the same locked node.
+    with storage.write_lock:
+        target_node = storage.get_node(node_id)
+        if decision.graph_access.enabled and not access.is_node_visible(
+            target_node, decision.graph_access
+        ):
+            return {"success": False, "error": f"Node with ID {node_id} not found"}
 
-    event_context = access.build_event_context(
-        target="update_node",
-        event_origin=event_origin,
-        event_session_id=event_session_id,
-        event_correlation_id=event_correlation_id,
-    )
-
-    try:
-        updated_node = storage.update_node(
-            node_id,
-            updates,
-            event_context=event_context,
-            metadata_merge=metadata_merge,
-            expected_updated_at=expected_updated_at,
-            expected_revision=expected_revision,
-            # Under the storage lock, on the node the update replaces.
-            validate=lambda before, after: saved_view_write_error(
-                before, after, sent_metadata_keys(updates)
-            ),
+        event_context = access.build_event_context(
+            target="update_node",
+            event_origin=event_origin,
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
         )
-    except _WRITE_ERRORS as e:
-        return write_error_result(e)
-    except StaleUpdateError as e:
-        return {
-            "success": False,
-            "conflict": True,
-            "error": str(e),
-            "current_updated_at": e.current_updated_at.isoformat(),
-        }
-    except ValueError as e:
-        return {
-            "success": False,
-            "error": f"Error validating input: {e}",
-            "error_code": VALIDATION_ERROR_CODE,
-        }
-    if not updated_node:
-        return {"success": False, "error": f"Node with ID {node_id} not found"}
 
-    return access.attach_mutation_attribution(
-        {
-            "success": True,
-            "node": serialize_node(updated_node),
-            "nodes": [serialize_node(updated_node)],
-            "action": "update_in_visualization",
-        },
-        event_context,
-    )
+        try:
+            updated_node = storage.update_node(
+                node_id,
+                updates,
+                event_context=event_context,
+                metadata_merge=metadata_merge,
+                expected_updated_at=expected_updated_at,
+                expected_revision=expected_revision,
+                # Under the storage lock, on the node the update replaces.
+                validate=lambda before, after: saved_view_write_error(
+                    before, after, sent_metadata_keys(updates)
+                ),
+            )
+        except _WRITE_ERRORS as e:
+            return write_error_result(e)
+        except StaleUpdateError as e:
+            return {
+                "success": False,
+                "conflict": True,
+                "error": str(e),
+                "current_updated_at": e.current_updated_at.isoformat(),
+            }
+        except ValueError as e:
+            return {
+                "success": False,
+                "error": f"Error validating input: {e}",
+                "error_code": VALIDATION_ERROR_CODE,
+            }
+        if not updated_node:
+            return {"success": False, "error": f"Node with ID {node_id} not found"}
+
+        return access.attach_mutation_attribution(
+            {
+                "success": True,
+                "node": serialize_node(updated_node),
+                "nodes": [serialize_node(updated_node)],
+                "action": "update_in_visualization",
+            },
+            event_context,
+        )
 
 
 def delete_nodes(

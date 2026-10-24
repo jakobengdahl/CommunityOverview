@@ -1115,3 +1115,26 @@ def test_checkpoint_reloads_a_merge_interrupted_before_the_mirror_was_updated(
     assert after.load_merge("m1")["status"] == ls.MERGE_APPLIED
     assert staged_keys(after) == [("node", "b")]
     assert ("c" in by_id(after.load_graph_data(), "nodes")) is prior_write
+
+
+def test_an_edge_upsert_journal_contains_only_the_persistent_operation_fields(staged):
+    staged.apply_batch(
+        [
+            EntityOperation(
+                "edge",
+                "upsert",
+                "e2",
+                fresh(edge_payload("e2", "a", "b")),
+                expect_absent=True,
+                endpoint_types=(("a", "Actor"), ("b", "Actor")),
+            )
+        ]
+    )
+    batch = json.loads(staged.journal_path.read_text().splitlines()[-1])
+    (operation,) = batch["ops"]
+    assert set(operation) == {"kind", "action", "entity_id", "payload"}
+    assert (operation["kind"], operation["action"], operation["entity_id"]) == (
+        "edge",
+        "upsert",
+        "e2",
+    )

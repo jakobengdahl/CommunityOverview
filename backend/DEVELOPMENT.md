@@ -934,7 +934,9 @@ its MCP twin (`get_staged_changes` as `read`; `merge_staged_changes` and
 
 Merge and discard fan out on the session stream as `graph_changes_merged`
 (`merge_id`, `removals`) and `graph_changes_discarded` (`removals`) - keys
-only - and record a session activity entry with no inverse. A reader narrowed
+only - and record a session activity entry with no inverse. The diff sanitises
+saved-view annotations on each side according to that side's own node type,
+stripping unsafe reference targets and non-embedded image URLs. A reader narrowed
 by the hook sees, selects and discards only the entries its view wholly covers
 (the composed entity, the main entity and the base, for an edge their
 endpoints too) and whose dependencies it covers; a node delete is outside it

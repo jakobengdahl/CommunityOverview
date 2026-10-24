@@ -100,3 +100,20 @@ def test_batch_checks_incident_edges_after_named_writes_before_announcing(backen
         [EntityOperation.delete_node("n"), EntityOperation.delete_edge("e")], None
     )
     assert steps == ["write", "write", "check", "announce"]
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+def test_a_refused_node_upsert_never_reports_the_stored_type(backend, scoped):
+    from backend.core.storage_backends import NodeTypeChanged
+
+    backend._scope_column = scoped
+    backend._scope = "test" if scoped else None
+    conn = MagicMock()
+    conn.execute.return_value.fetchone.side_effect = [None, ("HiddenStoredType",)]
+    operation = EntityOperation(
+        "node", "upsert", "a", {"id": "a", "type": "Actor", "name": "Edited"}
+    )
+    with pytest.raises(NodeTypeChanged) as refused:
+        backend._apply_one(conn, operation, "write")
+    assert "HiddenStoredType" not in str(refused.value)
+    assert refused.value.current_revision is None
