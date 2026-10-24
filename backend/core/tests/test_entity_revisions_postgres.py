@@ -630,10 +630,16 @@ def test_recreate_can_remove_inherited_edges_and_create_valid_edges_in_one_batch
 ):
     backend = lagging_node_deleter._persistence_backend
     backend.delete_node("n")
-    create = EntityOperation("node", "upsert", "n", _node("n").to_dict(), expect_absent=True)
+    create = EntityOperation(
+        "node", "upsert", "n", _node("n").to_dict(), expect_absent=True
+    )
     deletes = [EntityOperation.delete_edge(e) for e in ("outgoing", "incoming", "loop")]
-    new_edge = EntityOperation("edge", "upsert", "new", Edge(id="new", source="n", target="other").to_dict())
-    backend.apply_batch([create, *deletes, new_edge] if node_first else [*deletes, new_edge, create])
+    new_edge = EntityOperation(
+        "edge", "upsert", "new", Edge(id="new", source="n", target="other").to_dict()
+    )
+    backend.apply_batch(
+        [create, *deletes, new_edge] if node_first else [*deletes, new_edge, create]
+    )
     assert _stored(schema, "graph_nodes", "n") is not None
     assert _stored(schema, "graph_edges", "new") is not None
     assert _stored(schema, "graph_edges", "outgoing") is None
@@ -683,7 +689,9 @@ def test_a_node_delete_checks_only_incident_edges_in_its_scope(instances, schema
     )
 
     storage.delete_nodes(["n"], confirmed=True)
-    with pytest.raises(EntityRevisionConflict, match="dangling edges reference this id"):
+    with pytest.raises(
+        EntityRevisionConflict, match="dangling edges reference this id"
+    ):
         storage._persistence_backend.upsert_node(_node("n").to_dict())
     assert _stored(schema, "graph_edges", "own") is not None
 

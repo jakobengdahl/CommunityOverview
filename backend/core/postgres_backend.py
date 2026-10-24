@@ -1629,10 +1629,13 @@ class PostgresGraphPersistenceBackend:
         Separate endpoint probes use the scoped expression indexes.
         """
         scope, scope_params = self._and_scope()
-        written_edges = list({
-            op.entity_id for op in operations
-            if op.kind == "edge" and op.action == "upsert"
-        })
+        written_edges = list(
+            {
+                op.entity_id
+                for op in operations
+                if op.kind == "edge" and op.action == "upsert"
+            }
+        )
         for operation in created_nodes:
             for endpoint in ("source", "target"):
                 row = conn.execute(
@@ -1643,7 +1646,9 @@ class PostgresGraphPersistenceBackend:
                     (operation.entity_id, *scope_params, written_edges),
                 ).fetchone()
                 if row is not None:
-                    conflict = EntityRevisionConflict("node", operation.entity_id, None, None)
+                    conflict = EntityRevisionConflict(
+                        "node", operation.entity_id, None, None
+                    )
                     conflict.args = (
                         f"node {operation.entity_id!r}: dangling edges reference this id; "
                         "reload the graph before retrying",
@@ -1721,7 +1726,11 @@ class PostgresGraphPersistenceBackend:
         )
 
     def _apply_one(
-        self, conn, operation: EntityOperation, write_token: Optional[str], created_nodes=None
+        self,
+        conn,
+        operation: EntityOperation,
+        write_token: Optional[str],
+        created_nodes=None,
     ) -> Optional[int]:
         table = "graph_nodes" if operation.kind == "node" else "graph_edges"
         if operation.action == "delete":
@@ -1781,8 +1790,11 @@ class PostgresGraphPersistenceBackend:
         # xmax is zero for the inserted tuple, and nonzero for ON CONFLICT's
         # updated tuple. Determine creation in the writing statement itself,
         # rather than racing a preceding existence read.
-        track_create = (operation.kind == "node" and created_nodes is not None
-                        and operation.expected_revision is None)
+        track_create = (
+            operation.kind == "node"
+            and created_nodes is not None
+            and operation.expected_revision is None
+        )
         if track_create:
             returning += sql.SQL(", (xmax = 0)")
 
@@ -2479,7 +2491,9 @@ class PostgresGraphPersistenceBackend:
                                 f"{operation.kind} {operation.entity_id!r} is "
                                 f"already absent"
                             )
-                    revisions.append(self._apply_one(conn, operation, write_token, created_nodes))
+                    revisions.append(
+                        self._apply_one(conn, operation, write_token, created_nodes)
+                    )
                 self._refuse_dangling_edges_on_create(conn, created_nodes, ops)
                 for node_id in sorted(
                     {c.entity_id for c in checks if c.check == "node_exists"}

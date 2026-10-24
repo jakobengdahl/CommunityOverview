@@ -130,7 +130,10 @@ def test_only_inserted_node_upserts_are_checked_for_dangling_edges(
     conn.execute.return_value.fetchone.return_value = (42, inserted)
     created = []
     operation = EntityOperation(
-        "node", "upsert", "n", {"id": "n", "type": "Actor"},
+        "node",
+        "upsert",
+        "n",
+        {"id": "n", "type": "Actor"},
         expect_absent=expect_absent,
     )
     assert backend._apply_one(conn, operation, None, created) == 42
