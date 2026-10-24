@@ -20,6 +20,7 @@ import logging
 from typing import Any, Callable, Dict, List, Optional
 
 from backend.runtime.session_context import current_session_id
+from backend.core.events.causation import current_agent_mutation_context
 
 from .models import AutonomyLevel, Proposal
 from .store import ProposalStore
@@ -143,6 +144,7 @@ class AutonomyGate:
         self, namespaced_name: str, input_args: Dict[str, Any]
     ) -> Dict[str, Any]:
         try:
+            context = current_agent_mutation_context()
             proposal = self._store.create(
                 Proposal(
                     agent_id=self._agent_id,
@@ -151,7 +153,12 @@ class AutonomyGate:
                     input_args=dict(input_args),
                     autonomy_level=self._level,
                     run_id=self._run_id,
-                    correlation_id=self._correlation_id,
+                    correlation_id=(
+                        context.event_correlation_id
+                        if context
+                        else self._correlation_id
+                    ),
+                    causation_depth=context.event_causation_depth if context else 1,
                     session_id=current_session_id(),
                 )
             )
