@@ -359,6 +359,7 @@ def list_saved_views(
         )
         view_list.append(
             {
+                "id": view.id,
                 "name": view.name,
                 "description": view.description,
                 "summary": view.summary,
