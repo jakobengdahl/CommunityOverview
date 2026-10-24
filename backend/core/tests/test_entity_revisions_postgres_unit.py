@@ -65,7 +65,7 @@ def test_endpoint_locks_are_sorted_deduplicated_and_exclude_upserted_nodes(backe
 @pytest.mark.parametrize(
     "scope_column,scope", [(False, None), (True, None), (True, "workspace")]
 )
-def test_node_delete_guard_only_reads_and_refuses_remaining_edges(
+def test_node_create_guard_only_reads_and_refuses_dangling_edges(
     backend, incident, scope_column, scope
 ):
     backend._scope = scope
@@ -74,17 +74,16 @@ def test_node_delete_guard_only_reads_and_refuses_remaining_edges(
     conn.execute.return_value.fetchone.side_effect = (
         [(1,)] if incident == "source" else [None, (1,) if incident else None]
     )
-    operation = EntityOperation.delete_node("n")
+    operation = EntityOperation("node", "upsert", "n", {}, expect_absent=True)
     conflict = EntityRevisionConflict("node", "n", None, None)
     backend._refuse = Mock(return_value=conflict)
 
     if incident:
         with pytest.raises(EntityRevisionConflict) as refused:
-            backend._refuse_remaining_incident_edges(conn, [operation])
-        assert refused.value is conflict
-        backend._refuse.assert_called_once_with(conn, "graph_nodes", operation)
+            backend._refuse_dangling_edges_on_create(conn, [operation], [])
+        assert "dangling edges reference this id" in str(refused.value)
     else:
-        backend._refuse_remaining_incident_edges(conn, [operation])
+        backend._refuse_dangling_edges_on_create(conn, [operation], [])
         backend._refuse.assert_not_called()
 
     calls = conn.execute.call_args_list
@@ -97,29 +96,12 @@ def test_node_delete_guard_only_reads_and_refuses_remaining_edges(
         assert f"doc->>'{endpoint}' = %s" in text
         other = "target" if endpoint == "source" else "source"
         assert f"doc->>'{other}'" not in text
-        assert params == (("n", scope) if scope_column else ("n",))
+        assert params == (("n", scope, []) if scope_column else ("n", []))
         if scope_column:
             assert '"scope_id" IS NULL' in text
             assert '"scope_id" = %s' in text
         else:
             assert "scope_id" not in text
-
-
-def test_batch_checks_incident_edges_after_named_writes_before_announcing(backend):
-    backend._pool = MagicMock()
-    backend._bind_scope = Mock()
-    backend._claim_or_check_graph_identity = Mock()
-    backend._hold_endpoints = Mock()
-    steps = []
-    backend._apply_one = Mock(side_effect=lambda *args: steps.append("write"))
-    backend._refuse_remaining_incident_edges = Mock(
-        side_effect=lambda *args: steps.append("check")
-    )
-    backend._announce = Mock(side_effect=lambda *args: steps.append("announce"))
-    backend._apply_batch_once(
-        [EntityOperation.delete_node("n"), EntityOperation.delete_edge("e")], None
-    )
-    assert steps == ["write", "write", "check", "announce"]
 
 
 @pytest.mark.parametrize("scoped", [False, True])
@@ -137,3 +119,35 @@ def test_a_refused_node_upsert_never_reports_the_stored_type(backend, scoped):
         backend._apply_one(conn, operation, "write")
     assert "HiddenStoredType" not in str(refused.value)
     assert refused.value.current_revision is None
+
+
+@pytest.mark.parametrize("expect_absent", [False, True])
+@pytest.mark.parametrize("inserted", [False, True])
+def test_only_inserted_node_upserts_are_checked_for_dangling_edges(
+    backend, expect_absent, inserted
+):
+    conn = MagicMock()
+    conn.execute.return_value.fetchone.return_value = (42, inserted)
+    created = []
+    operation = EntityOperation(
+        "node", "upsert", "n", {"id": "n", "type": "Actor"},
+        expect_absent=expect_absent,
+    )
+    assert backend._apply_one(conn, operation, None, created) == 42
+    assert created == ([operation] if inserted else [])
+    assert "(xmax = 0)" in conn.execute.call_args.args[0].as_string()
+
+
+def test_create_guard_accounts_for_edges_written_in_the_batch(backend):
+    conn = MagicMock()
+    conn.execute.return_value.fetchone.return_value = None
+    node = EntityOperation("node", "upsert", "n", {}, expect_absent=True)
+    operations = [
+        node,
+        EntityOperation("edge", "upsert", "new", {"source": "n", "target": "n"}),
+        EntityOperation.delete_edge("old"),
+    ]
+    backend._refuse_dangling_edges_on_create(conn, [node], operations)
+    for call in conn.execute.call_args_list:
+        assert call.args[1] == ("n", ["new"])
+        assert "id = ANY(%s::text[])" in call.args[0].as_string()
