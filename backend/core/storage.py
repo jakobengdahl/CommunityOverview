@@ -1919,6 +1919,9 @@ class GraphStorage:
         ready at that moment. This retries later - on demand, or from the
         startup pass below - and is a no-op once the index is complete.
 
+        Incremental stores receive only the embedded nodes, with revision
+        expectations, so a lagging instance cannot overwrite a peer's writes.
+
         Returns how many nodes were embedded; 0 when there was nothing
         missing or the ML stack is still unavailable (the same
         optional-dependency degradation as every other embedding call in
@@ -1929,12 +1932,20 @@ class GraphStorage:
             if not missing_ids:
                 return 0
             missing_nodes = [self.nodes[node_id] for node_id in missing_ids]
+            undo = self._capture(node_ids=missing_ids)
             try:
                 self.vector_store.update_nodes_embeddings(missing_nodes)
             except Exception as embed_error:
                 logger.warning(f"could not backfill missing embeddings: {embed_error}")
                 return 0
-            self.save()
+            if self._backend_capabilities.incremental_writes:
+                self._commit(
+                    [("node", "upsert", node) for node in missing_nodes],
+                    undo,
+                    {("node", node.id): node.revision for node in missing_nodes},
+                )
+            else:
+                self.save()
             return len(missing_nodes)
 
     def _maybe_backfill_missing_embeddings_async(self) -> None:
