@@ -2,6 +2,8 @@
 Tests for agent worker.
 """
 
+import threading
+
 import pytest
 from unittest.mock import MagicMock
 
@@ -185,6 +187,30 @@ class TestWorkerStartStop:
         worker.stop(wait=True, timeout=1.0)
 
         assert worker._running is False
+
+    def test_stop_interrupts_throttle_without_processing_queued_event(self, worker):
+        throttled = threading.Event()
+
+        def processing_delay():
+            throttled.set()
+            return 60.0
+
+        worker._processing_delay = MagicMock(side_effect=processing_delay)
+        worker._create_llm_client = MagicMock()
+        worker._run_recorder = MagicMock()
+        worker.on_result = MagicMock()
+        worker.enqueue({"event_id": "throttled", "event_type": "node.create"})
+        worker.start()
+        try:
+            assert throttled.wait(timeout=2.0)
+            worker.stop(wait=True, timeout=1.0)
+            assert not worker._thread.is_alive()
+            worker._create_llm_client.assert_not_called()
+            worker._run_recorder.record_start.assert_not_called()
+            worker.on_result.assert_not_called()
+            assert worker.events_processed == 0
+        finally:
+            worker.stop(wait=True, timeout=1.0)
 
     def test_stop_without_start(self, worker):
         """Test that stop() works even if worker wasn't started."""

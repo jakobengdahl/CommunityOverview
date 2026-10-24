@@ -12,6 +12,7 @@ import logging
 import queue
 import threading
 import time
+from collections import deque
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List, Callable
 from dataclasses import dataclass, field
@@ -20,6 +21,12 @@ from .config import AgentConfig, AgentsSettings
 from .prompts import build_agent_system_prompt, build_event_user_message
 from .llm_client import LLMClient, create_llm_client_from_settings
 from .mcp_loader import MCPLoader
+from backend.core.events.causation import (
+    AGENT_EVENT_RATE_LIMIT,
+    AGENT_EVENT_RATE_WINDOW_SECONDS,
+    MAX_AGENT_CAUSATION_DEPTH,
+    agent_mutation_context,
+)
 from backend.skills.loader import (
     SkillDefinition,
     SkillMetadata,
@@ -108,7 +115,11 @@ class AgentWorker:
         # Worker thread
         self._thread: Optional[threading.Thread] = None
         self._running = False
+        self._stop_event = threading.Event()
         self._lock = threading.Lock()
+        self._guard_lock = threading.Lock()
+        self._event_admissions: deque[float] = deque()
+        self._pause_reason: Optional[str] = None
 
         # LLM client (created on demand)
         self._llm_client: Optional[LLMClient] = None
@@ -146,6 +157,7 @@ class AgentWorker:
                 logger.warning(f"Worker {self.agent_id} already running")
                 return
 
+            self._stop_event.clear()
             self._running = True
             self._thread = threading.Thread(
                 target=self._process_loop,
@@ -168,6 +180,7 @@ class AgentWorker:
                 return
 
             self._running = False
+            self._stop_event.set()
             # Send sentinel to unblock the queue
             self._queue.put(None)
 
@@ -175,17 +188,56 @@ class AgentWorker:
             self._thread.join(timeout=timeout)
             logger.info(f"Agent worker stopped: {self.config.name}")
 
-    def enqueue(self, event_payload: Dict[str, Any]) -> None:
+    def enqueue(self, event_payload: Dict[str, Any]) -> bool:
         """
         Add an event to the processing queue.
 
         Args:
             event_payload: The webhook event payload
         """
+        if not self._admit_event(event_payload):
+            return False
         event_id = event_payload.get("event_id", "unknown")
         item = EventItem(event_id=event_id, payload=event_payload)
         self._queue.put(item)
         logger.debug(f"Agent {self.agent_id}: Event {event_id} enqueued")
+        return True
+
+    def _admit_event(self, event_payload: Dict[str, Any]) -> bool:
+        """Bound agent chains and bursts before they can consume LLM capacity."""
+        origin = event_payload.get("origin") or {}
+        depth = (
+            origin.get("event_causation_depth", 0) if isinstance(origin, dict) else -1
+        )
+        if type(depth) is int and 0 <= depth < MAX_AGENT_CAUSATION_DEPTH:
+            return True
+        reason = "Event rejected: causation depth limit exceeded or invalid."
+        logger.warning("Agent %s: %s", self.agent_id, reason)
+        if self._run_recorder is not None:
+            run_id = self._run_recorder.record_start(
+                self.agent_id, self.config.name, event_payload
+            )
+            self._run_recorder.record_failure(run_id, reason)
+        return False
+
+    def _processing_delay(self) -> float:
+        """Reserve processing capacity; queued events survive temporary throttling."""
+        with self._guard_lock:
+            now = time.monotonic()
+            while (
+                self._event_admissions
+                and now - self._event_admissions[0] >= AGENT_EVENT_RATE_WINDOW_SECONDS
+            ):
+                self._event_admissions.popleft()
+            if len(self._event_admissions) >= AGENT_EVENT_RATE_LIMIT:
+                self._pause_reason = "Agent temporarily paused: event rate limit; queued events resume automatically."
+                return max(
+                    0.0,
+                    self._event_admissions[0] + AGENT_EVENT_RATE_WINDOW_SECONDS - now,
+                )
+            self._pause_reason = None
+            self._event_admissions.append(now)
+            return 0.0
 
     def reload_config(self, new_config: AgentConfig) -> None:
         """
@@ -199,6 +251,9 @@ class AgentWorker:
             self._llm_client = None
             self._skills_loader = None  # Reset so a fresh loader is created
             self._cached_skills = None  # Force skill reload on next event
+            with self._guard_lock:
+                self._pause_reason = None
+                self._event_admissions.clear()
             logger.info(f"Agent {self.agent_id}: Configuration reloaded")
 
     def _load_skills(self) -> List[SkillDefinition]:
@@ -344,6 +399,14 @@ class AgentWorker:
 
     def _process_event(self, item: EventItem) -> None:
         """Process a single event."""
+        while not self._stop_event.is_set():
+            delay = self._processing_delay()
+            if not delay:
+                break
+            if self._stop_event.wait(min(delay, 1.0)):
+                return
+        if self._stop_event.is_set():
+            return
         start_time = time.time()
         event_payload = item.payload
         event_id = item.event_id
@@ -435,6 +498,14 @@ class AgentWorker:
                     correlation_id=origin.get("event_correlation_id"),
                 )
                 tool_executor = gate.wrap(tool_executor)
+
+            execute_tool = tool_executor
+
+            def tool_executor(name: str, arguments: Dict[str, Any]) -> Any:
+                if self._pause_reason is not None:
+                    return {"error": self._pause_reason}
+                with agent_mutation_context(self.agent_id, event_payload):
+                    return execute_tool(name, arguments)
 
             # Execute with tools
             result = self._llm_client.execute_with_tools(
@@ -625,11 +696,13 @@ class AgentWorker:
             "agent_name": self.config.name,
             "enabled": self.config.enabled,
             "running": self._running,
+            "paused": self._pause_reason is not None,
+            "pause_reason": self._pause_reason,
             "queue_size": self.queue_size,
             "events_processed": self.events_processed,
             "events_failed": self.events_failed,
-            "last_event_at": self.last_event_at.isoformat()
-            if self.last_event_at
-            else None,
+            "last_event_at": (
+                self.last_event_at.isoformat() if self.last_event_at else None
+            ),
             "mcp_integrations": self.config.mcp_integration_ids,
         }

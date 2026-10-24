@@ -13,6 +13,7 @@ import logging
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from backend.runtime.session_context import bind_session
+from backend.core.events.causation import agent_mutation_context
 
 from .models import Proposal, ProposalStatus, utcnow
 from .store import ProposalStore
@@ -117,7 +118,20 @@ class GovernanceManager:
             executor = self._executor_factory(p.agent_id)
             # In the session the action was made in - or in none - whatever
             # session the approving request acts in.
-            with bind_session(p.session_id):
+            if type(p.causation_depth) is not int or p.causation_depth < 1:
+                raise ValueError("Invalid proposal causation depth")
+            with (
+                bind_session(p.session_id),
+                agent_mutation_context(
+                    p.agent_id,
+                    {
+                        "origin": {
+                            "event_causation_depth": p.causation_depth - 1,
+                            "event_correlation_id": p.correlation_id,
+                        }
+                    },
+                ),
+            ):
                 result = executor(p.tool, dict(p.input_args))
             if isinstance(result, dict) and result.get("error"):
                 p.status = ProposalStatus.APPLY_FAILED
