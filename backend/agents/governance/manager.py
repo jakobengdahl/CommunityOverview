@@ -120,14 +120,17 @@ class GovernanceManager:
             # session the approving request acts in.
             if type(p.causation_depth) is not int or p.causation_depth < 1:
                 raise ValueError("Invalid proposal causation depth")
-            with bind_session(p.session_id), agent_mutation_context(
-                p.agent_id,
-                {
-                    "origin": {
-                        "event_causation_depth": p.causation_depth - 1,
-                        "event_correlation_id": p.correlation_id,
-                    }
-                },
+            with (
+                bind_session(p.session_id),
+                agent_mutation_context(
+                    p.agent_id,
+                    {
+                        "origin": {
+                            "event_causation_depth": p.causation_depth - 1,
+                            "event_correlation_id": p.correlation_id,
+                        }
+                    },
+                ),
             ):
                 result = executor(p.tool, dict(p.input_args))
             if isinstance(result, dict) and result.get("error"):
