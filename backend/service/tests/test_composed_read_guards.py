@@ -6,11 +6,11 @@ from __future__ import annotations
 from unittest.mock import MagicMock, Mock
 
 import pytest
+import httpx
 
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
-from backend.core import Edge, layer_vectors
+from backend.core import Edge, Node, layer_vectors
 from backend.runtime.authorization import (
     GraphAccessNarrowing,
     GraphAuthorizationDecision,
@@ -283,7 +283,8 @@ def test_mcp_subtypes_and_audit_compose(world):
     assert audit["violation_count"] == 0
 
 
-def test_rest_similarity_subtypes_and_audit_ask_as_the_caller(world):
+@pytest.mark.asyncio
+async def test_rest_similarity_subtypes_and_audit_ask_as_the_caller(world):
     class HeaderHook:
         def evaluate(self, context):
             headers = get_current_request_authorization_inputs().get("headers") or {}
@@ -299,23 +300,163 @@ def test_rest_similarity_subtypes_and_audit_ask_as_the_caller(world):
     world.service._authorization_hook = HeaderHook()
     app = FastAPI()
     app.include_router(create_rest_router(world.service), prefix="/api")
-    client = TestClient(app)
     narrow = {"x-narrow": "1"}
-    single = client.post(
-        "/api/similar", headers=narrow, json={"name": "Remote Rho", "threshold": 0.3}
-    ).json()
-    batch = client.post(
-        "/api/similar/batch",
-        headers=narrow,
-        json={"names": ["Remote Rho"], "threshold": 0.3},
-    ).json()
-    subtypes = client.get("/api/meta/subtypes", headers=narrow).json()
-    audit = client.get(
-        "/api/meta/relationship-applicability/audit", headers=narrow
-    ).json()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        single = (
+            await client.post(
+                "/api/similar",
+                headers=narrow,
+                json={"name": "Remote Rho", "threshold": 0.3},
+            )
+        ).json()
+        batch = (
+            await client.post(
+                "/api/similar/batch",
+                headers=narrow,
+                json={"names": ["Remote Rho"], "threshold": 0.3},
+            )
+        ).json()
+        subtypes = (await client.get("/api/meta/subtypes", headers=narrow)).json()
+        audit = (
+            await client.get(
+                "/api/meta/relationship-applicability/audit", headers=narrow
+            )
+        ).json()
     assert all(s["node"]["id"] != "r" for s in single["similar_nodes"])
     assert all(
         s["node"]["id"] != "r" for s in batch["results"]["Remote Rho"]["similar_nodes"]
     )
     assert "Hidden" not in subtypes["subtypes"].get("Actor", [])
     assert audit["violations"] == []
+
+
+@pytest.mark.parametrize("staged", [False, True])
+@pytest.mark.parametrize("include_archived", [False, True])
+def test_related_nodes_never_cross_a_hidden_bridge(world, staged, include_archived):
+    world.storage.delete_edges(["ab", "bc"])
+    world.storage.add_nodes(
+        [], [Edge(id="rc", source="r", target="c", type="RELATES_TO")]
+    )
+    sid = world.staged_session() if staged else None
+    if staged:
+        with bind_session(sid):
+            world.service.update_node("a", {"description": "staged"})
+    # Exercise both outgoing and incoming traversal through the remote node.
+    with bind_session(sid):
+        assert _ids(world.service.get_related_nodes("a", depth=2)["nodes"]) == [
+            "a",
+            "c",
+            "r",
+        ]
+        world.hook.narrow = True
+        for anchor in ("a", "c"):
+            result = world.service.get_related_nodes(
+                anchor, depth=3, include_archived=include_archived
+            )
+            assert _ids(result["nodes"]) == [anchor]
+            assert result["edges"] == []
+        assert world.service.add_edge("a", "c", type="RELATES_TO")["success"]
+        assert _ids(world.service.get_related_nodes("a", depth=2)["nodes"]) == [
+            "a",
+            "c",
+        ]
+
+
+@pytest.mark.parametrize(
+    "tool,kwargs",
+    [
+        ("search_graph", {"query": "Alpha"}),
+        ("get_related_nodes", {"node_id": "a"}),
+        ("get_saved_view", {"name": "Plan"}),
+    ],
+)
+@pytest.mark.parametrize("missing", ["record", "layer_store"])
+def test_push_reads_refuse_a_staged_document_without_its_record(
+    world, monkeypatch, tool, kwargs, missing
+):
+    world.storage.add_nodes([Node(id="v", type="SavedView", name="Plan")], [])
+    mcp = Mock()
+    mcp.tool = MagicMock(return_value=lambda f: f)
+    tools = register_mcp_tools(mcp, world.service, session_manager=world.manager)
+    sid = world.staged_session()
+    if missing == "record":
+        monkeypatch.setattr(world.write_modes, "staged_status", lambda _: "none")
+        expected = "session_not_found"
+    else:
+        monkeypatch.setattr(world.write_modes, "_store", None)
+        expected = "staged_unsupported"
+    result = tools[tool](visualization_session_id=sid, **kwargs)
+    assert result["success"] is False and result["error"] == expected
+
+
+def test_reading_in_refuses_a_retired_record_without_a_session_document(world):
+    sid = "1111-2222-3333-4444"
+    world.write_modes.record_staged(sid)
+    world.write_modes.retire(sid, require_empty=True)
+    assert world.manager.get_session(sid) is None
+    with world.service.reading_in(sid):
+        result = world.service.resolve_session_nodes(["a"])
+    assert result["success"] is False and result["error"] == "session_not_found"
+
+
+@pytest.mark.asyncio
+async def test_canvas_reads_pass_on_a_staging_refusal_after_the_session_fetch(
+    world, monkeypatch
+):
+    from backend.service.staging import STAGED_UNSUPPORTED, StagingRefused
+
+    sid = world.staged_session()
+    mcp = Mock()
+    mcp.tool = MagicMock(return_value=lambda f: f)
+    tools = register_mcp_tools(mcp, world.service, session_manager=world.manager)
+    assert tools["add_nodes_to_session"](session_id=sid, node_ids=["a"])["success"]
+    app = FastAPI()
+    app.include_router(
+        create_rest_router(world.service, session_manager=world.manager), prefix="/api"
+    )
+
+    def refuse():
+        raise StagingRefused(STAGED_UNSUPPORTED, "staging became unavailable")
+
+    monkeypatch.setattr(world.service.session_gate, "read_session", refuse)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        response = await client.get(f"/api/sessions/{sid}?resolve=true")
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"] == "staged_unsupported"
+    layout = tools["get_visualization_layout"](session_id=sid)
+    assert layout["success"] is False and layout["error"] == "staged_unsupported"
+
+
+def test_legacy_revision_zero_endpoints_remain_visible_at_the_base_revision(world):
+    # Legacy graph files assign revision zero to every entity on load.
+    for entity in world.storage.get_all_nodes() + world.storage.get_all_edges():
+        entity.revision = 0
+    sid = world.staged_session()
+    with bind_session(sid):
+        assert world.service.update_edge("ab", {"label": "staged"})["success"]
+    assert world.layer(sid)[("edge", "ab")]["base_revision"] == 0
+    world.hook.narrow = True
+    with bind_session(sid):
+        edges = {e["id"]: e for e in world.service.get_node_details("a")["edges"]}
+    assert edges["ab"]["label"] == "staged"
+    assert edges["ab"]["staged_state"] == "updated"
+
+
+@pytest.mark.parametrize("state", ["none", "updated", "orphaned"])
+def test_saved_view_summaries_carry_their_id_and_staged_state(world, state):
+    world.storage.add_nodes([Node(id="v", type="SavedView", name="Plan")], [])
+    direct = world.service.list_saved_views()["views"][0]
+    assert direct["id"] == "v" and "staged_state" not in direct
+    sid = world.staged_session()
+    if state != "none":
+        with bind_session(sid):
+            world.service.update_node("v", {"description": "staged"})
+    if state == "orphaned":
+        world.storage.delete_nodes(["v"], confirmed=True)
+    with bind_session(sid):
+        views = world.service.list_saved_views()["views"]
+    assert _states(views) == {"v": state}

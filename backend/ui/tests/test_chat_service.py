@@ -79,6 +79,36 @@ class TestChatServiceInit:
 class TestChatServiceToolExecution:
     """Tests for ChatService tool execution via GraphService."""
 
+    def test_assistant_executes_dedicated_create_with_nested_config(
+        self, chat_service, graph_storage
+    ):
+        service, mock_llm = chat_service
+        mock_llm.mock_tool_calls = [
+            {
+                "name": "create_agent",
+                "input": {
+                    "config": {"name": "Reviewer", "task_prompt": "Review initiatives"}
+                },
+            }
+        ]
+        result = service.process_message(
+            [{"role": "user", "content": "Create the reviewer agent as configured"}]
+        )
+        assert result["toolUsed"] == "create_agent"
+        agent = next(n for n in graph_storage.nodes.values() if n.type_str == "Agent")
+        assert agent.metadata["enabled"] is True
+        subscription = graph_storage.get_node(agent.metadata["subscription_id"])
+        assert (
+            subscription.metadata["delivery"]["webhook_url"]
+            == f"internal://agent/{agent.id}"
+        )
+        offered = {t["name"] for t in mock_llm.received_tools[0]}
+        assert {
+            "create_agent",
+            "create_collection_response",
+            "create_saved_view",
+        } <= offered
+
     def test_search_graph_tool_uses_graph_service(self, chat_service, sample_nodes):
         """search_graph tool should use GraphService.search_graph."""
         service, mock_llm = chat_service

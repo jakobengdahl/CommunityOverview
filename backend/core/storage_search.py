@@ -9,7 +9,7 @@ search/similarity/related methods here and passes ``self.nodes``,
 
 import threading
 from types import MappingProxyType
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, Union
 
 from rapidfuzz.distance import Levenshtein
 
@@ -805,6 +805,7 @@ def get_related_nodes(
     relationship_types: Optional[List[RelationshipType]] = None,
     depth: int = 1,
     include_archived: bool = False,
+    node_visible: Optional[Callable[[Optional[Node]], bool]] = None,
 ) -> Dict[str, Any]:
     """BFS traversal from *node_id* up to *depth* hops.  Returns nodes and
     edges that are reachable, filtered by *relationship_types* when given.
@@ -813,8 +814,11 @@ def get_related_nodes(
     archived neighbour nodes are not visited (nor reached through), so an
     archived node cannot re-enter the result set via a later hop. The starting
     node is always included as the anchor, even when it is itself archived.
+    When supplied, ``node_visible`` also blocks traversal through hidden nodes.
     """
-    if node_id not in nodes:
+    if node_id not in nodes or (
+        node_visible is not None and not node_visible(nodes.get(node_id))
+    ):
         return {"nodes": [], "edges": []}
 
     visited_nodes = {node_id}
@@ -822,6 +826,8 @@ def get_related_nodes(
     current_layer = {node_id}
 
     def _neighbor_blocked(neighbor_id: str) -> bool:
+        if node_visible is not None and not node_visible(nodes.get(neighbor_id)):
+            return True
         if include_archived or neighbor_id == node_id:
             # The anchor is always part of the result, so an edge that reconnects
             # to it (e.g. a cycle at depth >= 2) must not be dropped even when the

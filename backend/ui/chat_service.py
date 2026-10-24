@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from backend.core.storage_search import MATCH_MODE_SUBSTRING
 from backend.ui.chat_logic import ChatProcessor
 from backend.service import GraphService
+from backend.service.system_nodes import SYSTEM_CREATE_MODELS, make_system_create_tools
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,7 @@ class ChatService:
             Dict mapping tool names to callable methods
         """
         return {
+            **make_system_create_tools(self._graph_service),
             "search_graph": self._search_graph_tool,
             "get_node_details": self._graph_service.get_node_details,
             "get_related_nodes": self._graph_service.get_related_nodes,
@@ -568,7 +570,17 @@ class ChatService:
                 "error": "Archiving is not permitted in collection mode.",
             }
 
+        def _system_create_blocked(*args, **kwargs):
+            # Collection visitors must not bypass the node-type wrappers or
+            # save responses against a different collection. The bound
+            # save_collection_response tool remains available below.
+            return {
+                "success": False,
+                "error": "System-node creation is not permitted in collection mode.",
+            }
+
         return {
+            **{name: _system_create_blocked for name in SYSTEM_CREATE_MODELS},
             "add_nodes": add_nodes_enforced,
             "update_node": update_node_enforced,
             "delete_nodes": delete_nodes_enforced,
