@@ -28,6 +28,7 @@ shared knowledge graphs. This guide covers all user-facing features.
 5. [Session menu and settings](#5-session-menu-and-settings)
    - [Collaborating in a session](#51-collaborating-in-a-session)
    - [Recent activity (audit log)](#52-recent-activity-audit-log)
+   - [Staged sessions: review before it reaches the graph](#53-staged-sessions-review-before-it-reaches-the-graph)
 6. [Federation — searching across multiple graphs](#6-federation--searching-across-multiple-graphs)
 7. [Interactive guides](#7-interactive-guides)
 8. [Connecting external AI tools via MCP](#8-connecting-external-ai-tools-via-mcp)
@@ -1001,6 +1002,85 @@ UI language.
 
 ---
 
+### 5.3 Staged sessions: review before it reaches the graph
+
+Normally every edit you make lands in the graph at once. Where the
+installation has staged sessions turned on, a session can instead **stage** its
+edits: they are held in the session, everyone in the session sees them, and
+nobody else does — until someone reviews them and **merges** them into the
+graph, or **discards** them.
+
+**Starting one.** **Start new session** in the session menu then asks how the
+session should write: **Direct session** (edits go straight into the graph, as
+before) or **Staged session**. A direct session can also be switched to staged
+with **Switch to staged…** in the small *Direct* label at the bottom of the
+canvas. The switch applies to everyone in the session and cannot be undone: a
+staged session never goes back to direct editing. To edit the graph directly
+again, start a new session. Where the installation stages by default, the
+session the app opens with, and the one it moves you to after a session is
+deleted, is a staged session too (unless you are not allowed to stage; then
+it is direct, and says so). Opening a link to a session always joins that
+session as it is; any other link that opens something (a saved view, a node,
+a collection form) opens in a direct session.
+
+**Seeing what is staged.** A staged session shows a dashed amber **Staged
+session** bar at the bottom of the canvas (at the top on a phone) with the
+number of pending changes. Nodes changed in the session are drawn with a dashed
+amber border and a badge — *Staged: new*, *Staged: changed*, *Staged: deleted in
+graph* (the graph no longer has the node your change applies to) or *Staged:
+deleted* — and staged connections are drawn dashed. The create and edit dialogs
+say that the edit is held for review. Changes made by others in the same
+session appear for you as they happen.
+
+![Staged session bar and markers](images/staged-session.png)
+*A staged session: the bar with its pending count, and a node changed in the
+session.*
+
+**Reviewing.** **Review changes** opens the list of staged changes. For each
+one it shows what kind of change it is, its status, and per field the value
+**Before** (when it was first staged), in **This session**, and in the **Graph
+now** — so you can see when someone changed the same thing in the graph
+meanwhile. The status tells you whether it can go in as it is:
+
+| Status | Meaning |
+|---|---|
+| Ready | Can be merged as it is |
+| Conflict | The graph changed the same field since, to something else (or, for a delete, the node gained connections since) |
+| Gone from graph | The graph no longer holds the node or connection the change applies to |
+| Id taken | The graph now holds something with the id of a node created here |
+| Missing endpoint | A connection would point at a node that is not in the graph after the merge |
+
+Anything that is not Ready needs a decision before it can be merged: **Use this
+session's version**, **Keep the graph's version** (drops your change), **Create
+as a new node** (keeps the graph's node and adds yours beside it), or, for a
+conflicting change, **Enter the values** yourself.
+
+![Staged changes review](images/staged-review.png)
+*The review: a change ready to merge, and a conflict with the graph's newer
+value shown beside yours.*
+
+**Merging and discarding.** Tick the changes to merge or discard. Ticking a
+connection also ticks the new nodes it needs; unticking a node unticks what
+depends on it. **Merge** applies the ticked changes to the graph as one step —
+all of them or none. If any of them changed after you opened the review (someone
+staged over it, or the graph moved on), nothing is merged and the review asks
+you to look again: a change that is not as you reviewed it loses its tick, and
+a decision you made on it is cleared, until you look at it again. If the
+connection drops mid-merge, merging again is safe and never applies the changes
+twice. **Discard** drops the ticked changes from the session after you confirm;
+the graph is not touched, and a change staged over since you reviewed it is not
+discarded.
+
+Opening a link to a session shows *Loading how this session writes* until
+the session has loaded, and edits wait until then: the session may be staged.
+**Retry** loads it again if that failed. File attachments are not staged: an
+attachment added to a node in a staged session is stored at once.
+
+**Deleting a staged session** drops its unmerged changes with it, and the
+delete confirmation says so. Everyone who was in it — you included — lands in a
+new, empty staged session, so nobody who was staging suddenly edits the graph
+directly.
+
 ## 6. Federation — searching across multiple graphs
 
 When the application is connected to one or more remote graphs, a **depth selector**
@@ -1331,4 +1411,6 @@ Screenshots for this guide are saved to `docs/images/` in PNG format.
 | `mobile-session-menu.png` | pending | Phone viewport with the session menu open as a full-width overlay and scrim |
 | `metamodel-explorer.png` | pending | Metamodel explorer network view with a node type selected and its detail panel open |
 | `annotation-reference-tiles.png` | pending | Canvas with reference tiles for a session, a web page and supporting material, plus one in its broken state |
+| `staged-session.png` | pending | Canvas in a staged session: the dashed Staged session bar with its pending count, and a node with a dashed amber border and a "Staged: changed" badge |
+| `staged-review.png` | pending | Staged changes review with one Ready change and one Conflict showing Before / This session / Graph now values and a resolution chosen |
 | `node-attachments.png` | pending | Node detail dialog, Details tab: Attachments section with two files, the Attach file button and the limits hint |

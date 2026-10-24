@@ -368,12 +368,17 @@ const useGraphStore = create((set, get) => ({
   // the default profile once capabilities are fetched.
   selectedModelProfileId: null,
 
+  // The active session's write mode, for the edit dialogs to say where an
+  // edit lands (docs/SESSION_OVERLAY_CONTRACT.md §17). App owns it.
+  sessionWriteMode: 'direct',
+
   // Loading states
   isLoading: false,
   configLoaded: false,
   error: null,
 
   // Actions
+  setSessionWriteMode: (mode) => set({ sessionWriteMode: mode === 'staged' ? 'staged' : 'direct' }),
   setNodes: (nodes) => set({ nodes }),
   setEdges: (edges) => set({ edges }),
 

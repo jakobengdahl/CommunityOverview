@@ -652,9 +652,15 @@ Reading a layer's diff returns one item per entry:
     "tags":        { "base": [], "staged": ["a"], "main": [], "conflict": false }
   },
   "status": "clean | conflict | orphaned | id_taken | dangling",
-  "depends_on": [ { "kind": "node", "entity_id": "…" } ]
+  "depends_on": [ { "kind": "node", "entity_id": "…" } ],
+  "version": "…"
 }
 ```
+
+`version` is opaque: it names the version of the entry the diff shows (the
+token of the staging op that wrote it, unique on every instance). A merge or
+discard request may name it to bind itself to what its caller reviewed
+(§11.4, §12).
 
 | Status | When |
 |---|---|
@@ -801,6 +807,17 @@ A merge request names:
 - optional resolutions;
 - a caller-chosen **`merge_id`**, which gives I9.
 
+**Reviewed versions.** Each listed entry may carry the `version` the diff gave
+it. The merge unit then also checks, where it checks that each entry is
+unchanged since the merge was decided (§11.3), that the entry is still that
+version. An entry restaged after the caller reviewed it, by any instance and
+even before the merge read the layer, refuses the merge with `merge_raced`, and
+nothing is written. A malformed version (not a non-empty string of at most 200
+characters, or two versions for one entry) is `invalid_merge_request`. A
+request without versions behaves as before. A refusal carries no version of an
+entry outside the caller's view, so it tells a narrowed reader nothing about
+such an entry; naming one is answered as for any entry not staged.
+
 The selection must be **closed under dependencies**. An entry depends on:
 
 - for an edge create: the create entries of its endpoints, where they have them;
@@ -863,7 +880,10 @@ first; an `applied` one is returned (I9).
 
 ## 12. Discard
 
-- **Scope:** discard all entries, or a list of them.
+- **Scope:** discard all entries, or a list of them. A listed entry may carry
+  the `version` its caller reviewed, as for a merge (§11.4): an entry restaged
+  since refuses the discard with `merge_raced`, checked in the unit that
+  removes it, and nothing is removed.
 - **Effect:** the entries are removed from the layer, and nothing else changes
   (I10).
 - **Visibility:**

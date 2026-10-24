@@ -67,6 +67,12 @@ export function useSharedSession({
   // Deliberately NOT invoked from applyServerSession — that path is reused by
   // same-session resync, which must keep the current session's assistant state.
   resetSessionScopedState,
+  // Told the session payload the server answered, before its content is
+  // applied, so the session's write mode (and with it the staged-session
+  // header, docs/SESSION_OVERLAY_CONTRACT.md §16.1) is known before anything
+  // is done in it; told null when the server holds no such session (it then
+  // exists only in this browser, so it is direct, §5.1). Optional.
+  onSessionPayload,
 }) {
   // Load a session's canvas content from the server (resolved node refs +
   // layout + group annotations) onto the store.
@@ -112,6 +118,9 @@ export function useSharedSession({
     async (targetId, { eagerConnect = false, onMissing = null, isStale = () => false } = {}) => {
       try {
         const payload = await api.getSession(targetId, { resolve: true });
+        // Adopt the mode even from a stale reply: it is a fact about targetId,
+        // and adoption never downgrades a session known staged.
+        onSessionPayload?.(targetId, payload);
         if (isStale()) return;
         // Compute the sync baseline before touching the canvas: it runs the same
         // annotation-transform logic applyServerSession does internally, and
@@ -135,6 +144,7 @@ export function useSharedSession({
           console.error('Error connecting sync client:', syncError);
         }
       } catch (error) {
+        if (error?.status === 404) onSessionPayload?.(targetId, null);
         if (isStale()) return;
         // Session does not exist server-side yet — new / not-yet-saved share URL.
         if (error?.status === 404) {
@@ -161,7 +171,14 @@ export function useSharedSession({
         }
       }
     },
-    [applyServerSession, clearVisualization, ensureSyncConnected, syncRef, resetSessionScopedState]
+    [
+      applyServerSession,
+      clearVisualization,
+      ensureSyncConnected,
+      syncRef,
+      resetSessionScopedState,
+      onSessionPayload,
+    ]
   );
 
   return { applyServerSession, loadSessionFromServer };

@@ -53,9 +53,10 @@ describe('AgentProposalsDialog', () => {
     fireEvent.click(screen.getByText('agent_proposals.approve'));
 
     await waitFor(() =>
-      expect(global.fetch).toHaveBeenCalledWith('/agents/proposals/prop-1/approve', {
-        method: 'POST',
-      })
+      expect(global.fetch).toHaveBeenCalledWith(
+        '/agents/proposals/prop-1/approve',
+        expect.objectContaining({ method: 'POST' })
+      )
     );
     await waitFor(() =>
       expect(screen.getByText('agent_proposals.status_applied')).toBeInTheDocument()
