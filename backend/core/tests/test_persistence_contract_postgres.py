@@ -81,6 +81,7 @@ from backend.core.storage_backends import ExternalChangeRefused  # noqa: E402
 from backend.core.storage_backends import (  # noqa: E402
     BackendCapabilities,
     EntityOperation,
+    EntityRevisionConflict,
 )
 
 # Deliberately no default. This module creates and drops roles and schemas
@@ -2458,7 +2459,7 @@ class TestPostgresEntityWritesTouchOneRow:
             lambda b: b.upsert_node(node_payload("n0", name="Renamed")),
             [{"graph_nodes"}],
         ),
-        "delete_node": (lambda b: b.delete_node("n0"), [{"graph_nodes"}]),
+        "delete_node": (lambda b: b.delete_node("isolated"), [{"graph_nodes"}]),
         "upsert_edge": (
             lambda b: b.upsert_edge(edge_payload("e0", "n0", "n1", name="Renamed")),
             [{"graph_edges"}],
@@ -2468,7 +2469,7 @@ class TestPostgresEntityWritesTouchOneRow:
             lambda b: b.apply_batch(
                 [
                     EntityOperation.delete_edge("e0"),
-                    EntityOperation.delete_node("n0"),
+                    EntityOperation.delete_node("isolated"),
                 ]
             ),
             [{"graph_edges"}, {"graph_nodes"}],
@@ -2599,6 +2600,9 @@ class TestPostgresEntityWritesTouchOneRow:
         action, expected = self.WRITES[write]
         backend = self._seeded(schema, backends)
 
+        if write in ("delete_node", "batch"):
+            # Successful delete probes need a node with no unnamed edges.
+            backend.upsert_node(node_payload("isolated"))
         issued = _statements_issued(lambda: action(backend))
 
         writes = _endpoint_locks_first(
@@ -2642,7 +2646,14 @@ class TestPostgresEntityWritesTouchOneRow:
         backend = self._seeded(schema, backends)
 
         batch = self._long_batch(length)
-        issued = _statements_issued(lambda: backend.apply_batch(batch))
+        issued = []
+        if length > self._RUN:
+            # These synthetic batches delete nodes whose edges they did not
+            # name. Refusal must still issue exactly the named writes.
+            with pytest.raises(EntityRevisionConflict):
+                _statements_issued(lambda: backend.apply_batch(batch), into=issued)
+        else:
+            _statements_issued(lambda: backend.apply_batch(batch), into=issued)
 
         writes = _endpoint_locks_first(_writing_statements(issued), batch)
         named = [_tables_named(text) for text in writes]
@@ -2670,15 +2681,16 @@ class TestPostgresEntityWritesTouchOneRow:
         A delete is the natural place to write rows nobody asked for -
         removing the edges that reference the node - which would eat an
         edge another instance committed a moment earlier. `delete_node` is
-        documented as removing one node, and `GraphStorage.delete_nodes`
+        refused if unnamed edges remain, and `GraphStorage.delete_nodes`
         names the edges it wants gone, edges first.
         """
         backend = self._seeded(schema, backends)
 
-        backend.delete_node("n0")
+        with pytest.raises(EntityRevisionConflict):
+            backend.delete_node("n0")
 
         loaded = backend.load_graph_data()
-        assert "n0" not in by_id(loaded, "nodes")
+        assert "n0" in by_id(loaded, "nodes")
         assert "n1" in by_id(loaded, "nodes")
         assert "e0" in by_id(loaded, "edges"), (
             "deleting a node removed an edge no operation named"

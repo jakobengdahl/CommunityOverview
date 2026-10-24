@@ -561,10 +561,10 @@ def lagging_node_deleter(instances):
     return behind
 
 
-def _assert_only_unrelated_edge_remains(schema):
-    for edge_id in ("outgoing", "incoming", "loop"):
-        assert _stored(schema, "graph_edges", edge_id) is None
-    assert _stored(schema, "graph_edges", "unrelated") is not None
+def _assert_original_node_and_edges_remain(schema):
+    assert _stored(schema, "graph_nodes", "n")["type"] == "Actor"
+    for edge_id in ("outgoing", "incoming", "loop", "unrelated"):
+        assert _stored(schema, "graph_edges", edge_id) is not None
 
 
 @pytest.mark.parametrize("with_expectation", [False, True])
@@ -573,38 +573,59 @@ def test_direct_delete_by_lagging_instance_then_recreate_has_no_misfit_edges(
 ):
     behind = lagging_node_deleter
     expected = {"n": behind.nodes["n"].revision} if with_expectation else None
-    result = behind.delete_nodes(["n"], confirmed=True, expected_revisions=expected)
-    assert result.success
-    assert _stored(schema, "graph_nodes", "n") is None
-    _assert_only_unrelated_edge_remains(schema)
+    with pytest.raises(EntityRevisionConflict) as refused:
+        behind.delete_nodes(["n"], confirmed=True, expected_revisions=expected)
+    assert (refused.value.kind, refused.value.entity_id) == ("node", "n")
+    assert behind.nodes["n"].type == NodeType.ACTOR
+    _assert_original_node_and_edges_remain(schema)
 
-    # AIMS_FOR permits an Actor source, but not this replacement's type.
+    # The refused delete leaves the id occupied, so a replacement cannot
+    # inherit AIMS_FOR with its incompatible Legislation source type.
     replacement = Node(id="n", type=NodeType.LEGISLATION, name="Replacement")
-    assert behind.add_nodes([replacement], []).success
-    assert _stored(schema, "graph_nodes", "n")["type"] == "Legislation"
-    _assert_only_unrelated_edge_remains(schema)
+    with pytest.raises(EntityRevisionConflict):
+        behind.add_nodes([replacement], [], expect_absent=True)
+    _assert_original_node_and_edges_remain(schema)
 
 
 def test_direct_delete_by_lagging_instance_then_merge_create_has_no_misfit_edges(
     lagging_node_deleter, schema
 ):
     behind = lagging_node_deleter
-    assert behind.delete_nodes(["n"], confirmed=True).success
+    with pytest.raises(EntityRevisionConflict):
+        behind.delete_nodes(["n"], confirmed=True)
+    _assert_original_node_and_edges_remain(schema)
     backend = behind._persistence_backend
     replacement = Node(id="n", type=NodeType.LEGISLATION, name="Replacement").to_dict()
     backend.record_staged(A)
     backend.stage(A, [entry("node", "n", action="create", staged=replacement)])
-    result = backend.merge(
-        A,
-        "recreate",
-        [EntityOperation("node", "upsert", "n", replacement, expect_absent=True)],
-        [],
-        [("node", "n")],
-        {},
-    )
-    assert result.record["status"] == ls.MERGE_APPLIED
-    assert _stored(schema, "graph_nodes", "n")["type"] == "Legislation"
-    _assert_only_unrelated_edge_remains(schema)
+    with pytest.raises(ls.MergeRaced):
+        backend.merge(
+            A,
+            "recreate",
+            [EntityOperation("node", "upsert", "n", replacement, expect_absent=True)],
+            [],
+            [("node", "n")],
+            {},
+        )
+    assert backend.load_layer(A)
+    _assert_original_node_and_edges_remain(schema)
+
+
+@pytest.mark.parametrize("node_first", [False, True])
+def test_a_batch_can_delete_all_named_incident_edges(
+    lagging_node_deleter, schema, node_first
+):
+    backend = lagging_node_deleter._persistence_backend
+    node = EntityOperation.delete_node("n")
+    edges = [
+        EntityOperation.delete_edge(edge_id)
+        for edge_id in ("outgoing", "incoming", "loop")
+    ]
+    backend.apply_batch([node, *edges] if node_first else [*edges, node])
+    assert _stored(schema, "graph_nodes", "n") is None
+    for edge_id in ("outgoing", "incoming", "loop"):
+        assert _stored(schema, "graph_edges", edge_id) is None
+    assert _stored(schema, "graph_edges", "unrelated") is not None
 
 
 @pytest.mark.parametrize("fail_after_delete", [False, True])
@@ -638,7 +659,7 @@ def test_a_refused_batch_keeps_the_node_and_its_unseen_incident_edges(
         )
 
 
-def test_a_node_delete_cascades_only_incident_edges_in_its_scope(instances, schema):
+def test_a_node_delete_checks_only_incident_edges_in_its_scope(instances, schema):
     storage = instances(deaf=True, scope="scope-a")
     storage.add_nodes([_node("n"), _node("other")], [])
     storage._persistence_backend.upsert_edge(
@@ -650,7 +671,14 @@ def test_a_node_delete_cascades_only_incident_edges_in_its_scope(instances, sche
         Edge(id="foreign", source="n", target="other").to_dict()
     )
 
-    assert storage.delete_nodes(["n"], confirmed=True).success
+    with pytest.raises(EntityRevisionConflict):
+        storage.delete_nodes(["n"], confirmed=True)
+    assert _stored(schema, "graph_edges", "own") is not None
+
+    # Naming the own-scope edge allows deletion; the foreign edge is ignored.
+    storage._persistence_backend.apply_batch(
+        [EntityOperation.delete_node("n"), EntityOperation.delete_edge("own")]
+    )
 
     assert _stored(schema, "graph_nodes", "n") is None
     assert _stored(schema, "graph_edges", "own") is None

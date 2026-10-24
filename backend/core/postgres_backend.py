@@ -1608,6 +1608,7 @@ class PostgresGraphPersistenceBackend:
                     self._apply_one(conn, operation, write_token)
                     for operation in operations
                 ]
+                self._refuse_remaining_incident_edges(conn, operations)
                 # Inside the transaction, so the announcement is atomic with
                 # what it announces: the server holds it until commit and
                 # discards it on rollback. A batch that deadlocks and retries
@@ -1615,6 +1616,30 @@ class PostgresGraphPersistenceBackend:
                 # and a batch that fails announces nothing at all.
                 self._announce(conn, operations)
                 return revisions
+
+    def _refuse_remaining_incident_edges(
+        self, conn, operations: Sequence[EntityOperation]
+    ) -> None:
+        """Refuse node deletes unless the batch also removed their edges.
+
+        Run after all named writes, while DELETE still holds the node locks.
+        This fresh READ COMMITTED snapshot sees edge writes committed while
+        DELETE waited for their endpoint locks. No unnamed rows are written;
+        a refusal rolls back the entire batch, including the node deletes.
+        """
+        scope, scope_params = self._and_scope()
+        for operation in operations:
+            if operation.kind != "node" or operation.action != "delete":
+                continue
+            row = conn.execute(
+                sql.SQL(
+                    "SELECT 1 FROM {} WHERE "
+                    "(doc->>'source' = %s OR doc->>'target' = %s){} LIMIT 1"
+                ).format(self._table("graph_edges"), scope),
+                (operation.entity_id, operation.entity_id, *scope_params),
+            ).fetchone()
+            if row is not None:
+                raise self._refuse(conn, "graph_nodes", operation)
 
     def _hold_endpoints(self, conn, operations: Sequence[EntityOperation]) -> None:
         """Hold the endpoints the batch's edge upserts name, until commit.
@@ -1714,21 +1739,6 @@ class PostgresGraphPersistenceBackend:
                 )
                 if cursor.rowcount == 0:
                     raise self._refuse(conn, table, operation)
-            if operation.kind == "node" and cursor.rowcount:
-                # A separate statement sees edges committed while DELETE
-                # waited for their endpoint locks. The deleted node stays
-                # locked until commit, excluding further edge writes to it.
-                cascaded = conn.execute(
-                    sql.SQL(
-                        "DELETE FROM {} WHERE "
-                        "(doc->>'source' = %s OR doc->>'target' = %s){}"
-                    ).format(self._table("graph_edges"), scope),
-                    (operation.entity_id, operation.entity_id, *scope_params),
-                )
-                if cascaded.rowcount:
-                    # These edges were not named by the caller. Reload peers
-                    # even if the node has been recreated by their next read.
-                    self._announce(conn, None)
             return None
 
         # The stored doc is the payload with the store's own revision and
@@ -2447,6 +2457,7 @@ class PostgresGraphPersistenceBackend:
                                 f"already absent"
                             )
                     revisions.append(self._apply_one(conn, operation, write_token))
+                self._refuse_remaining_incident_edges(conn, ops)
                 for node_id in sorted(
                     {c.entity_id for c in checks if c.check == "node_exists"}
                 ):

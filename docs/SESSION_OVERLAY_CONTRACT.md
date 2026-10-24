@@ -797,15 +797,16 @@ still true when the merge applies.
   retype locks its node row. So an edge create and a node delete or retype on
   the same node are ordered against each other, whichever instance issues
   them.
-- A direct PostgreSQL node delete also removes all incident edges in its
-  scope from the store in the same transaction, including edges committed by
-  another instance that the deleting instance has not seen. The cascade runs
-  after the node delete acquires its lock and passes any revision expectation,
-  using a fresh statement snapshot so it includes edge writes the delete
-  waited for. Other instances reload when this removes edges the caller did
-  not name. Recreating the id, directly or through a merge, therefore cannot
-  inherit those edges under a different node type. Merged deletes still
-  require the exact incident-edge check above; unseen edges fail the merge.
+- A direct PostgreSQL node delete is refused with
+  `entity_revision_conflict` when its scope still holds incident edges that
+  the batch does not also delete. The caller must reload before retrying.
+  After the named operations run, the store checks in the same transaction,
+  while holding the deleted node's lock, using a fresh statement snapshot
+  that includes edge writes the delete waited for. A refusal rolls back the
+  entire batch; no unnamed edges are written and nothing is announced.
+  Recreating the id, directly or through a merge, therefore cannot inherit
+  unseen edges under a different node type. Merged deletes still require the
+  exact incident-edge check above; unseen edges fail the merge.
 - An edge write, direct or merged, also carries the type of each endpoint it
   was judged against. Holding the endpoint, a shared store refuses the write if
   the endpoint now has another type or is gone, with `entity_revision_conflict`
