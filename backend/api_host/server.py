@@ -538,7 +538,7 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
     _mount_static_files(app, config)
 
     # Federation + agent-system status endpoints
-    register_agent_routes(app, agent_registry, graph_storage, federation_manager)
+    register_agent_routes(app, agent_registry, graph_service, federation_manager)
 
     # Shutdown handler for graceful cleanup
     @app.on_event("shutdown")

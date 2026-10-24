@@ -28,6 +28,8 @@ app = create_app(
 
 Both new arguments are keyword-only and optional. `authorization_hook` implements
 `GraphAuthorizationHook` and is passed to `GraphService` for reads and writes.
+The `/agents/skills` graph lookup also uses this service, including request actor
+and scope context, access denial, and graph visibility narrowing.
 `create_app()` and the existing
 `uvicorn backend.api_host.server:get_app --factory` command keep their defaults.
 

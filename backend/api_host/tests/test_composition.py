@@ -301,3 +301,72 @@ async def test_http_model_calls_use_selected_extensions(app_config, mode):
         assert get_runtime_extensions() is default
     finally:
         app.state.runtime.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("access", ["default", "deny", "narrow"])
+async def test_agent_skills_obey_injected_graph_authorization(app_config, access):
+    from backend.runtime.authorization import GraphAccessNarrowing
+
+    hook = Mock()
+    hook.evaluate.return_value = GraphAuthorizationDecision(
+        allowed=access != "deny",
+        reason="skills_denied" if access == "deny" else "",
+        graph_access=GraphAccessNarrowing(
+            enabled=access == "narrow",
+            allow_local_graph=False,
+            include_graph_ids=("visible",),
+        ),
+    )
+    kwargs = {} if access == "default" else {"authorization_hook": hook}
+    app = create_app(app_config, **kwargs)
+    try:
+        app.state.graph_storage.add_nodes(
+            [
+                Node(
+                    id="hidden-skill",
+                    name="Hidden",
+                    type="Skill",
+                    description="Private",
+                ),
+                Node(
+                    id="visible-skill",
+                    name="Visible",
+                    type="Skill",
+                    metadata={"origin_graph_id": "visible"},
+                ),
+                Node(id="other-type", name="Other", type="Actor"),
+            ],
+            [],
+        )
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get(
+                "/agents/skills",
+                headers={
+                    "x-communityoverview-actor-id": "reader",
+                    "x-communityoverview-graph-id": "visible",
+                },
+            )
+        if access == "deny":
+            assert response.status_code == 403
+            assert "hidden-skill" not in response.text
+            assert "Private" not in response.text
+        else:
+            assert response.status_code == 200
+            expected = [{"id": "visible-skill", "name": "Visible", "description": ""}]
+            if access == "default":
+                expected.insert(
+                    0,
+                    {"id": "hidden-skill", "name": "Hidden", "description": "Private"},
+                )
+            assert sorted(response.json(), key=lambda n: n["id"]) == expected
+        if access != "default":
+            context = hook.evaluate.call_args.args[0]
+            assert context.action == "read"
+            assert context.target == "search_graph"
+            assert context.actor["actor_id"] == "reader"
+            assert context.graph_id == "visible"
+    finally:
+        app.state.runtime.stop()

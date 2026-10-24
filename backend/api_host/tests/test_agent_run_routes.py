@@ -13,7 +13,7 @@ def _client(registry):
     register_agent_routes(
         app,
         agent_registry=registry,
-        graph_storage=MagicMock(),
+        graph_service=MagicMock(),
         federation_manager=MagicMock(),
     )
     return TestClient(app)
