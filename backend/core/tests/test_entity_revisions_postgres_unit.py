@@ -61,10 +61,19 @@ def test_endpoint_locks_are_sorted_deduplicated_and_exclude_upserted_nodes(backe
     ]
 
 
-@pytest.mark.parametrize("incident", [False, True])
-def test_node_delete_guard_only_reads_and_refuses_remaining_edges(backend, incident):
+@pytest.mark.parametrize("incident", [None, "source", "target"])
+@pytest.mark.parametrize(
+    "scope_column,scope", [(False, None), (True, None), (True, "workspace")]
+)
+def test_node_delete_guard_only_reads_and_refuses_remaining_edges(
+    backend, incident, scope_column, scope
+):
+    backend._scope = scope
+    backend._scope_column = scope_column
     conn = MagicMock()
-    conn.execute.return_value.fetchone.return_value = (1,) if incident else None
+    conn.execute.return_value.fetchone.side_effect = (
+        [(1,)] if incident == "source" else [None, (1,) if incident else None]
+    )
     operation = EntityOperation.delete_node("n")
     conflict = EntityRevisionConflict("node", "n", None, None)
     backend._refuse = Mock(return_value=conflict)
@@ -78,11 +87,22 @@ def test_node_delete_guard_only_reads_and_refuses_remaining_edges(backend, incid
         backend._refuse_remaining_incident_edges(conn, [operation])
         backend._refuse.assert_not_called()
 
-    query, params = conn.execute.call_args.args
-    assert "SELECT 1" in str(query)
-    assert "DELETE" not in str(query)
-    assert params == ("n", "n")
-    conn.execute.assert_called_once()
+    calls = conn.execute.call_args_list
+    assert len(calls) == (1 if incident == "source" else 2)
+    for call, endpoint in zip(calls, ("source", "target")):
+        query, params = call.args
+        text = query.as_string()
+        assert "SELECT 1" in text
+        assert "DELETE" not in text
+        assert f"doc->>'{endpoint}' = %s" in text
+        other = "target" if endpoint == "source" else "source"
+        assert f"doc->>'{other}'" not in text
+        assert params == (("n", scope) if scope_column else ("n",))
+        if scope_column:
+            assert '"scope_id" IS NULL' in text
+            assert '"scope_id" = %s' in text
+        else:
+            assert "scope_id" not in text
 
 
 def test_batch_checks_incident_edges_after_named_writes_before_announcing(backend):

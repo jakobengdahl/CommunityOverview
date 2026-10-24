@@ -1631,15 +1631,18 @@ class PostgresGraphPersistenceBackend:
         for operation in operations:
             if operation.kind != "node" or operation.action != "delete":
                 continue
-            row = conn.execute(
-                sql.SQL(
-                    "SELECT 1 FROM {} WHERE "
-                    "(doc->>'source' = %s OR doc->>'target' = %s){} LIMIT 1"
-                ).format(self._table("graph_edges"), scope),
-                (operation.entity_id, operation.entity_id, *scope_params),
-            ).fetchone()
-            if row is not None:
-                raise self._refuse(conn, "graph_nodes", operation)
+            # Probe the existing endpoint expression indexes separately.
+            # With OR and LIMIT the planner can prefer a sequential scan
+            # even for an isolated node, defeating the entity-write contract.
+            for endpoint in ("source", "target"):
+                row = conn.execute(
+                    sql.SQL("SELECT 1 FROM {} WHERE doc->>{} = %s{} LIMIT 1").format(
+                        self._table("graph_edges"), sql.Literal(endpoint), scope
+                    ),
+                    (operation.entity_id, *scope_params),
+                ).fetchone()
+                if row is not None:
+                    raise self._refuse(conn, "graph_nodes", operation)
 
     def _hold_endpoints(self, conn, operations: Sequence[EntityOperation]) -> None:
         """Hold the endpoints the batch's edge upserts name, until commit.
