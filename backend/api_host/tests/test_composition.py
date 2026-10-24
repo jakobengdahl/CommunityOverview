@@ -247,3 +247,57 @@ def test_workers_created_after_construction_inherit_extensions(compose):
     registry = runtime.agent_registry
     registry._start_worker(AgentConfig(agent_id="later", name="Later", enabled=True))
     assert registry._workers["later"]._extensions is extensions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async", "stream"])
+async def test_http_model_calls_use_selected_extensions(app_config, mode):
+    from fastapi.responses import StreamingResponse
+
+    from backend.llm.llm_providers import ClaudeProvider
+    from backend.runtime.extensions import AdmissionRefused
+
+    default = get_runtime_extensions()
+    admission = Mock()
+    admission.admit.return_value = AdmissionDecision("deny", "model_blocked")
+    extensions = RuntimeExtensions(execution_admission=admission)
+    app = create_app(app_config, runtime_extensions=extensions)
+    # Exercise real admission without constructing an SDK or making network calls.
+    provider = object.__new__(ClaudeProvider)
+    provider.client = Mock()
+    provider.model = "test"
+
+    def invoke():
+        assert get_runtime_extensions() is extensions
+        with pytest.raises(AdmissionRefused, match="model_blocked"):
+            provider.create_completion([], "", [])
+        return "blocked"
+
+    if mode == "sync":
+        app.get("/runtime-probe")(invoke)
+    else:
+
+        @app.get("/runtime-probe")
+        async def probe():
+            if mode == "stream":
+
+                async def body():
+                    yield invoke()
+
+                return StreamingResponse(body())
+            return invoke()
+
+    try:
+        assert get_runtime_extensions() is default
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get("/runtime-probe")
+        assert response.status_code == 200
+        assert "blocked" in response.text
+        admission.admit.assert_called_once()
+        assert admission.admit.call_args.args[0].operation == "model_invocation"
+        provider.client.messages.create.assert_not_called()
+        assert get_runtime_extensions() is default
+    finally:
+        app.state.runtime.stop()

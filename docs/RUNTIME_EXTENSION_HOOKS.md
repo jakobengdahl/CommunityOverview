@@ -36,7 +36,10 @@ construct federation and event delivery, construct the graph service, then start
 federation and the agent registry. The binding covers all application construction
 without changing the process default. Storage receives the selected instance in
 its constructor; dispatchers and agent workers inherit it from storage, including
-workers created later in response to graph events.
+workers created later in response to graph events. ASGI execution also binds the
+selected instance for each request through response streaming, so HTTP model
+invocations use the application's admission policy. The binding is reset when
+execution exits, including on errors.
 
 Optional pre-built storage remains supported as the second positional argument or
 `graph_storage=storage`. Construct it with

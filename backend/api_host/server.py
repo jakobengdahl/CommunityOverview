@@ -70,7 +70,12 @@ from backend.federation import (
 from .config import AppConfig
 from .diagnostics import build_startup_diagnostics, emit_startup_diagnostics_log
 from .logging_config import configure_root_logging
-from .middleware import add_auth_middleware, add_cors_middleware, compute_auth_active
+from .middleware import (
+    RuntimeExtensionsMiddleware,
+    add_auth_middleware,
+    add_cors_middleware,
+    compute_auth_active,
+)
 from .mcp_mount import build_mcp_instructions, mount_mcp
 from .attachments import build_attachment_settings
 from .persistence import (
@@ -302,6 +307,9 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         version="1.0.0",
     )
 
+    app.add_middleware(
+        RuntimeExtensionsMiddleware, runtime_extensions=runtime_extensions
+    )
     install_error_handlers(app)
 
     session_settings = build_session_settings(config)
