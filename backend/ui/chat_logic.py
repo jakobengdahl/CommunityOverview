@@ -12,6 +12,7 @@ from backend.config.model_profiles import (
     resolve_profile_reference,
 )
 from backend.llm.language_policy import format_language_policy_for_prompt
+from backend.service.system_nodes import system_create_tool_definitions
 
 # Initialize logger
 logger = logging.getLogger(__name__)
@@ -416,6 +417,11 @@ TOOL USAGE GUIDELINES:
 - find_similar_nodes: For checking ONE node for duplicates
 - find_similar_nodes_batch: For checking MULTIPLE nodes at once - ALWAYS use this when extracting from documents
 - add_nodes: Only after user approval, with proper validation
+- create_agent, create_event_subscription, create_skill, create_active_knowledge_collection,
+  create_saved_view, create_collection_response: Use these dedicated tools for system
+  objects after user approval. Pass the type-specific fields inside config. create_agent
+  creates an enabled agent and its subscription together. create_saved_view persists
+  explicit node_ids and positions without a browser; save_view captures the current canvas.
 - update_node: For editing existing nodes (name, description, summary, tags)
 - delete_nodes: CAREFUL - max 10 nodes, requires confirmation=True
 - delete_edges: CAREFUL - max 50 edges, requires confirmation=True
@@ -581,7 +587,7 @@ class ChatProcessor:
         In a more advanced setup, we could inspect the functions, but
         for now we want to ensure compatibility with the existing prompts.
         """
-        return [
+        return system_create_tool_definitions() + [
             {
                 "name": "search_graph",
                 "description": "Search for nodes in the graph based on text query. Matches a node's name, description, summary, tags, subtypes, aliases and type label, for local and federated nodes alike. By default the whole query must occur verbatim, so a multi-word query that no node contains matches nothing lexically and at best returns semantic-fallback results; use match_mode='any_term' or semantic=true for such queries.",

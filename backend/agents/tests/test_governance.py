@@ -496,3 +496,108 @@ class TestWorkerPreFiltersDefinitions:
         assert "error" in result
         raw.assert_not_called()
         assert store.list_proposals() == []
+
+
+def test_approved_chain_keeps_server_causation_across_sqlite_restart(tmp_path):
+    from backend.core.events.causation import (
+        MAX_AGENT_CAUSATION_DEPTH,
+        agent_mutation_context,
+        current_agent_mutation_context,
+    )
+    from backend.service.access import build_event_context
+
+    db = tmp_path / "chain.db"
+    store = SqliteProposalStore(db)
+    observed = []
+    for depth in range(MAX_AGENT_CAUSATION_DEPTH):
+        agent_id = f"agent-{depth % 2}"
+        gate = AutonomyGate(
+            autonomy_level=AutonomyLevel.ACT_AFTER_APPROVAL,
+            tool_allowlist=None,
+            mcp_loader=FakeLoader(),
+            proposal_store=store,
+            agent_id=agent_id,
+        )
+        with agent_mutation_context(
+            agent_id,
+            {
+                "event_id": "seed",
+                "origin": {
+                    "event_causation_depth": depth,
+                    "event_correlation_id": "chain",
+                },
+            },
+        ):
+            result = gate.wrap(MagicMock())(
+                "graph.update_node",
+                {
+                    "event_causation_depth": 0,
+                    "event_origin": "spoofed",
+                },
+            )
+        store.close()
+        store = SqliteProposalStore(db)
+
+        def execute(tool, arguments):
+            context = build_event_context(target="update_node", event_origin="spoofed")
+            observed.append(context)
+            return {"success": True}
+
+        manager = GovernanceManager(store, executor_factory=lambda _: execute)
+        assert manager.approve(result["proposal_id"])["status"] == "applied"
+        assert current_agent_mutation_context() is None
+    assert [ctx.event_causation_depth for ctx in observed] == list(range(1, 9))
+    assert {ctx.event_correlation_id for ctx in observed} == {"chain"}
+    # Corrupt/exhausted persisted proposals also fail closed before any write.
+    p = store.create(
+        Proposal(
+            "agent-0",
+            "graph.update_node",
+            {},
+            AutonomyLevel.ACT_AFTER_APPROVAL,
+            causation_depth=MAX_AGENT_CAUSATION_DEPTH + 1,
+        )
+    )
+    assert manager.approve(p.id)["status"] == "apply_failed"
+    assert len(observed) == MAX_AGENT_CAUSATION_DEPTH
+    store.close()
+
+
+def test_approval_checks_live_agent_pause_before_writing():
+    from backend.agents.registry import AgentRegistry
+
+    registry = AgentRegistry.__new__(AgentRegistry)
+    registry._ensure_initialized = MagicMock()
+    registry._mcp_loader = MagicMock()
+    registry._service = MagicMock()
+    worker = AgentWorker(
+        AgentConfig(agent_id="a", name="A", enabled=True), AgentsSettings(), None
+    )
+    registry._workers = {"a": worker}
+    worker._pause_reason = "temporarily throttled"
+    store = InMemoryProposalStore()
+    proposal = store.create(
+        Proposal("a", "graph.update_node", {}, AutonomyLevel.ACT_AFTER_APPROVAL)
+    )
+    manager = GovernanceManager(store, executor_factory=registry._build_apply_executor)
+    result = manager.approve(proposal.id)
+    assert result["status"] == "apply_failed"
+    assert "paused" in result["apply_error"]
+    registry._mcp_loader.create_tool_executor.return_value.assert_not_called()
+
+
+def test_causation_schema_migrates_existing_v2_proposals(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "legacy.db"
+    store = SqliteProposalStore(db)
+    p = store.create(
+        Proposal("a", "graph.update_node", {}, AutonomyLevel.ACT_AFTER_APPROVAL)
+    )
+    store.close()
+    with sqlite3.connect(db) as conn:
+        conn.execute("ALTER TABLE proposals DROP COLUMN causation_depth")
+        conn.execute("PRAGMA user_version=2")
+    migrated = SqliteProposalStore(db)
+    assert migrated.get(p.id).causation_depth == 1
+    migrated.close()
