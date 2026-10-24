@@ -368,6 +368,25 @@ class StagedWrite:
                 self.session_id, self._expected_session_seq
             )
             return {"entries": [], "removals": [], "session_seq": seq}
+        from backend.runtime.extensions import ResourceChange, runtime_context
+
+        changes = []
+        for kind, entity_id in [
+            (entry["kind"], entry["entity_id"]) for entry in upserts
+        ] + removals:
+            main = (layer.main_node if kind == "node" else layer.main_edge)(entity_id)
+            key = (kind, entity_id)
+            changes.append(
+                ResourceChange.snapshot(
+                    kind,
+                    entity_id,
+                    compose(layer._loaded.get(key), main),
+                    compose(layer.entry(key), main),
+                )
+            )
+        self._storage.runtime_extensions.evaluate_mutation(
+            runtime_context("stage", session_id=self.session_id), changes
+        )
         store = self._manager.write_modes.layer_store
 
         staged_entries: List[Dict[str, Any]] = []
@@ -1194,6 +1213,10 @@ class SessionGate:
 def refusal_result(exc: Exception, **defaults: Any) -> Optional[Dict[str, Any]]:
     """The result a session or staging refusal answers with, or None when
     ``exc`` is not one."""
+    from backend.runtime.extensions import MutationPolicyDenied
+
+    if isinstance(exc, MutationPolicyDenied):
+        return {**defaults, "success": False, "error": exc.code, "message": str(exc)}
     if isinstance(exc, session_context.SessionRefused):
         return {**defaults, **exc.to_result()}
     if isinstance(exc, StagingRefused):

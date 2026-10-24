@@ -51,6 +51,10 @@ This means the core should prepare for:
 The default application must remain runnable without external control planes, proprietary dependencies, or distribution-specific services.
 
 ### 2. Explicit extension points
+
+The implemented mutation policy, execution admission, runtime event sink and
+external delivery adapter contracts are described in
+[Runtime extension hooks](RUNTIME_EXTENSION_HOOKS.md).
 If embedding systems or future extensions need to integrate with the core, they should do so through documented hooks, interfaces, events, APIs, or configuration contracts.
 
 ### 3. No product-roadmap leakage

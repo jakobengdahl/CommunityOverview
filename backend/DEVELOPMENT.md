@@ -86,6 +86,11 @@ hook that narrows per tenant/workspace/graph without forking the core.
 
 ### Event System & Agents
 
+Generic mutation policy, execution admission, runtime observation and external
+delivery hooks are documented in
+[Runtime extension hooks](../docs/RUNTIME_EXTENSION_HOOKS.md), including constructor
+registration, standalone defaults and failure behavior.
+
 The system includes an event-driven architecture for webhooks and AI agents:
 
 - **Event System**: Tracks graph mutations (create, update, delete) and dispatches events to subscribers.

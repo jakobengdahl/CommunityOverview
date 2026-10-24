@@ -48,6 +48,7 @@ from backend.core.storage_backends import (
     GraphWriteOutcomeUnknown,
 )
 from backend.core.storage_merge import ImportMergeUnsupported
+from backend.runtime.extensions import MutationPolicyDenied
 from backend.runtime.authorization import GRAPH_ACTION_MUTATE, GRAPH_ACTION_READ
 
 from . import access, graph_archive, graph_merge_plan
@@ -176,6 +177,8 @@ def _validate_backup_replace(
     storage: "GraphStorage",
     hook: "GraphAuthorizationHook",
     document: Any,
+    *,
+    event_context=None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[_ReplaceOutcome]]:
     """The validate -> backup -> replace half of a whole-graph import.
 
@@ -249,12 +252,16 @@ def _validate_backup_replace(
         )
 
     try:
-        storage.replace_all_nodes_and_edges(validation.nodes, validation.edges)
+        storage.replace_all_nodes_and_edges(
+            validation.nodes, validation.edges, event_context=event_context
+        )
     except Exception as exc:
         return (
             {
                 "success": False,
-                "error_code": "replace_failed",
+                "error_code": exc.code
+                if isinstance(exc, MutationPolicyDenied)
+                else "replace_failed",
                 "message": (
                     "Import failed while committing the new graph; the previous "
                     f"graph is unchanged: {exc}"
@@ -398,7 +405,17 @@ def import_graph(
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    error, outcome = _validate_backup_replace(storage, hook, document)
+    error, outcome = _validate_backup_replace(
+        storage,
+        hook,
+        document,
+        event_context=access.build_event_context(
+            target="import_graph",
+            event_origin=event_origin,
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        ),
+    )
     if error is not None:
         return error
     assert outcome is not None  # for type checkers: exactly one of the pair is set
@@ -460,7 +477,17 @@ def import_graph_archive(
             "graph_replaced": False,
         }
 
-    error, outcome = _validate_backup_replace(storage, hook, extracted.graph_document)
+    error, outcome = _validate_backup_replace(
+        storage,
+        hook,
+        extracted.graph_document,
+        event_context=access.build_event_context(
+            target="import_graph_archive",
+            event_origin=event_origin,
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        ),
+    )
     if error is not None:
         return error
     assert outcome is not None

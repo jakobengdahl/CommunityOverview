@@ -85,8 +85,11 @@ class GraphService:
         federation_manager: Optional[FederationManager] = None,
         authorization_hook: Optional[GraphAuthorizationHook] = None,
         attachment_settings: Optional[AttachmentSettings] = None,
+        runtime_extensions=None,
     ):
         self._storage = storage
+        if runtime_extensions is not None:
+            storage.runtime_extensions = runtime_extensions
         self._federation_manager = federation_manager
         self._authorization_hook = authorization_hook or DefaultGraphAuthorizationHook()
         # None leaves the node attachment routes answering

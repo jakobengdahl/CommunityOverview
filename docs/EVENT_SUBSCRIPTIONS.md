@@ -2,6 +2,10 @@
 
 This document describes the event system for graph mutation webhooks.
 
+Embedding code can replace external delivery and observe policy/loop-guard
+diagnostics through the [runtime extension hooks](RUNTIME_EXTENSION_HOOKS.md).
+Internal agent routing and default HTTP URL checks continue to apply.
+
 ## Overview
 
 The event system allows external services to receive notifications when the graph is modified. This enables:

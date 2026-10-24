@@ -12,6 +12,12 @@ import copy
 import logging
 from typing import List, Dict, Any, Optional, Callable, TYPE_CHECKING
 from datetime import datetime, timezone
+from backend.runtime.extensions import (
+    DefaultEventDeliveryAdapter,
+    DeliveryOutcome,
+    get_runtime_extensions,
+    runtime_context,
+)
 
 from .models import (
     Event,
@@ -101,6 +107,8 @@ class EventDispatcher:
         storage: "GraphStorage",
         on_deliver: Optional[Callable[[Event, str], None]] = None,
         on_agent_deliver: Optional[Callable[[Event, str], bool]] = None,
+        delivery_adapter=None,
+        on_delivery_outcome=None,
     ):
         """
         Initialize the dispatcher.
@@ -116,6 +124,11 @@ class EventDispatcher:
         self._storage = storage
         self._on_deliver = on_deliver
         self._on_agent_deliver = on_agent_deliver
+        extensions = (
+            getattr(storage, "runtime_extensions", None) or get_runtime_extensions()
+        )
+        self._delivery_adapter = delivery_adapter or extensions.event_delivery
+        self._on_delivery_outcome = on_delivery_outcome
         self._subscriptions_cache: Optional[List[Dict[str, Any]]] = None
         self._cache_time: Optional[datetime] = None
         self._cache_ttl_seconds = 30  # Refresh cache every 30 seconds
@@ -243,7 +256,7 @@ class EventDispatcher:
         Returns:
             Number of subscriptions the event was dispatched to
         """
-        if self._on_deliver is None:
+        if self._on_deliver is None and self._delivery_adapter is None:
             logger.warning("No delivery callback set, event will not be delivered")
             return 0
 
@@ -290,7 +303,9 @@ class EventDispatcher:
                         )
 
                 # Fall back to webhook delivery if not handled by agent
-                if not handled_by_agent and self._on_deliver:
+                if not handled_by_agent and (
+                    self._on_deliver or self._delivery_adapter
+                ):
                     webhook_url = sub["delivery"].webhook_url
 
                     # Prevent delivering internal agent URLs to external webhook handler
@@ -304,8 +319,42 @@ class EventDispatcher:
                         continue
 
                     try:
-                        self._on_deliver(event_copy, webhook_url)
-                        dispatch_count += 1
+                        context = runtime_context(
+                            "event_delivery",
+                            event_context=event_copy.origin,
+                            event_id=event.event_id,
+                            delivery_id=f"{sub['id']}:{event.event_id}",
+                        )
+                        adapter = self._delivery_adapter or DefaultEventDeliveryAdapter(
+                            self._on_deliver
+                        )
+                        try:
+                            outcome = adapter.deliver(
+                                copy.deepcopy(sub), event_copy, context
+                            )
+                            if not isinstance(
+                                outcome, DeliveryOutcome
+                            ) or outcome.outcome not in {
+                                "delivered",
+                                "deferred",
+                                "terminal_failure",
+                            }:
+                                raise ValueError("Invalid delivery outcome")
+                        except Exception:
+                            logger.exception("Event delivery adapter failed")
+                            outcome = DeliveryOutcome(
+                                "terminal_failure",
+                                context.delivery_id,
+                                context.correlation_id,
+                                "delivery_adapter_error",
+                            )
+                        if self._on_delivery_outcome:
+                            try:
+                                self._on_delivery_outcome(outcome)
+                            except Exception:
+                                logger.exception("Delivery outcome observer failed")
+                        if outcome.outcome != "terminal_failure":
+                            dispatch_count += 1
                         logger.info(
                             f"Dispatched event {event.event_id} ({event.event_type.value}) "
                             f"to webhook for subscription {sub['name']}"

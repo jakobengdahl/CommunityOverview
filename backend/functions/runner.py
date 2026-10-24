@@ -31,7 +31,19 @@ from pathlib import PurePosixPath
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from backend.functions import sandbox
-from backend.functions.broker import FunctionBroker, ToolCallRecord
+from backend.runtime.authorization import use_request_authorization
+from backend.runtime.extensions import (
+    AdmissionRefused,
+    bind_execution_context,
+    bind_runtime_extensions,
+    get_runtime_extensions,
+    runtime_context,
+)
+from backend.functions.broker import (
+    FunctionBroker,
+    ToolCallRecord,
+    _authorization_kwargs,
+)
 from backend.functions.protocol import (
     CODE_NO_RESULT,
     CODE_PROTOCOL_ERROR,
@@ -614,6 +626,7 @@ class FunctionRunResult:
     peak_memory_kib: Optional[int] = None
     log: str = ""
     log_truncated: bool = False
+    retry_at: Optional[float] = None
 
 
 def run_function(
@@ -623,20 +636,46 @@ def run_function(
     envelope: Dict[str, Any],
     *,
     max_output_bytes: int = MAX_OUTPUT_BYTES,
+    runtime_extensions=None,
+    attempt: int = 1,
 ) -> FunctionRunResult:
     """Execute one run: start it, serve its tool calls, terminate it."""
+    extensions = runtime_extensions or get_runtime_extensions()
+    with (
+        use_request_authorization(
+            **_authorization_kwargs(broker.context.authorization_inputs)
+        ),
+        bind_execution_context(None),
+    ):
+        context = runtime_context(
+            "user_function",
+            run_id=broker.context.run_id,
+            correlation_id=broker.context.correlation_id,
+            attempt=attempt,
+        )
+    try:
+        with bind_runtime_extensions(extensions):
+            extensions.require_admission(context)
+    except AdmissionRefused as exc:
+        return FunctionRunResult(
+            "deferred" if exc.decision.outcome == "defer" else STATUS_FAILED,
+            exc.code,
+            str(exc),
+            retry_at=exc.retry_at,
+        )
     deadline = time.monotonic() + spec.timeout_seconds
     handle = runner.start(spec)
     outcome: Optional[SessionOutcome] = None
     try:
-        outcome = run_session(
-            broker,
-            envelope,
-            reader_fd=handle.stdout_fd,
-            writer_fd=handle.stdin_fd,
-            deadline=deadline,
-            max_output_bytes=max_output_bytes,
-        )
+        with bind_execution_context(context), bind_runtime_extensions(extensions):
+            outcome = run_session(
+                broker,
+                envelope,
+                reader_fd=handle.stdout_fd,
+                writer_fd=handle.stdin_fd,
+                deadline=deadline,
+                max_output_bytes=max_output_bytes,
+            )
     finally:
         sent_result = outcome is not None and outcome.code not in (
             CODE_TIMEOUT,

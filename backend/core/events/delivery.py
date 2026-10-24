@@ -441,6 +441,8 @@ class DeliveryWorker:
                 )
                 if self._on_result:
                     result = DeliveryResult(
+                        delivery_id=f"{event.subscription.id if event.subscription else ''}:{event.event_id}",
+                        correlation_id=event.origin.event_correlation_id or "",
                         event_id=event.event_id,
                         subscription_id=event.subscription.id
                         if event.subscription
@@ -474,6 +476,8 @@ class DeliveryWorker:
             if response.status_code >= 200 and response.status_code < 300:
                 # Success
                 result = DeliveryResult(
+                    delivery_id=f"{event.subscription.id if event.subscription else ''}:{event.event_id}",
+                    correlation_id=event.origin.event_correlation_id or "",
                     event_id=event.event_id,
                     subscription_id=event.subscription.id if event.subscription else "",
                     webhook_url=webhook_url,
@@ -504,6 +508,8 @@ class DeliveryWorker:
             )
             if self._on_result:
                 result = DeliveryResult(
+                    delivery_id=f"{event.subscription.id if event.subscription else ''}:{event.event_id}",
+                    correlation_id=event.origin.event_correlation_id or "",
                     event_id=event.event_id,
                     subscription_id=event.subscription.id if event.subscription else "",
                     webhook_url=webhook_url,
@@ -525,6 +531,8 @@ class DeliveryWorker:
             )
             if self._on_result:
                 result = DeliveryResult(
+                    delivery_id=f"{event.subscription.id if event.subscription else ''}:{event.event_id}",
+                    correlation_id=event.origin.event_correlation_id or "",
                     event_id=event.event_id,
                     subscription_id=event.subscription.id if event.subscription else "",
                     webhook_url=webhook_url,
@@ -651,6 +659,8 @@ class DeliveryWorker:
             # Report retrying status
             if self._on_result:
                 result = DeliveryResult(
+                    delivery_id=f"{event.subscription.id if event.subscription else ''}:{event.event_id}",
+                    correlation_id=event.origin.event_correlation_id or "",
                     event_id=event.event_id,
                     subscription_id=event.subscription.id if event.subscription else "",
                     webhook_url=webhook_url,
@@ -686,6 +696,8 @@ class DeliveryWorker:
             # Report dropped status
             if self._on_result:
                 result = DeliveryResult(
+                    delivery_id=f"{event.subscription.id if event.subscription else ''}:{event.event_id}",
+                    correlation_id=event.origin.event_correlation_id or "",
                     event_id=event.event_id,
                     subscription_id=event.subscription.id if event.subscription else "",
                     webhook_url=webhook_url,
