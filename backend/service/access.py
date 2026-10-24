@@ -19,6 +19,7 @@ from backend.core import (
     GraphStats,
     Node,
 )
+from backend.core.events.causation import current_agent_mutation_context
 from backend.runtime.authorization import (
     GRAPH_ACTION_READ,
     GraphAccessNarrowing,
@@ -325,6 +326,11 @@ def build_event_context(
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
 ) -> Optional[EventContext]:
+    agent_context = current_agent_mutation_context()
+    if agent_context is not None:
+        # Agent tool arguments cannot reset the inherited chain or impersonate a user.
+        event_origin = agent_context.event_origin
+        event_correlation_id = agent_context.event_correlation_id
     attribution = build_mutation_attribution(target=target)
     if not any((event_origin, event_session_id, event_correlation_id, attribution)):
         return None
@@ -333,6 +339,9 @@ def build_event_context(
         event_session_id=event_session_id,
         event_correlation_id=event_correlation_id,
         attribution=attribution,
+        event_causation_depth=agent_context.event_causation_depth
+        if agent_context
+        else 0,
     )
 
 

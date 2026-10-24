@@ -69,7 +69,10 @@ def main_endpoint_shown(
     and was when the base was taken. Neither the main edge nor the base keeps
     a copy of its endpoints, so one main no longer holds counts as hidden,
     and so does one written after the base: it may have entered the view
-    since (revisions are graph-wide)."""
+    since (revisions are graph-wide). This deliberately over-hides after an
+    unrelated endpoint edit, including every later write to a revision-0
+    endpoint of a legacy base. The caller also applies this conservative
+    cutoff to the current main edge's endpoints."""
     node = storage.get_node(node_id) if isinstance(node_id, str) else None
     if node is None or not doc_visible(_doc(node), narrowing):
         return False
@@ -588,7 +591,7 @@ def _state(entry: Dict[str, Any], main_doc: Optional[Dict[str, Any]]) -> str:
 
 
 # The keys a composing read's result carries entities under.
-_NODE_LISTS = ("nodes",)
+_NODE_LISTS = ("nodes", "views")
 _EDGE_LISTS = ("edges",)
 
 
