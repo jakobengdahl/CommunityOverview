@@ -97,6 +97,7 @@ from backend.runtime.authorization import (
 )
 from . import access, graph_merge_plan
 from .service import GraphService
+from .system_nodes import SYSTEM_CREATE_MODELS, make_system_create_tools
 
 # Server-owned session state records node x/y but not rendered node dimensions
 # (design §3.8: the browser no longer uploads canvas geometry). Agents still need
@@ -149,6 +150,7 @@ _UNDELIVERED_PUSH_REMEDY = (
 # tool refuses a session with `session_not_supported`.
 _STAGING_TOOLS = frozenset(
     {
+        *SYSTEM_CREATE_MODELS,
         "add_nodes",
         "update_node",
         "delete_nodes",
@@ -228,7 +230,7 @@ def _message_session(request) -> Optional[str]:
 def _session_aware(
     func: Callable,
     is_retired: Callable[[str], bool],
-    staged_status,
+    is_staged: Callable[[str], bool],
     message_request: Callable[[], Tuple[bool, Any]] = lambda: (False, None),
     sessions_unreadable: Callable[[], bool] = lambda: False,
 ):
@@ -244,7 +246,8 @@ def _session_aware(
     The three read tools already took `visualization_session_id` as a push
     target before sessions could stage, and a push may go to a session with no
     stored state yet. So on them the argument binds the session only when it
-    names a staged-session record; otherwise it stays a push target.
+    names a staged-session record or a document whose mode is staged;
+    otherwise it stays a push target.
     """
     name = func.__name__
     params = inspect.signature(func).parameters
@@ -280,12 +283,7 @@ def _session_aware(
             # reading it as none would turn a staged write into a direct one.
             raise session_context.not_found(named)
         session = session_context.reconcile(bound, named)
-        if (
-            name in _PUSHING_TOOLS
-            and bound is None
-            and named
-            and staged_status(named) == layer_store.STATUS_NONE
-        ):
+        if name in _PUSHING_TOOLS and bound is None and named and not is_staged(named):
             return func(*args, **kwargs)
         with session_context.bind_session(session):
             return func(*args, **kwargs)
@@ -551,7 +549,7 @@ def register_mcp_tools(
         wrapped = _session_aware(
             func,
             lambda sid: _staged_status(sid) == layer_store.STATUS_RETIRED,
-            _staged_status,
+            service.session_gate.is_staged,
             lambda: _message_request(mcp),
             _sessions_unreadable,
         )
@@ -714,7 +712,7 @@ def register_mcp_tools(
         _session_aware(
             show_graph_widget,
             lambda sid: _staged_status(sid) == layer_store.STATUS_RETIRED,
-            _staged_status,
+            service.session_gate.is_staged,
             lambda: _message_request(mcp),
             _sessions_unreadable,
         )
@@ -859,6 +857,9 @@ def register_mcp_tools(
         )
 
     # ==================== CRUD Tools ====================
+
+    for create_tool in make_system_create_tools(service, event_origin="mcp").values():
+        register_tool(create_tool)
 
     @register_tool
     def add_nodes(

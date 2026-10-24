@@ -448,11 +448,10 @@ class PostgresGraphPersistenceBackend:
 
         An exact match on the two catalog columns, not `to_regclass`: that
         function *parses* its argument as an SQL name, so it case-folds an
-        unquoted part and splits on a dot. It answers "missing" for a table
-        that exists under a mixed-case schema - dropping this guard for
-        exactly the least-privilege role it was written for - and raises
-        outright on a schema name containing a dot. The schema guard below
-        matches `pg_namespace.nspname` for the same reason.
+        unquoted part. It answers "missing" for a table that exists under a
+        mixed-case schema - dropping this guard for exactly the least-privilege
+        role it was written for. The schema guard below matches
+        `pg_namespace.nspname` for the same reason.
         """
         if conn.execute(
             "SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"

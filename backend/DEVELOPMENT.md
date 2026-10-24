@@ -116,7 +116,9 @@ NetworkX graph, the searchable-text cache and the vector index — without a
 restart, emitting the ordinary events with `event_origin: external-change`.
 A fourth, `store_traversal`, is the backend saying it can answer a
 neighbourhood traversal itself: `get_related_nodes` asks the store instead of
-walking the in-memory graph. The store is used only while it is current —
+walking the in-memory graph. Narrowed reads use the in-memory walk so each
+hop enforces node visibility; hidden nodes cannot connect visible results.
+The store is used only while it is current —
 every write landed, no resync owed — and the in-memory walk remains the
 reference and the fallback, so the graph is still loaded into memory today;
 what this moves is which copy answers a traversal, which is the step a
@@ -889,6 +891,10 @@ read that finds one missing; those vectors live in memory on the instance and
 are never written to the main index. `search_graph`, `get_related_nodes` and
 `get_saved_view` still treat a `visualization_session_id` naming no staged
 session as a push target only.
+An id whose session document still says `staged` is bound even if its staged
+record or layer store is missing, so the read returns the session refusal.
+`GET /api/views` and `list_saved_views` summaries include the saved-view node's
+`id`, and in a composing read its `staged_state`.
 
 Any other route or tool refuses the header (or argument) with
 `400 session_not_supported`. A write may carry `expected_session_seq`; it holds
@@ -1108,20 +1114,34 @@ can configure one. See `docs/EVENT_SUBSCRIPTIONS.md`.
 
 ### MCP Tools
 
+The six dedicated system-node create tools below are also exposed to the built-in
+assistant. Each takes a typed `config` object, uses the UI's `add_nodes` mutation
+authorization, and returns `created_node_id` on success. They accept
+`visualization_session_id` and `expected_session_seq` for staged sessions; linked
+nodes are staged together and only become active after merge. The existing
+generic mutation tools remain available for editing and legacy configurations.
+
 | Tool Name | Description |
 |-----------|-------------|
 | `search_graph` | Search nodes by query |
 | `show_graph_widget` | Same search, returned with an MCP Apps UI link (`_meta.ui.resourceUri` → `ui://community-graph/graph-widget.html`) so Claude/ChatGPT render the interactive widget; MCP only, not in the chat/REST tool map |
 | `get_node_details` | Get full details for a node |
-| `get_related_nodes` | Get nodes connected to a node |
+| `get_related_nodes` | Get nodes connected through visible nodes only |
+| `list_saved_views` | List saved-view summaries with node IDs and, in staged sessions, staged state |
 | `find_similar_nodes` | Find nodes with similar names |
 | `add_nodes` | Add new nodes and edges |
+| `create_agent` | Create an Agent (enabled by default) plus its internal EventSubscription and relationship |
+| `create_event_subscription` | Create a subscription with validated filters and a public HTTP(S) delivery URL |
+| `create_skill` | Create a Skill with nonempty content and when-to-use instructions |
+| `create_active_knowledge_collection` | Create a collection with a validated, unique kiosk short name |
+| `create_saved_view` | Persist a SavedView from explicit node IDs and positions, including for headless clients |
+| `create_collection_response` | Persist answers and link the response to its collection by ID |
 | `update_node` | Update node properties |
 | `delete_nodes` | Delete nodes by ID |
 | `archive_nodes` / `unarchive_nodes` | Hide/restore nodes via the `archived` flag (see Archived lifecycle) |
 | `archive_edges` / `unarchive_edges` | Hide/restore edges via the `archived` flag |
 | `get_graph_stats` | Get graph statistics |
-| `save_view` | Save a named view (creates SavedView node) |
+| `save_view` | Ask a connected frontend to capture and save its current canvas |
 | `connect_to_visualization_session` | Check that a session id resolves, and how many clients are watching it (`connected_clients`) |
 | `get_visualization_session_state` | Read a session's visible and selected node ids. `node_count` counts every node the session references, hidden ones included (the same meaning as in `get_visualization_layout`, `add_nodes_to_session` and the session resource); `visible_node_count` counts `visible_node_ids` only |
 | `clear_visualization` | Clear the canvas in the browsers displaying a session (refuses unless a client is on the op stream or draining the legacy push channel; a leftover registry entry does not count, see below) |
