@@ -10,9 +10,25 @@ from unittest.mock import Mock, call
 import pytest
 
 from backend.functions import runner as runner_module
+from backend.functions.broker import BrokerContext
 from backend.functions.protocol import SessionOutcome
 from backend.functions.runner import HardenedSubprocessRunner, RunHandle, RunSpec
 from backend.functions.tests.test_runner import execute, handler
+
+
+@pytest.fixture
+def lifecycle_broker():
+    return SimpleNamespace(
+        context=BrokerContext(
+            run_id="r",
+            function_id="lifecycle",
+            function_version="1",
+            declared_grants=frozenset(),
+            correlation_id="corr-lifecycle",
+            authorization_inputs={},
+            grant_enabled=lambda grant: False,
+        )
+    )
 
 
 @pytest.mark.parametrize("multiarch", [None, "fixture-linux-gnu"])
@@ -299,7 +315,9 @@ def test_log_reader_keeps_exactly_the_limit_and_marks_only_excess_bytes(
     ],
 )
 @pytest.mark.parametrize("exits", [False, True])
-def test_run_function_allows_grace_only_after_a_result(monkeypatch, code, exits):
+def test_run_function_allows_grace_only_after_a_result(
+    monkeypatch, code, exits, lifecycle_broker
+):
     handle = Mock(stdin_fd=10, stdout_fd=11)
     handle.exited_within.return_value = exits
     runner = Mock()
@@ -310,7 +328,7 @@ def test_run_function_allows_grace_only_after_a_result(monkeypatch, code, exits)
     result_for = Mock()
     monkeypatch.setattr(runner_module, "_result_for", result_for)
     spec = RunSpec("r", "python", "main.py", {"main.py": b""})
-    broker, envelope = object(), {"schema_version": "1.0"}
+    broker, envelope = lifecycle_broker, {"schema_version": "1.0"}
     assert (
         runner_module.run_function(runner, spec, broker, envelope)
         is result_for.return_value
@@ -326,7 +344,9 @@ def test_run_function_allows_grace_only_after_a_result(monkeypatch, code, exits)
     result_for.assert_called_once_with(outcome, handle.wait.return_value, broker)
 
 
-def test_run_function_still_kills_and_waits_when_the_session_raises(monkeypatch):
+def test_run_function_still_kills_and_waits_when_the_session_raises(
+    monkeypatch, lifecycle_broker
+):
     handle = Mock()
     runner = Mock()
     runner.start.return_value = handle
@@ -335,7 +355,7 @@ def test_run_function_still_kills_and_waits_when_the_session_raises(monkeypatch)
     )
     with pytest.raises(RuntimeError, match="session failed"):
         runner_module.run_function(
-            runner, RunSpec("r", "python", "main.py", {}), object(), {}
+            runner, RunSpec("r", "python", "main.py", {}), lifecycle_broker, {}
         )
     assert handle.mock_calls == [call.close_input(), call.kill(), call.wait()]
 
