@@ -10,7 +10,10 @@ test_entity_revisions_postgres.py.
 from __future__ import annotations
 
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from typing import Any, Dict, List
+from unittest.mock import Mock
 
 import pytest
 
@@ -23,12 +26,31 @@ from backend.core import (
     capabilities_of,
 )
 from backend.core.events.models import EventType
+from backend.core.models import AddNodesResult
+from backend.core.storage_backends import (
+    FileGraphPersistenceBackend,
+    GraphWriteFailed,
+    GraphWriteOutcomeUnknown,
+    WriteRefusedByStore,
+)
 from backend.runtime.authorization import DefaultGraphAuthorizationHook
 from backend.service import mutations
 
 
 def _node(node_id: str, **fields: Any) -> Node:
     return Node(id=node_id, type="Actor", name=fields.pop("name", node_id), **fields)
+
+
+@pytest.fixture(autouse=True)
+def no_embedding_model(monkeypatch):
+    # Revision tests use supplied vectors where needed; never load an ML
+    # model or contact a model registry just to exercise persistence.
+    def unavailable():
+        raise RuntimeError("embedding model unavailable in revision tests")
+
+    monkeypatch.setattr(
+        "backend.core.vector_store._ensure_sentence_transformers", unavailable
+    )
 
 
 @pytest.fixture
@@ -132,6 +154,116 @@ def test_a_matching_expectation_applies_and_waits_for_the_store(make_storage):
     journal = (storage.json_path.parent / "graph.journal.ndjson").read_text()
     assert '"ok"' in journal
     assert storage.nodes["a"].revision > current
+
+
+@pytest.mark.parametrize("expecting", [False, True])
+def test_only_an_expected_file_write_waits_and_surfaces_a_failed_persist(
+    make_storage, monkeypatch, expecting
+):
+    storage = make_storage()
+    storage.add_nodes([_node("a")], [])
+    storage.flush()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def fail_incremental(payload):
+        entered.set()
+        assert release.wait(5), "test did not release the blocked write"
+        raise OSError("journal unavailable")
+
+    def fail_snapshot(data):
+        raise OSError("snapshot unavailable")
+
+    # Both persistence paths fail: an expected write must report the failed
+    # healing snapshot too, while an ordinary write returns before either.
+    with monkeypatch.context() as patch:
+        patch.setattr(storage._persistence_backend, "upsert_node", fail_incremental)
+        patch.setattr(storage._persistence_backend, "save_graph_data", fail_snapshot)
+        with ThreadPoolExecutor(max_workers=1) as caller:
+            write = caller.submit(
+                storage.update_node,
+                "a",
+                {"name": "changed"},
+                expected_revision=storage.nodes["a"].revision if expecting else None,
+            )
+            try:
+                assert entered.wait(5), "write did not reach persistence"
+                if expecting:
+                    with pytest.raises(TimeoutError):
+                        write.result(timeout=0.1)
+                else:
+                    assert write.result(timeout=5).name == "changed"
+                release.set()
+                if expecting:
+                    with pytest.raises(OSError, match="snapshot unavailable"):
+                        write.result(timeout=5)
+            finally:
+                release.set()
+        storage._io_executor.submit(lambda: None).result(timeout=5)
+
+    storage.flush()
+    assert json.loads(storage.json_path.read_text())["nodes"][0]["name"] == "changed"
+
+
+def test_a_refused_node_delete_restores_its_vector(make_storage, monkeypatch):
+    storage = make_storage()
+    vector = [0.25, 0.5]
+    storage.add_nodes(
+        [_node("a", embedding=vector), _node("b", embedding=[0.5, 0.25])],
+        [Edge(id="e", source="a", target="b")],
+    )
+    storage.flush()
+    before = _snapshot(storage)
+    events = _events(storage)
+
+    def refuse(operations, write_token=None):
+        assert not storage.vector_store.has_embedding("a")
+        raise WriteRefusedByStore("delete refused")
+
+    monkeypatch.setattr(storage, "_store_assigns_revisions", True)
+    monkeypatch.setattr(storage._persistence_backend, "apply_batch", refuse)
+    with pytest.raises(GraphWriteFailed):
+        storage.delete_nodes(["a"], confirmed=True)
+
+    assert _snapshot(storage) == before
+    assert storage.graph.has_edge("a", "b", key="e")
+    assert storage.vector_store.get_vector_list("a") == pytest.approx(vector)
+    assert events == []
+
+
+@pytest.mark.parametrize("second_read", ["unchanged", "changed", "unreadable"])
+def test_a_failed_shared_write_is_undone_only_after_two_unchanged_readings(
+    make_storage, monkeypatch, second_read
+):
+    storage = make_storage()
+    storage.add_nodes([_node("a")], [])
+    storage.flush()
+    revision = storage.nodes["a"].revision
+    reads = []
+
+    def fail(operations, write_token=None):
+        raise OSError("acknowledgement lost")
+
+    def evidence(keys):
+        reads.append(list(keys))
+        if len(reads) == 2:
+            if second_read == "unreadable":
+                raise OSError("store unavailable")
+            if second_read == "changed":
+                return {("node", "a"): (revision + 1, "another-write")}
+        return {("node", "a"): (revision, None)}
+
+    monkeypatch.setattr(storage, "_store_assigns_revisions", True)
+    monkeypatch.setattr(storage, "WRITE_RESOLVE_DELAY_SECONDS", 0)
+    monkeypatch.setattr(storage._persistence_backend, "apply_batch", fail)
+    monkeypatch.setattr(
+        storage._persistence_backend, "read_write_evidence", evidence, raising=False
+    )
+    error = GraphWriteFailed if second_read == "unchanged" else GraphWriteOutcomeUnknown
+    with pytest.raises(error):
+        storage.update_node("a", {"name": "changed"})
+    assert reads == [[("node", "a")], [("node", "a")]]
+    assert storage.nodes["a"].name == "a"
 
 
 def test_an_expectation_on_an_absent_entity_is_a_conflict_not_a_miss(make_storage):
@@ -239,6 +371,92 @@ def test_a_legacy_entity_reads_as_zero_and_its_first_write_stamps_it(tmp_path):
         storage.flush()
 
 
+@pytest.mark.parametrize("highest_kind", ["node", "edge"])
+def test_a_file_without_a_reservation_resumes_above_its_highest_revision(
+    make_storage, tmp_path, highest_kind
+):
+    highest = 73
+    (tmp_path / "graph.json").write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    _node(
+                        "a", revision=highest if highest_kind == "node" else 1
+                    ).to_dict()
+                ],
+                "edges": [
+                    Edge(
+                        id="e",
+                        source="a",
+                        target="a",
+                        revision=highest if highest_kind == "edge" else 1,
+                    ).to_dict()
+                ],
+                "metadata": {"graph_name": "g"},
+            }
+        )
+    )
+    storage = make_storage()
+    storage.add_nodes([_node("new")], [])
+    assert storage.nodes["new"].revision > highest
+
+
+def test_reservations_are_written_once_per_block_and_skipped_with_headroom(
+    make_storage, tmp_path, monkeypatch
+):
+    (tmp_path / "graph.json").write_text(
+        json.dumps({"nodes": [], "edges": [], "metadata": {}})
+    )
+    reserved = []
+    reserve = FileGraphPersistenceBackend.reserve_revisions
+
+    def record(backend, ceiling):
+        reserved.append(ceiling)
+        return reserve(backend, ceiling)
+
+    monkeypatch.setattr(GraphStorage, "REVISION_RESERVATION_BLOCK", 3)
+    monkeypatch.setattr(FileGraphPersistenceBackend, "reserve_revisions", record)
+    storage = make_storage(block=3)
+    assert reserved == [4], "load must reserve ahead once"
+    with storage._lock:
+        storage._reserve_ahead()
+    assert reserved == [4], "headroom must not be reserved again"
+    for index in range(1, 9):
+        storage.add_nodes([_node(f"n{index}")], [])
+        assert reserved == ([4] if index < 4 else [4, 8] if index < 8 else [4, 8, 12])
+
+
+@pytest.mark.parametrize("action", ["delete", "archive"])
+def test_bulk_edge_expectations_are_checked_before_any_edge_changes(
+    make_storage, action
+):
+    storage = make_storage()
+    storage.add_nodes(
+        [_node("a")],
+        [Edge(id="e", source="a", target="a"), Edge(id="f", source="a", target="a")],
+    )
+    before = _snapshot(storage)
+    events = _events(storage)
+    expected = {"e": storage.edges["e"].revision, "f": storage.edges["f"].revision + 1}
+    with pytest.raises(EntityRevisionConflict) as refused:
+        if action == "delete":
+            storage.delete_edges(["e", "f"], expected_revisions=expected)
+        else:
+            storage.set_edges_archived(["e", "f"], True, expected_revisions=expected)
+    assert refused.value.entity_id == "f"
+    assert _snapshot(storage) == before
+    assert events == []
+
+    expected["f"] = storage.edges["f"].revision
+    if action == "delete":
+        assert storage.delete_edges(["e", "f"], expected_revisions=expected).success
+        assert not storage.edges
+    else:
+        storage.set_edges_archived(["e", "f"], True, expected_revisions=expected)
+        assert all(edge.archived for edge in storage.edges.values())
+        assert all(edge.revision > expected[edge.id] for edge in storage.edges.values())
+
+
 def test_replacing_the_graph_restamps_every_entity_above_what_was_held(make_storage):
     storage = make_storage()
     storage.add_nodes([_node("a"), _node("b")], [Edge(id="e", source="a", target="b")])
@@ -264,31 +482,73 @@ def test_the_journal_never_carries_an_expectation(make_storage):
             assert set(op) == {"kind", "action", "entity_id", "payload"}
 
 
-def test_a_plain_create_on_a_single_writer_store_carries_no_expectation(
-    make_storage,
+@pytest.mark.parametrize("kind", ["node", "edge"])
+@pytest.mark.parametrize("expect_absent", [False, True])
+def test_a_single_writer_create_waits_only_when_it_carries_an_expectation(
+    make_storage, monkeypatch, kind, expect_absent
 ):
     # The shared store's refusal of an unseen id is not this store's: here
     # the instance's own model is the whole graph, and a plain create stays
     # the fire-and-forget write it always was.
     storage = make_storage()
+    storage.add_nodes([_node("a"), _node("b")], [])
     sent: List[Any] = []
+    futures: List[Any] = []
     persist = storage._persist
 
     def spy(operations):
-        sent.append(list(operations))
-        return persist(operations)
+        sent.extend(operations)
+        future = Mock(wraps=persist(operations))
+        futures.append(future)
+        return future
 
-    storage._persist = spy  # type: ignore[method-assign]
-    storage.add_nodes([_node("a")], [Edge(id="e", source="a", target="a")])
-    storage.add_nodes([_node("b")], [], expect_absent=True)
-    storage.add_edge(Edge(id="f", source="a", target="b"))
-    storage.add_edge(Edge(id="g", source="b", target="a"), expect_absent=True)
+    monkeypatch.setattr(storage, "_persist", spy)
+    if kind == "node":
+        result = storage.add_nodes(
+            [_node("c")],
+            [Edge(id="e", source="c", target="a")],
+            expect_absent=expect_absent,
+        )
+        assert result.success
+        expected_entities = {("node", "c"), ("edge", "e")}
+    else:
+        result = storage.add_edge(
+            Edge(id="e", source="a", target="b"), expect_absent=expect_absent
+        )
+        assert result == "e"
+        expected_entities = {("edge", "e")}
 
-    plain, expecting, plain_edge, expecting_edge = sent
-    assert [op.expect_absent for op in plain] == [False, False]
-    assert [op.expect_absent for op in expecting] == [True]
-    assert [op.expect_absent for op in plain_edge] == [False]
-    assert [op.expect_absent for op in expecting_edge] == [True]
+    assert {(op.kind, op.entity_id) for op in sent} == expected_entities
+    assert all(op.expect_absent is expect_absent for op in sent)
+    assert any(future.result.called for future in futures) is expect_absent
+
+
+@pytest.mark.parametrize("failure", ["duplicate_node", "duplicate_edge"])
+def test_a_locally_failing_batch_keeps_landed_nodes_when_persistence_raises(
+    make_storage, monkeypatch, failure
+):
+    storage = make_storage()
+    storage.add_nodes(
+        [_node("held")], [Edge(id="held_edge", source="held", target="held")]
+    )
+    commit = Mock(side_effect=RuntimeError("executor shut down"))
+    monkeypatch.setattr(storage, "_commit", commit)
+    nodes = [_node("new")]
+    edges = []
+    if failure == "duplicate_node":
+        nodes.append(_node("held"))
+    else:
+        edges.append(Edge(id="held_edge", source="new", target="held"))
+
+    result = storage.add_nodes(nodes, edges)
+
+    assert isinstance(result, AddNodesResult)
+    assert result.success is False
+    assert "already exists" in result.message
+    assert result.added_node_ids == [] and result.added_edge_ids == []
+    assert result.landed_node_ids == ["new"]
+    assert storage.nodes["new"] is nodes[0]
+    commit.assert_called_once()
 
 
 def test_a_backend_declaring_revision_enforcement_must_implement_it():
@@ -380,18 +640,31 @@ def test_a_shared_store_without_enforcement_never_persists_a_reservation():
         storage.shutdown_events()
 
 
-def test_a_create_conflict_never_reports_the_taken_entitys_revision(make_storage):
+@pytest.mark.parametrize("staged", [False, True])
+def test_a_create_conflict_never_reports_the_taken_entitys_revision(
+    make_storage, staged
+):
     storage = make_storage()
     storage.add_nodes([_node("taken")], [])
+    staging = None
+    if staged:
+        staging = Mock()
+        staging.add_nodes.side_effect = EntityRevisionConflict(
+            "node", "taken", None, storage.nodes["taken"].revision
+        )
     result = mutations.add_nodes(
         storage,
         DefaultGraphAuthorizationHook(),
         [{"id": "taken", "type": "Actor", "name": "again"}],
         [],
         expect_absent=True,
+        staging=staging,
     )
+    assert result["success"] is False
     assert result["error"] == "entity_revision_conflict"
     assert result["current_revision"] is None
+    assert result["message"] == "node 'taken' already exists"
+    assert result["added_node_ids"] == [] and result["added_edge_ids"] == []
     assert str(storage.nodes["taken"].revision) not in result["message"]
 
 

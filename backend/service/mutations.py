@@ -220,13 +220,7 @@ def add_nodes(
                 graph_access=decision.graph_access,
             )
         except EntityRevisionConflict as e:
-            return write_error_result(
-                EntityRevisionConflict(e.kind, e.entity_id, None, None),
-                message=f"{e.kind} {e.entity_id!r} already exists",
-                current_revision=None,
-                added_node_ids=[],
-                added_edge_ids=[],
-            )
+            return _create_conflict_result(e, added_node_ids=[], added_edge_ids=[])
 
     event_context = access.build_event_context(
         target="add_nodes",
@@ -970,13 +964,21 @@ def adopt_federated_node(
 
     if not create_new_copy:
         if staging is not None:
-            already = staging.find_adopted(source_node.id)
+            already = staging.find_adopted(source_node.id, decision.graph_access)
             adopted_nodes = [already] if already is not None else []
         else:
             adopted_nodes = list(storage.nodes.values())
         for local_node in adopted_nodes:
             adopted_from = (local_node.metadata or {}).get("adopted_from") or {}
             if adopted_from.get("federated_node_id") == source_node.id:
+                if not access.is_node_visible(local_node, decision.graph_access):
+                    return {
+                        "success": False,
+                        "error": "not_found",
+                        "message": "Local adopted node not found",
+                        "added_node_ids": [],
+                        "added_edge_ids": [],
+                    }
                 return {
                     "success": True,
                     "message": "Federated node already adopted",

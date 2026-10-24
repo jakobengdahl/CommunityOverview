@@ -5,6 +5,7 @@ session's writes never reach the graph.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 import uuid
@@ -143,11 +144,25 @@ def test_a_composing_read_in_a_staged_session_answers_from_the_composed_view(
     client,
 ):
     sid = _staged(client)
-    _add(client, {SESSION_ID_HEADER: sid}, node_id="staged-only")
-    composed = client.post(
-        "/api/search", headers={SESSION_ID_HEADER: sid}, json={"query": "staged-only"}
+    client.post(
+        "/api/nodes",
+        headers={SESSION_ID_HEADER: sid},
+        json={
+            "nodes": [
+                {
+                    "id": "staged-only",
+                    "type": "Actor",
+                    "name": "staged-only",
+                    "tags": ["staged-only"],
+                }
+            ],
+            "edges": [],
+        },
     )
-    plain = client.post("/api/search", json={"query": "staged-only"})
+    # Keep semantic fallback from returning unrelated fixture nodes.
+    query = {"query": "staged-only", "tags_all": ["staged-only"]}
+    composed = client.post("/api/search", headers={SESSION_ID_HEADER: sid}, json=query)
+    plain = client.post("/api/search", json=query)
     assert composed.status_code == 200
     assert [(n["id"], n["staged_state"]) for n in composed.json()["nodes"]] == [
         ("staged-only", "created")
@@ -426,6 +441,121 @@ def test_an_mcp_connection_opened_in_a_session_stays_in_it(transport):
     store = transport.app.state.write_modes.layer_store
     assert [e["entity_id"] for e in store.load_layer(staged)] == ["p1"]
     assert store.load_layer(other) == []
+
+
+@pytest.mark.asyncio
+async def test_an_sse_mcp_connection_opened_in_a_session_stays_in_it(client):
+    import httpx
+
+    manager = client.app.state.session_manager
+    staged = manager.create_session("bound", "staged").id
+    other = manager.create_session("other", "staged").id
+    events = asyncio.Queue()
+    disconnect = asyncio.Event()
+    pending = b""
+
+    async def receive():
+        await disconnect.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        nonlocal pending
+        if message["type"] == "http.response.start":
+            assert message["status"] == 200
+        if message["type"] != "http.response.body":
+            return
+        pending += message.get("body", b"")
+        while b"\r\n\r\n" in pending:
+            event, pending = pending.split(b"\r\n\r\n", 1)
+            fields = dict(
+                line.split(": ", 1)
+                for line in event.decode().splitlines()
+                if ": " in line
+            )
+            if "event" in fields:
+                events.put_nowait((fields["event"], fields["data"]))
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/mcp/sse",
+        "raw_path": b"/mcp/sse",
+        "root_path": "",
+        "query_string": b"",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"accept", b"text/event-stream"),
+            (SESSION_ID_HEADER.encode(), staged.encode()),
+        ],
+        "client": ("127.0.0.1", 1234),
+        "server": ("testserver", 80),
+    }
+    stream = asyncio.create_task(client.app(scope, receive, send))
+    try:
+        event, endpoint = await asyncio.wait_for(events.get(), 5)
+        assert event == "endpoint"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=client.app), base_url="http://testserver"
+        ) as connection:
+
+            async def rpc(method, params, rpc_id=None, session=staged):
+                payload = {"jsonrpc": "2.0", "method": method, "params": params}
+                if rpc_id is not None:
+                    payload["id"] = rpc_id
+                headers = {SESSION_ID_HEADER: session} if session else {}
+                response = await connection.post(
+                    endpoint, json=payload, headers=headers
+                )
+                assert response.status_code == 202, response.text
+                if rpc_id is None:
+                    return None
+                event, data = await asyncio.wait_for(events.get(), 5)
+                assert event == "message"
+                assert json.loads(data)["id"] == rpc_id
+                return data
+
+            await rpc(
+                "initialize",
+                {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": {"name": "t", "version": "1"},
+                },
+                1,
+            )
+            await rpc("notifications/initialized", {})
+            for rpc_id, session in ((2, staged), (3, other), (4, None)):
+                result = await rpc(
+                    "tools/call",
+                    {
+                        "name": "add_nodes",
+                        "arguments": {
+                            "nodes": [
+                                {"id": f"sse{rpc_id}", "type": "Actor", "name": "SSE"}
+                            ],
+                            "edges": [],
+                        },
+                    },
+                    rpc_id,
+                    session,
+                )
+                if rpc_id == 2:
+                    content = json.loads(result)["result"]["content"][0]["text"]
+                    assert json.loads(content)["staged"] is True
+                else:
+                    assert "session_mismatch" in result
+                    assert staged not in result
+                assert _node(client, f"sse{rpc_id}") is None
+        store = client.app.state.write_modes.layer_store
+        assert [e["entity_id"] for e in store.load_layer(staged)] == ["sse2"]
+        assert store.load_layer(other) == []
+    finally:
+        stream.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(stream, 5)
 
 
 def test_a_retired_session_path_answers_byte_for_byte_like_an_unknown_one(client):

@@ -115,10 +115,13 @@ export function useSharedSession({
   );
 
   const loadSessionFromServer = useCallback(
-    async (targetId, { eagerConnect = false, onMissing = null } = {}) => {
+    async (targetId, { eagerConnect = false, onMissing = null, isStale = () => false } = {}) => {
       try {
         const payload = await api.getSession(targetId, { resolve: true });
+        // Adopt the mode even from a stale reply: it is a fact about targetId,
+        // and adoption never downgrades a session known staged.
         onSessionPayload?.(targetId, payload);
+        if (isStale()) return;
         // Compute the sync baseline before touching the canvas: it runs the same
         // annotation-transform logic applyServerSession does internally, and
         // applyServerSession itself validates the resolved shape before its first
@@ -141,9 +144,10 @@ export function useSharedSession({
           console.error('Error connecting sync client:', syncError);
         }
       } catch (error) {
+        if (error?.status === 404) onSessionPayload?.(targetId, null);
+        if (isStale()) return;
         // Session does not exist server-side yet — new / not-yet-saved share URL.
         if (error?.status === 404) {
-          onSessionPayload?.(targetId, null);
           clearVisualization();
           // Switching into a brand-new / empty session is still a session switch:
           // reset the carried-over UI state just as the loaded-content path does.

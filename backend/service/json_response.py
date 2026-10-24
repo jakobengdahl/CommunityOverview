@@ -192,9 +192,7 @@ async def _http_exception_handler(
 async def _validation_exception_handler(
     request: Request, exc: RequestValidationError
 ) -> Response:
-    return GraphJSONResponse(
-        {"detail": jsonable_encoder(exc.errors())}, status_code=422
-    )
+    return GraphJSONResponse({"detail": exc.errors()}, status_code=422)
 
 
 def install_error_handlers(app: FastAPI) -> None:

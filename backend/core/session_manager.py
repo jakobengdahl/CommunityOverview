@@ -717,7 +717,14 @@ class SessionManager:
         # request, so it is direct whatever the graph default (§5.1): a staged
         # session is created explicitly, where the hook is asked.
         try:
-            return self.store.get_or_create(session_id)
+            return self.store.get_or_create(
+                session_id,
+                write_mode_source=(
+                    "explicit"
+                    if self.write_modes.default_mode == WRITE_MODE_STAGED
+                    else "inherited"
+                ),
+            )
         except SessionRetired:
             raise SessionNotFound() from None
 
@@ -813,7 +820,12 @@ class SessionManager:
             )
         return session
 
-    def _retire_for_delete(self, session_id: str, discard_staged: bool) -> str:
+    def _retire_for_delete(
+        self,
+        session_id: str,
+        discard_staged: bool,
+        authorize_staged: Optional[Callable[[], None]] = None,
+    ) -> str:
         """Retire a staged session's record before its document goes (§13).
 
         Returns the write mode the session had. A layer holding entries
@@ -822,6 +834,8 @@ class SessionManager:
         """
         if self.write_modes.staged_status(session_id) != layer_store.STATUS_ACTIVE:
             return WRITE_MODE_DIRECT
+        if authorize_staged is not None:
+            authorize_staged()
         self.write_modes.retire(session_id, require_empty=not discard_staged)
         return WRITE_MODE_STAGED
 
@@ -998,6 +1012,7 @@ class SessionManager:
         deleted_by: Optional[str] = None,
         *,
         discard_staged: bool = False,
+        authorize_staged: Optional[Callable[[], None]] = None,
     ) -> bool:
         # Same per-session lock apply_ops uses (R10): without it, an in-flight
         # apply_ops batch that already holds a `Session` reference can persist()
@@ -1015,7 +1030,9 @@ class SessionManager:
         # session_id ever deleted); `max_sessions` already bounds how many
         # sessions can exist at once.
         async with self._lock(session_id):
-            write_mode = self._retire_for_delete(session_id, discard_staged)
+            write_mode = self._retire_for_delete(
+                session_id, discard_staged, authorize_staged
+            )
             existed = self.store.delete(session_id) or write_mode == WRITE_MODE_STAGED
         if existed:
             # Broadcast before tearing down so connected clients get the notice.

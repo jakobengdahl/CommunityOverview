@@ -953,7 +953,9 @@ other session op. The new op kinds are:
 - **`graph_change_staged`:** carries the resulting entry, or its removal after
   collapsing. The entry goes without its `base` and `staged_by`: the stream
   reaches anyone holding the session id, and those are read from the diff,
-  which asks the authorization hook (§10, §14);
+  which asks the authorization hook (§10, §14). The carried entry still
+  includes `base_revision` and the names of removed metadata keys (as nulls
+  in the staged merge-patch); withholding the base does not hide those;
 - **`graph_changes_discarded`:** carries the removed keys;
 - **`graph_changes_merged`:** carries the merge id and the merged keys;
 - **`write_mode_changed`:** carries the new mode.

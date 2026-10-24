@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, waitFor, act, screen } from '@testing-library/react';
+import { render, waitFor, act, screen, fireEvent } from '@testing-library/react';
 
 // The session-scoped helpers App delegates to are tested on their own in
 // appAwaitingHandlerEpochGuards.test.js. What those tests cannot see is App's
@@ -7,7 +7,34 @@ import { render, waitFor, act, screen } from '@testing-library/react';
 // over. So this file renders App with the canvas and the dialog stack stubbed
 // to record the handlers App gives them, invokes those handlers the way the
 // real components would, and checks what reached the API and the store.
-const captured = vi.hoisted(() => ({ canvas: null, dialogs: null }));
+const captured = vi.hoisted(() => ({
+  canvas: null,
+  dialogs: null,
+  desktop: null,
+  syncHandlersRef: null,
+}));
+
+vi.mock('../src/hooks/useSyncConnection', async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    useSyncConnection(sessionId) {
+      const connection = actual.useSyncConnection(sessionId);
+      captured.syncHandlersRef = connection.syncHandlersRef;
+      return connection;
+    },
+  };
+});
+
+vi.mock('../src/components/DesktopShell', async (importOriginal) => {
+  const { default: DesktopShell } = await importOriginal();
+  return {
+    default: function DesktopShellStub(props) {
+      captured.desktop = props;
+      return <DesktopShell {...props} />;
+    },
+  };
+});
 
 vi.mock('@community-graph/ui-graph-canvas', async (importOriginal) => {
   const actual = await importOriginal();
@@ -46,6 +73,7 @@ vi.mock('../src/services/api', () => {
     getStagedSessionBinding: vi.fn(() => null),
     getStagedChanges: vi.fn(async () => ({ items: [], count: 0 })),
     getDisplayName: vi.fn(() => null),
+    summonSessionViewport: vi.fn(async () => ({ connected_clients: 2 })),
     listServerSessions: vi.fn(async () => ({ sessions: [] })),
     renameServerSession: vi.fn(async () => ({})),
     deleteServerSession: vi.fn(async () => ({ deleted: true })),
@@ -100,6 +128,7 @@ import App from '../src/App';
 import * as api from '../src/services/api';
 import useGraphStore from '../src/store/graphStore';
 import { I18nProvider } from '../src/i18n';
+import en from '../src/i18n/en.json';
 
 const NODE_A = { id: 'a', type: 'Actor', name: 'A' };
 const NODE_B = { id: 'b', type: 'Actor', name: 'B' };
@@ -156,6 +185,8 @@ describe('App handler wiring', () => {
     store().setEditingEdge(null);
     captured.canvas = null;
     captured.dialogs = null;
+    captured.desktop = null;
+    captured.syncHandlersRef = null;
     startupStats = null;
     vi.clearAllMocks();
     vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -177,6 +208,49 @@ describe('App handler wiring', () => {
     } finally {
       vi.restoreAllMocks();
     }
+  });
+
+  it('routes a viewport summon through the sync handlers to the canvas and Return notice', async () => {
+    await renderApp();
+    const previousViewport = { x: 100, y: 200, zoom: 2 };
+    const bounds = { x: 400, y: 500, width: 600, height: 300 };
+    const message = en.summon.notice.replace('{name}', 'Planner');
+    expect(screen.queryByText(message)).toBeNull();
+
+    await act(async () => {
+      canvas().onViewportChange(previousViewport);
+      // The sync client delivers the normalized viewport_summoned event.
+      captured.syncHandlersRef.current.onViewportSummoned({
+        sessionId: canvas().sessionKey,
+        summonedBy: 'Planner',
+        bounds,
+      });
+    });
+
+    expect(canvas().viewportRequest.bounds).toEqual(bounds);
+    expect(screen.getByRole('status')).toHaveTextContent(message);
+    fireEvent.click(screen.getByRole('button', { name: en.summon.return }));
+    expect(canvas().viewportRequest.viewport).toEqual(previousViewport);
+    expect(screen.queryByText(message)).toBeNull();
+  });
+
+  it('gives DesktopShell a summon action that sends the current visible bounds', async () => {
+    await renderApp();
+    const container = screen.getByTestId('graph-canvas-stub').parentElement;
+    vi.spyOn(container, 'getBoundingClientRect').mockReturnValue({ width: 800, height: 600 });
+
+    await act(async () => {
+      canvas().onViewportChange({ x: -200, y: -100, zoom: 2 });
+      await captured.desktop.onSummonEveryone();
+    });
+
+    expect(api.summonSessionViewport).toHaveBeenCalledTimes(1);
+    expect(api.summonSessionViewport).toHaveBeenCalledWith(canvas().sessionKey, 'client-test', {
+      x: 100,
+      y: 50,
+      width: 400,
+      height: 300,
+    });
   });
 
   it('handleEdit opens the agent editor with the subscription fetched from the API', async () => {

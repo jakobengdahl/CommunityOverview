@@ -974,6 +974,29 @@ function GraphCanvasInner({
     });
   }
   const rightDragStart = useRef({ x: 0, y: 0, time: null });
+  const spacePressedRef = useRef(false);
+  useEffect(() => {
+    // ReactFlow's Space pan override accepts primary/middle buttons, not right.
+    const handleKeyDown = (event) => {
+      if (event.code !== 'Space') return;
+      if (event.target.closest?.('input, textarea, select, [contenteditable="true"]')) return;
+      spacePressedRef.current = true;
+    };
+    const resetSpace = () => {
+      spacePressedRef.current = false;
+    };
+    const handleKeyUp = (event) => {
+      if (event.code === 'Space') resetSpace();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', resetSpace);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('blur', resetSpace);
+    };
+  }, []);
   const mouseDownPos = useRef(null);
   // Tracks whether the primary mouse button is currently held, independent of
   // where the press started — the document-level selection-suppression effect
@@ -5333,9 +5356,16 @@ function GraphCanvasInner({
           onMouseDownCapture={(event) => {
             // Only a press that can start a pan arms the tracker: the right
             // button must be a pan button, and nodes, edges and the selection
-            // box carry `nopan`, so a right-press there never pans.
+            // box carry `nopan`, so a right-press there never pans. ReactFlow
+            // also blocks right-button panning with Shift, Ctrl or Space held.
             rightDragStart.current =
-              Array.isArray(panOnDrag) && event.button === 2 && !event.target.closest?.('.nopan')
+              Array.isArray(panOnDrag) &&
+              panOnDrag.includes(2) &&
+              event.button === 2 &&
+              !event.shiftKey &&
+              !event.ctrlKey &&
+              !spacePressedRef.current &&
+              !event.target.closest?.('.nopan')
                 ? { x: event.clientX, y: event.clientY, time: Date.now() }
                 : { x: 0, y: 0, time: null };
           }}
