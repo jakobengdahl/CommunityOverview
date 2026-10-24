@@ -4834,24 +4834,23 @@ class GraphStorage:
         More efficient than iterating through all edges.
         """
         collected_edges = {}
+        valid_node_ids = [
+            node_id for node_id in node_ids if node_id in self.nodes and node_id in self.graph
+        ]
 
-        for node_id in node_ids:
-            if node_id not in self.nodes:
-                continue
+        if valid_node_ids:
+            # Outgoing edges
+            for _, _, _, edge_data in self.graph.out_edges(
+                valid_node_ids, keys=True, data=True
+            ):
+                edge = edge_data["data"]
+                collected_edges[edge.id] = edge
 
-            if node_id in self.graph:
-                # Outgoing edges
-                for _, _, _, edge_data in self.graph.out_edges(
-                    node_id, keys=True, data=True
-                ):
-                    edge = edge_data["data"]
-                    collected_edges[edge.id] = edge
-
-                # Incoming edges
-                for _, _, _, edge_data in self.graph.in_edges(
-                    node_id, keys=True, data=True
-                ):
-                    edge = edge_data["data"]
-                    collected_edges[edge.id] = edge
+            # Incoming edges
+            for _, _, _, edge_data in self.graph.in_edges(
+                valid_node_ids, keys=True, data=True
+            ):
+                edge = edge_data["data"]
+                collected_edges[edge.id] = edge
 
         return list(collected_edges.values())

@@ -1,0 +1,3 @@
+## 2024-06-25 - NetworkX Batched Edge Retrieval
+**Learning:** NetworkX supports batched multi-node retrieval for `out_edges` and `in_edges` by passing an iterable of node IDs. This avoids iterating node-by-node in a Python loop, which improves performance. However, because edge data dictionaries are unhashable, deduplication should be done using a dictionary keyed by a unique identifier (like `edge.id`) rather than a `set`.
+**Action:** When querying edges for multiple nodes in NetworkX, always pre-filter the nodes that exist in the graph, query `out_edges` and `in_edges` using the list of valid node IDs directly, and deduplicate the result using a unique identifier as a dictionary key.
