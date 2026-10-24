@@ -30,7 +30,7 @@ from backend.core.postgres_backend import (  # noqa: E402
     CrossScopeWriteRefused,
     PostgresGraphPersistenceBackend,
 )
-from backend.core.storage_backends import EntityOperation  # noqa: E402
+from backend.core.storage_backends import EntityOperation, NodeTypeChanged  # noqa: E402
 from backend.core.tests.layer_store_contract import (  # noqa: E402
     A,
     B,
@@ -465,7 +465,17 @@ class TestAMergeOnASharedStore:
         backend.record_staged(A)
         backend.stage(A, [entry("node", "a", action="delete")])
         delete = EntityOperation("node", "delete", "a", expected_revision=1)
-        outcomes = []
+        draw_edge = EntityOperation(
+            "edge",
+            "upsert",
+            "e",
+            edge_payload("e", "b", "a"),
+            endpoint_types=tuple(
+                (node["id"], node["type"])
+                for node in backend.load_graph_data()["nodes"]
+            ),
+        )
+        outcomes, draw_outcomes, errors = [], [], []
         start = threading.Barrier(2)
 
         def merge():
@@ -482,24 +492,34 @@ class TestAMergeOnASharedStore:
                 outcomes.append("merged")
             except ls.MergeRaced:
                 outcomes.append("raced")
+            except Exception as exc:
+                errors.append(exc)
 
         def draw():
             start.wait()
-            make().apply_batch(
-                [EntityOperation.upsert_edge(edge_payload("e", "b", "a"))]
-            )
+            try:
+                make().apply_batch([draw_edge])
+                draw_outcomes.append("drawn")
+            except NodeTypeChanged:
+                draw_outcomes.append("refused")
+            except Exception as exc:
+                errors.append(exc)
 
         threads = [threading.Thread(target=merge), threading.Thread(target=draw)]
         for thread in threads:
             thread.start()
         for thread in threads:
             thread.join(60)
+        assert not any(thread.is_alive() for thread in threads)
+        assert errors == []
         data = backend.load_graph_data()
         nodes, edges = by_id(data, "nodes"), by_id(data, "edges")
         if outcomes == ["merged"]:
-            assert "a" not in nodes
+            assert "a" not in nodes and "e" not in edges
+            assert draw_outcomes == ["refused"]
         else:
             assert outcomes == ["raced"] and "a" in nodes and "e" in edges
+            assert draw_outcomes == ["drawn"]
 
 
 class TestALeastPrivilegeRole:

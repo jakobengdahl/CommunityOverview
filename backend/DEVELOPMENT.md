@@ -1112,6 +1112,13 @@ can configure one. See `docs/EVENT_SUBSCRIPTIONS.md`.
 
 ### MCP Tools
 
+The six dedicated system-node create tools below are also exposed to the built-in
+assistant. Each takes a typed `config` object, uses the UI's `add_nodes` mutation
+authorization, and returns `created_node_id` on success. They accept
+`visualization_session_id` and `expected_session_seq` for staged sessions; linked
+nodes are staged together and only become active after merge. The existing
+generic mutation tools remain available for editing and legacy configurations.
+
 | Tool Name | Description |
 |-----------|-------------|
 | `search_graph` | Search nodes by query |
@@ -1121,12 +1128,18 @@ can configure one. See `docs/EVENT_SUBSCRIPTIONS.md`.
 | `list_saved_views` | List saved-view summaries with node IDs and, in staged sessions, staged state |
 | `find_similar_nodes` | Find nodes with similar names |
 | `add_nodes` | Add new nodes and edges |
+| `create_agent` | Create an Agent (enabled by default) plus its internal EventSubscription and relationship |
+| `create_event_subscription` | Create a subscription with validated filters and a public HTTP(S) delivery URL |
+| `create_skill` | Create a Skill with nonempty content and when-to-use instructions |
+| `create_active_knowledge_collection` | Create a collection with a validated, unique kiosk short name |
+| `create_saved_view` | Persist a SavedView from explicit node IDs and positions, including for headless clients |
+| `create_collection_response` | Persist answers and link the response to its collection by ID |
 | `update_node` | Update node properties |
 | `delete_nodes` | Delete nodes by ID |
 | `archive_nodes` / `unarchive_nodes` | Hide/restore nodes via the `archived` flag (see Archived lifecycle) |
 | `archive_edges` / `unarchive_edges` | Hide/restore edges via the `archived` flag |
 | `get_graph_stats` | Get graph statistics |
-| `save_view` | Save a named view (creates SavedView node) |
+| `save_view` | Ask a connected frontend to capture and save its current canvas |
 | `connect_to_visualization_session` | Check that a session id resolves, and how many clients are watching it (`connected_clients`) |
 | `get_visualization_session_state` | Read a session's visible and selected node ids. `node_count` counts every node the session references, hidden ones included (the same meaning as in `get_visualization_layout`, `add_nodes_to_session` and the session resource); `visible_node_count` counts `visible_node_ids` only |
 | `clear_visualization` | Clear the canvas in the browsers displaying a session (refuses unless a client is on the op stream or draining the legacy push channel; a leftover registry entry does not count, see below) |

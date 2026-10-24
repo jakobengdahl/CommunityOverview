@@ -317,8 +317,7 @@ class AgentRegistry:
                 logger.warning(f"No worker found for agent {agent_id}")
                 return False
 
-            worker.enqueue(event_payload)
-            return True
+            return worker.enqueue(event_payload) is not False
 
     def enqueue_for_subscription(
         self,
@@ -348,7 +347,8 @@ class AgentRegistry:
                 )
                 return False
 
-            worker.enqueue(event_payload)
+            if worker.enqueue(event_payload) is False:
+                return False
             logger.debug(
                 f"Routed event to agent {agent_id} via subscription {subscription_id}"
             )
@@ -567,9 +567,21 @@ class AgentRegistry:
     def _build_apply_executor(self, agent_id: str):
         """Raw (ungated) tool executor used to apply an approved proposal."""
         self._ensure_initialized()
-        return self._mcp_loader.create_tool_executor(
+        raw = self._mcp_loader.create_tool_executor(
             graph_service=self._service, agent_id=agent_id
         )
+
+        def apply(tool, arguments):
+            worker = self._workers.get(agent_id)
+            if worker is None or not worker.config.enabled:
+                raise ValueError("Agent is unavailable or disabled")
+            if worker.get_status()["paused"]:
+                raise ValueError(
+                    "Agent is paused; retry with a new proposal after recovery"
+                )
+            return raw(tool, arguments)
+
+        return apply
 
     def list_proposals(
         self,
@@ -657,7 +669,8 @@ class AgentRegistry:
             return False
 
         payload = _build_payload(config, datetime.now(timezone.utc))
-        worker.enqueue(payload)
+        if worker.enqueue(payload) is False:
+            return False
         logger.info(
             "External trigger: enqueued scheduled_trigger for agent %s", agent_id
         )

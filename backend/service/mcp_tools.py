@@ -97,6 +97,7 @@ from backend.runtime.authorization import (
 )
 from . import access, graph_merge_plan
 from .service import GraphService
+from .system_nodes import SYSTEM_CREATE_MODELS, make_system_create_tools
 
 # Server-owned session state records node x/y but not rendered node dimensions
 # (design §3.8: the browser no longer uploads canvas geometry). Agents still need
@@ -149,6 +150,7 @@ _UNDELIVERED_PUSH_REMEDY = (
 # tool refuses a session with `session_not_supported`.
 _STAGING_TOOLS = frozenset(
     {
+        *SYSTEM_CREATE_MODELS,
         "add_nodes",
         "update_node",
         "delete_nodes",
@@ -855,6 +857,9 @@ def register_mcp_tools(
         )
 
     # ==================== CRUD Tools ====================
+
+    for create_tool in make_system_create_tools(service, event_origin="mcp").values():
+        register_tool(create_tool)
 
     @register_tool
     def add_nodes(

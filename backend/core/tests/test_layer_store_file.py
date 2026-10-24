@@ -298,7 +298,12 @@ class TestTheWriteAheadMerge:
                 "journal_id": None,
                 "operations": [],
                 "removals": [],
-                "record": {},
+                "record": {
+                    "merge_id": "x",
+                    "session_id": A,
+                    "status": ls.MERGE_APPLIED,
+                    "applied": [],
+                },
             }
         )
         staged.merge_log_path.write_text(
@@ -943,3 +948,170 @@ def test_a_failed_reload_after_a_failed_commit_raises_the_original_error(
     with pytest.raises(OSError, match="original"):
         staged.merge(A, "m1", [op], [], [("node", "a")], {})
     assert staged._mirrored is False
+
+
+@pytest.mark.parametrize("line", [b"{garbage\n", b"{}\n", b"null\n", b"\xff\n"])
+def test_a_damaged_complete_last_merge_log_line_is_preserved(staged, path, line):
+    merge_a(staged)
+    raw = staged.merge_log_path.read_bytes() + line
+    staged.merge_log_path.write_bytes(raw)
+    with pytest.raises(GraphJournalError, match="cannot be read"):
+        reopen(path).load_graph_data()
+    assert staged.merge_log_path.read_bytes() == raw
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("merge_id", "other"), ("session_id", B), ("status", ls.MERGE_PENDING)],
+)
+def test_a_pending_merge_must_match_its_record(staged, path, field, value):
+    merge_a(staged)
+    pending = json.loads(log_lines(staged)[0])
+    pending["record"][field] = value
+    write_log(staged, [json.dumps(pending)])
+    before = staged.merge_log_path.read_bytes()
+    with pytest.raises(GraphJournalError, match="does not match its record"):
+        reopen(path).load_graph_data()
+    assert staged.merge_log_path.read_bytes() == before
+
+
+def test_a_pending_merge_cannot_reopen_an_applied_id(staged, path):
+    merge_a(staged)
+    lines = log_lines(staged)
+    write_log(staged, lines + [lines[0]])
+    before = staged.merge_log_path.read_bytes()
+    with pytest.raises(GraphJournalError, match="already applied"):
+        reopen(path).load_graph_data()
+    assert staged.merge_log_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("error", [OSError, KeyboardInterrupt])
+def test_an_empty_merge_with_a_durable_pending_line_has_landed(
+    staged, path, monkeypatch, error
+):
+    durable_then_raise(staged, monkeypatch, 1, error)
+    if error is KeyboardInterrupt:
+        with pytest.raises(error):
+            staged.merge(A, "empty", [], [], [("node", "a")], {})
+    else:
+        result = staged.merge(A, "empty", [], [], [("node", "a")], {})
+        assert result.record["status"] == ls.MERGE_APPLIED
+        assert not result.replayed
+    monkeypatch.undo()
+    assert staged.load_merge("empty") is not None
+    assert staged_keys(staged) == [("node", "b")]
+    after = reopen(path)
+    assert after.merge(A, "empty", [], [], [("node", "a")], {}).replayed
+    assert staged_keys(after) == [("node", "b")]
+
+
+def test_an_empty_merge_whose_pending_line_did_not_land_still_fails(
+    staged, path, monkeypatch
+):
+    def broken(line):
+        raise OSError("before durable")
+
+    monkeypatch.setattr(staged, "_append_merge_log_locked", broken)
+    with pytest.raises(OSError, match="before durable"):
+        staged.merge(A, "empty", [], [], [("node", "a")], {})
+    monkeypatch.undo()
+    assert reopen(path).load_merge("empty") is None
+    assert staged_keys(reopen(path)) == [("node", "a"), ("node", "b")]
+
+
+@pytest.mark.parametrize("status", [ls.MERGE_PENDING, ls.MERGE_APPLIED, "aborted"])
+def test_a_short_merge_log_write_with_a_failed_rollback_is_repaired_before_retry(
+    staged, path, monkeypatch, status
+):
+    real_open = open
+    failed = False
+
+    class ShortWriter:
+        def __init__(self, file):
+            self.file = file
+
+        def __getattr__(self, name):
+            return getattr(self.file, name)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return self.file.__exit__(*exc)
+
+        def write(self, data):
+            nonlocal failed
+            if not failed and json.loads(data)["status"] == status:
+                failed = True
+                return self.file.write(data[: len(data) // 2])
+            return self.file.write(data)
+
+    def short_open(target, mode="r", *args, **kwargs):
+        file = real_open(target, mode, *args, **kwargs)
+        if target == staged.merge_log_path and mode == "ab":
+            return ShortWriter(file)
+        return file
+
+    def fail_truncate(fd, length):
+        raise OSError("rollback failed")
+
+    def fail_journal(ops, stored):
+        raise OSError("journal failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(storage_backends, "open", short_open, raising=False)
+        patch.setattr(storage_backends.os, "ftruncate", fail_truncate)
+        if status == "aborted":
+            patch.setattr(staged, "_append_journal_locked", fail_journal)
+        if status == ls.MERGE_APPLIED:
+            merge_a(staged)
+        else:
+            with pytest.raises(OSError):
+                merge_a(staged)
+    assert failed
+    assert not staged.merge_log_path.read_bytes().endswith(b"\n")
+    staged.stage(A, [entry("node", "c")])
+    after = reopen(path)
+    landed = status == ls.MERGE_APPLIED
+    assert name_of_a(after) == ("Merged" if landed else "A")
+    assert (after.load_merge("m1") is not None) is landed
+    expected = [("node", "b"), ("node", "c")]
+    if not landed:
+        expected.insert(0, ("node", "a"))
+    assert staged_keys(after) == expected
+    staged.stage(A, [entry("node", "a", session_seq=2)])
+    result = merge_a(staged, "m2", "Later")
+    assert reopen(path).load_merge("m2") == result.record
+    assert name_of_a(reopen(path)) == "Later"
+    assert staged.merge_log_path.read_bytes().endswith(b"\n")
+
+
+@pytest.mark.parametrize("prior_write", [False, True])
+def test_checkpoint_reloads_a_merge_interrupted_before_the_mirror_was_updated(
+    staged, path, monkeypatch, prior_write
+):
+    if prior_write:
+        staged.upsert_node(fresh(node_payload("c")))
+    current = by_id(staged.load_graph_data(), "nodes")["a"]
+    op = EntityOperation(
+        "node",
+        "upsert",
+        "a",
+        fresh({**current, "name": "Merged"}),
+        expected_revision=current["revision"],
+    )
+
+    def interrupted(op):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(staged, "_apply", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        staged.merge(A, "m1", [op], [], [("node", "a")], {})
+    monkeypatch.undo()
+    staged.checkpoint()
+    assert staged.journal_path.read_text() == ""
+    after = reopen(path)
+    assert name_of_a(after) == "Merged"
+    assert after.load_merge("m1")["status"] == ls.MERGE_APPLIED
+    assert staged_keys(after) == [("node", "b")]
+    assert ("c" in by_id(after.load_graph_data(), "nodes")) is prior_write
