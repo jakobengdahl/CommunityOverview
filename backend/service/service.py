@@ -802,6 +802,9 @@ class GraphService:
                     self._authorization_hook,
                     nodes,
                     edges,
+                    event_origin=event_origin,
+                    event_session_id=event_session_id,
+                    event_correlation_id=event_correlation_id,
                     expect_absent=expect_absent,
                     staging=staging,
                 )

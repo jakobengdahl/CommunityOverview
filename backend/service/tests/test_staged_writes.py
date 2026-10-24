@@ -464,8 +464,8 @@ def test_a_staged_answer_uses_the_main_snapshot_that_was_checked(
     sid = world.staged_session()
     original = StagedWrite._commit
 
-    def commit_then_change_main(writer, layer):
-        result = original(writer, layer)
+    def commit_then_change_main(writer, layer, **kwargs):
+        result = original(writer, layer, **kwargs)
         if kind == "node":
             world.storage.update_node("a", {"name": "Unchecked main content"})
         else:

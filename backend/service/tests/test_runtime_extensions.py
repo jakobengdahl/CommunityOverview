@@ -173,6 +173,44 @@ def test_generic_service_writes_return_stable_denial(
         assert world.layer(sid) == {}
 
 
+@pytest.mark.parametrize("staged", [False, True])
+@pytest.mark.parametrize(
+    "operation,args,kwargs",
+    [
+        ("add_nodes", ([{"id": "new", "type": "Actor", "name": "New"}], []), {}),
+        ("update_node", ("a", {"name": "Changed"}), {}),
+        ("delete_nodes", (["a"],), {"confirmed": True}),
+        ("archive_nodes", (["a"],), {}),
+        ("add_edge", ("a", "b"), {}),
+        ("update_edge", ("ab", {"label": "Changed"}), {}),
+        ("delete_edge", ("ab",), {}),
+        ("delete_edges", (["ab"],), {"confirmed": True}),
+        ("archive_edges", (["ab"],), {}),
+    ],
+)
+def test_service_policy_preserves_explicit_mutation_correlation(
+    world, staged, operation, args, kwargs
+):
+    sid = world.staged_session() if staged else None
+    hook = deny(world.storage)
+    with (
+        bind_session(sid),
+        use_request_authorization(
+            actor_id="editor", graph_id="graph", headers={"x-request-id": "request"}
+        ),
+    ):
+        result = getattr(world.service, operation)(
+            *args, **kwargs, event_correlation_id="mutation-correlation"
+        )
+    assert result["error"] == "resource_blocked"
+    context = hook.evaluate.call_args.args[0]
+    assert context.correlation_id == "mutation-correlation"
+    assert context.request_id == "request"
+    assert context.actor["actor_id"] == "editor"
+    assert context.scope["graph_id"] == "graph"
+    assert context.session_id == (sid or "")
+
+
 def test_final_session_merge_is_rechecked_and_keeps_layer_on_denial(world):
     sid = world.staged_session()
     with bind_session(sid):
