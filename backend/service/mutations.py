@@ -211,6 +211,13 @@ def add_nodes(
             "added_edge_ids": [],
         }
 
+    event_context = access.build_event_context(
+        target="add_nodes",
+        event_origin=event_origin,
+        event_session_id=event_session_id,
+        event_correlation_id=event_correlation_id,
+    )
+
     if staging is not None:
         try:
             return staging.add_nodes(
@@ -218,16 +225,10 @@ def add_nodes(
                 edge_objects,
                 expect_absent=expect_absent,
                 graph_access=decision.graph_access,
+                event_context=event_context,
             )
         except EntityRevisionConflict as e:
             return _create_conflict_result(e, added_node_ids=[], added_edge_ids=[])
-
-    event_context = access.build_event_context(
-        target="add_nodes",
-        event_origin=event_origin,
-        event_session_id=event_session_id,
-        event_correlation_id=event_correlation_id,
-    )
 
     try:
         with storage.write_lock:
@@ -308,6 +309,13 @@ def update_node(
         return access.build_access_denied_result(
             action=GRAPH_ACTION_MUTATE, target="update_node", decision=decision
         )
+    event_context = access.build_event_context(
+        target="update_node",
+        event_origin=event_origin,
+        event_session_id=event_session_id,
+        event_correlation_id=event_correlation_id,
+    )
+
     if staging is not None:
         try:
             return staging.update_node(
@@ -317,6 +325,7 @@ def update_node(
                 expected_updated_at=expected_updated_at,
                 expected_revision=expected_revision,
                 graph_access=decision.graph_access,
+                event_context=event_context,
             )
         except EntityRevisionConflict as e:
             return write_error_result(e)
@@ -340,13 +349,6 @@ def update_node(
             target_node, decision.graph_access
         ):
             return {"success": False, "error": f"Node with ID {node_id} not found"}
-
-        event_context = access.build_event_context(
-            target="update_node",
-            event_origin=event_origin,
-            event_session_id=event_session_id,
-            event_correlation_id=event_correlation_id,
-        )
 
         try:
             updated_node = storage.update_node(
@@ -428,6 +430,13 @@ def delete_nodes(
             "affected_edge_ids": [],
         }
 
+    event_context = access.build_event_context(
+        target="delete_nodes",
+        event_origin=event_origin,
+        event_session_id=event_session_id,
+        event_correlation_id=event_correlation_id,
+    )
+
     if staging is not None:
         # The limits a direct delete enforces in the storage, before anything.
         if len(node_ids) > 10:
@@ -449,6 +458,7 @@ def delete_nodes(
                 node_ids,
                 expected_revisions=expected_revisions,
                 graph_access=decision.graph_access,
+                event_context=event_context,
             )
         except EntityRevisionConflict as e:
             return write_error_result(e, deleted_node_ids=[], affected_edge_ids=[])
@@ -459,13 +469,6 @@ def delete_nodes(
             for nid in node_ids
             if access.is_node_visible(storage.get_node(nid), decision.graph_access)
         ]
-
-    event_context = access.build_event_context(
-        target="delete_nodes",
-        event_origin=event_origin,
-        event_session_id=event_session_id,
-        event_correlation_id=event_correlation_id,
-    )
 
     if expected_revisions and decision.graph_access.enabled:
         # An expectation on a node this caller may not see is answered as if
@@ -517,9 +520,19 @@ def set_nodes_archived(
         )
         denied.setdefault("node_ids", [])
         return denied
+    event_context = access.build_event_context(
+        target="archive_nodes",
+        event_origin=event_origin,
+        event_session_id=event_session_id,
+        event_correlation_id=event_correlation_id,
+    )
+
     if staging is not None:
         return staging.set_nodes_archived(
-            node_ids, archived, graph_access=decision.graph_access
+            node_ids,
+            archived,
+            graph_access=decision.graph_access,
+            event_context=event_context,
         )
 
     if decision.graph_access.enabled:
@@ -528,13 +541,6 @@ def set_nodes_archived(
             for nid in node_ids
             if access.is_node_visible(storage.get_node(nid), decision.graph_access)
         ]
-
-    event_context = access.build_event_context(
-        target="archive_nodes",
-        event_origin=event_origin,
-        event_session_id=event_session_id,
-        event_correlation_id=event_correlation_id,
-    )
 
     try:
         nodes = storage.set_nodes_archived(
@@ -607,15 +613,17 @@ def add_edge(
     except Exception as e:
         return {"success": False, "message": f"Invalid edge data: {str(e)}"}
 
-    if staging is not None:
-        return staging.add_edge(edge, graph_access=decision.graph_access)
-
     event_context = access.build_event_context(
         target="add_edge",
         event_origin=event_origin,
         event_session_id=event_session_id,
         event_correlation_id=event_correlation_id,
     )
+
+    if staging is not None:
+        return staging.add_edge(
+            edge, graph_access=decision.graph_access, event_context=event_context
+        )
 
     try:
         edge_id = storage.add_edge(edge, event_context=event_context)
@@ -663,6 +671,13 @@ def update_edge(
         return access.build_access_denied_result(
             action=GRAPH_ACTION_MUTATE, target="update_edge", decision=decision
         )
+    event_context = access.build_event_context(
+        target="update_edge",
+        event_origin=event_origin,
+        event_session_id=event_session_id,
+        event_correlation_id=event_correlation_id,
+    )
+
     if staging is not None:
         try:
             return staging.update_edge(
@@ -670,6 +685,7 @@ def update_edge(
                 updates,
                 expected_revision=expected_revision,
                 graph_access=decision.graph_access,
+                event_context=event_context,
             )
         except EntityRevisionConflict as e:
             return write_error_result(e)
@@ -683,13 +699,6 @@ def update_edge(
         storage.edges.get(edge_id), storage, decision.graph_access
     ):
         return {"success": False, "error": f"Edge with ID {edge_id} not found"}
-
-    event_context = access.build_event_context(
-        target="update_edge",
-        event_origin=event_origin,
-        event_session_id=event_session_id,
-        event_correlation_id=event_correlation_id,
-    )
 
     try:
         updated_edge = storage.update_edge(
@@ -735,12 +744,20 @@ def delete_edge(
         return access.build_access_denied_result(
             action=GRAPH_ACTION_MUTATE, target="delete_edge", decision=decision
         )
+    event_context = access.build_event_context(
+        target="delete_edge",
+        event_origin=event_origin,
+        event_session_id=event_session_id,
+        event_correlation_id=event_correlation_id,
+    )
+
     if staging is not None:
         try:
             return staging.delete_edge(
                 edge_id,
                 expected_revision=expected_revision,
                 graph_access=decision.graph_access,
+                event_context=event_context,
             )
         except EntityRevisionConflict as e:
             return write_error_result(e)
@@ -748,13 +765,6 @@ def delete_edge(
         storage.edges.get(edge_id), storage, decision.graph_access
     ):
         return {"success": False, "error": f"Edge with ID {edge_id} not found"}
-
-    event_context = access.build_event_context(
-        target="delete_edge",
-        event_origin=event_origin,
-        event_session_id=event_session_id,
-        event_correlation_id=event_correlation_id,
-    )
 
     try:
         deleted = storage.delete_edge(
@@ -807,8 +817,17 @@ def delete_edges(
             "message": "Deletion requires confirmed=True. Please confirm before proceeding.",
         }
 
+    event_context = access.build_event_context(
+        target="delete_edges",
+        event_origin=event_origin,
+        event_session_id=event_session_id,
+        event_correlation_id=event_correlation_id,
+    )
+
     if staging is not None:
-        return staging.delete_edges(edge_ids, graph_access=decision.graph_access)
+        return staging.delete_edges(
+            edge_ids, graph_access=decision.graph_access, event_context=event_context
+        )
 
     if decision.graph_access.enabled:
         edge_ids = [
@@ -818,13 +837,6 @@ def delete_edges(
                 storage.edges.get(eid), storage, decision.graph_access
             )
         ]
-
-    event_context = access.build_event_context(
-        target="delete_edges",
-        event_origin=event_origin,
-        event_session_id=event_session_id,
-        event_correlation_id=event_correlation_id,
-    )
 
     try:
         result = storage.delete_edges(edge_ids, event_context=event_context)
@@ -858,9 +870,19 @@ def set_edges_archived(
         )
         denied.setdefault("edge_ids", [])
         return denied
+    event_context = access.build_event_context(
+        target="archive_edges",
+        event_origin=event_origin,
+        event_session_id=event_session_id,
+        event_correlation_id=event_correlation_id,
+    )
+
     if staging is not None:
         return staging.set_edges_archived(
-            edge_ids, archived, graph_access=decision.graph_access
+            edge_ids,
+            archived,
+            graph_access=decision.graph_access,
+            event_context=event_context,
         )
 
     if decision.graph_access.enabled:
@@ -871,13 +893,6 @@ def set_edges_archived(
                 storage.edges.get(eid), storage, decision.graph_access
             )
         ]
-
-    event_context = access.build_event_context(
-        target="archive_edges",
-        event_origin=event_origin,
-        event_session_id=event_session_id,
-        event_correlation_id=event_correlation_id,
-    )
 
     try:
         edges = storage.set_edges_archived(
@@ -1110,6 +1125,7 @@ def adopt_federated_node(
             [lineage_edge],
             expect_absent=False,
             graph_access=decision.graph_access,
+            event_context=event_context,
         )
         if not staged.get("success"):
             return staged

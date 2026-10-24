@@ -277,6 +277,8 @@ class DeliveryResult(BaseModel):
     status_code: Optional[int] = None
     error_message: Optional[str] = None
     delivered_at: Optional[datetime] = None
+    delivery_id: str = ""
+    correlation_id: str = ""
 
 
 # Subscription configuration models (stored in EventSubscription node metadata)

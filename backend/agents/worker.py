@@ -15,7 +15,19 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from uuid import uuid4
+from backend.runtime.extensions import (
+    AdmissionDecision,
+    AdmissionRefused,
+    RuntimeContext,
+    RuntimeEvent,
+    RuntimeExtensions,
+    bind_execution_context,
+    bind_runtime_extensions,
+    get_runtime_extensions,
+    runtime_context,
+)
 
 from .config import AgentConfig, AgentsSettings
 from .prompts import build_agent_system_prompt, build_event_user_message
@@ -27,6 +39,7 @@ from backend.core.events.causation import (
     MAX_AGENT_CAUSATION_DEPTH,
     agent_mutation_context,
 )
+from backend.core.events.dispatcher import _copy_payload
 from backend.skills.loader import (
     SkillDefinition,
     SkillMetadata,
@@ -44,6 +57,8 @@ class EventItem:
     event_id: str
     payload: Dict[str, Any]
     enqueued_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    context: Optional[RuntimeContext] = None
+    attempt: int = 1
 
 
 @dataclass
@@ -84,6 +99,7 @@ class AgentWorker:
         graph_storage: Optional[Any] = None,
         run_recorder: Optional[Any] = None,
         proposal_store: Optional[Any] = None,
+        runtime_extensions=None,
     ):
         """
         Initialize the agent worker.
@@ -108,6 +124,13 @@ class AgentWorker:
         self._graph_storage = graph_storage
         self._run_recorder = run_recorder
         self._proposal_store = proposal_store
+        storage = graph_storage or getattr(graph_service, "_storage", None)
+        configured = getattr(storage, "runtime_extensions", None)
+        self._extensions = runtime_extensions or (
+            configured
+            if isinstance(configured, RuntimeExtensions)
+            else get_runtime_extensions()
+        )
 
         # Event queue
         self._queue: queue.Queue[Optional[EventItem]] = queue.Queue()
@@ -195,10 +218,15 @@ class AgentWorker:
         Args:
             event_payload: The webhook event payload
         """
+        event_payload = _copy_payload(event_payload)
         if not self._admit_event(event_payload):
             return False
         event_id = event_payload.get("event_id", "unknown")
-        item = EventItem(event_id=event_id, payload=event_payload)
+        item = EventItem(
+            event_id=event_id,
+            payload=event_payload,
+            context=runtime_context("agent_work", agent_id=self.agent_id),
+        )
         self._queue.put(item)
         logger.debug(f"Agent {self.agent_id}: Event {event_id} enqueued")
         return True
@@ -212,6 +240,7 @@ class AgentWorker:
         if type(depth) is int and 0 <= depth < MAX_AGENT_CAUSATION_DEPTH:
             return True
         reason = "Event rejected: causation depth limit exceeded or invalid."
+        self._guard_event("loop_guard.rejected", "causation_depth_limit", event_payload)
         logger.warning("Agent %s: %s", self.agent_id, reason)
         if self._run_recorder is not None:
             run_id = self._run_recorder.record_start(
@@ -219,6 +248,26 @@ class AgentWorker:
             )
             self._run_recorder.record_failure(run_id, reason)
         return False
+
+    def _guard_event(self, event_type, reason, payload=None, context=None):
+        payload = payload or {}
+        origin = payload.get("origin") or {}
+        self._extensions.event_sink.emit(
+            RuntimeEvent(
+                event_type,
+                reason,
+                context
+                or runtime_context(
+                    "agent_work",
+                    agent_id=self.agent_id,
+                    event_id=payload.get("event_id", ""),
+                    correlation_id=origin.get("event_correlation_id", "")
+                    if isinstance(origin, dict)
+                    else "",
+                ),
+                (self.agent_id,),
+            )
+        )
 
     def _processing_delay(self) -> float:
         """Reserve processing capacity; queued events survive temporary throttling."""
@@ -230,11 +279,15 @@ class AgentWorker:
             ):
                 self._event_admissions.popleft()
             if len(self._event_admissions) >= AGENT_EVENT_RATE_LIMIT:
+                if self._pause_reason is None:
+                    self._guard_event("loop_guard.throttled", "event_rate_limit")
                 self._pause_reason = "Agent temporarily paused: event rate limit; queued events resume automatically."
                 return max(
                     0.0,
                     self._event_admissions[0] + AGENT_EVENT_RATE_WINDOW_SECONDS - now,
                 )
+            if self._pause_reason is not None:
+                self._guard_event("loop_guard.recovered", "event_rate_recovered")
             self._pause_reason = None
             self._event_admissions.append(now)
             return 0.0
@@ -399,8 +452,19 @@ class AgentWorker:
 
     def _process_event(self, item: EventItem) -> None:
         """Process a single event."""
+        if not self._admit_event(item.payload):
+            return
+        origin = item.payload.get("origin") or {}
+        context = replace(
+            item.context or runtime_context("agent_work", agent_id=self.agent_id),
+            event_id=item.event_id,
+            causation_depth=origin.get("event_causation_depth", 0) + 1,
+            correlation_id=origin.get("event_correlation_id") or item.event_id,
+            attempt=item.attempt,
+        )
         while not self._stop_event.is_set():
-            delay = self._processing_delay()
+            with bind_execution_context(context):
+                delay = self._processing_delay()
             if not delay:
                 break
             if self._stop_event.wait(min(delay, 1.0)):
@@ -423,6 +487,35 @@ class AgentWorker:
             )
 
         try:
+            context = replace(context, run_id=run_id or str(uuid4()))
+            while True:
+                if self._stop_event.is_set():
+                    raise AdmissionRefused(
+                        AdmissionDecision("deny", "execution_stopped")
+                    )
+                decision = self._extensions.admit(context)
+                if decision.outcome == "allow":
+                    break
+                if decision.outcome == "deny":
+                    raise AdmissionRefused(decision)
+                if self._stop_event.wait(max(0, decision.retry_at - time.time())):
+                    raise AdmissionRefused(
+                        AdmissionDecision("deny", "execution_stopped")
+                    )
+                item.attempt += 1
+                context = replace(context, attempt=item.attempt)
+                # A deferral may outlive the original guard reservation. Judge
+                # the retry independently, so admission cannot shift a burst
+                # past the core's processing-rate window.
+                while not self._stop_event.is_set():
+                    with bind_execution_context(context):
+                        delay = self._processing_delay()
+                    if not delay:
+                        break
+                    if self._stop_event.wait(min(delay, 1.0)):
+                        raise AdmissionRefused(
+                            AdmissionDecision("deny", "execution_stopped")
+                        )
             # Ensure LLM client is ready
             if not self._llm_client:
                 self._llm_client = self._create_llm_client()
@@ -508,13 +601,19 @@ class AgentWorker:
                     return execute_tool(name, arguments)
 
             # Execute with tools
-            result = self._llm_client.execute_with_tools(
-                system_prompt=system_prompt,
-                user_message=user_message,
-                tools=tool_definitions,
-                tool_executor=tool_executor,
-                max_turns=self.settings.max_agent_turns,
-            )
+            with (
+                bind_execution_context(context),
+                bind_runtime_extensions(
+                    self._extensions, admission_wait=self._stop_event.wait
+                ),
+            ):
+                result = self._llm_client.execute_with_tools(
+                    system_prompt=system_prompt,
+                    user_message=user_message,
+                    tools=tool_definitions,
+                    tool_executor=tool_executor,
+                    max_turns=self.settings.max_agent_turns,
+                )
 
             # Log detailed trace (reasoning and tool calls)
             self._log_execution_trace(result)

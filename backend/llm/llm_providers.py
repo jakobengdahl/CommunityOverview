@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 import json
 import os
+from backend.runtime.extensions import get_runtime_extensions, runtime_context
 
 
 class LLMProvider(ABC):
@@ -60,6 +61,7 @@ class ClaudeProvider(LLMProvider):
         max_tokens: int = 4096,
     ) -> LLMResponse:
         """Create completion using Claude API"""
+        get_runtime_extensions().require_admission(runtime_context("model_invocation"))
         response = self.client.messages.create(
             model=self.model,
             max_tokens=max_tokens,
@@ -125,6 +127,7 @@ class OpenAIProvider(LLMProvider):
         # Format tools for OpenAI (skip if tool calling is disabled for this endpoint)
         openai_tools = self.format_tool_definitions(tools) if self._tool_calling else []
 
+        get_runtime_extensions().require_admission(runtime_context("model_invocation"))
         response = self.client.chat.completions.create(
             model=self.model,
             max_tokens=max_tokens,
