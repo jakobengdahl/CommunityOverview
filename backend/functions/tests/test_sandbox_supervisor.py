@@ -121,7 +121,7 @@ def child(spec, setup_w):
         os._exit(125)
     signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
     os.close(setup_w)
-    if case == "signal":
+    if case in ("signal", "signal_then_stop"):
         os.kill(os.getpid(), signal.SIGUSR1)
     if case == "stop":
         os.kill(spec["supervisor_pid"], signal.SIGTERM)
@@ -129,6 +129,15 @@ def child(spec, setup_w):
             signal.pause()
     os._exit(17)
 sandbox._child = child
+
+# Force the host's EOF-triggered stop into the gap between reaping the function
+# and starting cleanup. The function's exit status must still be reported.
+if case in ("exit_then_stop", "signal_then_stop"):
+    reap_all = sandbox._reap_all
+    def stop_before_cleanup():
+        os.kill(os.getpid(), signal.SIGTERM)
+        reap_all()
+    sandbox._reap_all = stop_before_cleanup
 
 def confine(spec):
     if case == "setup":
@@ -201,6 +210,22 @@ def test_supervisor_reports_exact_start_setup_and_exit_messages(
             },
         ]
     assert report == b"".join((json.dumps(m) + "\n").encode() for m in expected)
+
+
+@pytest.mark.parametrize("case", ["exit", "signal"])
+def test_stop_after_child_exit_does_not_lose_the_final_report(supervisor_report, case):
+    report, child_pid = supervisor_report("supervise", case + "_then_stop")
+    messages = [json.loads(line) for line in report.splitlines()]
+    assert messages == [
+        {"started": child_pid},
+        {
+            "exit_code": 17 if case == "exit" else None,
+            "signal": int(signal.SIGUSR1) if case == "signal" else None,
+            "stopped": False,
+            "peak_memory_kib": 12345,
+            "cpu_seconds": 3.58,
+        },
+    ]
 
 
 @pytest.mark.parametrize("case", ["exit", "setup", "nonzero", "signal"])
