@@ -18,7 +18,7 @@ from backend.runtime.authorization import (
     build_graph_authorization_context,
     get_current_request_authorization_inputs,
 )
-from backend.core.storage_backends import GraphWriteFailed
+from backend.runtime.errors import GraphWriteFailed
 
 logger = logging.getLogger(__name__)
 MAX_ADMISSION_RETRY_SECONDS = 60

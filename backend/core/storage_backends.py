@@ -46,6 +46,8 @@ from typing import (
     runtime_checkable,
 )
 
+from backend.runtime.errors import GraphWriteFailed as GraphWriteFailed
+
 logger = logging.getLogger(__name__)
 
 
@@ -467,16 +469,6 @@ def refused_outright(exc: BaseException) -> bool:
         return True
     sqlstate = getattr(exc, "sqlstate", None)
     return isinstance(sqlstate, str) and sqlstate[:2] in REFUSAL_SQLSTATE_CLASSES
-
-
-class GraphWriteFailed(RuntimeError):
-    """A shared-store write that did not land (§4.4: `write_failed`).
-
-    The instance has confirmed, on two reads of the store, that nothing the
-    write touched changed. Memory is back where it was and no event fired.
-    """
-
-    code = "write_failed"
 
 
 class GraphWriteOutcomeUnknown(RuntimeError):
