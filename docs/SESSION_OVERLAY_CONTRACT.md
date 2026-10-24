@@ -797,6 +797,17 @@ still true when the merge applies.
   retype locks its node row. So an edge create and a node delete or retype on
   the same node are ordered against each other, whichever instance issues
   them.
+- A direct PostgreSQL node delete removes only the named node, even when
+  unseen edges remain. A node upsert that creates an absent id (plain or
+  `expect_absent`) refuses with `entity_revision_conflict` and the message
+  “dangling edges reference this id” if scoped edges still name it. Separate
+  source and target index probes run after the batch writes, in the same
+  transaction, while the inserted row is locked. Deleted edges are absent;
+  edge upserts judged against their endpoints in this batch are excluded.
+  Refusal rolls back the whole batch and announces nothing. This also applies
+  to merge creates, reported as `merge_raced`, so a recreated id cannot inherit
+  unseen edges under a different type. Merged deletes still require the exact
+  incident-edge check above.
 - An edge write, direct or merged, also carries the type of each endpoint it
   was judged against. Holding the endpoint, a shared store refuses the write if
   the endpoint now has another type or is gone, with `entity_revision_conflict`
