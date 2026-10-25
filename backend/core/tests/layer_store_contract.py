@@ -16,7 +16,7 @@ rather than assume either.
 from __future__ import annotations
 
 import itertools
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 import pytest
@@ -1003,3 +1003,61 @@ class LayerStoreContract:
         with pytest.raises(ls.InvalidLayerRequest):
             seeded.purge_merge_records(retention, limit=limit, now=now)
         assert factory().load_merge("m") is not None
+
+
+class PinnedClockRetentionContract:
+    """Retention clauses for a backend whose clock is `layer_store.utc_now`
+    (not a database's), pinned here so a boundary is exact. Mix into a class
+    that provides `factory` and `seeded` (a LayerStoreContract)."""
+
+    RETENTION = timedelta(days=90)
+    T = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    @pytest.fixture
+    def clock(self, monkeypatch):
+        now = {"t": self.T}
+        monkeypatch.setattr(ls, "utc_now", lambda: now["t"])
+        return now
+
+    def _merged_once(self, backend):
+        backend.stage(A, [entry("node", "a")])
+        backend.merge(A, "m", [], [], [("node", "a")], {})
+
+    def test_a_record_exactly_at_the_cutoff_is_kept(self, seeded, factory, clock):
+        self._merged_once(seeded)
+        seeded.retire(A)
+        at = self.T + self.RETENTION
+        assert factory().purge_merge_records(self.RETENTION, limit=9, now=at) == 0
+        just_past = at + timedelta(microseconds=1)
+        assert (
+            factory().purge_merge_records(self.RETENTION, limit=9, now=just_past) == 1
+        )
+
+    def test_retiring_again_a_day_later_keeps_the_first_time(
+        self, seeded, factory, clock
+    ):
+        self._merged_once(seeded)
+        seeded.retire(A)
+        clock["t"] = self.T + timedelta(days=1)
+        factory().retire(A)
+        factory().retire(A, require_empty=True)
+        past_first = self.T + self.RETENTION + timedelta(seconds=1)
+        assert (
+            factory().purge_merge_records(self.RETENTION, limit=9, now=past_first) == 1
+        )
+
+    def test_without_now_the_purge_judges_on_the_store_clock(
+        self, seeded, factory, clock
+    ):
+        self._merged_once(seeded)
+        seeded.retire(A)
+        assert factory().purge_merge_records(self.RETENTION, limit=9) == 0
+        clock["t"] = self.T + self.RETENTION + timedelta(seconds=1)
+        assert factory().purge_merge_records(self.RETENTION, limit=9) == 1
+
+    def test_the_instance_that_purged_forgets_the_record(self, seeded, clock):
+        self._merged_once(seeded)
+        seeded.retire(A)
+        later = self.T + self.RETENTION + timedelta(seconds=1)
+        assert seeded.purge_merge_records(self.RETENTION, limit=9, now=later) == 1
+        assert seeded.load_merge("m") is None

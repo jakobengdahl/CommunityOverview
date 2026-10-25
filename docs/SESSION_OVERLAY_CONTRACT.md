@@ -479,8 +479,9 @@ must also declare `revision_enforcement` (§4.4). It implements:
 | `drop_layer(session_id)` | Remove the whole layer; used only by an explicit discard-and-delete (§13). |
 | `record_staged(session_id)` | Create the session's staged-session record (§5.3). |
 | `staged_status(session_id)` | `active`, `retired` or `none`. |
-| `retire(session_id)` | Mark the record retired, in the same unit as `drop_layer`. |
+| `retire(session_id)` | Mark the record retired, and store when, in the same unit as `drop_layer`. Retiring again keeps the first time. |
 | `layers_in_use()` | The ids of sessions whose layers are not empty. |
+| `purge_merge_records(retention, limit)` | Remove at most `limit` merge records of sessions retired more than `retention` ago (§11.5). |
 
 `merge` does the following **as one unit**:
 
@@ -891,6 +892,10 @@ On success:
   - A replay of a purged merge id is refused as one for any deleted session
     is: the session is retired, so the merge is refused with
     `session_not_found` and nothing is applied.
+  - A purged record no longer holds its merge id, so another session can
+    then merge under it (`merge_id_taken` holds only while the record is
+    kept). Clients mint unpredictable merge ids (a UUID), so a reuse is
+    deliberate; events of the two merges then share a correlation id.
 
 A partial merge leaves the unselected entries in the layer untouched.
 
@@ -1074,7 +1079,7 @@ session-tool code `revision_conflict` is unchanged (§9.2).
 | `merge_blocked` | 409 | an unresolved entry (§11.2) |
 | `merge_raced` | 409 | an expectation or check failing inside the merge unit (§11.3) |
 | `merge_incomplete` | 422 | a selection not closed under dependencies (§11.4) |
-| `merge_id_taken` | 409 | a merge id already used by another session's merge (I9 holds per session) |
+| `merge_id_taken` | 409 | a merge id already used by another session's merge (I9 holds per session); a purged record (§11.5) no longer holds its id |
 | `invalid_merge_request` | 422 | a malformed selection, resolution or merge id (§11.2, §11.4) |
 | `session_not_staged` | 409 | a merge or discard naming a direct session, which holds no layer |
 | `write_mode_irreversible` | 409 | switching a staged session to direct (§5.2) |

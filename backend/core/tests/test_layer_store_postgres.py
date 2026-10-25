@@ -806,3 +806,78 @@ class TestMergeRecordRetention:
         assert second.purge_merge_records(self.RETENTION, limit=10, now=far) == 0
         assert first.load_merge("m-a") is not None
         assert first.purge_merge_records(self.RETENTION, limit=10, now=far) == 1
+
+    @staticmethod
+    def _set_retired_at(schema, session_id, moment):
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                psycopg.sql.SQL(
+                    "UPDATE {}.graph_staged_sessions SET retired_at = %s"
+                    " WHERE session_id = %s"
+                ).format(psycopg.sql.Identifier(schema)),
+                (moment, session_id),
+            )
+
+    def _retired_with_record(self, make):
+        backend = make()
+        backend.save_graph_data(snapshot([node_payload("a", revision=1)]))
+        backend.record_staged(A)
+        self._merged(backend, A, "m")
+        backend.retire(A)
+        return backend
+
+    def test_a_record_exactly_at_the_cutoff_is_kept(self, make, schema):
+        backend = self._retired_with_record(make)
+        retired = ls.utc_now().replace(microsecond=0)
+        self._set_retired_at(schema, A, retired)
+        at = retired + self.RETENTION
+        assert backend.purge_merge_records(self.RETENTION, limit=9, now=at) == 0
+        past = at + timedelta(microseconds=1)
+        assert backend.purge_merge_records(self.RETENTION, limit=9, now=past) == 1
+
+    def test_retiring_again_keeps_the_first_time(self, make, schema):
+        backend = self._retired_with_record(make)
+        first = ls.utc_now() - timedelta(days=30)
+        self._set_retired_at(schema, A, first)
+        backend.retire(A)
+        with psycopg.connect(DSN) as conn:
+            kept = conn.execute(
+                psycopg.sql.SQL(
+                    "SELECT retired_at FROM {}.graph_staged_sessions"
+                    " WHERE session_id = %s"
+                ).format(psycopg.sql.Identifier(schema)),
+                (A,),
+            ).fetchone()[0]
+        assert kept == first
+
+    def test_a_purge_skips_rows_another_transaction_holds(self, make, schema):
+        backend = self._retired_with_record(make)
+        backend.record_staged(B)
+        backend.retire(B)
+        self._set_retired_at(schema, B, None)
+        far = ls.utc_now() + timedelta(days=3650)
+        ident = psycopg.sql.Identifier(schema)
+        with psycopg.connect(DSN) as holder:
+            holder.execute(
+                psycopg.sql.SQL(
+                    "SELECT 1 FROM {}.graph_merge_records WHERE merge_id = 'm'"
+                    " FOR UPDATE"
+                ).format(ident)
+            )
+            holder.execute(
+                psycopg.sql.SQL(
+                    "SELECT 1 FROM {}.graph_staged_sessions WHERE session_id = %s"
+                    " FOR UPDATE"
+                ).format(ident),
+                (B,),
+            )
+            done = []
+            worker = threading.Thread(
+                target=lambda: done.append(
+                    backend.purge_merge_records(self.RETENTION, limit=9, now=far)
+                )
+            )
+            worker.start()
+            worker.join(10)
+            assert done == [0], "the purge waited on, or took, a held row"
+        assert backend.purge_merge_records(self.RETENTION, limit=9, now=far) == 1

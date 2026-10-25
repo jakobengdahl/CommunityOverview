@@ -18,6 +18,7 @@ from backend.core.tests.layer_store_contract import (
     A,
     B,
     LayerStoreContract,
+    PinnedClockRetentionContract,
     entry,
     fresh,
 )
@@ -29,7 +30,7 @@ from backend.core.tests.persistence_contract import (
 )
 
 
-class TestFileLayerStoreContract(LayerStoreContract):
+class TestFileLayerStoreContract(LayerStoreContract, PinnedClockRetentionContract):
     @pytest.fixture
     def factory(self, tmp_path):
         path = tmp_path / "graph.json"

@@ -61,6 +61,8 @@ LayerKey = Tuple[str, str]
 # How long the merge records of a deleted session are kept (§11.5): 90 days
 # after its staged-session record was retired, then a purge removes them.
 DEFAULT_MERGE_RECORD_RETENTION_DAYS = 90
+# A century: far past any audit need, and well inside what a date can hold.
+MAX_MERGE_RECORD_RETENTION_DAYS = 36_500
 
 # The longest entity or merge id the store accepts. Far beyond any id the
 # application mints, and short enough that a key can never reach a limit of

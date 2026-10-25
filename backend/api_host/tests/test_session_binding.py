@@ -319,6 +319,8 @@ def test_mcp_switches_a_session_to_staged_and_never_back(client):
         {"session_merge_record_retention_days": "-5"},
         {"session_merge_record_retention_days": "ninety"},
         {"session_merge_record_retention_days": "1.5"},
+        {"session_merge_record_retention_days": "36501"},
+        {"session_merge_record_retention_days": "1000000000"},
     ],
 )
 def test_unusable_staged_session_settings_fail_at_boot(app_config, changes):
@@ -326,7 +328,9 @@ def test_unusable_staged_session_settings_fail_at_boot(app_config, changes):
         build_session_settings(dataclasses.replace(app_config, **changes))
 
 
-@pytest.mark.parametrize("raw, days", [(None, 90), ("", 90), (" 30 ", 30), ("1", 1)])
+@pytest.mark.parametrize(
+    "raw, days", [(None, 90), ("", 90), (" 30 ", 30), ("1", 1), ("36500", 36500)]
+)
 def test_merge_record_retention_defaults_to_90_days(app_config, raw, days):
     config = dataclasses.replace(app_config, session_merge_record_retention_days=raw)
     assert build_session_settings(config).merge_record_retention_days == days

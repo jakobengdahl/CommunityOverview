@@ -4,11 +4,14 @@ declaration rules `capabilities_of` enforces for `staged_sessions`."""
 import pytest
 
 from backend.core.storage_backends import BackendCapabilities, capabilities_of
-from backend.core.tests.layer_store_contract import LayerStoreContract
+from backend.core.tests.layer_store_contract import (
+    LayerStoreContract,
+    PinnedClockRetentionContract,
+)
 from backend.core.tests.persistence_contract import InMemoryGraphPersistenceBackend
 
 
-class TestInMemoryLayerStoreContract(LayerStoreContract):
+class TestInMemoryLayerStoreContract(LayerStoreContract, PinnedClockRetentionContract):
     @pytest.fixture
     def factory(self):
         store = {}
