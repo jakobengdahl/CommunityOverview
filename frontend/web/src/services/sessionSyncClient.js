@@ -731,6 +731,7 @@ export class SessionSyncClient {
     this._readyWaiters = [];
     this._hadSnapshot = false;
     this._refusalProbed = false; // asked once why the stream never opened
+    this._probeController = null;
     // Seq the host's initial REST load reflected (setBaseline's `seq`), or
     // null when the baseline did not come from a load. The first stream
     // snapshot carries no content the host applies, so a snapshot newer than
@@ -1228,27 +1229,33 @@ export class SessionSyncClient {
   }
 
   // An EventSource does not say why it never opened. The stream creates a
-  // session it does not hold, so a 404 there means the id is retired (a
-  // deleted staged session's, §5.3) and nothing will ever save in it: ask
-  // once, by status, and tell the host. Anything else keeps reconnecting.
+  // session it does not hold, so the server's own 404 there means the id is
+  // retired (a deleted staged session's, §5.3) and nothing will ever save in
+  // it: ask once, by status and body (a proxy's 404 is not that), and tell
+  // the host. Anything else keeps reconnecting.
   async _probeStreamRefusal(url) {
     if (this._refusalProbed || !this._fetch || !this.handlers.onStreamRefused) return;
     this._refusalProbed = true;
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    let status = null;
+    this._probeController = controller;
+    let refused = false;
     try {
       const resp = await this._fetch(url, {
         headers: { Accept: 'text/event-stream' },
         signal: controller?.signal,
       });
-      status = resp?.status ?? null;
+      if (resp?.status === 404) {
+        const body = await resp.json().catch(() => null);
+        refused = body?.detail === 'session not found';
+      }
     } catch {
       return;
     } finally {
       controller?.abort();
+      this._probeController = null;
     }
-    if (status === 404 && !this._closed && !this._hadSnapshot) {
-      this.handlers.onStreamRefused(status);
+    if (refused && !this._closed && !this._hadSnapshot) {
+      this.handlers.onStreamRefused(404);
     }
   }
 
@@ -1943,6 +1950,7 @@ export class SessionSyncClient {
 
   close() {
     this._closed = true;
+    this._probeController?.abort();
     if (this._source) {
       try {
         this._source.close();

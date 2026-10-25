@@ -106,7 +106,7 @@ import * as api from '../src/services/api';
 import useGraphStore from '../src/store/graphStore';
 import { I18nProvider } from '../src/i18n';
 import en from '../src/i18n/en.json';
-import { DEFAULT_REQUEST_TIMEOUT_MS } from '../src/services/sessionSyncClient';
+import { DEFAULT_REQUEST_TIMEOUT_MS, SessionSyncClient } from '../src/services/sessionSyncClient';
 
 const store = () => useGraphStore.getState();
 const payload = (id) => ({
@@ -351,6 +351,28 @@ describe('App URL session bootstrap', () => {
     expect(global.fetch.mock.calls[0][1].headers['x-communityoverview-session-id']).toBe(
       '1111-2222'
     );
+  });
+
+  it('keeps the baseline of a stream an edit already connected when the late 404 arrives', async () => {
+    await renderApp();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(DEFAULT_REQUEST_TIMEOUT_MS);
+    });
+    // The view's content is saved: the edit connects the session's stream.
+    await act(async () => {
+      captured.canvas.onSaveView({
+        nodes: [{ id: 'view-node', position: { x: 1, y: 2 } }],
+        edges: [],
+        groups: [],
+      });
+    });
+    const streams = () =>
+      FakeEventSource.instances.filter((es) => es.url.includes('/api/sessions/1111-2222/stream'));
+    expect(streams()).toHaveLength(1);
+    const reset = vi.spyOn(SessionSyncClient.prototype, 'setBaseline');
+    await act(async () => bootstrap.reject(Object.assign(new Error('gone'), { status: 404 })));
+    expect(reset).not.toHaveBeenCalled();
+    expect(streams()).toHaveLength(1);
   });
 
   it('does not connect the stream of a link the user already left when its late 404 arrives', async () => {

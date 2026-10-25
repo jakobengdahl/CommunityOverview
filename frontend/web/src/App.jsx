@@ -1222,6 +1222,11 @@ function App() {
         // someone else materialise it and switch it to staged meanwhile.
         onStaleMissing: () => {
           if (sessionIdRef.current !== urlSession) return;
+          // A client an edit already connected keeps its baseline.
+          if (syncRef.current?.sessionId === urlSession) {
+            ensureSyncConnected(urlSession);
+            return;
+          }
           // Seq 0, as the in-time 404 does: any later seq is someone else's
           // write this empty load never saw, and is loaded on ready.
           ensureSyncConnected(urlSession)?.setBaseline({}, { seq: 0 });
@@ -2495,6 +2500,8 @@ function App() {
       if (!id || sessionIdRef.current !== id) return;
       if (retiredLeftRef.current.has(id) || locallyDeletingRef.current.has(id)) return;
       if (!retiredLeaveArmedRef.current) {
+        // Not left, but its writes are refused rather than sent unbound.
+        adoptWriteMode(id, 'staged');
         console.error('Session stream refused again; not leaving a second time:', id);
         return;
       }
@@ -2505,7 +2512,12 @@ function App() {
       sessionStore.removeSession(id);
       setSessionsVersion((v) => v + 1);
       showNotification('info', t('sessions.link_retired'));
-      leaveDeletedSession(id, true).then(() => setSessionsVersion((v) => v + 1));
+      leaveDeletedSession(id, true).then((left) => {
+        // No replacement on the server, so no stream to re-arm it: a later
+        // refusal leaves again.
+        if (!left) retiredLeaveArmedRef.current = true;
+        setSessionsVersion((v) => v + 1);
+      });
     },
     [adoptWriteMode, leaveDeletedSession, showNotification, t]
   );

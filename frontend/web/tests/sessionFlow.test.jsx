@@ -2663,17 +2663,23 @@ describe('Server-backed session lifecycle', () => {
 
     it('leaves only once while every stream is refused, until one opens', async () => {
       stagingOn();
-      getSessionAnswering({ '7777-8888': notFound(), '6666-0000': notFound() });
-      // Something in front of the server answers every stream with 404.
+      getSessionAnswering({
+        '7777-8888': notFound(),
+        '6666-0000': notFound(),
+        '4444-0000': notFound(),
+      });
+      // Every stream is refused as retired.
       global.fetch.mockImplementation(async (url) =>
         String(url).includes('/stream')
-          ? { ok: false, status: 404, json: async () => ({}) }
+          ? { ok: false, status: 404, json: async () => ({ detail: 'session not found' }) }
           : { ok: true, status: 200, json: async () => ({ applied: [], seq: 1 }) }
       );
       FakeEventSource.microtaskMessagesByUrl[STREAM_7777] = [];
       FakeEventSource.microtaskMessagesByUrl['http://localhost/api/sessions/9999-0001/stream'] = [];
       FakeEventSource.microtaskMessagesByUrl['http://localhost/api/sessions/6666-0000/stream'] = [];
       const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      FakeEventSource.microtaskMessagesByUrl['http://localhost/api/sessions/4444-0000/stream'] = [];
+      sessionStore.touchSession('4444-0000');
       sessionStore.touchSession('6666-0000');
       sessionStore.touchSession('7777-8888');
       renderApp();
@@ -2706,9 +2712,22 @@ describe('Server-backed session lifecycle', () => {
         'Session stream refused again; not leaving a second time:',
         '9999-0001'
       );
+      // A retired session opened while leaving is disarmed is not left, but
+      // its writes are refused rather than sent unbound.
+      await switchViaDrawer('4444-0000');
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A], []);
+      });
+      fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+      await waitFor(() => expect(streamsFor('4444-0000')).toHaveLength(1));
+      expect(api.setSessionStaged).not.toHaveBeenCalledWith('4444-0000', true);
+      await refuse('4444-0000');
+      expect(api.setSessionStaged).toHaveBeenCalledWith('4444-0000', true);
+      expect(api.createSession).toHaveBeenCalledTimes(1);
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('4444-0000');
       // Once a stream opens, the next retired session is left again.
       await act(async () => {
-        streamsFor('9999-0001')
+        streamsFor('4444-0000')
           .at(-1)
           .onmessage({
             data: JSON.stringify({ type: 'snapshot', seq: 0, session: { state: {} } }),
@@ -2725,6 +2744,47 @@ describe('Server-backed session lifecycle', () => {
       await waitFor(() =>
         expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('9999-0002')
       );
+    });
+
+    it('leaves the next retired session too when no replacement could be created', async () => {
+      stagingOn();
+      getSessionAnswering({ '7777-8888': notFound(), '6666-0000': notFound() });
+      api.createSession.mockRejectedValue(Object.assign(new Error('no'), { status: 403 }));
+      global.fetch.mockImplementation(async (url) =>
+        String(url).includes('/stream')
+          ? { ok: false, status: 404, json: async () => ({ detail: 'session not found' }) }
+          : { ok: true, status: 200, json: async () => ({ applied: [], seq: 1 }) }
+      );
+      FakeEventSource.microtaskMessagesByUrl[STREAM_7777] = [];
+      FakeEventSource.microtaskMessagesByUrl['http://localhost/api/sessions/6666-0000/stream'] = [];
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      sessionStore.touchSession('6666-0000');
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      fireEvent.click(screen.getByTitle('Menu'));
+      const toolbarButtons = document.querySelectorAll('.floating-toolbar-item');
+      const editAndRefuse = async (id, node) => {
+        await switchViaDrawer(id);
+        act(() => {
+          useGraphStore.getState().updateVisualization([node], []);
+        });
+        fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+        await waitFor(() => expect(streamsFor(id)).toHaveLength(1));
+        await act(async () => {
+          const es = streamsFor(id)[0];
+          es.readyState = 2;
+          es.onerror?.();
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        });
+      };
+      await editAndRefuse('7777-8888', NODE_A);
+      await waitFor(() => expect(api.createSession).toHaveBeenCalledTimes(1));
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).not.toHaveBeenLastCalledWith('7777-8888')
+      );
+      await editAndRefuse('6666-0000', NODE_B);
+      await waitFor(() => expect(api.createSession).toHaveBeenCalledTimes(2));
     });
 
     it('keeps a session whose stream fails for another reason', async () => {
