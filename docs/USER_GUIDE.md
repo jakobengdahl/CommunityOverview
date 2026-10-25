@@ -1092,7 +1092,9 @@ attachment added to a node in a staged session is stored at once.
 **Deleting a staged session** drops its unmerged changes with it, and the
 delete confirmation says so. Everyone who was in it — you included — lands in a
 new, empty staged session, so nobody who was staging suddenly edits the graph
-directly.
+directly. A link to a staged session that was deleted opens empty; as soon as
+the server refuses it (on the first edit or rename) you are moved to a new
+session with a notice, since nothing could be saved in the deleted one.
 
 ## 6. Federation — searching across multiple graphs
 
