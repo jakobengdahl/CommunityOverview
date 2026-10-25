@@ -872,8 +872,25 @@ On success:
   - per entry: action, entity, base revision, resulting revision and resolution.
 
   It is the audit trail of the merge, and it does not depend on mutation
-  history, which PostgreSQL mode does not keep. How long merge records are kept
-  is *open* (§20).
+  history, which PostgreSQL mode does not keep.
+- **Retention.** A merge record is kept while its session exists, and for
+  `SESSION_MERGE_RECORD_RETENTION_DAYS` (default 90) after the session is
+  deleted; then it is purged.
+  - Deleting a staged session retires its record (§5.3), and the retirement
+    stores its time (the database clock in PostgreSQL mode). Retiring again
+    keeps the first time. A retired record from before that time was stored
+    is stamped by the first purge, so its window starts then.
+  - The purge removes, in bounded batches, only applied records whose
+    session's record was retired more than the period ago. It never removes a
+    record of an active session, one inside the window, or a pending one
+    (§11.6), and never the retired session record itself, so the id stays
+    unusable.
+  - Each instance runs it at start and then periodically, on its own thread,
+    never inside a merge unit. Two instances purging one store at once each
+    skip the records the other holds.
+  - A replay of a purged merge id is refused as one for any deleted session
+    is: the session is retired, so the merge is refused with
+    `session_not_found` and nothing is applied.
 
 A partial merge leaves the unselected entries in the layer untouched.
 
@@ -1133,9 +1150,10 @@ recommendation comes first.
    unchanged, and staging is opted into per session or per graph.
 2. **Layer cap.** 1000 entries per layer. That is ample for a workshop, and it
    keeps composition cheap. It is configurable.
-3. **Merge-record retention.** Keep records as long as the session exists, plus
-   90 days after a session is deleted. They are the only audit a merge leaves
-   in PostgreSQL mode.
+3. **Merge-record retention.** *Decided:* records are kept as long as the
+   session exists, plus 90 days (configurable) after the session is deleted,
+   then purged (§11.5). They are the only audit a merge leaves in PostgreSQL
+   mode.
 4. **Staged-work expiry.** None in the core, consistent with D13. A deployment
    that wants expiry adds it on top.
 5. **Embedding layer entries.** *Decided:* embed each entry in the background
