@@ -3,8 +3,9 @@
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 
+from backend.runtime.authorization import use_request_authorization
 from backend.runtime.session_context import current_session_id, mismatch
 
 logger = logging.getLogger(__name__)
@@ -13,7 +14,7 @@ logger = logging.getLogger(__name__)
 def register_agent_routes(
     app: FastAPI,
     agent_registry,
-    graph_storage,
+    graph_service,
     federation_manager,
 ) -> None:
     """Register /federation/* and /agents/* status and trigger endpoints."""
@@ -39,12 +40,25 @@ def register_agent_routes(
         return agent_registry.get_available_mcp_integrations()
 
     @app.get("/agents/skills")
-    async def agents_skills():
+    async def agents_skills(request: Request):
         """List Skill nodes from the graph for agent configuration."""
-        nodes = graph_storage.search_nodes("", node_types=["Skill"], limit=200)
+        with use_request_authorization(headers=request.headers):
+            result = graph_service.search_graph(
+                "", node_types=["Skill"], limit=200, federation_depth=0
+            )
+        if result.get("error_code") == "access_denied":
+            raise HTTPException(
+                status_code=403, detail=result.get("message") or result.get("error")
+            )
+        if result.get("success") is False:
+            raise HTTPException(status_code=500, detail="Skill lookup failed")
         return [
-            {"id": n.id, "name": n.name, "description": n.description or ""}
-            for n in nodes
+            {
+                "id": n["id"],
+                "name": n["name"],
+                "description": n.get("description") or "",
+            }
+            for n in result["nodes"]
         ]
 
     @app.get("/agents/schedules")

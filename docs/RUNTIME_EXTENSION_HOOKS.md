@@ -7,11 +7,11 @@ revision checks, agent causation limits and agent rate limits still apply.
 
 ## Registration and context
 
-Register a `RuntimeExtensions` instance during process startup, before constructing
-stores, services, workers or provider clients:
+An embedding application can select its collaborators directly at startup:
 
 ```python
-from backend.runtime.extensions import RuntimeExtensions, configure_runtime_extensions
+from backend.api_host import AppConfig, create_app
+from backend.runtime.extensions import RuntimeExtensions
 
 extensions = RuntimeExtensions(
     mutation_policy=my_policy,
@@ -19,17 +19,76 @@ extensions = RuntimeExtensions(
     event_sink=my_observer,
     event_delivery=my_delivery_adapter,
 )
-configure_runtime_extensions(extensions)
+app = create_app(
+    AppConfig(graph_file="graph.json"),
+    authorization_hook=my_authorization_hook,
+    runtime_extensions=extensions,
+)
 ```
 
-This follows the constructor injection used by `GraphAuthorizationHook`.
-`GraphStorage(..., runtime_extensions=extensions)` or
-`GraphService(storage, runtime_extensions=extensions)` can select an instance
-explicitly; agent workers inherit it from their storage/service. `AgentWorker`
-and `run_function` also accept `runtime_extensions`. Independently constructed
-model clients use the process default; agent execution binds its selected
-extensions through each model invocation. Registration is a startup operation,
-not a per-request configuration API.
+Both new arguments are keyword-only and optional. `authorization_hook` implements
+`GraphAuthorizationHook` and is passed to `GraphService` for reads and writes.
+The `/agents/skills` graph lookup also uses this service, including request actor
+and scope context, access denial, and graph visibility narrowing.
+`create_app()` and the existing
+`uvicorn backend.api_host.server:get_app --factory` command keep their defaults.
+
+Construction order is explicit: select and bind extensions, construct storage,
+construct federation and event delivery, construct the graph service, then start
+federation and the agent registry. The binding covers all application construction
+without changing the process default. Storage receives the selected instance in
+its constructor; dispatchers and agent workers inherit it from storage, including
+workers created later in response to graph events. ASGI execution also binds the
+selected instance for each request through response streaming, so HTTP model
+invocations use the application's admission policy. The binding is reset when
+execution exits, including on errors.
+
+Optional pre-built storage remains supported as the second positional argument or
+`graph_storage=storage`. Construct it with
+`GraphStorage(..., runtime_extensions=extensions)` first. If both storage and
+extensions are supplied, they must refer to the same instance; a mismatch raises
+`ValueError` before any new collaborators are constructed. If extensions are
+omitted, the storage's instance is retained. Composition is fixed at construction:
+there is no reconfiguration method, and the `AppRuntime` fields are frozen.
+Replacing storage or worker extension attributes directly is unsupported because
+other collaborators may already have captured them.
+
+The app exposes these collaborators as `app.state.runtime`, an `AppRuntime`.
+Use `app.state.runtime.run_function(runner, spec, broker, envelope, attempt=1)`
+to execute a user function with the same extensions. It delegates to the existing
+function runner with an explicit instance, so admission happens before subprocess
+startup. Model invocations within agent and user-function execution bind that
+instance for the duration of the work.
+
+A worker-only process uses exactly the same construction path, without HTTP
+routes or static files:
+
+```python
+from backend.api_host import create_worker_runtime
+
+runtime = create_worker_runtime(
+    AppConfig(graph_file="graph.json"),
+    authorization_hook=my_authorization_hook,
+    runtime_extensions=extensions,
+)
+try:
+    wait_for_shutdown()  # The embedding process owns its lifetime.
+finally:
+    runtime.stop()
+```
+
+`create_worker_runtime` accepts the same arguments as `create_app` and starts
+event delivery, federation and configured agents immediately. `runtime.stop()`
+stops them and flushes storage, including supplied storage. The HTTP application
+calls it from its shutdown handler. Worker-only processes can also use
+`runtime.run_function(...)`; each process must receive its own composition at boot.
+
+For independently constructed clients, the existing process default remains
+available through `configure_runtime_extensions(extensions)`. Set it before
+constructing any clients; it does not reconfigure an existing application.
+`GraphStorage`, `GraphService`, `AgentWorker` and `run_function` also retain their
+lower-level constructor/keyword injection APIs. Independently invoked model
+clients use the currently bound instance or the process default.
 
 `RuntimeContext` carries immutable actor, scope, session, attribution,
 correlation/request IDs, agent/run/event IDs, attempt and causation depth.
