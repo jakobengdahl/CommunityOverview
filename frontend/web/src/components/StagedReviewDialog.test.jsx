@@ -316,6 +316,17 @@ describe('StagedReviewDialog', () => {
     expect(onDiscarded).not.toHaveBeenCalled();
   });
 
+  it('reports a failure, not a discard, when the read before any discard fails', async () => {
+    const onRefresh = vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    const { onDiscarded } = renderDialog({ onRefresh });
+    fireEvent.click(checkbox('node:n1'));
+    fireEvent.click(screen.getByText('staged.discard_selected'));
+    fireEvent.click(screen.getByText('staged.discard_confirm'));
+    await waitFor(() => expect(screen.getByText('staged.discard_failed')).toBeTruthy());
+    expect(api.discardStagedChanges).not.toHaveBeenCalled();
+    expect(onDiscarded).not.toHaveBeenCalled();
+  });
+
   it('says the outcome is unknown when the re-read after a lost answer fails', async () => {
     api.discardStagedChanges.mockRejectedValueOnce(new TypeError('Failed to fetch'));
     const onRefresh = vi.fn().mockResolvedValueOnce(ITEMS).mockResolvedValueOnce(null);

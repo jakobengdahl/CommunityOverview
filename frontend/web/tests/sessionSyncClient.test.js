@@ -3335,6 +3335,21 @@ describe('SessionSyncClient — a stream that never opens', () => {
     client.close();
   });
 
+  it('does not tell a client whose stream opened while the probe was asked', async () => {
+    let answer;
+    const fetchImpl = vi.fn(() => new Promise((resolve) => (answer = resolve)));
+    const { client, handlers } = makeClient({ fetchImpl });
+    handlers.onStreamRefused = vi.fn();
+    client.connect();
+    FakeEventSource.instances[0].error(true);
+    client.connect();
+    FakeEventSource.instances.at(-1).emit({ type: 'snapshot', seq: 1, session: { state: {} } });
+    answer({ ok: false, status: 404 });
+    await flush();
+    expect(handlers.onStreamRefused).not.toHaveBeenCalled();
+    client.close();
+  });
+
   it('does not tell a closed client', async () => {
     let answer;
     const fetchImpl = vi.fn(() => new Promise((resolve) => (answer = resolve)));

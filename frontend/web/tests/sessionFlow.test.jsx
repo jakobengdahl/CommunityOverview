@@ -2779,6 +2779,28 @@ describe('Server-backed session lifecycle', () => {
       expect(api.createSession).toHaveBeenCalledWith(null, { writeMode: 'staged' });
     });
 
+    it('stays in the active session when renaming another, retired one is refused', async () => {
+      stagingOn();
+      api.renameServerSession.mockRejectedValue(notFound());
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      const [startId] = api.setActiveSessionForRequests.mock.calls[0];
+      fireEvent.click(screen.getByTitle('Menu'));
+      openSessionAction('7777-8888', 'Name session');
+      await screen.findByText('Session name');
+      fireEvent.change(document.querySelector('.input-dialog input'), {
+        target: { value: 'Mine' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(api.renameServerSession).toHaveBeenCalled());
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+      expect(api.createSession).not.toHaveBeenCalled();
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith(startId);
+    });
+
     it('stays in the session when a rename fails for another reason', async () => {
       api.renameServerSession.mockRejectedValue(new TypeError('Failed to fetch'));
       sessionStore.touchSession('7777-8888');
