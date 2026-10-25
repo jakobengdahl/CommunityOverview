@@ -299,6 +299,7 @@
     "new_session": "Starta ny session",
     "new_session_started": "Ny session startad",
     "link_not_found": "Sessionslänken kunde inte hittas — den kan ha tagits bort eller upphört att gälla.",
+    "link_retired": "Sessionen har tagits bort, så inget kan sparas i den — fortsätter i en ny session.",
     "search_sessions": "Sök bland tidigare sessioner",
     "search_placeholder": "Sök på namn eller ID...",
     "connect_session": "Anslut till session (via ID)",

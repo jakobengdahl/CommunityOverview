@@ -1217,6 +1217,12 @@ function App() {
         eagerConnect: true,
         isStale: () => expired || scope.canvasReplaced(),
         onMissing: () => showNotification('info', t('sessions.link_not_found')),
+        // Settled direct after the wait: connect its stream anyway, as the
+        // load would have, so its ready handler reads the mode again should
+        // someone else materialise it and switch it to staged meanwhile.
+        onStaleMissing: () => {
+          if (sessionIdRef.current === urlSession) ensureSyncConnected(urlSession);
+        },
       });
       // Bound the wait even if fetch never settles. Invalidate the load itself
       // too, so a late reply cannot undo the view/focus that proceeds afterward.
@@ -2470,6 +2476,28 @@ function App() {
     ]
   );
 
+  // A session id the server refuses as retired (a deleted staged session's,
+  // §5.3) answers its load like one it never held, so it opens as a
+  // browser-only direct session that can never save: its stream and its
+  // rename are refused. On the first such refusal, leave it as a deleted
+  // staged session is left, with a notice. Not while this tab is deleting it:
+  // that path leaves it.
+  const retiredLeftRef = useRef(new Set());
+  const leaveRetiredSession = useCallback(
+    (id) => {
+      if (!id || sessionIdRef.current !== id) return;
+      if (retiredLeftRef.current.has(id) || locallyDeletingRef.current.has(id)) return;
+      retiredLeftRef.current.add(id);
+      // Refuse writes naming it until the replacement exists.
+      adoptWriteMode(id, 'staged');
+      sessionStore.removeSession(id);
+      setSessionsVersion((v) => v + 1);
+      showNotification('info', t('sessions.link_retired'));
+      leaveDeletedSession(id, true).then(() => setSessionsVersion((v) => v + 1));
+    },
+    [adoptWriteMode, leaveDeletedSession, showNotification, t]
+  );
+
   // How the app starts without a ?session= link, once the capabilities are
   // known (or failed): where the installation stages by default, in a session
   // created on the server, so that default (and the hook) decide its mode;
@@ -2508,7 +2536,11 @@ function App() {
         sessionIdRef.current === startId && useGraphStore.getState().nodes.length === 0;
       if (!created?.id || !untouched) {
         // Unused: nothing was written in it.
-        if (created?.id) api.deleteServerSession(created.id, api.getClientId()).catch(() => {});
+        if (created?.id) {
+          api
+            .deleteServerSession(created.id, api.getClientId())
+            .catch((error) => console.error('Error deleting the unused starting session:', error));
+        }
         settleDirect();
         return;
       }
@@ -2655,6 +2687,7 @@ function App() {
         showNotification('info', t('sessions.session_deleted_remote'));
       },
       onViewportSummoned: receiveSummon,
+      onStreamRefused: () => leaveRetiredSession(syncRef.current?.sessionId),
       onCommand: (command) => {
         if (command?.type === 'tool_result' && command.result) {
           applyToolResultCommand(command.result, command.command_id);
@@ -2705,6 +2738,7 @@ function App() {
     sessionId,
     sessionWriteMode,
     leaveDeletedSession,
+    leaveRetiredSession,
     adoptWriteMode,
     forgetStagedSession,
     handleStagedSessionOp,
@@ -2932,12 +2966,17 @@ function App() {
   const handleRenameSession = useCallback(
     (name) => {
       if (!renameDialog) return;
-      sessionStore.renameSession(renameDialog.id, name);
-      api.renameServerSession(renameDialog.id, name).catch(() => {});
+      const { id } = renameDialog;
+      sessionStore.renameSession(id, name);
+      api.renameServerSession(id, name).catch((error) => {
+        // A rename creates a session the server does not hold: a 404 means
+        // the id is retired.
+        if (error?.status === 404) leaveRetiredSession(id);
+      });
       setSessionsVersion((v) => v + 1);
       setRenameDialog(null);
     },
-    [renameDialog]
+    [renameDialog, leaveRetiredSession]
   );
 
   // Open the delete confirmation, first checking the roster so the dialog can

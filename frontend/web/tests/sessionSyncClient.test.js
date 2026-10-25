@@ -3278,3 +3278,73 @@ describe('foldAckedAnnotationOp', () => {
     expect(a.field_versions).toEqual({ style: 2 });
   });
 });
+
+describe('SessionSyncClient — a stream that never opens', () => {
+  const probing = (status) => vi.fn(async () => ({ ok: status < 400, status }));
+
+  it('tells the host once when the stream answers 404: the session id is retired', async () => {
+    const fetchImpl = probing(404);
+    const { client, handlers } = makeClient({ fetchImpl });
+    handlers.onStreamRefused = vi.fn();
+    client.connect();
+    FakeEventSource.instances[0].error(true);
+    await flush();
+    expect(fetchImpl).toHaveBeenCalledWith(
+      expect.stringContaining('/api/sessions/1234-5678/stream?'),
+      expect.objectContaining({ headers: { Accept: 'text/event-stream' } })
+    );
+    expect(handlers.onStreamRefused).toHaveBeenCalledWith(404);
+    // The next failed connect does not ask again.
+    client.connect();
+    FakeEventSource.instances.at(-1).error(true);
+    await flush();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(handlers.onStreamRefused).toHaveBeenCalledTimes(1);
+    client.close();
+  });
+
+  it('says nothing for a refusal that is not a 404, or a network failure', async () => {
+    for (const fetchImpl of [
+      probing(429),
+      probing(503),
+      vi.fn(async () => {
+        throw new TypeError('Failed to fetch');
+      }),
+    ]) {
+      FakeEventSource.instances = [];
+      const { client, handlers } = makeClient({ fetchImpl });
+      handlers.onStreamRefused = vi.fn();
+      client.connect();
+      FakeEventSource.instances[0].error(true);
+      await flush();
+      expect(handlers.onStreamRefused).not.toHaveBeenCalled();
+      client.close();
+    }
+  });
+
+  it('does not ask about a stream that was open before it dropped', async () => {
+    const fetchImpl = probing(404);
+    const { client, handlers } = makeClient({ fetchImpl });
+    handlers.onStreamRefused = vi.fn();
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 1, session: { state: {} } });
+    FakeEventSource.instances[0].error(true);
+    await flush();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(handlers.onStreamRefused).not.toHaveBeenCalled();
+    client.close();
+  });
+
+  it('does not tell a closed client', async () => {
+    let answer;
+    const fetchImpl = vi.fn(() => new Promise((resolve) => (answer = resolve)));
+    const { client, handlers } = makeClient({ fetchImpl });
+    handlers.onStreamRefused = vi.fn();
+    client.connect();
+    FakeEventSource.instances[0].error(true);
+    client.close();
+    answer({ ok: false, status: 404 });
+    await flush();
+    expect(handlers.onStreamRefused).not.toHaveBeenCalled();
+  });
+});
