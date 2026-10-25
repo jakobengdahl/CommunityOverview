@@ -2,6 +2,10 @@
 
 This document describes the event system for graph mutation webhooks.
 
+Embedding code can replace external delivery and observe policy/loop-guard
+diagnostics through the [runtime extension hooks](RUNTIME_EXTENSION_HOOKS.md).
+Internal agent routing and default HTTP URL checks continue to apply.
+
 ## Overview
 
 The event system allows external services to receive notifications when the graph is modified. This enables:
@@ -33,6 +37,7 @@ Every mutation can include context for tracking and loop prevention:
   it as somebody else's work, or the change bounces between instances.
 - `event_session_id`: Unique session identifier
 - `event_correlation_id`: For chaining related events
+- `event_causation_depth`: Server-owned agent hop count, starting at zero
 
 A write that a staged session's merge applies to the graph
 (docs/SESSION_OVERLAY_CONTRACT.md §11.5) fires the same event a direct write
@@ -118,13 +123,14 @@ Events are delivered as JSON POST requests:
 ```json
 {
   "event_id": "550e8400-e29b-41d4-a716-446655440000",
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "event_type": "node.create",
   "occurred_at": "2024-01-15T10:30:00.000000Z",
   "origin": {
     "event_origin": "web-ui",
     "event_session_id": "session-abc123",
-    "event_correlation_id": null
+    "event_correlation_id": null,
+    "event_causation_depth": 0
   },
   "entity": {
     "kind": "node",
@@ -187,7 +193,24 @@ For `node.update` events, both `before` and `after` states are included:
 
 ## Loop Prevention
 
-To prevent infinite loops when agents modify the graph:
+Built-in agents have a default-on guard independent of subscription exclusions:
+
+- Every agent execution increments `origin.event_causation_depth` on its graph
+  writes and preserves the initiating event's correlation ID (or event ID).
+  At depth **8**, the receiving agent pauses before calling the LLM. This bounds
+  both self-retriggering agents and chains across multiple agents.
+- An agent receiving more than **30 events in 60 seconds** pauses. Paused agents
+  reject new events and skip queued work. Their tools stop executing additional
+  actions if the guard trips during a run.
+- `GET /agents/status` exposes `paused` and `pause_reason` in each worker's status. The
+  trip also appears as a failed run with its reason in agent run history. Edit
+  the agent configuration (or disable and enable the agent) to resume. Guard
+  counters and pauses are local to the running process; durable run history
+  retains the trip when a persistent history store is configured.
+
+The depth and origin are set by the server around built-in agent tool calls;
+model-supplied arguments cannot reset the chain. Existing external webhook
+clients can continue using origin and session exclusions:
 
 1. **Set `ignore_origins`**: Configure subscriptions to ignore events from specific sources
 2. **Use unique session IDs**: Each client should use a consistent session ID
@@ -259,7 +282,21 @@ curl -X POST http://localhost:8000/api/nodes \
 
 ### MCP Tools
 
-MCP tools automatically set `event_origin` to "mcp" and accept optional session/correlation IDs.
+Generic MCP mutation tools set `event_origin` to "mcp" and accept optional
+session/correlation IDs. Dedicated create tools also attribute writes to "mcp".
+
+`create_agent(config={"name": "Reviewer", "task_prompt": "Review new initiatives"})`
+creates an enabled Agent, its EventSubscription, and their relationship in one
+write. The server sets `subscription_id`, `internal://agent/<agent-id>`, and the
+matching `ignore_origins` entry using the exact Agent ID. Set `enabled` to false
+in `config` to create it disabled. Agent execution still requires the runtime
+and chosen integrations to be configured, as for agents created in the UI.
+
+`create_event_subscription` accepts a `config` with `name`, a public HTTP(S)
+`webhook_url`, and optional `filters`, `ignore_origins`, and `ignore_session_ids`.
+It validates operations and delivery before saving; internal subscriptions are
+assembled by `create_agent`. Both tools are also available to the built-in
+assistant and authorize through the same create path as the UI.
 
 ## Web UI
 

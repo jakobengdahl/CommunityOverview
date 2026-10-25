@@ -717,6 +717,36 @@ class LayerStoreContract:
             {},
         )
 
+    def test_a_kept_incident_edge_changed_since_the_diff_fails_the_merge(
+        self, seeded, factory
+    ):
+        seeded.stage(A, [entry("node", "a")])
+        revision = self.revision_of(seeded, "edge", "e1")
+        checks = [MergeCheck.incident_edges("a", ["e1"], {"e1": revision})]
+        factory().apply_batch(
+            [
+                EntityOperation.upsert_edge(
+                    fresh(edge_payload("e1", "a", "b", label="new"))
+                )
+            ]
+        )
+        self._assert_raced_and_untouched(
+            seeded, factory, [self._update_a(seeded)], checks, [("node", "a")], {}
+        )
+
+    @pytest.mark.parametrize("revisions", [{"unlisted": 1}, {"e1": "4"}, {"e1": True}])
+    def test_invalid_incident_edge_revisions_are_refused(self, seeded, revisions):
+        with pytest.raises(ls.InvalidLayerRequest):
+            seeded.merge(
+                A,
+                "bad",
+                [],
+                [MergeCheck.incident_edges("a", ["e1"], revisions)],
+                [],
+                {},
+            )
+        assert seeded.load_merge("bad") is None
+
     def test_an_endpoint_deleted_since_the_diff_fails_an_edge_create(
         self, seeded, factory
     ):

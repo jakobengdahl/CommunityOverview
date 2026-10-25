@@ -65,6 +65,12 @@ from .vector_store import VectorStore, dominant_dimension, matching_dimension
 from . import storage_search
 from . import storage_history
 from . import storage_events
+from backend.runtime.extensions import (
+    ResourceChange,
+    RuntimeExtensions,
+    get_runtime_extensions,
+    runtime_context,
+)
 
 # Event system imports
 from .events.models import EventType, EntityKind, EventContext
@@ -403,6 +409,7 @@ class GraphStorage:
         history_max_events: Optional[int] = None,
         history_max_age_days: Optional[float] = None,
         history_compaction_interval: Optional[int] = None,
+        runtime_extensions: Optional[RuntimeExtensions] = None,
     ):
         """
         Initialize GraphStorage.
@@ -426,6 +433,7 @@ class GraphStorage:
                 compaction passes (throttle). Defaults to an amortised value when
                 retention is enabled; ignored when retention is disabled.
         """
+        self.runtime_extensions = runtime_extensions or get_runtime_extensions()
         self._persistence_backend = persistence_backend or FileGraphPersistenceBackend(
             json_path
         )
@@ -757,6 +765,7 @@ class GraphStorage:
         enabled: bool = True,
         max_attempts: int = 3,
         backoff_times: Optional[List[float]] = None,
+        on_delivery_outcome: Optional[Callable] = None,
     ) -> None:
         """
         Initialize the event system for webhook delivery.
@@ -776,11 +785,28 @@ class GraphStorage:
         # Import here to avoid circular imports
         from .events.dispatcher import EventDispatcher
         from .events.delivery import DeliveryWorker
+        from backend.runtime.extensions import DeliveryOutcome
+
+        def report_delivery(result):
+            if on_delivery_outcome is not None:
+                status = {
+                    "success": "delivered",
+                    "retrying": "deferred",
+                }.get(result.status.value, "terminal_failure")
+                on_delivery_outcome(
+                    DeliveryOutcome(
+                        status,
+                        result.delivery_id,
+                        result.correlation_id,
+                        f"http_{result.status.value}",
+                    )
+                )
 
         # Create delivery worker
         self._delivery_worker = DeliveryWorker(
             max_attempts=max_attempts,
             backoff_times=backoff_times,
+            on_result=report_delivery if on_delivery_outcome is not None else None,
         )
         self._delivery_worker.start()
 
@@ -788,6 +814,7 @@ class GraphStorage:
         self._event_dispatcher = EventDispatcher(
             storage=self,
             on_deliver=self._delivery_worker.enqueue,
+            on_delivery_outcome=on_delivery_outcome,
         )
 
         self._events_enabled = True
@@ -1314,6 +1341,8 @@ class GraphStorage:
         changes: List[Tuple[str, str, Any]],
         undo: _Undo,
         expectations: Optional[Dict[Tuple[str, str], Any]] = None,
+        *,
+        event_context: Optional[EventContext] = None,
     ) -> None:
         """Stamp revisions on a write already applied to memory, and persist it.
 
@@ -1330,6 +1359,24 @@ class GraphStorage:
         expectation (memory is undone, EntityRevisionConflict raised), and a
         failure is resolved on the write's own evidence (§4.4).
         """
+        try:
+            self.runtime_extensions.evaluate_mutation(
+                runtime_context("graph_write", event_context=event_context),
+                [
+                    ResourceChange.snapshot(
+                        kind,
+                        entity if action == "delete" else entity.id,
+                        (undo.nodes if kind == "node" else undo.edges).get(
+                            entity if action == "delete" else entity.id
+                        ),
+                        None if action == "delete" else entity.to_dict(),
+                    )
+                    for kind, action, entity in changes
+                ],
+            )
+        except Exception:
+            self._undo(undo)
+            raise
         expectations = expectations or {}
         upserted = [entity for _, action, entity in changes if action == "upsert"]
 
@@ -1919,6 +1966,9 @@ class GraphStorage:
         ready at that moment. This retries later - on demand, or from the
         startup pass below - and is a no-op once the index is complete.
 
+        Incremental stores receive only the embedded nodes, with revision
+        expectations, so a lagging instance cannot overwrite a peer's writes.
+
         Returns how many nodes were embedded; 0 when there was nothing
         missing or the ML stack is still unavailable (the same
         optional-dependency degradation as every other embedding call in
@@ -1929,12 +1979,20 @@ class GraphStorage:
             if not missing_ids:
                 return 0
             missing_nodes = [self.nodes[node_id] for node_id in missing_ids]
+            undo = self._capture(node_ids=missing_ids)
             try:
                 self.vector_store.update_nodes_embeddings(missing_nodes)
             except Exception as embed_error:
                 logger.warning(f"could not backfill missing embeddings: {embed_error}")
                 return 0
-            self.save()
+            if self._backend_capabilities.incremental_writes:
+                self._commit(
+                    [("node", "upsert", node) for node in missing_nodes],
+                    undo,
+                    {("node", node.id): node.revision for node in missing_nodes},
+                )
+            else:
+                self.save()
             return len(missing_nodes)
 
     def _maybe_backfill_missing_embeddings_async(self) -> None:
@@ -3072,6 +3130,7 @@ class GraphStorage:
                     + [("edge", "upsert", edge) for edge in created_edges],
                     undo,
                     store_expectations,
+                    event_context=event_context,
                 )
 
             def persist_landed() -> None:
@@ -3313,7 +3372,13 @@ class GraphStorage:
         with self._lock:
             return self._generation
 
-    def replace_all_nodes_and_edges(self, nodes: List[Node], edges: List[Edge]) -> None:
+    def replace_all_nodes_and_edges(
+        self,
+        nodes: List[Node],
+        edges: List[Edge],
+        *,
+        event_context: Optional[EventContext] = None,
+    ) -> None:
         """
         Atomically replace the ENTIRE graph with ``nodes``/``edges``.
 
@@ -3371,6 +3436,23 @@ class GraphStorage:
         guarantee as the nodes/edges/graph/search-index swap above.
         """
         with self._lock:
+            replacements = [
+                ("node", self.nodes, {n.id: n for n in nodes}),
+                ("edge", self.edges, {e.id: e for e in edges}),
+            ]
+            self.runtime_extensions.evaluate_mutation(
+                runtime_context("replace_graph", event_context=event_context),
+                [
+                    ResourceChange.snapshot(
+                        kind,
+                        entity_id,
+                        before[entity_id].to_dict() if entity_id in before else None,
+                        after[entity_id].to_dict() if entity_id in after else None,
+                    )
+                    for kind, before, after in replacements
+                    for entity_id in dict.fromkeys([*before, *after])
+                ],
+            )
             previous_nodes = self.nodes
             previous_edges = self.edges
             previous_graph = self.graph
@@ -3653,7 +3735,7 @@ class GraphStorage:
                 raise
 
             try:
-                self._commit(changes, undo, expectations)
+                self._commit(changes, undo, expectations, event_context=event_context)
             except (EntityRevisionConflict, GraphWriteFailed):
                 # _commit has undone memory.
                 undone()
@@ -3763,6 +3845,27 @@ class GraphStorage:
                 replayed = _layer.replay(stored, session_id, merge_id)
                 return SessionMergeLanded(record=replayed.record, replayed=True)
             plan = prepare()
+            self.runtime_extensions.evaluate_mutation(
+                runtime_context(
+                    "merge", event_context=event_context, session_id=session_id
+                ),
+                [
+                    ResourceChange.snapshot(
+                        write.kind,
+                        write.entity_id,
+                        current.to_dict()
+                        if (
+                            current := (
+                                self.nodes if write.kind == "node" else self.edges
+                            ).get(write.entity_id)
+                        )
+                        is not None
+                        else None,
+                        write.payload if write.action == "upsert" else None,
+                    )
+                    for write in plan.writes
+                ],
+            )
             heal = self._heal_if_needed()
             if heal is not None:
                 # The store's image must be this instance's before the unit
@@ -4138,6 +4241,7 @@ class GraphStorage:
                 {("node", node_id): expected_revision}
                 if expected_revision is not None
                 else None,
+                event_context=event_context,
             )
 
             # Emit update event
@@ -4211,6 +4315,7 @@ class GraphStorage:
                     for node_id, expected in (expected_revisions or {}).items()
                     if node_id in before_states
                 },
+                event_context=event_context,
             )
 
             # After the write, so each event carries the revision it landed at.
@@ -4342,6 +4447,7 @@ class GraphStorage:
                         ("node", node_id): expected
                         for node_id, expected in (expected_revisions or {}).items()
                     },
+                    event_context=event_context,
                 )
 
                 # Emit delete events for edges (before nodes, to maintain referential integrity info)
@@ -4522,6 +4628,7 @@ class GraphStorage:
                 {("edge", edge_id): expected_revision}
                 if expected_revision is not None
                 else None,
+                event_context=event_context,
             )
 
             # Emit update event
@@ -4587,6 +4694,7 @@ class GraphStorage:
                     for edge_id, expected in (expected_revisions or {}).items()
                     if edge_id in before_states
                 },
+                event_context=event_context,
             )
 
             for edge in to_change.values():
@@ -4656,6 +4764,7 @@ class GraphStorage:
                 {("edge", edge_id): expected_revision}
                 if expected_revision is not None
                 else None,
+                event_context=event_context,
             )
 
             # Emit delete event
@@ -4717,6 +4826,7 @@ class GraphStorage:
                         ("edge", edge_id): expected
                         for edge_id, expected in (expected_revisions or {}).items()
                     },
+                    event_context=event_context,
                 )
 
                 for edge_id in deleted_edge_ids:
@@ -4810,6 +4920,7 @@ class GraphStorage:
                 {("edge", edge.id): EXPECT_ABSENT}
                 if expect_absent or self._store_assigns_revisions
                 else None,
+                event_context=event_context,
             )
 
             # Emit create event

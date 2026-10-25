@@ -28,6 +28,7 @@ is a historical archive.
 | [DATA_MANAGEMENT.md](DATA_MANAGEMENT.md) | How graph data files are stored and loaded |
 | [PERSISTENCE_BACKENDS.md](PERSISTENCE_BACKENDS.md) | The storage seam: what a persistence backend implements, and how mutations reach it |
 | [EVENT_SUBSCRIPTIONS.md](EVENT_SUBSCRIPTIONS.md) | Webhook / graph-mutation event system |
+| [RUNTIME_EXTENSION_HOOKS.md](RUNTIME_EXTENSION_HOOKS.md) | Mutation policy, execution admission, runtime observation and external delivery contracts |
 | [AGENT_SCHEDULING.md](AGENT_SCHEDULING.md) | Time-based agent schedule triggers |
 | [USER_FUNCTION_CONTRACT.md](USER_FUNCTION_CONTRACT.md) | Sandboxed user-defined functions: manifest, broker protocol, grants, limits, run records (draft contract) |
 | [FEDERATED_GRAPH_DESIGN.md](FEDERATED_GRAPH_DESIGN.md) | Federation design and its implementation status |

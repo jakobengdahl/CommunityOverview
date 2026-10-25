@@ -528,6 +528,17 @@ For an entity id `e`, read in a staged session:
 
 An edge is absent from the composed view when either endpoint is absent from it.
 
+Under graph-access narrowing, a layer entry is shown only if its composed,
+main and base entities are visible. Edge bases do not snapshot endpoint
+visibility. For an entry with a base, the current implementation therefore
+also requires each endpoint of the base and current main edge to be visible
+now and to have a revision no greater than the edge's base revision. This is
+conservative: any later endpoint write, even an unrelated edit, hides the
+staged edge from a narrowed reader. For a legacy base at revision `0`, an
+endpoint's first later write also hides it. Endpoints still at revision `0`
+pass the inclusive cutoff.
+Unnarrowed reads do not apply this cutoff.
+
 Every entity a composing read returns carries **`staged_state`**:
 
 | Value | Meaning |
@@ -598,6 +609,11 @@ the layer from the backend on each composing request.
 A composing read costs its main-graph cost plus work linear in the layer size.
 It may also need an in-process walk instead of the store's traversal. §6.4's cap
 bounds the extra work.
+
+The implementation reloads the layer and rechecks the staged record for every
+composing read, preserving freshness across instances without a layer cache.
+Narrowed similarity builds a visible-node scope by scanning the node map;
+lexical name similarity itself also scans the visible nodes.
 
 ## 9. Staged writes
 
@@ -787,6 +803,17 @@ still true when the merge applies.
   retype locks its node row. So an edge create and a node delete or retype on
   the same node are ordered against each other, whichever instance issues
   them.
+- A direct PostgreSQL node delete removes only the named node, even when
+  unseen edges remain. A node upsert that creates an absent id (plain or
+  `expect_absent`) refuses with `entity_revision_conflict` and the message
+  “dangling edges reference this id” if scoped edges still name it. Separate
+  source and target index probes run after the batch writes, in the same
+  transaction, while the inserted row is locked. Deleted edges are absent;
+  edge upserts judged against their endpoints in this batch are excluded.
+  Refusal rolls back the whole batch and announces nothing. This also applies
+  to merge creates, reported as `merge_raced`, so a recreated id cannot inherit
+  unseen edges under a different type. Merged deletes still require the exact
+  incident-edge check above.
 - An edge write, direct or merged, also carries the type of each endpoint it
   was judged against. Holding the endpoint, a shared store refuses the write if
   the endpoint now has another type or is gone, with `entity_revision_conflict`
@@ -821,7 +848,8 @@ such an entry; naming one is answered as for any entry not staged.
 The selection must be **closed under dependencies**. An entry depends on:
 
 - for an edge create: the create entries of its endpoints, where they have them;
-- for a node delete: the tombstones of its incident edges;
+- for a node delete or an update staging a new node type: the tombstones of
+  its incident edges;
 - for an `as_new` node: the edge creates in the layer that name the old id.
 
 A selection that leaves out a dependency is refused with `merge_incomplete`,

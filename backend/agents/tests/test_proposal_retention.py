@@ -317,6 +317,34 @@ class TestCli:
         finally:
             store.close()
 
+    def test_dry_run_reads_v2_proposals_without_migrating(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        db = tmp_path / "governance.db"
+        store = SqliteProposalStore(db)
+        old = _proposal(store, decided_days_ago=4000)
+        store.close()
+        with sqlite3.connect(db) as conn:
+            conn.execute("ALTER TABLE proposals DROP COLUMN causation_depth")
+            conn.execute("PRAGMA user_version=2")
+        before = db.read_bytes()
+
+        store = SqliteProposalStore(db, read_only=True)
+        try:
+            assert store.get(old.id).causation_depth == 1
+            decided = store.list_decided_older_than(T0)
+            assert [p.id for p in decided] == [old.id]
+            assert decided[0].causation_depth == 1
+        finally:
+            store.close()
+
+        monkeypatch.delenv("AGENTS_RUN_HISTORY_DB", raising=False)
+        monkeypatch.setenv("AGENTS_GOVERNANCE_DB", str(db))
+        monkeypatch.setenv("AGENTS_RUN_HISTORY_RETENTION_DAYS", "30")
+        assert main(["--dry-run"]) == 0
+        assert json.loads(capsys.readouterr().out)["proposals_purged"] == 1
+        assert db.read_bytes() == before
+
     def test_cli_closes_the_proposal_store_when_the_proposal_sweep_reports_failure(
         self, tmp_path, monkeypatch
     ):

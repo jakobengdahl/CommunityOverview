@@ -26,11 +26,6 @@ from backend.core.session_store import (
     SessionStore,
 )
 from backend.core.storage_backends import FileGraphPersistenceBackend
-from backend.core.tests.test_persistence_contract_postgres import (
-    DSN,
-    _server_reachable,
-    psycopg,
-)
 from backend.core.write_modes import WriteModeRefused, WriteModes
 from backend.runtime.authorization import (
     DefaultGraphAuthorizationHook,
@@ -116,6 +111,12 @@ def world(request, tmp_path):
         yield World(storage)
         storage.shutdown_events()
         return
+    from backend.core.tests.test_persistence_contract_postgres import (
+        DSN,
+        _server_reachable,
+        psycopg,
+    )
+
     if not _server_reachable():
         pytest.skip("no PostgreSQL server configured")
     from backend.core.postgres_backend import PostgresGraphPersistenceBackend
@@ -463,8 +464,8 @@ def test_a_staged_answer_uses_the_main_snapshot_that_was_checked(
     sid = world.staged_session()
     original = StagedWrite._commit
 
-    def commit_then_change_main(writer, layer):
-        result = original(writer, layer)
+    def commit_then_change_main(writer, layer, **kwargs):
+        result = original(writer, layer, **kwargs)
         if kind == "node":
             world.storage.update_node("a", {"name": "Unchecked main content"})
         else:
@@ -812,6 +813,12 @@ def test_a_stale_expected_session_seq_is_refused_even_when_nothing_changes(world
 
 
 def test_postgres_refuses_to_boot_with_staging_off_over_staged_sessions():
+    from backend.core.tests.test_persistence_contract_postgres import (
+        DSN,
+        _server_reachable,
+        psycopg,
+    )
+
     if not _server_reachable():
         pytest.skip("no PostgreSQL server configured")
     from backend.core.postgres_backend import PostgresGraphPersistenceBackend

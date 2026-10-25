@@ -230,6 +230,20 @@ class TestEventRouting:
         assert result is True
         mock_worker.enqueue.assert_called_once_with(sample_event_payload)
 
+    @pytest.mark.parametrize("via_subscription", [False, True])
+    def test_guard_rejection_is_not_reported_as_delivery(
+        self, registry_with_worker, sample_event_payload, via_subscription
+    ):
+        registry, mock_worker = registry_with_worker
+        mock_worker.enqueue.return_value = False
+
+        if via_subscription:
+            result = registry.enqueue_for_subscription("sub-001", sample_event_payload)
+        else:
+            result = registry.enqueue("agent-001", sample_event_payload)
+
+        assert result is False
+
     def test_enqueue_unknown_agent_returns_false(
         self, registry_with_worker, sample_event_payload
     ):
@@ -381,3 +395,19 @@ class TestGetAvailableIntegrations:
         payload = enqueued[0]
         assert payload["event_type"] == "scheduled_trigger"
         assert payload["schedule"]["day_name"] == "Tuesday"
+
+    def test_trigger_agent_reports_guard_rejection(self, mock_storage, mock_service):
+        registry = AgentRegistry(
+            settings=AgentsSettings(enabled=False),
+            graph_storage=mock_storage,
+            graph_service=mock_service,
+        )
+        worker = MagicMock()
+        worker.config = AgentConfig(
+            agent_id="agent-1",
+            name="Paused",
+            schedule=AgentSchedule(day_of_week=1, hour=14, minute=0),
+        )
+        worker.enqueue.return_value = False
+        registry._workers = {"agent-1": worker}
+        assert registry.trigger_agent("agent-1") is False

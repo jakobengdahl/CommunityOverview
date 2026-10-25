@@ -85,8 +85,11 @@ class GraphService:
         federation_manager: Optional[FederationManager] = None,
         authorization_hook: Optional[GraphAuthorizationHook] = None,
         attachment_settings: Optional[AttachmentSettings] = None,
+        runtime_extensions=None,
     ):
         self._storage = storage
+        if runtime_extensions is not None:
+            storage.runtime_extensions = runtime_extensions
         self._federation_manager = federation_manager
         self._authorization_hook = authorization_hook or DefaultGraphAuthorizationHook()
         # None leaves the node attachment routes answering
@@ -814,6 +817,9 @@ class GraphService:
                     self._authorization_hook,
                     nodes,
                     edges,
+                    event_origin=event_origin,
+                    event_session_id=event_session_id,
+                    event_correlation_id=event_correlation_id,
                     expect_absent=expect_absent,
                     staging=staging,
                 )

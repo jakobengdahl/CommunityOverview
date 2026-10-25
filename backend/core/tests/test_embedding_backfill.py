@@ -29,6 +29,16 @@ from backend.core import storage as storage_module
 DIM = 8
 
 
+@pytest.fixture(autouse=True)
+def no_real_embedding_model(monkeypatch):
+    from backend.core import vector_store
+
+    def unavailable():
+        raise ImportError("ML extras unavailable in this test")
+
+    monkeypatch.setattr(vector_store, "_ensure_sentence_transformers", unavailable)
+
+
 class _FakeEncoder:
     """Deterministic encoder: same text always yields the same vector."""
 
@@ -366,21 +376,13 @@ class TestStartupBackfillPass:
         reloaded.vector_store.model = _FakeEncoder()
         reloaded.flush()
 
-    def test_a_save_failure_during_the_startup_backfill_does_not_abort_construction(
+    def test_a_persist_failure_during_the_startup_backfill_does_not_abort_construction(
         self, tmpdir_path, monkeypatch
     ):
-        """`backfill_missing_embeddings()` calls `self.save()` without
-        waiting on or checking its result - fire-and-forget, per this
-        module's own docstring - and nothing in it guards that call with a
-        try/except of its own. This simulates `save()` itself raising
-        synchronously (the same shape as `ThreadPoolExecutor.submit` raising
-        `RuntimeError` when the executor is already shut down) and checks
-        two things: the raise must not escape the background startup pass
-        `__init__` starts and so must not abort construction; and, because
-        the vector was already computed and put in the index before `save()`
-        was even called, it must not be lost - any later successful `save()`
-        reissues the whole graph and so recovers it, the general
-        resync-on-next-save behaviour `__init__` leans on here."""
+        """A synchronous persistence failure stays inside the startup task.
+
+        The computed vector remains available for a later explicit save.
+        """
         from backend.core import vector_store as vector_store_module
 
         class _FakeSentenceTransformer:
@@ -406,16 +408,18 @@ class TestStartupBackfillPass:
             storage_module.importlib.util, "find_spec", lambda name: object()
         )
 
-        original_save = storage_module.GraphStorage.save
+        original_persist = storage_module.GraphStorage._persist
         calls = {"n": 0}
 
-        def _fail_first_save(self):
+        def _fail_first_persist(self, operations):
             calls["n"] += 1
             if calls["n"] == 1:
                 raise RuntimeError("simulated save failure mid-backfill")
-            return original_save(self)
+            return original_persist(self, operations)
 
-        monkeypatch.setattr(storage_module.GraphStorage, "save", _fail_first_save)
+        monkeypatch.setattr(
+            storage_module.GraphStorage, "_persist", _fail_first_persist
+        )
 
         # Must not raise - the same tolerance the other startup-pass failure
         # modes in this class already pin, extended to the async body itself.
@@ -424,7 +428,7 @@ class TestStartupBackfillPass:
         deadline = time.monotonic() + 5
         while calls["n"] < 1 and time.monotonic() < deadline:
             time.sleep(0.01)
-        assert calls["n"] == 1, "backfill's save() was never even attempted"
+        assert calls["n"] == 1, "backfill's persistence was never attempted"
 
         # The vector was computed and put in the index even though the
         # call that would have persisted it raised.
@@ -433,7 +437,6 @@ class TestStartupBackfillPass:
         # The resync-on-next-save mechanism: a later, successful save
         # recovers it on disk.
         reloaded.save().result()
-        assert calls["n"] == 2
 
         restarted = GraphStorage(json_path=os.path.join(tmpdir_path, "graph.json"))
         assert restarted.embedding_coverage() == (1, 1)
@@ -592,3 +595,58 @@ class TestLoadModelConcurrency:
             t.join(timeout=5)
 
         assert constructions["count"] == 1
+
+
+def test_backfill_persists_only_missing_nodes_with_revision_expectations(
+    tmp_path, monkeypatch
+):
+    from backend.core.tests.persistence_contract import by_id
+    from backend.core.tests.test_generation_embeddings import _RevisionBackend
+
+    backend = _RevisionBackend({})
+    storage = _make_storage(str(tmp_path), persistence_backend=backend)
+    try:
+        _add_node_without_embedding(storage, Node(id="a", type="Actor", name="Alpha"))
+        storage.flush()
+        revision = storage.nodes["a"].revision
+        # A peer's node has not reached this instance's memory.
+        backend.upsert_node(Node(id="peer", type="Actor", name="Peer").to_dict())
+        operations = []
+        apply_batch = backend.apply_batch
+
+        def record_batch(batch, write_token=None):
+            operations.extend(batch)
+            return apply_batch(batch, write_token=write_token)
+
+        monkeypatch.setattr(backend, "apply_batch", record_batch)
+        assert storage.backfill_missing_embeddings() == 1
+        assert [
+            (op.kind, op.action, op.entity_id, op.expected_revision)
+            for op in operations
+        ] == [("node", "upsert", "a", revision)]
+        nodes = by_id(backend.load_graph_data(), "nodes")
+        assert nodes["peer"]["name"] == "Peer"
+        assert nodes["a"]["embedding"] == storage.vector_store.get_vector_list("a")
+    finally:
+        storage.shutdown_events()
+
+
+def test_a_stale_backfill_cannot_overwrite_a_peer_edit(tmp_path):
+    from backend.core import EntityRevisionConflict
+    from backend.core.tests.persistence_contract import by_id
+    from backend.core.tests.test_generation_embeddings import _RevisionBackend
+
+    backend = _RevisionBackend({})
+    storage = _make_storage(str(tmp_path), persistence_backend=backend)
+    try:
+        _add_node_without_embedding(storage, Node(id="a", type="Actor", name="Alpha"))
+        revision = storage.nodes["a"].revision
+        backend.upsert_node(Node(id="a", type="Actor", name="Peer edit").to_dict())
+        stored_before = backend.load_graph_data()
+        with pytest.raises(EntityRevisionConflict):
+            storage.backfill_missing_embeddings()
+        assert by_id(backend.load_graph_data(), "nodes")["a"]["name"] == "Peer edit"
+        assert backend.load_graph_data() == stored_before
+        assert storage.nodes["a"].revision == revision
+    finally:
+        storage.shutdown_events()

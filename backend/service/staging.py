@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional,
 
 from backend.core import Edge, EntityRevisionConflict, Node, StaleUpdateError
 from backend.core import layer_store
+from backend.core.events import EventContext
 from backend.core.layer_vectors import LayerVectors
 from backend.core.models import _parse_datetime
 from backend.core.session_annotations import saved_view_write_error
@@ -354,7 +355,9 @@ class StagedWrite:
         store = self._manager.write_modes.layer_store
         return Layer(self._storage, store.load_layer(self.session_id))
 
-    def _commit(self, layer: Layer) -> Dict[str, Any]:
+    def _commit(
+        self, layer: Layer, event_context: Optional[EventContext] = None
+    ) -> Dict[str, Any]:
         """Write the op's changes to the layer and fan them out (§15).
 
         Returns ``{"entries": [...], "removals": [...], "session_seq": n}``;
@@ -368,6 +371,28 @@ class StagedWrite:
                 self.session_id, self._expected_session_seq
             )
             return {"entries": [], "removals": [], "session_seq": seq}
+        from backend.runtime.extensions import ResourceChange, runtime_context
+
+        changes = []
+        for kind, entity_id in [
+            (entry["kind"], entry["entity_id"]) for entry in upserts
+        ] + removals:
+            main = (layer.main_node if kind == "node" else layer.main_edge)(entity_id)
+            key = (kind, entity_id)
+            changes.append(
+                ResourceChange.snapshot(
+                    kind,
+                    entity_id,
+                    compose(layer._loaded.get(key), main),
+                    compose(layer.entry(key), main),
+                )
+            )
+        self._storage.runtime_extensions.evaluate_mutation(
+            runtime_context(
+                "stage", event_context=event_context, session_id=self.session_id
+            ),
+            changes,
+        )
         store = self._manager.write_modes.layer_store
 
         staged_entries: List[Dict[str, Any]] = []
@@ -629,6 +654,7 @@ class StagedWrite:
         *,
         expect_absent: bool,
         graph_access: GraphAccessNarrowing,
+        event_context: Optional[EventContext] = None,
     ) -> Dict[str, Any]:
         layer = self._load()
         failure = {"added_node_ids": [], "added_edge_ids": []}
@@ -704,7 +730,7 @@ class StagedWrite:
             doc = _doc(edge)
             doc["revision"] = 0
             self._stage_create(layer, "edge", doc)
-        committed = self._commit(layer)
+        committed = self._commit(layer, event_context=event_context)
         added_nodes = [_node(layer.node(n.id)) for n in nodes]
         added_edges = [_edge(layer.edge_ignoring_endpoints(e.id)) for e in edges]
         return self._staged(
@@ -729,6 +755,7 @@ class StagedWrite:
         expected_updated_at: Optional[str],
         expected_revision: Optional[int],
         graph_access: GraphAccessNarrowing,
+        event_context: Optional[EventContext] = None,
     ) -> Dict[str, Any]:
         layer = self._load()
         current = layer.node(node_id)
@@ -764,7 +791,7 @@ class StagedWrite:
                 "error_code": "validation_error",
             }
         self._stage_update(layer, "node", current, updated, _NODE_STAGED_FIELDS)
-        committed = self._commit(layer)
+        committed = self._commit(layer, event_context=event_context)
         node = serialize_node(_node(layer.node(node_id)))
         return self._staged(
             {
@@ -782,6 +809,7 @@ class StagedWrite:
         *,
         expected_revisions: Optional[Dict[str, int]],
         graph_access: GraphAccessNarrowing,
+        event_context: Optional[EventContext] = None,
     ) -> Dict[str, Any]:
         layer = self._load()
         present = [
@@ -802,7 +830,7 @@ class StagedWrite:
             for edge_id in self._delete_node(layer, node_id):
                 if edge_id not in affected:
                     affected.append(edge_id)
-        committed = self._commit(layer)
+        committed = self._commit(layer, event_context=event_context)
         return self._staged(
             {
                 "success": True,
@@ -820,6 +848,7 @@ class StagedWrite:
         archived: bool,
         *,
         graph_access: GraphAccessNarrowing,
+        event_context: Optional[EventContext] = None,
     ) -> Dict[str, Any]:
         layer = self._load()
         found: List[str] = []
@@ -833,7 +862,7 @@ class StagedWrite:
             self._stage_update(
                 layer, "node", current, {**current, "archived": archived}, ("archived",)
             )
-        committed = self._commit(layer)
+        committed = self._commit(layer, event_context=event_context)
         nodes = [serialize_node(_node(layer.node(nid))) for nid in found]
         return self._staged(
             {
@@ -847,7 +876,11 @@ class StagedWrite:
         )
 
     def add_edge(
-        self, edge: Edge, *, graph_access: GraphAccessNarrowing
+        self,
+        edge: Edge,
+        *,
+        graph_access: GraphAccessNarrowing,
+        event_context: Optional[EventContext] = None,
     ) -> Dict[str, Any]:
         layer = self._load()
         not_found = {
@@ -880,7 +913,7 @@ class StagedWrite:
         doc = _doc(edge)
         doc["revision"] = 0
         self._stage_create(layer, "edge", doc)
-        committed = self._commit(layer)
+        committed = self._commit(layer, event_context=event_context)
         staged = serialize_edge(_edge(layer.edge_ignoring_endpoints(edge.id)))
         return self._staged(
             {
@@ -922,6 +955,7 @@ class StagedWrite:
         *,
         expected_revision: Optional[int],
         graph_access: GraphAccessNarrowing,
+        event_context: Optional[EventContext] = None,
     ) -> Dict[str, Any]:
         layer = self._load()
         current = self._visible_edge(layer, edge_id, graph_access)
@@ -940,7 +974,7 @@ class StagedWrite:
         self._stage_update(
             layer, "edge", current, _doc(updated), tuple(sorted(EDGE_UPDATE_FIELDS))
         )
-        committed = self._commit(layer)
+        committed = self._commit(layer, event_context=event_context)
         staged = serialize_edge(_edge(layer.edge(edge_id)))
         return self._staged({"success": True, "edge": staged}, committed)
 
@@ -950,6 +984,7 @@ class StagedWrite:
         *,
         expected_revision: Optional[int],
         graph_access: GraphAccessNarrowing,
+        event_context: Optional[EventContext] = None,
     ) -> Dict[str, Any]:
         layer = self._load()
         current = self._visible_edge(layer, edge_id, graph_access)
@@ -958,11 +993,15 @@ class StagedWrite:
         if current is None:
             return {"success": False, "error": f"Edge with ID {edge_id} not found"}
         self._stage_delete(layer, "edge", edge_id)
-        committed = self._commit(layer)
+        committed = self._commit(layer, event_context=event_context)
         return self._staged({"success": True, "deleted_edge_id": edge_id}, committed)
 
     def delete_edges(
-        self, edge_ids: List[str], *, graph_access: GraphAccessNarrowing
+        self,
+        edge_ids: List[str],
+        *,
+        graph_access: GraphAccessNarrowing,
+        event_context: Optional[EventContext] = None,
     ) -> Dict[str, Any]:
         layer = self._load()
         deleted = [
@@ -972,7 +1011,7 @@ class StagedWrite:
         ]
         for edge_id in deleted:
             self._stage_delete(layer, "edge", edge_id)
-        committed = self._commit(layer)
+        committed = self._commit(layer, event_context=event_context)
         return self._staged(
             {
                 "success": True,
@@ -988,6 +1027,7 @@ class StagedWrite:
         archived: bool,
         *,
         graph_access: GraphAccessNarrowing,
+        event_context: Optional[EventContext] = None,
     ) -> Dict[str, Any]:
         layer = self._load()
         found: List[str] = []
@@ -999,7 +1039,7 @@ class StagedWrite:
             self._stage_update(
                 layer, "edge", current, {**current, "archived": archived}, ("archived",)
             )
-        committed = self._commit(layer)
+        committed = self._commit(layer, event_context=event_context)
         edges = [serialize_edge(_edge(layer.edge(eid))) for eid in found]
         return self._staged(
             {
@@ -1194,6 +1234,10 @@ class SessionGate:
 def refusal_result(exc: Exception, **defaults: Any) -> Optional[Dict[str, Any]]:
     """The result a session or staging refusal answers with, or None when
     ``exc`` is not one."""
+    from backend.runtime.extensions import MutationPolicyDenied
+
+    if isinstance(exc, MutationPolicyDenied):
+        return {**defaults, "success": False, "error": exc.code, "message": str(exc)}
     if isinstance(exc, session_context.SessionRefused):
         return {**defaults, **exc.to_result()}
     if isinstance(exc, StagingRefused):

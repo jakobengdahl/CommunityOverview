@@ -448,11 +448,10 @@ class PostgresGraphPersistenceBackend:
 
         An exact match on the two catalog columns, not `to_regclass`: that
         function *parses* its argument as an SQL name, so it case-folds an
-        unquoted part and splits on a dot. It answers "missing" for a table
-        that exists under a mixed-case schema - dropping this guard for
-        exactly the least-privilege role it was written for - and raises
-        outright on a schema name containing a dot. The schema guard below
-        matches `pg_namespace.nspname` for the same reason.
+        unquoted part. It answers "missing" for a table that exists under a
+        mixed-case schema - dropping this guard for exactly the least-privilege
+        role it was written for. The schema guard below matches
+        `pg_namespace.nspname` for the same reason.
         """
         if conn.execute(
             "SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
@@ -1605,10 +1604,12 @@ class PostgresGraphPersistenceBackend:
                 )
                 self._claim_or_check_graph_identity(conn)
                 self._hold_endpoints(conn, operations)
+                created_nodes = []
                 revisions = [
-                    self._apply_one(conn, operation, write_token)
+                    self._apply_one(conn, operation, write_token, created_nodes)
                     for operation in operations
                 ]
+                self._refuse_dangling_edges_on_create(conn, created_nodes, operations)
                 # Inside the transaction, so the announcement is atomic with
                 # what it announces: the server holds it until commit and
                 # discards it on rollback. A batch that deadlocks and retries
@@ -1616,6 +1617,43 @@ class PostgresGraphPersistenceBackend:
                 # and a batch that fails announces nothing at all.
                 self._announce(conn, operations)
                 return revisions
+
+    def _refuse_dangling_edges_on_create(
+        self, conn, created_nodes, operations: Sequence[EntityOperation]
+    ) -> None:
+        """Prevent a newly created id inheriting edges from an earlier node.
+
+        Check after the named writes, while INSERT holds the new node row.
+        Edge upserts in this batch were judged against their endpoints; they
+        are not inherited edges. Deleted edges are already absent here.
+        Separate endpoint probes use the scoped expression indexes.
+        """
+        scope, scope_params = self._and_scope()
+        written_edges = list(
+            {
+                op.entity_id
+                for op in operations
+                if op.kind == "edge" and op.action == "upsert"
+            }
+        )
+        for operation in created_nodes:
+            for endpoint in ("source", "target"):
+                row = conn.execute(
+                    sql.SQL(
+                        "SELECT 1 FROM {} WHERE doc->>{} = %s{}"
+                        " AND NOT (id = ANY(%s::text[])) LIMIT 1"
+                    ).format(self._table("graph_edges"), sql.Literal(endpoint), scope),
+                    (operation.entity_id, *scope_params, written_edges),
+                ).fetchone()
+                if row is not None:
+                    conflict = EntityRevisionConflict(
+                        "node", operation.entity_id, None, None
+                    )
+                    conflict.args = (
+                        f"node {operation.entity_id!r}: dangling edges reference this id; "
+                        "reload the graph before retrying",
+                    )
+                    raise conflict
 
     def _hold_endpoints(self, conn, operations: Sequence[EntityOperation]) -> None:
         """Hold the endpoints the batch's edge upserts name, until commit.
@@ -1688,7 +1726,11 @@ class PostgresGraphPersistenceBackend:
         )
 
     def _apply_one(
-        self, conn, operation: EntityOperation, write_token: Optional[str]
+        self,
+        conn,
+        operation: EntityOperation,
+        write_token: Optional[str],
+        created_nodes=None,
     ) -> Optional[int]:
         table = "graph_nodes" if operation.kind == "node" else "graph_edges"
         if operation.action == "delete":
@@ -1745,6 +1787,22 @@ class PostgresGraphPersistenceBackend:
         )
         returning = sql.SQL(" RETURNING (doc->>'revision')::bigint")
 
+        # xmax is zero for the inserted tuple, and nonzero for ON CONFLICT's
+        # updated tuple. Determine creation in the writing statement itself,
+        # rather than racing a preceding existence read.
+        track_create = (
+            operation.kind == "node"
+            and created_nodes is not None
+            and operation.expected_revision is None
+        )
+        if track_create:
+            returning += sql.SQL(", (xmax = 0)")
+
+        def revision(row):
+            if track_create and row[1]:
+                created_nodes.append(operation)
+            return int(row[0])
+
         if operation.expect_absent:
             row = conn.execute(
                 sql.SQL("INSERT INTO {} ({}) VALUES (").format(
@@ -1761,7 +1819,7 @@ class PostgresGraphPersistenceBackend:
                     # Taken, but by a row this instance may not see.
                     raise self._cross_scope(operation)
                 raise conflict
-            return int(row[0])
+            return revision(row)
 
         if operation.expected_revision is not None:
             scope, scope_params = self._and_scope()
@@ -1786,7 +1844,7 @@ class PostgresGraphPersistenceBackend:
             ).fetchone()
             if row is None:
                 raise self._refuse(conn, table, operation)
-            return int(row[0])
+            return revision(row)
 
         # A node's type changes in place only under an expectation (a merge's
         # retype); a plain upsert that would change it was made over a type
@@ -1812,7 +1870,7 @@ class PostgresGraphPersistenceBackend:
                 raise NodeTypeChanged(
                     operation.entity_id, operation.payload.get("type")
                 )
-            return int(row[0])
+            return revision(row)
         # The scope travels with the row. A row written before this instance
         # had a scope carries none, and adopting it here is what stops the
         # store drifting into two kinds of row that the whole-graph save would
@@ -1856,7 +1914,7 @@ class PostgresGraphPersistenceBackend:
                     operation.entity_id, operation.payload.get("type")
                 )
             raise self._cross_scope(operation)
-        return int(row[0])
+        return revision(row)
 
     def _cross_scope(self, operation: EntityOperation) -> "CrossScopeWriteRefused":
         return CrossScopeWriteRefused(
@@ -2411,6 +2469,7 @@ class PostgresGraphPersistenceBackend:
                     )
                 self._hold_endpoints(conn, ops)
                 revisions = []
+                created_nodes = []
                 for operation in ops:
                     if operation.action == "delete":
                         # Locked and required, as layer_store's reference does:
@@ -2432,7 +2491,10 @@ class PostgresGraphPersistenceBackend:
                                 f"{operation.kind} {operation.entity_id!r} is "
                                 f"already absent"
                             )
-                    revisions.append(self._apply_one(conn, operation, write_token))
+                    revisions.append(
+                        self._apply_one(conn, operation, write_token, created_nodes)
+                    )
+                self._refuse_dangling_edges_on_create(conn, created_nodes, ops)
                 for node_id in sorted(
                     {c.entity_id for c in checks if c.check == "node_exists"}
                 ):

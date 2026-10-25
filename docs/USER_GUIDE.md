@@ -675,6 +675,17 @@ Ask the assistant to add content:
 Write operations go through the same validation as the UI — the node type must exist
 in the current profile's schema.
 
+You can also ask the assistant to create an Agent, EventSubscription, Skill,
+ActiveKnowledgeCollection, SavedView, or CollectionResponse. Dedicated tools
+validate their configuration and create the required links. An Agent is enabled
+by default and comes with its own subscription. A collection response names its
+collection by ID. These tools are available in ordinary graph chat; collection
+visitors use the collection's restricted tools and bound response-saving tool.
+
+Agent chains stop at eight agent hops. An agent also pauses after receiving more
+than 30 events in 60 seconds. The reason appears as a failed run in agent history;
+edit the agent configuration or disable and enable it to resume.
+
 ### 4.3 Node proposals and duplicate detection
 
 When the assistant extracts entities (from text or a document), it checks the graph
@@ -1166,15 +1177,30 @@ interface.
 | `get_related_nodes` | Get nodes connected to a given node |
 | `find_similar_nodes` | Find nodes with similar names/descriptions |
 | `add_nodes` | Add new nodes and edges |
+| `create_agent` | Create an enabled Agent with its internal subscription |
+| `create_event_subscription` | Create a subscription for a public HTTP(S) webhook |
+| `create_skill` | Create reusable instructions with content and when-to-use guidance |
+| `create_active_knowledge_collection` | Create a collection with a unique kiosk short name |
+| `create_saved_view` | Save explicit node IDs and positions without needing a browser |
+| `create_collection_response` | Store answers linked to a collection by ID |
 | `update_node` | Update node properties |
 | `delete_nodes` | Delete nodes by ID |
 | `get_graph_stats` | Get summary statistics about the graph |
 | `preview_graph_merge` | Preview what merging a small graph document into the graph would add, overwrite, skip or reject — writes nothing (see [DATA_MANAGEMENT.md](DATA_MANAGEMENT.md#previewing-a-merge-import)) |
-| `save_view` | Save a named canvas view |
+| `save_view` | Ask a connected frontend to capture and save its canvas |
 | `get_capabilities` | Discover what the server supports |
 | `connect_to_visualization_session` | Check that a session ID resolves, and whether a client is connected to it |
 | `summon_session_viewport` | Move everyone connected to a session to one region of the canvas — given as bounds or as a set of node ids — the same as **Bring everyone here** |
 | `show_graph_widget` | Show matching nodes as an interactive graph inside the chat (see [8.5](#85-interactive-graph-inside-the-chat)) |
+
+Each dedicated create tool takes a `config` object. For example,
+`create_skill(config={"name": "Review", "content": "Check consistency.",
+"when_to_use": "When reviewing graph changes"})` creates a usable Skill.
+For a headless saved view, pass `config={"name": "Overview", "node_ids": ["node-id"],
+"positions": {"node-id": {"x": 0, "y": 0}}}` to `create_saved_view`; omitted
+positions receive a default layout. These writes use the UI's create authorization
+path and respect a bound session's staged write mode. Their schemas describe the
+required fields; invalid configurations are rejected before any nodes are added.
 
 ### 8.2 Connecting
 

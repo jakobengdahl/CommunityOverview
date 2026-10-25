@@ -455,12 +455,28 @@ def get_related_nodes(
     if relationship_types:
         rel_filters = [RelationshipType(r) for r in relationship_types]
 
-    result = storage.get_related_nodes(
-        node_id=node_id,
-        relationship_types=rel_filters,
-        depth=depth,
-        include_archived=include_archived,
-    )
+    if decision.graph_access.enabled:
+        # Filter each hop: filtering only the answer leaks connectivity through
+        # hidden nodes. A backend traversal cannot enforce this reader's view.
+        result = storage_search.get_related_nodes(
+            storage.nodes,
+            storage.edges,
+            storage.graph,
+            node_id=node_id,
+            relationship_types=rel_filters,
+            depth=depth,
+            include_archived=include_archived,
+            node_visible=lambda node: access.is_node_visible(
+                node, decision.graph_access
+            ),
+        )
+    else:
+        result = storage.get_related_nodes(
+            node_id=node_id,
+            relationship_types=rel_filters,
+            depth=depth,
+            include_archived=include_archived,
+        )
 
     visible_nodes, visible_edges = access.filter_nodes_and_edges(
         nodes=result["nodes"],
