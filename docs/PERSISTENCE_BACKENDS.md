@@ -638,7 +638,8 @@ def purge_merge_records(retention, *, limit, now=None) -> int
   `timedelta`) before `now` (the store's own clock when None), and returns
   how many (§11.5). `retire` stores the retirement time and a repeated
   `retire` keeps it; a retired record without one is stamped `now` by the
-  purge, so its window starts there. A record of an active session, of a
+  purge, so its window starts there (the file backend stamps every such
+  record in one call, PostgreSQL at most `limit` per call). A record of an active session, of a
   retirement inside the window, or not marked `applied`, is never removed,
   nor is the retired record itself. It is idempotent, and the server runs it
   in batches from a thread of its own (`backend/core/merge_record_retention.py`).

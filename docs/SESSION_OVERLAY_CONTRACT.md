@@ -880,7 +880,8 @@ On success:
   - Deleting a staged session retires its record (§5.3), and the retirement
     stores its time (the database clock in PostgreSQL mode). Retiring again
     keeps the first time. A retired record from before that time was stored
-    is stamped by the first purge, so its window starts then.
+    is stamped by the purge that first reaches it (PostgreSQL stamps at most
+    one batch of such records per call), so its window starts then.
   - The purge removes, in bounded batches, only applied records whose
     session's record was retired more than the period ago. It never removes a
     record of an active session, one inside the window, or a pending one
