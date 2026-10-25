@@ -4,7 +4,8 @@
 Every test here drives the real app over HTTP (and MCP where a workshop agent
 would use it), with the session bound by the header exactly as the frontend
 sends it. The service-level suites prove each rule in isolation; this module
-proves they hold together on the routes a workshop actually calls:
+proves they hold together on the routes a workshop actually calls (the MCP
+case calls the registered tool functions in-process, not the MCP transport):
 
 1. isolation between two staged sessions and from the main graph;
 2. composed reads - lexical search, semantic search and traversal - in the
@@ -210,52 +211,37 @@ def test_mcp_search_and_traversal_compose_in_the_named_session_only(client):
         assert "kelp" not in {n["id"] for n in related["nodes"]}
 
 
-class KeywordEmbedder:
-    """Stands in for the embedding model on the app's own vector store.
+class KeywordModel:
+    """Stands in for the sentence-transformer behind the app's real vector store.
 
-    Text embeds as one dimension per keyword, so scores are predictable. The
-    main index's answer is the real store's stored vectors searched the same
-    way, which keeps the composition under test: main hits that a session
-    superseded must drop out, staged entries must be embedded and scored.
+    Only the encoder is replaced: text embeds as one dimension per keyword (a
+    small constant keeps every vector non-zero), so scores are predictable.
+    The store's own index, its search and the composed layer's vectors all run
+    as they do in production, so staged content written into the main index
+    would answer a main-graph semantic search and fail the test.
     """
 
     KEYWORDS = ("ocean", "forest", "desert")
 
-    def __init__(self, store):
-        self.store = store
-        self.main_vectors = {}
+    def encode(self, texts, **_):
+        import numpy as np
 
-    def vector(self, text):
-        text = text.lower()
-        return [1.0 if k in text else 0.0 for k in self.KEYWORDS]
+        def vector(text):
+            text = text.lower()
+            return [1.0 if k in text else 0.0 for k in self.KEYWORDS] + [0.01]
 
-    def install(self, main_nodes):
-        store = self.store
-        self.main_vectors = {
-            n.id: self.vector(store._get_text_representation(n)) for n in main_nodes
-        }
-
-        def compute(nodes):
-            return {n.id: self.vector(store._get_text_representation(n)) for n in nodes}
-
-        def search(query_text=None, query_node=None, limit=5, threshold=0.0):
-            q = self.vector(query_text or "")
-            hits = [
-                (nid, float(sum(x * y for x, y in zip(q, v))))
-                for nid, v in self.main_vectors.items()
-            ]
-            hits = [h for h in hits if h[1] > 0 and h[1] >= threshold]
-            return sorted(hits, key=lambda h: -h[1])[:limit]
-
-        store.compute_node_embeddings = compute
-        store.embed_query = self.vector
-        store.search = search
+        if isinstance(texts, str):
+            return np.array(vector(texts), dtype=np.float32)
+        return np.array([vector(t) for t in texts], dtype=np.float32)
 
 
 def test_semantic_search_composes_in_the_owning_session_only(client):
     storage = _main(client)
     _patch(client, None, "node-3", {"description": "a guide to the ocean floor"})
-    KeywordEmbedder(storage.vector_store).install(storage.get_all_nodes())
+    store = storage.vector_store
+    store.model = KeywordModel()
+    store.load_vectors({})
+    store.update_nodes_embeddings(storage.get_all_nodes())
     a = _session(client)
     b = _session(client)
     _add(client, a, [{"id": "watch", "type": "Actor", "name": "Ocean Watch"}])
@@ -270,6 +256,9 @@ def test_semantic_search_composes_in_the_owning_session_only(client):
     for sid in (b, None):
         assert set(semantic(sid, "ocean")) == {"node-3"}
         assert semantic(sid, "forest") == {}
+    # The main index holds main content only.
+    assert not store.has_embedding("watch")
+    assert store.get_vector_list("node-3")[:3] == [1.0, 0.0, 0.0]
 
 
 def test_traversal_walks_staged_edges_in_the_owning_session_only(client):

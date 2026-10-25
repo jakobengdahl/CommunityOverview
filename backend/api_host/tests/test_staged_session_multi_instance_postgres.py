@@ -283,3 +283,26 @@ def test_a_merge_retried_on_the_other_instance_is_answered_from_its_record(insta
     assert taken.status_code == 409, taken.text
     assert taken.json()["detail"]["error"] == "merge_id_taken"
     assert _main_node(a, "elsewhere") is None
+
+
+def test_a_main_edit_on_one_instance_is_a_conflict_in_the_others_diff(instances):
+    a, b = instances
+    _seed(a, b)
+    sid = _ok(a.post("/api/sessions", json={"name": "w", "write_mode": "staged"}))["id"]
+    _ok(
+        a.patch(
+            "/api/nodes/hub", headers=_h(sid), json={"updates": {"name": "Workshop"}}
+        )
+    )
+    _ok(a.patch("/api/nodes/hub", json={"updates": {"name": "Main meanwhile"}}))
+    _eventually(
+        lambda: _main_node(b, "hub")["name"] == "Main meanwhile", "the edit reaches B"
+    )
+    item = _ok(b.get(f"/api/sessions/{sid}/staged"))["items"][0]
+    assert item["status"] == "conflict"
+    assert item["fields"]["name"] == {
+        "base": "Harbour Hub",
+        "staged": "Workshop",
+        "main": "Main meanwhile",
+        "conflict": True,
+    }
