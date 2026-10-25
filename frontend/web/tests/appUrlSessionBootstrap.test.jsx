@@ -336,13 +336,17 @@ describe('App URL session bootstrap', () => {
     expect(streams()).toHaveLength(1);
     // Someone else materialised it and switched it to staged meanwhile: the
     // ready handler reads the mode again, so the next write names it.
+    api.getSession.mockClear();
     api.getSession.mockResolvedValue({ id: '1111-2222', write_mode: 'staged', state: {} });
     await act(async () => {
       streams()[0].onmessage({
         data: JSON.stringify({ type: 'snapshot', seq: 3, session: { state: {} } }),
       });
     });
-    expect(api.getSession).toHaveBeenLastCalledWith('1111-2222');
+    expect(api.getSession).toHaveBeenCalledWith('1111-2222');
+    // Seeded at seq 0 like the in-time 404: content written meanwhile (seq 3)
+    // is loaded rather than missed.
+    expect(api.getSession).toHaveBeenCalledWith('1111-2222', { resolve: true });
     await tryWrite();
     expect(global.fetch.mock.calls[0][1].headers['x-communityoverview-session-id']).toBe(
       '1111-2222'

@@ -360,12 +360,16 @@ function StagedReviewDialog({
     } catch (error) {
       if (entries.length && mergeOutcomeUnknown(error)) {
         // The answer was lost, not necessarily the discard: the diff says
-        // whether it landed. A discard removes all its entries or none.
+        // whether its entries are still staged. A discard removes all of them
+        // or none, but so may someone else's merge, so all gone is reported
+        // as no longer staged, not as discarded.
         const after = await onRefresh();
         const left = new Set((after || []).map(itemKey));
         const gone = entries.filter((ref) => !left.has(entryKey(ref.kind, ref.entity_id)));
         if (after && gone.length === entries.length) {
-          discarded({ removed_entries: gone.map((ref) => [ref.kind, ref.entity_id]) });
+          setSelected(new Map());
+          setMessage({ kind: 'success', text: t('staged.discard_gone', { count: gone.length }) });
+          onDiscarded?.({ removed_entries: gone.map((ref) => [ref.kind, ref.entity_id]) });
           return;
         }
         setMessage({

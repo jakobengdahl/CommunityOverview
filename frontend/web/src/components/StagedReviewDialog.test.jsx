@@ -291,15 +291,17 @@ describe('StagedReviewDialog', () => {
     expect(onDiscarded).not.toHaveBeenCalled();
   });
 
-  it('reports a discard whose answer was lost as done when the entries are gone', async () => {
+  it('reports a discard whose answer was lost as no longer staged when the entries are gone', async () => {
     api.discardStagedChanges.mockRejectedValueOnce(new TypeError('Failed to fetch'));
     const onRefresh = vi.fn().mockResolvedValueOnce(ITEMS).mockResolvedValueOnce([EDGE, CONFLICT]);
     const { onDiscarded } = renderDialog({ onRefresh });
     fireEvent.click(checkbox('node:n1'));
     fireEvent.click(screen.getByText('staged.discard_selected'));
     fireEvent.click(screen.getByText('staged.discard_confirm'));
-    await waitFor(() => expect(screen.getByText('staged.discarded')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('staged.discard_gone')).toBeTruthy());
     expect(onDiscarded).toHaveBeenCalledWith({ removed_entries: [['node', 'n1']] });
+    // Someone else's merge removes them as well: not claimed as discarded.
+    expect(screen.queryByText('staged.discarded')).toBeNull();
     expect(screen.queryByText('staged.discard_failed')).toBeNull();
   });
 

@@ -1221,7 +1221,10 @@ function App() {
         // load would have, so its ready handler reads the mode again should
         // someone else materialise it and switch it to staged meanwhile.
         onStaleMissing: () => {
-          if (sessionIdRef.current === urlSession) ensureSyncConnected(urlSession);
+          if (sessionIdRef.current !== urlSession) return;
+          // Seq 0, as the in-time 404 does: any later seq is someone else's
+          // write this empty load never saw, and is loaded on ready.
+          ensureSyncConnected(urlSession)?.setBaseline({}, { seq: 0 });
         },
       });
       // Bound the wait even if fetch never settles. Invalidate the load itself
@@ -2483,10 +2486,19 @@ function App() {
   // staged session is left, with a notice. Not while this tab is deleting it:
   // that path leaves it.
   const retiredLeftRef = useRef(new Set());
+  // Left again only after a stream has opened since: where something else
+  // answers every stream with 404 (a proxy that does not route them), each
+  // replacement would be refused too, and leaving must not repeat for ever.
+  const retiredLeaveArmedRef = useRef(true);
   const leaveRetiredSession = useCallback(
     (id) => {
       if (!id || sessionIdRef.current !== id) return;
       if (retiredLeftRef.current.has(id) || locallyDeletingRef.current.has(id)) return;
+      if (!retiredLeaveArmedRef.current) {
+        console.error('Session stream refused again; not leaving a second time:', id);
+        return;
+      }
+      retiredLeaveArmedRef.current = false;
       retiredLeftRef.current.add(id);
       // Refuse writes naming it until the replacement exists.
       adoptWriteMode(id, 'staged');
@@ -2574,6 +2586,7 @@ function App() {
       // may have been switched to staged by someone else meanwhile, and that
       // op is not replayed to a first connect: read its mode.
       onReady: () => {
+        retiredLeaveArmedRef.current = true;
         const readyId = syncRef.current?.sessionId;
         api.setSessionOnServer(readyId);
         if (!readyId || !stagedAvailableRef.current) return;

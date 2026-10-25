@@ -2655,10 +2655,76 @@ describe('Server-backed session lifecycle', () => {
       expect(api.setSessionStaged).toHaveBeenCalledWith('7777-8888', true);
       expect(
         await screen.findByText(
-          'This session was deleted, so nothing can be saved in it — continuing in a new session.'
+          'This session was deleted and can no longer be saved to — continuing in a new session.'
         )
       ).toBeTruthy();
       expect(sessionStore.hasSession('7777-8888')).toBe(false);
+    });
+
+    it('leaves only once while every stream is refused, until one opens', async () => {
+      stagingOn();
+      getSessionAnswering({ '7777-8888': notFound(), '6666-0000': notFound() });
+      // Something in front of the server answers every stream with 404.
+      global.fetch.mockImplementation(async (url) =>
+        String(url).includes('/stream')
+          ? { ok: false, status: 404, json: async () => ({}) }
+          : { ok: true, status: 200, json: async () => ({ applied: [], seq: 1 }) }
+      );
+      FakeEventSource.microtaskMessagesByUrl[STREAM_7777] = [];
+      FakeEventSource.microtaskMessagesByUrl['http://localhost/api/sessions/9999-0001/stream'] = [];
+      FakeEventSource.microtaskMessagesByUrl['http://localhost/api/sessions/6666-0000/stream'] = [];
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      sessionStore.touchSession('6666-0000');
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('7777-8888');
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A], []);
+      });
+      const toolbarButtons = document.querySelectorAll('.floating-toolbar-item');
+      fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+      await waitFor(() => expect(streamsFor('7777-8888')).toHaveLength(1));
+      const refuse = async (id) => {
+        await act(async () => {
+          const es = streamsFor(id).at(-1);
+          es.readyState = 2;
+          es.onerror?.();
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        });
+      };
+      await refuse('7777-8888');
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('9999-0001')
+      );
+      await waitFor(() => expect(streamsFor('9999-0001').length).toBeGreaterThan(0));
+      await refuse('9999-0001');
+      expect(api.createSession).toHaveBeenCalledTimes(1);
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('9999-0001');
+      expect(errors).toHaveBeenCalledWith(
+        'Session stream refused again; not leaving a second time:',
+        '9999-0001'
+      );
+      // Once a stream opens, the next retired session is left again.
+      await act(async () => {
+        streamsFor('9999-0001')
+          .at(-1)
+          .onmessage({
+            data: JSON.stringify({ type: 'snapshot', seq: 0, session: { state: {} } }),
+          });
+      });
+      api.createSession.mockImplementation(async () => ({ id: '9999-0002', write_mode: 'staged' }));
+      await switchViaDrawer('6666-0000');
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_B], []);
+      });
+      fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+      await waitFor(() => expect(streamsFor('6666-0000')).toHaveLength(1));
+      await refuse('6666-0000');
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('9999-0002')
+      );
     });
 
     it('keeps a session whose stream fails for another reason', async () => {
