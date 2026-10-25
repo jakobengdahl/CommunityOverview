@@ -904,6 +904,7 @@
       "deleted": "Staged: deleted"
     },
     "edit_notice": "Staged session: this edit is held for review and does not reach the graph until it is merged.",
+    "edit_notice_mode_unknown": "Checking this session's mode: edits cannot be saved until it has loaded.",
     "mode_staged_short": "not in the graph until merged",
     "mode_unknown": "Loading how this session writes — edits are paused until it has loaded.",
     "mode_retry": "Retry",

@@ -904,6 +904,7 @@
       "deleted": "Granskad: raderad"
     },
     "edit_notice": "Granskad session: ändringen hålls för granskning och når inte grafen förrän den slås ihop.",
+    "edit_notice_mode_unknown": "Kontrollerar sessionens läge: ändringar kan inte sparas förrän den har laddats.",
     "mode_staged_short": "inte i grafen förrän ihopslaget",
     "mode_unknown": "Läser in hur sessionen skriver — ändringar väntar tills den har lästs in.",
     "mode_retry": "Försök igen",

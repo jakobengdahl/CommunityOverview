@@ -370,6 +370,7 @@ const useGraphStore = create((set, get) => ({
 
   // The active session's write mode, for the edit dialogs to say where an
   // edit lands (docs/SESSION_OVERLAY_CONTRACT.md §17). App owns it.
+  // 'unknown' while the server has not said yet; writes are held meanwhile.
   sessionWriteMode: 'direct',
 
   // Loading states
@@ -378,7 +379,8 @@ const useGraphStore = create((set, get) => ({
   error: null,
 
   // Actions
-  setSessionWriteMode: (mode) => set({ sessionWriteMode: mode === 'staged' ? 'staged' : 'direct' }),
+  setSessionWriteMode: (mode) =>
+    set({ sessionWriteMode: mode === 'staged' || mode === 'unknown' ? mode : 'direct' }),
   setNodes: (nodes) => set({ nodes }),
   setEdges: (edges) => set({ edges }),
 

@@ -1080,11 +1080,13 @@ a decision you made on it is cleared, until you look at it again. If the
 connection drops mid-merge, merging again is safe and never applies the changes
 twice. **Discard** drops the ticked changes from the session after you confirm;
 the graph is not touched, and a change staged over since you reviewed it is not
-discarded.
+discarded. If the answer to a discard is lost, the review reads the list again
+and says whether the changes were discarded.
 
 Opening a link to a session shows *Loading how this session writes* until
 the session has loaded, and edits wait until then: the session may be staged.
-**Retry** loads it again if that failed. File attachments are not staged: an
+The create and edit dialogs say meanwhile that the session's mode is being
+checked. **Retry** loads it again if that failed. File attachments are not staged: an
 attachment added to a node in a staged session is stored at once.
 
 **Deleting a staged session** drops its unmerged changes with it, and the
