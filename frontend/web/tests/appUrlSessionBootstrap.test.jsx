@@ -6,7 +6,7 @@ import { StrictMode } from 'react';
 vi.hoisted(() => {
   window.history.replaceState({}, '', '/?session=1111-2222&view=Overview&node=focus-node');
 });
-const captured = vi.hoisted(() => ({ canvas: null, shell: null }));
+const captured = vi.hoisted(() => ({ canvas: null, shell: null, actualApi: null }));
 
 vi.mock('../src/components/DesktopShell', () => ({
   default: (props) => {
@@ -31,7 +31,11 @@ vi.mock('../src/components/AppDialogs', () => ({
   },
 }));
 
-vi.mock('../src/services/api', () => {
+// The session-mode bookkeeping is api.js's own, so a test can tell whether a
+// graph write from the linked session would be held.
+vi.mock('../src/services/api', async (importOriginal) => {
+  const actual = await importOriginal();
+  captured.actualApi = actual;
   let idCounter = 0;
   return {
     generateVisualizationSessionId: vi.fn(() => `4321-000${++idCounter}`),
@@ -39,16 +43,16 @@ vi.mock('../src/services/api', () => {
     getSessionStreamUrl: vi.fn((id) => `http://localhost/api/sessions/${id}/stream`),
     getSessionOpsUrl: vi.fn((id) => `http://localhost/api/sessions/${id}/ops`),
     getClientId: vi.fn(() => 'client-test'),
-    setActiveSessionForRequests: vi.fn(),
-    setSessionStaged: vi.fn(),
-    setSessionModeUnknown: vi.fn(),
-    isActiveSessionPossiblyStaged: vi.fn(() => false),
-    setSessionModeDirect: vi.fn(),
-    setSessionOnServer: vi.fn(),
-    setStagingAvailable: vi.fn(),
-    subscribeStagedMarks: vi.fn(() => () => {}),
+    setActiveSessionForRequests: vi.fn(actual.setActiveSessionForRequests),
+    setSessionStaged: vi.fn(actual.setSessionStaged),
+    setSessionModeUnknown: vi.fn(actual.setSessionModeUnknown),
+    isActiveSessionPossiblyStaged: vi.fn(actual.isActiveSessionPossiblyStaged),
+    setSessionModeDirect: vi.fn(actual.setSessionModeDirect),
+    setSessionOnServer: vi.fn(actual.setSessionOnServer),
+    setStagingAvailable: vi.fn(actual.setStagingAvailable),
+    subscribeStagedMarks: vi.fn(actual.subscribeStagedMarks),
     setMessageTranslator: vi.fn(),
-    getStagedSessionBinding: vi.fn(() => null),
+    getStagedSessionBinding: vi.fn(actual.getStagedSessionBinding),
     getStagedChanges: vi.fn(async () => ({ items: [], count: 0 })),
     getDisplayName: vi.fn(() => null),
     listServerSessions: vi.fn(async () => ({ sessions: [] })),
@@ -85,9 +89,11 @@ class FakeEventSource {
     this.url = url;
     this.onmessage = null;
     this.onerror = null;
+    FakeEventSource.instances.push(this);
   }
   close() {}
 }
+FakeEventSource.instances = [];
 global.EventSource = FakeEventSource;
 global.fetch = vi.fn(async () => ({
   ok: true,
@@ -138,6 +144,7 @@ describe('App URL session bootstrap', () => {
     vi.clearAllMocks();
     window.localStorage.clear();
     window.history.replaceState({}, '', '/?session=1111-2222&view=Overview&node=focus-node');
+    FakeEventSource.instances = [];
     store().clearVisualization();
     store().clearFocusNode();
     bootstrap = deferred();
@@ -272,4 +279,89 @@ describe('App URL session bootstrap', () => {
       expect(store().focusNodeId).toBe('focus-node');
     }
   );
+
+  // A graph write made through api.js's own request path from the active
+  // session: refused while its mode is not known, sent otherwise.
+  async function tryWrite() {
+    global.fetch.mockClear();
+    const error = await captured.actualApi.updateNode('session-node', { name: 'x' }).then(
+      () => null,
+      (e) => e
+    );
+    return { held: error?.code === 'session_mode_unknown', sent: global.fetch.mock.calls.length };
+  }
+
+  it.each([
+    ['a direct payload', () => bootstrap.resolve({ ...payload('old'), write_mode: 'direct' })],
+    ['a 404', () => bootstrap.reject(Object.assign(new Error('gone'), { status: 404 }))],
+  ])(
+    'holds writes while the bootstrap waits and past its bound, until %s arrives late',
+    async (_label, answer) => {
+      await renderApp();
+      expect(await tryWrite()).toEqual({ held: true, sent: 0 });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(DEFAULT_REQUEST_TIMEOUT_MS);
+      });
+      // The view proceeds; the session's mode is still unread.
+      expect(api.getSavedView).toHaveBeenCalledWith('Overview');
+      expect(await tryWrite()).toEqual({ held: true, sent: 0 });
+      await act(async () => answer());
+      expect(await tryWrite()).toEqual({ held: false, sent: 1 });
+    }
+  );
+
+  it('keeps writes held when the late reply says staged, and then names the session', async () => {
+    await renderApp();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(DEFAULT_REQUEST_TIMEOUT_MS);
+    });
+    await act(async () => bootstrap.resolve({ ...payload('old'), write_mode: 'staged' }));
+    const { held, sent } = await tryWrite();
+    expect({ held, sent }).toEqual({ held: false, sent: 1 });
+    expect(global.fetch.mock.calls[0][1].headers['x-communityoverview-session-id']).toBe(
+      '1111-2222'
+    );
+  });
+
+  it('connects the stream of a link settled direct by a late 404, so a later switch to staged is learnt', async () => {
+    api.getUiCapabilities.mockResolvedValue({ llm_available: false, staged_sessions: true });
+    await renderApp();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(DEFAULT_REQUEST_TIMEOUT_MS);
+    });
+    const streams = () =>
+      FakeEventSource.instances.filter((es) => es.url.includes('/api/sessions/1111-2222/stream'));
+    expect(streams()).toHaveLength(0);
+    await act(async () => bootstrap.reject(Object.assign(new Error('gone'), { status: 404 })));
+    expect(streams()).toHaveLength(1);
+    // Someone else materialised it and switched it to staged meanwhile: the
+    // ready handler reads the mode again, so the next write names it.
+    api.getSession.mockResolvedValue({ id: '1111-2222', write_mode: 'staged', state: {} });
+    await act(async () => {
+      streams()[0].onmessage({
+        data: JSON.stringify({ type: 'snapshot', seq: 3, session: { state: {} } }),
+      });
+    });
+    expect(api.getSession).toHaveBeenLastCalledWith('1111-2222');
+    await tryWrite();
+    expect(global.fetch.mock.calls[0][1].headers['x-communityoverview-session-id']).toBe(
+      '1111-2222'
+    );
+  });
+
+  it('does not connect the stream of a link the user already left when its late 404 arrives', async () => {
+    await renderApp();
+    await act(async () => {
+      captured.shell.onSelectSession('3333-4444');
+    });
+    await act(async () => {
+      captured.canvas.onSaveView({ nodes: [], edges: [], groups: [] });
+    });
+    expect(captured.canvas.sessionKey).toBe('3333-4444');
+    const streams = () =>
+      FakeEventSource.instances.filter((es) => es.url.includes('/api/sessions/1111-2222/stream'));
+    const before = streams().length;
+    await act(async () => bootstrap.reject(Object.assign(new Error('gone'), { status: 404 })));
+    expect(streams()).toHaveLength(before);
+  });
 });
