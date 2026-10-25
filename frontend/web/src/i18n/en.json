@@ -847,6 +847,7 @@
     "discard_confirm": "Discard",
     "discarded": "Discarded {count} change(s)",
     "discard_failed": "Could not discard the changes",
+    "discard_unknown": "Could not tell whether the changes were discarded. The list shows what the session still holds.",
     "merged": "Merged {count} change(s) into the graph",
     "merge_replayed": "This merge had already been applied",
     "merge_failed": "The merge failed; nothing was written",

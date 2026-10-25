@@ -291,6 +291,45 @@ describe('StagedReviewDialog', () => {
     expect(onDiscarded).not.toHaveBeenCalled();
   });
 
+  it('reports a discard whose answer was lost as done when the entries are gone', async () => {
+    api.discardStagedChanges.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    const onRefresh = vi
+      .fn()
+      .mockResolvedValueOnce(ITEMS)
+      .mockResolvedValueOnce([EDGE, CONFLICT]);
+    const { onDiscarded } = renderDialog({ onRefresh });
+    fireEvent.click(checkbox('node:n1'));
+    fireEvent.click(screen.getByText('staged.discard_selected'));
+    fireEvent.click(screen.getByText('staged.discard_confirm'));
+    await waitFor(() => expect(screen.getByText('staged.discarded')).toBeTruthy());
+    expect(onDiscarded).toHaveBeenCalledWith({ removed_entries: [['node', 'n1']] });
+    expect(screen.queryByText('staged.discard_failed')).toBeNull();
+  });
+
+  it('reports a discard whose answer was lost as failed when the entries are still there', async () => {
+    api.discardStagedChanges.mockRejectedValueOnce(
+      Object.assign(new Error('x'), { status: 502 })
+    );
+    const { onRefresh, onDiscarded } = renderDialog();
+    fireEvent.click(checkbox('node:n1'));
+    fireEvent.click(screen.getByText('staged.discard_selected'));
+    fireEvent.click(screen.getByText('staged.discard_confirm'));
+    await waitFor(() => expect(screen.getByText('staged.discard_failed')).toBeTruthy());
+    expect(onRefresh).toHaveBeenCalledTimes(2);
+    expect(onDiscarded).not.toHaveBeenCalled();
+  });
+
+  it('says the outcome is unknown when the re-read after a lost answer fails', async () => {
+    api.discardStagedChanges.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    const onRefresh = vi.fn().mockResolvedValueOnce(ITEMS).mockResolvedValueOnce(null);
+    const { onDiscarded } = renderDialog({ onRefresh });
+    fireEvent.click(checkbox('node:n1'));
+    fireEvent.click(screen.getByText('staged.discard_selected'));
+    fireEvent.click(screen.getByText('staged.discard_confirm'));
+    await waitFor(() => expect(screen.getByText('staged.discard_unknown')).toBeTruthy());
+    expect(onDiscarded).not.toHaveBeenCalled();
+  });
+
   it('marks the entries a merge_blocked answer names', async () => {
     api.mergeStagedChanges.mockRejectedValueOnce(
       Object.assign(new Error('blocked'), {

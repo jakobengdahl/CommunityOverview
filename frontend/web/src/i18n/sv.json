@@ -847,6 +847,7 @@
     "discard_confirm": "Kasta",
     "discarded": "Kastade {count} ändring(ar)",
     "discard_failed": "Kunde inte kasta ändringarna",
+    "discard_unknown": "Det gick inte att avgöra om ändringarna kastades. Listan visar vad som fortfarande hålls i sessionen.",
     "merged": "Slog ihop {count} ändring(ar) med grafen",
     "merge_replayed": "Den här sammanslagningen var redan gjord",
     "merge_failed": "Sammanslagningen misslyckades; inget skrevs",
