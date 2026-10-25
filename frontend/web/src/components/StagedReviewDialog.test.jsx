@@ -293,10 +293,7 @@ describe('StagedReviewDialog', () => {
 
   it('reports a discard whose answer was lost as done when the entries are gone', async () => {
     api.discardStagedChanges.mockRejectedValueOnce(new TypeError('Failed to fetch'));
-    const onRefresh = vi
-      .fn()
-      .mockResolvedValueOnce(ITEMS)
-      .mockResolvedValueOnce([EDGE, CONFLICT]);
+    const onRefresh = vi.fn().mockResolvedValueOnce(ITEMS).mockResolvedValueOnce([EDGE, CONFLICT]);
     const { onDiscarded } = renderDialog({ onRefresh });
     fireEvent.click(checkbox('node:n1'));
     fireEvent.click(screen.getByText('staged.discard_selected'));
@@ -307,9 +304,7 @@ describe('StagedReviewDialog', () => {
   });
 
   it('reports a discard whose answer was lost as failed when the entries are still there', async () => {
-    api.discardStagedChanges.mockRejectedValueOnce(
-      Object.assign(new Error('x'), { status: 502 })
-    );
+    api.discardStagedChanges.mockRejectedValueOnce(Object.assign(new Error('x'), { status: 502 }));
     const { onRefresh, onDiscarded } = renderDialog();
     fireEvent.click(checkbox('node:n1'));
     fireEvent.click(screen.getByText('staged.discard_selected'));

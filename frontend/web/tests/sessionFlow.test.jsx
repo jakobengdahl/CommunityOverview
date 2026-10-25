@@ -2345,6 +2345,16 @@ describe('Server-backed session lifecycle', () => {
         expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('9999-0002')
       );
       expect(api.createSession).toHaveBeenLastCalledWith(null);
+      // The deleted id held its writes before the new one was asked for.
+      const deletedAt = api.deleteServerSession.mock.invocationCallOrder[0];
+      const createdAt = api.createSession.mock.invocationCallOrder[1];
+      const heldBetween = api.setSessionModeUnknown.mock.calls.some(
+        ([id], i) =>
+          id === '7777-8888' &&
+          api.setSessionModeUnknown.mock.invocationCallOrder[i] > deletedAt &&
+          api.setSessionModeUnknown.mock.invocationCallOrder[i] < createdAt
+      );
+      expect(heldBetween).toBe(true);
     });
   });
 
@@ -2557,5 +2567,455 @@ describe('Server-backed session lifecycle', () => {
     } finally {
       window.matchMedia = originalMatchMedia;
     }
+  });
+
+  describe('staged-session residue', () => {
+    const stagingOn = (extra = {}) =>
+      api.getUiCapabilities.mockImplementation(async () => ({
+        llm_available: false,
+        staged_sessions: true,
+        ...extra,
+      }));
+    const drawerRow = (id) => {
+      let row = screen.getAllByText(id).find((el) => el.closest('.session-drawer'));
+      while (!row.querySelector('[aria-label="Session actions"]')) row = row.parentElement;
+      return row;
+    };
+    async function switchViaDrawer(id) {
+      fireEvent.click(screen.getAllByText(id).find((el) => el.closest('.session-drawer')));
+      await waitFor(() => expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith(id));
+    }
+    function openSessionAction(id, name) {
+      fireEvent.click(drawerRow(id).querySelector('[aria-label="Session actions"]'));
+      fireEvent.click(screen.getByRole('menuitem', { name }));
+    }
+    async function deleteViaDrawer(id) {
+      openSessionAction(id, 'Delete session');
+      fireEvent.click(await screen.findByRole('button', { name: 'Delete' }));
+    }
+    const STREAM_7777 = 'http://localhost/api/sessions/7777-8888/stream';
+    const notFound = () => Object.assign(new Error('session not found'), { status: 404 });
+    const streamsFor = (id) =>
+      FakeEventSource.instances.filter((es) => es.url.includes(`/api/sessions/${id}/stream`));
+    const getSessionAnswering = (answers) => {
+      const fallback = api.getSession.getMockImplementation();
+      api.getSession.mockImplementation(async (id, opts) => {
+        if (id in answers) {
+          const answer = answers[id];
+          if (answer instanceof Error) throw answer;
+          return typeof answer === 'function' ? answer(opts) : answer;
+        }
+        return fallback(id, opts);
+      });
+    };
+    const directPayload = (id) => ({
+      id,
+      write_mode: 'direct',
+      state: {},
+      resolved: { nodes: [], edges: [] },
+      roster: [],
+    });
+
+    // Item: a retired id (a deleted staged session) answers its load like an
+    // unknown one, so it opens browser-only and direct and can never save.
+    it('leaves a retired session for a staged one when its stream is refused', async () => {
+      stagingOn();
+      getSessionAnswering({ '7777-8888': notFound() });
+      global.fetch.mockImplementation(async (url) =>
+        String(url).includes('/7777-8888/stream')
+          ? { ok: false, status: 404, json: async () => ({ detail: 'session not found' }) }
+          : { ok: true, status: 200, json: async () => ({ applied: [], seq: 1 }) }
+      );
+      // A stream that never delivers its first snapshot.
+      FakeEventSource.microtaskMessagesByUrl[STREAM_7777] = [];
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('7777-8888');
+      // The first edit connects the stream, which the server refuses.
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A], []);
+      });
+      const toolbarButtons = document.querySelectorAll('.floating-toolbar-item');
+      fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+      await waitFor(() => expect(streamsFor('7777-8888')).toHaveLength(1));
+      await act(async () => {
+        const es = streamsFor('7777-8888')[0];
+        es.readyState = 2;
+        es.onerror?.();
+      });
+      await waitFor(() =>
+        expect(api.createSession).toHaveBeenCalledWith(null, { writeMode: 'staged' })
+      );
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('9999-0001')
+      );
+      // Writes naming the retired id were refused until the replacement existed.
+      expect(api.setSessionStaged).toHaveBeenCalledWith('7777-8888', true);
+      expect(
+        await screen.findByText(
+          'This session was deleted, so nothing can be saved in it — continuing in a new session.'
+        )
+      ).toBeTruthy();
+      expect(sessionStore.hasSession('7777-8888')).toBe(false);
+    });
+
+    it('keeps a session whose stream fails for another reason', async () => {
+      stagingOn();
+      getSessionAnswering({ '7777-8888': notFound() });
+      global.fetch.mockImplementation(async (url) =>
+        String(url).includes('/7777-8888/stream')
+          ? { ok: false, status: 503, json: async () => ({}) }
+          : { ok: true, status: 200, json: async () => ({ applied: [], seq: 1 }) }
+      );
+      FakeEventSource.microtaskMessagesByUrl[STREAM_7777] = [];
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('7777-8888');
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A], []);
+      });
+      const toolbarButtons = document.querySelectorAll('.floating-toolbar-item');
+      fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+      await waitFor(() => expect(streamsFor('7777-8888')).toHaveLength(1));
+      await act(async () => {
+        const es = streamsFor('7777-8888')[0];
+        es.readyState = 2;
+        es.onerror?.();
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+      expect(api.createSession).not.toHaveBeenCalled();
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('7777-8888');
+    });
+
+    it('leaves a retired session when renaming it is refused', async () => {
+      stagingOn();
+      getSessionAnswering({ '7777-8888': notFound() });
+      api.renameServerSession.mockRejectedValue(notFound());
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('7777-8888');
+      openSessionAction('7777-8888', 'Name session');
+      await screen.findByText('Session name');
+      fireEvent.change(document.querySelector('.input-dialog input'), {
+        target: { value: 'Mine' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('9999-0001')
+      );
+      expect(api.createSession).toHaveBeenCalledTimes(1);
+      expect(api.createSession).toHaveBeenCalledWith(null, { writeMode: 'staged' });
+    });
+
+    it('stays in the session when a rename fails for another reason', async () => {
+      api.renameServerSession.mockRejectedValue(new TypeError('Failed to fetch'));
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('7777-8888');
+      openSessionAction('7777-8888', 'Name session');
+      await screen.findByText('Session name');
+      fireEvent.change(document.querySelector('.input-dialog input'), {
+        target: { value: 'Mine' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(api.renameServerSession).toHaveBeenCalled());
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+      expect(api.createSession).not.toHaveBeenCalled();
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('7777-8888');
+    });
+
+    it('logs, rather than swallows, a failed delete of the unused starting session', async () => {
+      stagingOn({ session_write_mode_default: 'staged' });
+      let answer;
+      api.createSession.mockImplementation(() => new Promise((resolve) => (answer = resolve)));
+      const failure = new TypeError('Failed to fetch');
+      api.deleteServerSession.mockRejectedValue(failure);
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      renderApp();
+      await waitFor(() => expect(api.createSession).toHaveBeenCalled());
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A], []);
+      });
+      await act(async () => answer({ id: '9999-0001', write_mode: 'staged' }));
+      await waitFor(() =>
+        expect(errors).toHaveBeenCalledWith('Error deleting the unused starting session:', failure)
+      );
+    });
+
+    it('deletes the created start when the user switched away before it answered', async () => {
+      stagingOn({ session_write_mode_default: 'staged' });
+      let answer;
+      api.createSession.mockImplementation(() => new Promise((resolve) => (answer = resolve)));
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.createSession).toHaveBeenCalled());
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('7777-8888');
+      await act(async () => answer({ id: '9999-0001', write_mode: 'staged' }));
+      expect(api.deleteServerSession).toHaveBeenCalledWith('9999-0001', 'client-test');
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('7777-8888');
+      expect(api.setSessionStaged).not.toHaveBeenCalledWith('9999-0001', true);
+    });
+
+    // Regression for clearing deletedStagedRef per delete: what one delete of
+    // an id learnt must not decide the next delete of the same id.
+    it('a second delete of an id is decided by its own answer, not the first one', async () => {
+      stagingOn();
+      getSessionAnswering({ '7777-8888': directPayload('7777-8888') });
+      api.deleteServerSession.mockImplementationOnce(async (id) => ({
+        deleted: true,
+        id,
+        write_mode: 'staged',
+      }));
+      sessionStore.touchSession('5555-6666');
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      fireEvent.click(screen.getByTitle('Menu'));
+      // First delete, while elsewhere: its answer says staged.
+      await deleteViaDrawer('7777-8888');
+      await waitFor(() => expect(api.deleteServerSession).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(sessionStore.hasSession('7777-8888')).toBe(false));
+      // Opened again (direct now), and deleted again while in it.
+      api.deleteServerSession.mockImplementation(async (id) => ({
+        deleted: true,
+        id,
+        write_mode: 'direct',
+      }));
+      sessionStore.touchSession('7777-8888');
+      // A switch refreshes the drawer's list.
+      await switchViaDrawer('5555-6666');
+      await switchViaDrawer('7777-8888');
+      await deleteViaDrawer('7777-8888');
+      await waitFor(() => expect(api.deleteServerSession).toHaveBeenCalledTimes(2));
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).not.toHaveBeenLastCalledWith('7777-8888')
+      );
+      expect(api.createSession).not.toHaveBeenCalled();
+      expect(await screen.findByText('Session deleted — started a new one')).toBeTruthy();
+    });
+
+    it('reads an edge an op names from the composed view while the session may be staged', async () => {
+      api.isActiveSessionPossiblyStaged.mockReturnValue(true);
+      sessionStore.touchSession('5555-6666');
+      renderApp();
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('5555-6666');
+      await waitFor(() =>
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b'])
+      );
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A, NODE_B], []);
+      });
+      api.getNodeDetails.mockImplementation(async (id) =>
+        id === 'node-a'
+          ? {
+              node: NODE_A,
+              edges: [
+                { id: 'e1', source: 'node-a', target: 'node-b', type: 'RELATES_TO', label: 'read' },
+              ],
+            }
+          : { node: NODE_B, edges: [] }
+      );
+      await waitFor(() => expect(streamsFor('5555-6666')).toHaveLength(1));
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+      await act(async () => {
+        streamsFor('5555-6666')[0].onmessage({
+          data: JSON.stringify({
+            type: 'op',
+            seq: 5,
+            client_id: 'client-other',
+            op: {
+              op: 'edges_added',
+              edges: [
+                { id: 'e1', source: 'node-a', target: 'node-b', label: 'from the stream' },
+                { id: 'e2', source: 'node-a', target: 'node-b', label: 'not readable here' },
+              ],
+            },
+          }),
+        });
+      });
+      await waitFor(() =>
+        expect(useGraphStore.getState().edges.map((e) => [e.id, e.label])).toEqual([['e1', 'read']])
+      );
+      expect(api.getNodeDetails).toHaveBeenCalledWith('node-a');
+    });
+
+    it('deleting a staged session discards its changes and lands in a staged one', async () => {
+      stagingOn();
+      getSessionAnswering({ '7777-8888': { ...directPayload('7777-8888'), write_mode: 'staged' } });
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('7777-8888');
+      await deleteViaDrawer('7777-8888');
+      await waitFor(() =>
+        expect(api.deleteServerSession).toHaveBeenCalledWith('7777-8888', 'client-test', {
+          discardStaged: true,
+        })
+      );
+      await waitFor(() =>
+        expect(api.createSession).toHaveBeenCalledWith(null, { writeMode: 'staged' })
+      );
+    });
+
+    it('deleting a direct session discards nothing and lands in a direct one', async () => {
+      stagingOn();
+      getSessionAnswering({ '7777-8888': directPayload('7777-8888') });
+      api.deleteServerSession.mockImplementation(async (id) => ({
+        deleted: true,
+        id,
+        write_mode: 'direct',
+      }));
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('7777-8888');
+      await deleteViaDrawer('7777-8888');
+      await waitFor(() =>
+        expect(api.deleteServerSession).toHaveBeenCalledWith('7777-8888', 'client-test', {
+          discardStaged: false,
+        })
+      );
+      expect(await screen.findByText('Session deleted — started a new one')).toBeTruthy();
+      expect(api.createSession).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['still there', () => directPayload('7777-8888'), false],
+      ['gone', notFound(), true],
+    ])(
+      'a delete whose answer is lost asks whether the session is %s',
+      async (_label, afterwards, gone) => {
+        stagingOn();
+        let deleting = false;
+        getSessionAnswering({
+          '7777-8888': (opts) => {
+            if (deleting && !opts) {
+              if (afterwards instanceof Error) throw afterwards;
+              return afterwards();
+            }
+            return directPayload('7777-8888');
+          },
+        });
+        api.deleteServerSession.mockImplementation(async () => {
+          deleting = true;
+          throw new TypeError('Failed to fetch');
+        });
+        sessionStore.touchSession('7777-8888');
+        renderApp();
+        await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+        fireEvent.click(screen.getByTitle('Menu'));
+        await switchViaDrawer('7777-8888');
+        await deleteViaDrawer('7777-8888');
+        await waitFor(() => expect(api.deleteServerSession).toHaveBeenCalled());
+        if (gone) {
+          expect(await screen.findByText('Session deleted — started a new one')).toBeTruthy();
+          expect(sessionStore.hasSession('7777-8888')).toBe(false);
+        } else {
+          expect(await screen.findByText('The staged session was not deleted')).toBeTruthy();
+          expect(sessionStore.hasSession('7777-8888')).toBe(true);
+          expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('7777-8888');
+        }
+      }
+    );
+
+    // The starting session's mode is unknown until the capabilities answer.
+    async function startUnknownAndSave() {
+      let answerCapabilities;
+      api.getUiCapabilities.mockImplementation(
+        () =>
+          new Promise(
+            (resolve) =>
+              (answerCapabilities = () => resolve({ llm_available: false, staged_sessions: true }))
+          )
+      );
+      const view = renderApp();
+      const [startId] = api.setActiveSessionForRequests.mock.calls[0];
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A], []);
+      });
+      const toolbarButtons = view.container.querySelectorAll('.floating-toolbar-item');
+      fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+      await waitFor(() => expect(streamsFor(startId)).toHaveLength(1));
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+      return { startId, answerCapabilities };
+    }
+
+    it('a remote delete notice without a mode, while the mode is unknown, counts as staged', async () => {
+      const { startId } = await startUnknownAndSave();
+      await act(async () => {
+        streamsFor(startId)[0].onmessage({
+          data: JSON.stringify({ type: 'session_deleted', deleted_by: 'client-other' }),
+        });
+      });
+      await waitFor(() =>
+        expect(api.createSession).toHaveBeenCalledWith(null, { writeMode: 'staged' })
+      );
+      expect(api.setSessionStaged).toHaveBeenCalledWith(startId, true);
+    });
+
+    it('deleting a session the server never held leaves for a direct one even while its mode is unknown', async () => {
+      const { startId } = await startUnknownAndSave();
+      getSessionAnswering({ [startId]: notFound() });
+      api.deleteServerSession.mockRejectedValue(notFound());
+      fireEvent.click(screen.getByTitle('Menu'));
+      await waitFor(() =>
+        expect(screen.getAllByText(startId).some((el) => el.closest('.session-drawer'))).toBe(true)
+      );
+      await deleteViaDrawer(startId);
+      expect(await screen.findByText('Session deleted — started a new one')).toBeTruthy();
+      expect(api.createSession).not.toHaveBeenCalledWith(null, { writeMode: 'staged' });
+    });
+
+    it('does not adopt a mode the ready re-read answers after the user left the session', async () => {
+      stagingOn();
+      let answerReread;
+      getSessionAnswering({
+        '5555-6666': (opts) =>
+          opts?.resolve
+            ? { ...directPayload('5555-6666'), resolved: { nodes: [NODE_B], edges: [] } }
+            : new Promise(
+                (resolve) =>
+                  (answerReread = () =>
+                    resolve({ ...directPayload('5555-6666'), write_mode: 'staged' }))
+              ),
+      });
+      sessionStore.touchSession('5555-6666');
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('5555-6666');
+      await waitFor(() => expect(answerReread).toBeTruthy());
+      await switchViaDrawer('7777-8888');
+      await act(async () => answerReread());
+      expect(api.setSessionStaged).not.toHaveBeenCalledWith('5555-6666', true);
+    });
+
+    it('keeps the browser start, direct, when the create answers without an id', async () => {
+      stagingOn({ session_write_mode_default: 'staged' });
+      api.createSession.mockImplementation(async () => ({}));
+      renderApp();
+      const [startId] = api.setActiveSessionForRequests.mock.calls[0];
+      await waitFor(() => expect(api.setSessionModeDirect).toHaveBeenCalledWith(startId));
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith(startId);
+      expect(api.deleteServerSession).not.toHaveBeenCalled();
+    });
   });
 });
