@@ -25,7 +25,7 @@ class _Declares:
             "checkpoint read_write_evidence start_change_notification "
             "stop_change_notification load_layer stage merge discard "
             "load_merge drop_layer record_staged staged_status retire "
-            "layers_in_use"
+            "layers_in_use purge_merge_records"
         ).split():
             if name not in omit:
                 setattr(self, name, lambda *a, **k: None)
@@ -61,7 +61,9 @@ def test_it_needs_atomic_entity_batches(missing):
         capabilities_of(_Declares(BackendCapabilities(**caps)))
 
 
-@pytest.mark.parametrize("method", ["merge", "retire", "layers_in_use"])
+@pytest.mark.parametrize(
+    "method", ["merge", "retire", "layers_in_use", "purge_merge_records"]
+)
 def test_a_declaration_without_the_layer_store_is_refused(method):
     with pytest.raises(TypeError, match=method):
         capabilities_of(_Declares(BackendCapabilities(**STAGED), omit=(method,)))

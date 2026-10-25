@@ -15,6 +15,7 @@ function for the same reason.
 
 from dataclasses import dataclass
 
+from backend.core.layer_store import DEFAULT_MERGE_RECORD_RETENTION_DAYS
 from backend.core.write_modes import (
     DEFAULT_LAYER_MAX_ENTRIES,
     WRITE_MODE_DIRECT,
@@ -46,6 +47,7 @@ class SessionSettings:
     staged_sessions: bool = False
     default_write_mode: str = WRITE_MODE_DIRECT
     layer_max_entries: int = DEFAULT_LAYER_MAX_ENTRIES
+    merge_record_retention_days: int = DEFAULT_MERGE_RECORD_RETENTION_DAYS
 
 
 _TRUE = ("1", "true", "yes", "on")
@@ -95,8 +97,26 @@ def build_session_settings(config: AppConfig) -> SessionSettings:
                 "is not usable; it is the most entries one session's layer may "
                 "hold, so it must be a whole number of at least 1."
             )
+
+    retention_raw = (config.session_merge_record_retention_days or "").strip()
+    retention = DEFAULT_MERGE_RECORD_RETENTION_DAYS
+    if retention_raw:
+        try:
+            retention = int(retention_raw)
+        except ValueError:
+            retention = 0
+        if retention < 1:
+            raise PersistenceConfigurationError(
+                "SESSION_MERGE_RECORD_RETENTION_DAYS="
+                f"{config.session_merge_record_retention_days!r} is not usable; "
+                "it is how many days a deleted session's merge records are "
+                "kept, so it must be a whole number of at least 1."
+            )
     return SessionSettings(
-        staged_sessions=staged, default_write_mode=mode, layer_max_entries=cap
+        staged_sessions=staged,
+        default_write_mode=mode,
+        layer_max_entries=cap,
+        merge_record_retention_days=retention,
     )
 
 

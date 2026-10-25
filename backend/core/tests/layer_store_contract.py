@@ -16,6 +16,7 @@ rather than assume either.
 from __future__ import annotations
 
 import itertools
+from datetime import datetime, timedelta
 from typing import Any, Dict, List
 
 import pytest
@@ -897,3 +898,108 @@ class LayerStoreContract:
         revision = self.revision_of(factory(), "node", "a")
         assert result.record["applied"][0]["revision"] == revision
         assert revision > 3
+
+    # -- merge-record retention (§11.5) ---------------------------------------
+
+    RETENTION = timedelta(days=90)
+
+    @staticmethod
+    def _merged(backend, session_id: str, merge_id: str, entity: str = "a"):
+        """A merge record for `session_id`: one entry staged and merged away."""
+        backend.stage(session_id, [entry("node", entity, session_id=session_id)])
+        return backend.merge(session_id, merge_id, [], [], [("node", entity)], {})
+
+    def _retired_between(self, backend, session_id: str):
+        """Retire `session_id`; the moments just before and just after, which
+        bracket the retirement time the store recorded."""
+        before = ls.utc_now() - timedelta(seconds=1)
+        backend.retire(session_id)
+        return before, ls.utc_now() + timedelta(seconds=1)
+
+    def test_a_record_of_an_existing_session_is_never_purged(self, seeded, factory):
+        self._merged(seeded, A, "m-live")
+        far = ls.utc_now() + timedelta(days=3650)
+        assert factory().purge_merge_records(self.RETENTION, limit=10, now=far) == 0
+        assert factory().load_merge("m-live") is not None
+
+    def test_a_record_inside_the_window_is_kept_and_one_past_it_purged(
+        self, seeded, factory
+    ):
+        self._merged(seeded, A, "m")
+        before, after = self._retired_between(seeded, A)
+        inside = before + self.RETENTION
+        assert factory().purge_merge_records(self.RETENTION, limit=10, now=inside) == 0
+        assert factory().load_merge("m") is not None
+        outside = after + self.RETENTION
+        assert factory().purge_merge_records(self.RETENTION, limit=10, now=outside) == 1
+        assert factory().load_merge("m") is None
+
+    def test_the_purge_takes_only_records_of_sessions_past_the_window(
+        self, seeded, factory
+    ):
+        seeded.record_staged(B)
+        self._merged(seeded, A, "m-a")
+        self._merged(seeded, B, "m-b")
+        _, after = self._retired_between(seeded, A)
+        now = after + self.RETENTION
+        assert factory().purge_merge_records(self.RETENTION, limit=10, now=now) == 1
+        assert factory().load_merge("m-a") is None
+        assert factory().load_merge("m-b") is not None
+
+    def test_a_purge_is_bounded_by_its_limit_and_idempotent(self, seeded, factory):
+        for n in range(3):
+            self._merged(seeded, A, f"m-{n}", entity="abc"[n])
+        _, after = self._retired_between(seeded, A)
+        now = after + self.RETENTION
+        assert factory().purge_merge_records(self.RETENTION, limit=2, now=now) == 2
+        assert [factory().load_merge(f"m-{n}") is None for n in range(3)].count(
+            True
+        ) == 2
+        assert factory().purge_merge_records(self.RETENTION, limit=2, now=now) == 1
+        assert factory().purge_merge_records(self.RETENTION, limit=2, now=now) == 0
+        assert all(factory().load_merge(f"m-{n}") is None for n in range(3))
+
+    def test_a_purged_merge_id_replayed_is_refused_and_the_id_stays_retired(
+        self, seeded, factory
+    ):
+        self._merged(seeded, A, "m")
+        _, after = self._retired_between(seeded, A)
+        factory().purge_merge_records(
+            self.RETENTION, limit=10, now=after + self.RETENTION
+        )
+        with pytest.raises(ls.StagedSessionNotActive) as raised:
+            factory().merge(A, "m", [], [], [], {})
+        assert raised.value.status == ls.STATUS_RETIRED
+        assert factory().load_merge("m") is None
+        assert factory().staged_status(A) == ls.STATUS_RETIRED
+        with pytest.raises(ls.StagedSessionRetired):
+            factory().record_staged(A)
+
+    def test_retiring_again_keeps_the_first_retirement_time(self, seeded, factory):
+        self._merged(seeded, A, "m")
+        before, _ = self._retired_between(seeded, A)
+        factory().retire(A)
+        factory().retire(A, require_empty=True)
+        inside = before + self.RETENTION
+        assert factory().purge_merge_records(self.RETENTION, limit=10, now=inside) == 0
+
+    @pytest.mark.parametrize(
+        "retention, limit, now",
+        [
+            (timedelta(0), 1, None),
+            (timedelta(days=-1), 1, None),
+            (90, 1, None),
+            (timedelta(days=90), 0, None),
+            (timedelta(days=90), True, None),
+            (timedelta(days=90), 1, datetime(2026, 1, 1)),
+        ],
+        ids=["zero", "negative", "not-a-timedelta", "no-limit", "bool", "naive"],
+    )
+    def test_a_malformed_purge_is_refused_before_anything_is_read(
+        self, seeded, factory, retention, limit, now
+    ):
+        self._merged(seeded, A, "m")
+        seeded.retire(A)
+        with pytest.raises(ls.InvalidLayerRequest):
+            seeded.purge_merge_records(retention, limit=limit, now=now)
+        assert factory().load_merge("m") is not None
