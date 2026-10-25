@@ -329,7 +329,8 @@ def test_unusable_staged_session_settings_fail_at_boot(app_config, changes):
 
 
 @pytest.mark.parametrize(
-    "raw, days", [(None, 90), ("", 90), (" 30 ", 30), ("1", 1), ("36500", 36500)]
+    "raw, days",
+    [(None, 90), ("", 90), ("   ", 90), (" 30 ", 30), ("1", 1), ("36500", 36500)],
 )
 def test_merge_record_retention_defaults_to_90_days(app_config, raw, days):
     config = dataclasses.replace(app_config, session_merge_record_retention_days=raw)

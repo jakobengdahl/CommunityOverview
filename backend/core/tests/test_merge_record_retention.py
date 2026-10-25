@@ -65,3 +65,14 @@ def test_a_record_not_marked_applied_is_never_a_candidate():
         "applied": {"session_id": A, "status": ls.MERGE_APPLIED},
     }
     assert ls.merge_records_to_purge(merges, retired, ls.utc_now(), 10) == ["applied"]
+
+
+def test_a_limited_purge_takes_the_lowest_merge_ids_first():
+    retired = {
+        A: {"status": ls.STATUS_RETIRED, "retired_at": "2020-01-01T00:00:00+00:00"}
+    }
+    merges = {
+        merge_id: {"session_id": A, "status": ls.MERGE_APPLIED}
+        for merge_id in ("m-c", "m-a", "m-b")
+    }
+    assert ls.merge_records_to_purge(merges, retired, ls.utc_now(), 2) == ["m-a", "m-b"]

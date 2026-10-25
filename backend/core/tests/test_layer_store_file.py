@@ -1216,11 +1216,12 @@ def test_a_retired_record_without_a_time_starts_its_window_at_the_first_purge(
     assert reopen(path).purge_merge_records(RETENTION, limit=10, now=later) == 1
 
 
-def test_an_unreadable_retirement_time_stops_the_load(staged, path):
+@pytest.mark.parametrize("stored", ["not a time", "2026-01-01T00:00:00", 12])
+def test_an_unreadable_retirement_time_stops_the_load(staged, path, stored):
     staged.discard(A)
     staged.retire(A)
     layers = json.loads(staged.layers_path.read_text())
-    layers["sessions"][A]["retired_at"] = "not a time"
+    layers["sessions"][A]["retired_at"] = stored
     staged.layers_path.write_text(json.dumps(layers))
     with pytest.raises(GraphJournalError):
         reopen(path).staged_status(A)
