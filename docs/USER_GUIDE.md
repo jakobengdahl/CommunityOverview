@@ -1080,17 +1080,21 @@ a decision you made on it is cleared, until you look at it again. If the
 connection drops mid-merge, merging again is safe and never applies the changes
 twice. **Discard** drops the ticked changes from the session after you confirm;
 the graph is not touched, and a change staged over since you reviewed it is not
-discarded.
+discarded. If the answer to a discard is lost, the review reads the list again
+and says whether the changes are still held in the session.
 
 Opening a link to a session shows *Loading how this session writes* until
 the session has loaded, and edits wait until then: the session may be staged.
-**Retry** loads it again if that failed. File attachments are not staged: an
+The create and edit dialogs say meanwhile that the session's mode is being
+checked. **Retry** loads it again if that failed. File attachments are not staged: an
 attachment added to a node in a staged session is stored at once.
 
 **Deleting a staged session** drops its unmerged changes with it, and the
 delete confirmation says so. Everyone who was in it — you included — lands in a
 new, empty staged session, so nobody who was staging suddenly edits the graph
-directly.
+directly. A link to a staged session that was deleted opens empty; once the
+server refuses its live connection or a rename, you are moved to a new session
+with a notice, since the canvas can no longer be saved to the deleted one.
 
 ## 6. Federation — searching across multiple graphs
 

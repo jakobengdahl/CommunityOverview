@@ -769,8 +769,8 @@ export async function uploadFile(file, analyze = false, options = {}) {
   });
 
   if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.detail || `Upload failed: ${response.status}`);
+    // A structured refusal (a staged session's) keeps its code and message.
+    throw await responseError(response);
   }
 
   return response.json();

@@ -17,6 +17,14 @@ describe('StagedEditNotice', () => {
     expect(screen.getByTestId('staged-edit-notice').textContent).toBe('staged.edit_notice');
   });
 
+  it('says the mode is being checked while it is not known and writes are held', () => {
+    useGraphStore.getState().setSessionWriteMode('unknown');
+    render(<StagedEditNotice />);
+    expect(screen.getByTestId('staged-edit-notice').textContent).toBe(
+      'staged.edit_notice_mode_unknown'
+    );
+  });
+
   it('says nothing in a direct session', () => {
     render(<StagedEditNotice />);
     expect(screen.queryByTestId('staged-edit-notice')).toBeNull();
