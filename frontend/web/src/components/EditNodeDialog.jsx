@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import useGraphStore from '../store/graphStore';
+import StagedEditNotice from './StagedEditNotice';
 import * as api from '../services/api';
 import SubtypeInput from './SubtypeInput';
 import './EditNodeDialog.css';
@@ -155,6 +156,7 @@ function EditNodeDialog({ node, onClose, onSave }) {
           </button>
         </header>
 
+        <StagedEditNotice />
         <form onSubmit={handleSubmit}>
           <div className="form-group">
             <label htmlFor="name">Name</label>

@@ -267,6 +267,39 @@ describe('useSharedSession.loadSessionFromServer', () => {
     expect(setBaseline).toHaveBeenCalledWith({}, { seq: 0 });
   });
 
+  it('reports a 404 as a session the server does not hold', async () => {
+    const err = Object.assign(new Error('not found'), { status: 404 });
+    api.getSession.mockRejectedValueOnce(err);
+    const onSessionPayload = vi.fn();
+    const { result } = renderHook(() => useSharedSession(makeDeps({ onSessionPayload })));
+    await act(async () => {
+      await result.current.loadSessionFromServer('1234-5678');
+    });
+    expect(onSessionPayload).toHaveBeenCalledWith('1234-5678', null);
+  });
+
+  it.each([
+    ['reply', () => api.getSession.mockResolvedValueOnce({ write_mode: 'staged', state: {} })],
+    [
+      '404',
+      () =>
+        api.getSession.mockRejectedValueOnce(
+          Object.assign(new Error('not found'), { status: 404 })
+        ),
+    ],
+  ])('adopts the mode from a stale %s but leaves the canvas alone', async (_label, arrange) => {
+    arrange();
+    const onSessionPayload = vi.fn();
+    const deps = makeDeps({ onSessionPayload });
+    const { result } = renderHook(() => useSharedSession(deps));
+    await act(async () => {
+      await result.current.loadSessionFromServer('1234-5678', { isStale: () => true });
+    });
+    expect(onSessionPayload).toHaveBeenCalledTimes(1);
+    expect(onSessionPayload.mock.calls[0][0]).toBe('1234-5678');
+    expect(deps.clearVisualization).not.toHaveBeenCalled();
+  });
+
   it('calls onMissing on a 404 while still seeding the empty fallback', async () => {
     const setBaseline = vi.fn();
     const deps = makeDeps({ ensureSyncConnected: vi.fn(() => ({ setBaseline, sessionId: null })) });
