@@ -64,6 +64,9 @@ export default defineConfig({
         // enough to exercise the panel.
         ANTHROPIC_API_KEY: 'test-key-for-e2e',
         GRAPH_FILE: 'data/e2e/graph.json',
+        // staged-session.spec.js needs sessions that can be staged. The
+        // default write mode stays direct, so every other spec runs as before.
+        GRAPH_STAGED_SESSIONS: 'true',
       },
     },
     {

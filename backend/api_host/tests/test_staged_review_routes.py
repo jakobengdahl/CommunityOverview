@@ -66,6 +66,28 @@ def test_discard_over_rest_leaves_the_graph_alone(client):
     assert _storage(client).get_node("s1") is None
 
 
+def test_a_merge_or_discard_naming_a_reviewed_version_restaged_since_is_refused(client):
+    sid = _staged(client)
+    _stage_node(client, sid, name="Reviewed")
+    reviewed = client.get(f"/api/sessions/{sid}/staged").json()["items"][0]
+    entry = {"kind": "node", "entity_id": "s1", "version": reviewed["version"]}
+    restaged = client.patch(
+        "/api/nodes/s1",
+        headers={SESSION_ID_HEADER: sid},
+        json={"updates": {"name": "Later"}},
+    )
+    assert restaged.status_code == 200, restaged.text
+    for path, body in (
+        ("merge", {"merge_id": "m1", "entries": [entry]}),
+        ("discard", {"entries": [entry]}),
+    ):
+        response = client.post(f"/api/sessions/{sid}/staged/{path}", json=body)
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"]["error"] == "merge_raced"
+    assert _storage(client).get_node("s1") is None
+    assert client.get(f"/api/sessions/{sid}/staged").json()["count"] == 1
+
+
 def test_the_header_may_name_only_the_routes_own_session(client):
     sid = _staged(client)
     other = _staged(client)

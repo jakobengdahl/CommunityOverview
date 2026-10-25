@@ -3129,8 +3129,11 @@ def register_mcp_tools(
             merge_id: An id you choose for this merge. Repeating a merge with
                 the same id returns the first result and writes nothing more.
             entries: "all", or a list of {"kind": "node" | "edge",
-                "entity_id": ...}. The selection must include every entry
-                listed in a selected entry's depends_on (merge_incomplete).
+                "entity_id": ..., "version": optional}. The selection must
+                include every entry listed in a selected entry's depends_on
+                (merge_incomplete). "version", as get_staged_changes gave it,
+                refuses the merge (merge_raced) if the entry was restaged
+                since you read it.
             resolutions: Optional list of {"kind", "entity_id", "choice"}:
                 take_session (the session's version wins), keep_main (drop
                 the entry, keep the graph's version), as_new (nodes only: the
@@ -3159,11 +3162,13 @@ def register_mcp_tools(
         Args:
             session_id: The session ID.
             entries: "all", or a list of {"kind": "node" | "edge",
-                "entity_id": ...}.
+                "entity_id": ..., "version": optional}. "version", as
+                get_staged_changes gave it, refuses the discard
+                (merge_raced) if the entry was restaged since you read it.
 
         Returns:
             Dict with success and removed_entries, or an error:
-            session_not_staged, session_not_found.
+            merge_raced, session_not_staged, session_not_found.
         """
         if not is_valid_session_id(session_id):
             return {"success": False, "error": _INVALID_SESSION_ID_ERROR}

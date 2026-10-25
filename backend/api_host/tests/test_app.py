@@ -5,6 +5,7 @@ Tests that the FastAPI application is properly configured and
 all REST API endpoints function correctly.
 """
 
+import dataclasses
 import json
 import os
 from pathlib import Path
@@ -899,6 +900,28 @@ class TestUiCapabilitiesEndpoint:
             data = response.json()
             assert data["llm_available"] is True
             assert data["llm_provider"] == "openai"
+
+    def test_capabilities_report_staged_sessions_off_by_default(
+        self, test_app: TestClient
+    ):
+        """Without GRAPH_STAGED_SESSIONS the UI must not offer a staged session."""
+        data = test_app.get("/ui/capabilities").json()
+        assert data["staged_sessions"] is False
+        assert data["session_write_mode_default"] == "direct"
+
+    def test_capabilities_report_staged_sessions_when_enabled(self, app_config):
+        """With staged sessions on, the UI learns it may create one, and the
+        default mode a session created without one takes."""
+        config = dataclasses.replace(
+            app_config,
+            graph_staged_sessions="true",
+            session_write_mode_default="staged",
+        )
+        from backend.api_host import create_app
+
+        data = TestClient(create_app(config)).get("/ui/capabilities").json()
+        assert data["staged_sessions"] is True
+        assert data["session_write_mode_default"] == "staged"
 
 
 class TestStartupDiagnosticsLlmCheck:

@@ -29,6 +29,10 @@ import {
 import { serverStateToMirror, useSharedSession } from './hooks/useSharedSession';
 import { DEFAULT_REQUEST_TIMEOUT_MS as SYNC_REQUEST_TIMEOUT_MS } from './services/sessionSyncClient';
 import { useSyncConnection } from './hooks/useSyncConnection';
+import { useStagedSession } from './hooks/useStagedSession';
+import WriteModeBar from './components/WriteModeBar';
+import NewSessionDialog from './components/NewSessionDialog';
+import StagedReviewDialog from './components/StagedReviewDialog';
 import { useToolResultCommands } from './hooks/useToolResultCommands';
 import { useViewportSummon } from './hooks/useViewportSummon';
 import SummonNotice from './components/SummonNotice';
@@ -59,6 +63,7 @@ import { createAnnotationChangeScheduler } from './utils/annotationChangeSchedul
 import { createSelfEchoDedup } from './utils/selfEchoDedup';
 import { applyIngestedImageOptimistically } from './utils/imageIngestApply';
 import { shouldPersistSnapshot } from './utils/sessionSnapshotGuard';
+import { refusalText } from './utils/stagedReview';
 import './App.css';
 
 // Ceiling on how long one resyncFromServer call may stay in flight before its
@@ -131,6 +136,8 @@ function App() {
     removeNode,
     removeEdge,
     updateEdgeData,
+    setNodes,
+    setEdges,
     presentation,
     setConfig,
     focusNodeId,
@@ -218,9 +225,15 @@ function App() {
   // stream and state uploads reconnect automatically when it changes.
   const [sessionId, setSessionIdState] = useState(() => {
     const urlSession = _urlParams.get('session');
-    return sessionStore.isValidSessionId(urlSession)
+    const initial = sessionStore.isValidSessionId(urlSession)
       ? urlSession
       : api.generateVisualizationSessionId();
+    api.setActiveSessionForRequests(initial);
+    // A linked session may be staged: hold graph writes until its load says.
+    // So may the starting one, until the capabilities say whether the app
+    // starts in a server-created session of the installation's default mode.
+    api.setSessionModeUnknown(initial);
+    return initial;
   });
   // Written together with the state, not from an effect: a switch bumps the
   // session epoch before React re-renders, and the ?view= load must not see the
@@ -228,6 +241,9 @@ function App() {
   const sessionIdRef = useRef(sessionId);
   const setSessionId = useCallback((id) => {
     sessionIdRef.current = id;
+    // Before any request is made from the new session: graph requests carry a
+    // session's header only while it is the active one and known staged.
+    api.setActiveSessionForRequests(id);
     setSessionIdState(id);
   }, []);
   // The session the page was opened into, for the ?view= load to compare against.
@@ -297,6 +313,68 @@ function App() {
     setRemoteLeases,
     opStreamReady,
   } = useSyncConnection(sessionId);
+  // The active session's write mode and staged changes
+  // (docs/SESSION_OVERLAY_CONTRACT.md §17).
+  const {
+    writeMode: sessionWriteMode,
+    items: stagedItems,
+    pendingCount: stagedPendingCount,
+    diffError: stagedDiffError,
+    stagedStates,
+    adoptWriteMode,
+    adoptSessionPayload,
+    markModeUnknown,
+    forgetSession: forgetStagedSession,
+    refreshDiff: refreshStagedDiff,
+    handleSessionOp: handleStagedSessionOp,
+  } = useStagedSession(sessionId);
+  // api.js's own messages (held writes, a changed session) in the UI language.
+  useEffect(() => {
+    api.setMessageTranslator(t);
+  }, [t]);
+  const sessionWriteModeRef = useRef(sessionWriteMode);
+  sessionWriteModeRef.current = sessionWriteMode;
+  const setStoreWriteMode = useGraphStore((state) => state.setSessionWriteMode);
+  useEffect(() => {
+    setStoreWriteMode(sessionWriteMode);
+  }, [sessionWriteMode, setStoreWriteMode]);
+  const [stagedAvailable, setStagedAvailable] = useState(false);
+  const stagedAvailableRef = useRef(false);
+  stagedAvailableRef.current = stagedAvailable;
+  // The browser-made id the app opened in without a ?session= link, until
+  // the capabilities settle how it starts (settleStartingSession).
+  const startingSessionRef = useRef(null);
+  const settleStartingSessionRef = useRef(null);
+  // While the start is settled its mode bar is not shown: graph writes are
+  // held meanwhile, and its Retry would settle the start before the
+  // capabilities say how it starts. An installation without staging sees no
+  // bar at all, as before.
+  const [settlingStartId, setSettlingStartId] = useState(() =>
+    sessionStore.isValidSessionId(_urlParams.get('session')) ? null : sessionIdRef.current
+  );
+  const [defaultWriteMode, setDefaultWriteMode] = useState('direct');
+  const defaultWriteModeRef = useRef('direct');
+  defaultWriteModeRef.current = defaultWriteMode;
+  const [newSessionDialogOpen, setNewSessionDialogOpen] = useState(false);
+  const [stagedReviewOpen, setStagedReviewOpen] = useState(false);
+  const [switchToStagedConfirm, setSwitchToStagedConfirm] = useState(false);
+  // Sessions this tab is deleting, so its own delete notice is told apart from
+  // one another tab of the same browser (same client id) caused.
+  const locallyDeletingRef = useRef(new Set());
+  // A deleted direct id can be opened again (a link recreates it): once this
+  // tab switches to it, a later delete of it is someone else's again.
+  // Not while its delete is still in flight, or the delete's own notice would
+  // read as someone else's and the session be left twice.
+  const deletesInFlightRef = useRef(new Set());
+  const previousSessionIdRef = useRef(sessionId);
+  useEffect(() => {
+    if (previousSessionIdRef.current === sessionId) return;
+    previousSessionIdRef.current = sessionId;
+    if (!deletesInFlightRef.current.has(sessionId)) locallyDeletingRef.current.delete(sessionId);
+  }, [sessionId]);
+  // Sessions this tab is deleting that the server's notice says were staged,
+  // even if this tab had not learnt it: they are replaced by staged ones.
+  const deletedStagedRef = useRef(new Set());
   const applyServerSessionRef = useRef(null);
   // Guards resyncFromServer against overlapping reconnects (review round 2):
   // a flaky connection can drop and reconnect more than once before a slow
@@ -382,9 +460,57 @@ function App() {
     [setRemoteAnnotationOps]
   );
 
+  // When each edge was last removed by a remote op (a running count), so a
+  // composed re-read still in flight does not put back an edge removed after
+  // it started.
+  // inFlight counts the re-reads started at each seq (several can share one).
+  const edgeRemovalSeqRef = useRef({ seq: 0, removed: new Map(), inFlight: new Map() });
   const applyRemoteOp = useCallback(
     async (op) => {
       const store = useGraphStore.getState();
+      if (
+        (op?.op === 'edges_added' || op?.op === 'edges_updated') &&
+        api.isActiveSessionPossiblyStaged()
+      ) {
+        // In a staged session the edge an op carries is staged content, and
+        // the stream reaches anyone holding the session id: read it from the
+        // composed view instead, which asks the authorization hook
+        // (docs/SESSION_OVERLAY_CONTRACT.md §15).
+        const sessionAtStart = syncRef.current?.sessionId;
+        const removalsAtStart = edgeRemovalSeqRef.current.seq;
+        const inFlight = edgeRemovalSeqRef.current.inFlight;
+        inFlight.set(removalsAtStart, (inFlight.get(removalsAtStart) || 0) + 1);
+        const onCanvas = new Set(store.nodes.map((n) => n.id));
+        const wanted = (op.edges || []).filter(
+          (e) => e && e.id && onCanvas.has(e.source) && onCanvas.has(e.target)
+        );
+        const sources = [...new Set(wanted.map((e) => e.source))];
+        let reads;
+        try {
+          reads = await Promise.all(sources.map((id) => api.getNodeDetails(id).catch(() => null)));
+        } finally {
+          const left = inFlight.get(removalsAtStart) - 1;
+          if (left > 0) inFlight.set(removalsAtStart, left);
+          else inFlight.delete(removalsAtStart);
+        }
+        if (syncRef.current?.sessionId !== sessionAtStart) return false; // switched away while fetching
+        const listed = new Map(reads.flatMap((r) => r?.edges || []).map((e) => [e.id, e]));
+        const have = new Set(useGraphStore.getState().edges.map((e) => e.id));
+        const fresh = wanted.map((e) => listed.get(e.id)).filter(Boolean);
+        fresh.filter((e) => have.has(e.id)).forEach((e) => updateEdgeData(e.id, e));
+        // Only an add adds, and not an edge a later op removed while this
+        // read was in flight (the sync baseline already has that removal).
+        const added =
+          op.op === 'edges_added'
+            ? fresh.filter(
+                (e) =>
+                  !have.has(e.id) &&
+                  !((edgeRemovalSeqRef.current.removed.get(e.id) ?? -1) > removalsAtStart)
+              )
+            : [];
+        if (added.length) addNodesToVisualization([], added);
+        return fresh.length > 0;
+      }
       switch (op?.op) {
         case 'nodes_added': {
           const have = new Set(store.nodes.map((n) => n.id));
@@ -463,6 +589,19 @@ function App() {
         }
         case 'edges_removed': {
           const removeIds = op.edge_ids || [];
+          const removals = edgeRemovalSeqRef.current;
+          removeIds.forEach((id) => {
+            removals.seq += 1;
+            removals.removed.set(id, removals.seq);
+          });
+          if (removals.removed.size > 1000) {
+            // Forget only removals no re-read still in flight could compare
+            // against.
+            const oldest = Math.min(removals.seq, ...removals.inFlight.keys());
+            for (const [id, seq] of removals.removed) {
+              if (seq <= oldest) removals.removed.delete(id);
+            }
+          }
           const existing = new Set(store.edges.map((e) => e.id));
           removeIds.forEach((id) => removeEdge(id));
           return removeIds.some((id) => existing.has(id));
@@ -739,6 +878,7 @@ function App() {
           } catch {
             return 0;
           }
+          adoptSessionPayload(targetId, payload);
           // Also bail if the guard timeout already fired and a newer resync
           // now owns it (review round 4): the token check above only stops
           // *this* stale call from clearing a flag it no longer owns — without
@@ -845,7 +985,80 @@ function App() {
         if (resyncGuardTokenRef.current === myToken) resyncInFlightRef.current = null;
       }
     },
-    [syncRef, applyRemoteOp]
+    [syncRef, applyRemoteOp, adoptSessionPayload]
+  );
+
+  // Re-read, in the session's composed view, the canvas entities a staged
+  // change touched (docs/SESSION_OVERLAY_CONTRACT.md §15). Only the keys of the
+  // op are used: its content reaches anyone holding the session id, while a
+  // composed read asks the authorization hook. A node the composed view no
+  // longer holds is taken off the canvas when `removeMissing` is set (after a
+  // merge or discard: a discarded create, a merged delete); after a staging
+  // op that is left to the session ops that remove it, as in direct mode.
+  // Deliberately not a full reload: canvas additions not yet flushed to the
+  // session would be lost with it.
+  const refreshStagedEntities = useCallback(
+    async (op, { removeMissing = false } = {}) => {
+      const sessionAtStart = syncRef.current?.sessionId;
+      const keys = [
+        ...(op.entries || []).map((e) => [e?.kind, e?.entity_id]),
+        ...(op.removals || []).map((r) => (Array.isArray(r) ? r : [r?.kind, r?.entity_id])),
+      ];
+      const store = useGraphStore.getState();
+      const onCanvas = new Set(store.nodes.map((n) => n.id));
+      const nodeIds = new Set();
+      const namedEdges = new Set();
+      for (const [kind, id] of keys) {
+        if (kind === 'node' && onCanvas.has(id)) nodeIds.add(id);
+        if (kind === 'edge') {
+          namedEdges.add(id);
+          const edge = store.edges.find((e) => e.id === id);
+          if (edge && onCanvas.has(edge.source)) nodeIds.add(edge.source);
+        }
+      }
+      const missing = [];
+      const fetched = await Promise.all(
+        [...nodeIds].map((id) =>
+          api.getNodeDetails(id).catch((error) => {
+            if (error?.status === 404) missing.push(id);
+            return null;
+          })
+        )
+      );
+      if (syncRef.current?.sessionId !== sessionAtStart) return; // switched away while fetching
+      if (removeMissing) missing.forEach((id) => removeNode(id));
+      const current = useGraphStore.getState();
+      const present = new Set(current.nodes.map((n) => n.id));
+      const nodeUpdates = new Map();
+      const listed = new Map();
+      fetched.forEach((r) => {
+        if (!r?.node) return;
+        nodeUpdates.set(r.node.id, r.node);
+        (r.edges || []).forEach((e) => listed.set(e.id, e));
+      });
+      if (!nodeUpdates.size) return;
+      const nodes = current.nodes.map((n) =>
+        nodeUpdates.has(n.id) ? { ...n, ...nodeUpdates.get(n.id) } : n
+      );
+      // An edge the op names that its re-read endpoint no longer lists is gone
+      // from the session's view (a staged delete). Other edges stay: a node
+      // read leaves out archived edges the canvas may still be showing.
+      const edges = current.edges
+        .filter(
+          (e) =>
+            listed.has(e.id) ||
+            !namedEdges.has(e.id) ||
+            !(nodeUpdates.has(e.source) || nodeUpdates.has(e.target))
+        )
+        .map((e) => (listed.has(e.id) ? { ...e, ...listed.get(e.id) } : e));
+      const known = new Set(edges.map((e) => e.id));
+      listed.forEach((e, id) => {
+        if (!known.has(id) && present.has(e.source) && present.has(e.target)) edges.push(e);
+      });
+      setNodes(nodes);
+      setEdges(edges);
+    },
+    [syncRef, setNodes, setEdges, removeNode]
   );
 
   // Callbacks waiting for the next canvas snapshot (positions/groups arrive
@@ -893,6 +1106,9 @@ function App() {
       connectDialogOpen ||
       renameDialog ||
       deleteSessionDialog ||
+      newSessionDialogOpen ||
+      stagedReviewOpen ||
+      switchToStagedConfirm ||
       clearConfirm ||
       (akcShortName && akcConfig && !akcIntroShown)
     );
@@ -914,6 +1130,9 @@ function App() {
     connectDialogOpen,
     renameDialog,
     deleteSessionDialog,
+    newSessionDialogOpen,
+    stagedReviewOpen,
+    switchToStagedConfirm,
     clearConfirm,
     akcShortName,
     akcConfig,
@@ -980,11 +1199,16 @@ function App() {
   useEffect(() => {
     reflectSessionUrl(sessionId);
     const urlSession = _urlParams.get('session');
+    if (!sessionStore.isValidSessionId(urlSession)) {
+      startingSessionRef.current = sessionId;
+      markModeUnknown(sessionId);
+    }
     const scope = captureCanvasScope();
     let expired = false;
     let timer;
     let settleBootstrapWait;
     if (sessionStore.isValidSessionId(urlSession)) {
+      markModeUnknown(urlSession);
       sessionStore.touchSession(urlSession);
       // This id came in via a ?session= deep link, so a 404 means the linked
       // session is gone/expired (not a brand-new local one) — surface it rather
@@ -1070,10 +1294,17 @@ function App() {
         setStats(statsData);
         setLlmAvailable(capabilitiesData.llm_available ?? false);
         setModelProfilesCapability(capabilitiesData.model_profiles);
+        setStagedAvailable(capabilitiesData.staged_sessions === true);
+        api.setStagingAvailable(capabilitiesData.staged_sessions === true);
+        setDefaultWriteMode(
+          capabilitiesData.session_write_mode_default === 'staged' ? 'staged' : 'direct'
+        );
+        settleStartingSessionRef.current?.(capabilitiesData);
       } catch (error) {
         console.error('Error loading configuration:', error);
         api.getGraphStats().then(setStats).catch(console.error);
         setLlmAvailable(false);
+        settleStartingSessionRef.current?.(null);
       }
     };
     loadConfig();
@@ -2154,9 +2385,151 @@ function App() {
     ensureSyncConnected,
     syncRef,
     resetSessionScopedState: resetSessionScopedUi,
+    onSessionPayload: adoptSessionPayload,
   });
   // Expose the latest applyServerSession to resyncFromServer (defined earlier).
   applyServerSessionRef.current = applyServerSession;
+
+  // Leave a session that was deleted (by this user or another) for a new one
+  // (design D11). A staged session is replaced by a staged one, created on the
+  // server before anything is done in it, so a user who was staging keeps
+  // staging (docs/SESSION_OVERLAY_CONTRACT.md §13, I2). Until the replacement
+  // exists the deleted id stays active, and the server refuses anything still
+  // naming it, rather than letting a write land in the graph meanwhile.
+  const leaveDeletedSession = useCallback(
+    async (deletedId, wasStaged) => {
+      if (!wasStaged) {
+        if (stagedAvailableRef.current && defaultWriteModeRef.current === 'staged') {
+          // The installation's default governs the new session: created on
+          // the server (the hook asked), with nothing written from the deleted
+          // id meanwhile. Refused or unreachable: today's browser session.
+          markModeUnknown(deletedId);
+          clearVisualization();
+          resetSessionScopedUi();
+          try {
+            const created = await api.createSession(null);
+            if (!created?.id) throw new Error('no session created');
+            await loadSessionFromServer(created.id, { eagerConnect: true });
+            setSessionId(created.id);
+            reflectSessionUrl(created.id);
+            sessionStore.touchSession(created.id);
+            forgetStagedSession(deletedId);
+            return true;
+          } catch (error) {
+            console.error('Error creating the new session:', error);
+          }
+        }
+        forgetStagedSession(deletedId);
+        dropIntoFreshSession({
+          freshId: api.generateVisualizationSessionId(),
+          clearVisualization,
+          resetSessionScopedState: resetSessionScopedUi,
+          setSessionId,
+          reflectSessionUrl,
+        });
+        return true;
+      }
+      clearVisualization();
+      resetSessionScopedUi();
+      try {
+        const created = await api.createSession(null, { writeMode: 'staged' });
+        if (created?.write_mode !== 'staged' || !created?.id) {
+          throw new Error('replacement session is not staged');
+        }
+        adoptWriteMode(created.id, 'staged');
+        await loadSessionFromServer(created.id, { eagerConnect: true });
+        setSessionId(created.id);
+        reflectSessionUrl(created.id);
+        sessionStore.touchSession(created.id);
+        forgetStagedSession(deletedId);
+        return true;
+      } catch (error) {
+        console.error('Error creating the staged replacement session:', error);
+        forgetStagedSession(deletedId);
+        dropIntoFreshSession({
+          freshId: api.generateVisualizationSessionId(),
+          clearVisualization,
+          resetSessionScopedState: resetSessionScopedUi,
+          setSessionId,
+          reflectSessionUrl,
+        });
+        showNotification('error', t('staged.replacement_failed'));
+        return false;
+      }
+    },
+    [
+      forgetStagedSession,
+      adoptWriteMode,
+      markModeUnknown,
+      clearVisualization,
+      resetSessionScopedUi,
+      loadSessionFromServer,
+      setSessionId,
+      showNotification,
+      t,
+    ]
+  );
+
+  // How the app starts without a ?session= link, once the capabilities are
+  // known (or failed): where the installation stages by default, in a session
+  // created on the server, so that default (and the hook) decide its mode;
+  // otherwise, or if that is refused or unreachable, in the browser-made id
+  // it opened with, which materialises direct on first save, as before. Until
+  // then the starting id holds graph writes, so nothing is written from a
+  // session about to be left, and nothing shows a staged one as direct.
+  const settleStartingSession = useCallback(
+    async (capabilities) => {
+      const startId = startingSessionRef.current;
+      if (!startId) return;
+      startingSessionRef.current = null;
+      const settleDirect = () => adoptSessionPayload(startId, null);
+      const stagesByDefault =
+        capabilities?.staged_sessions === true &&
+        capabilities?.session_write_mode_default === 'staged';
+      // A link that fills the canvas (?view=, ?node=) loads into the session
+      // it was opened in, rather than racing the create; a collection kiosk
+      // (?collect=, ?akc=) keeps writing its responses as before.
+      const linkedStart = ['view', 'node', 'collect', 'akc'].some((key) => _urlParams.get(key));
+      if (!stagesByDefault || linkedStart) {
+        settleDirect();
+        return;
+      }
+      let created;
+      try {
+        created = await api.createSession(null);
+      } catch (error) {
+        console.error('Error creating the starting session:', error);
+        settleDirect();
+        return;
+      }
+      // Only a start the user has not moved on from is replaced: a switch, or
+      // a canvas already in use, keeps the session the user is working in.
+      const untouched =
+        sessionIdRef.current === startId && useGraphStore.getState().nodes.length === 0;
+      if (!created?.id || !untouched) {
+        // Unused: nothing was written in it.
+        if (created?.id) api.deleteServerSession(created.id, api.getClientId()).catch(() => {});
+        settleDirect();
+        return;
+      }
+      adoptSessionPayload(created.id, created);
+      // New and empty, like the untouched canvas: entered at once, with no
+      // load to wait on that a switch by the user could overtake. Its stream
+      // connects now, so the first staged change shows as it happens.
+      setSessionId(created.id);
+      reflectSessionUrl(created.id);
+      sessionStore.touchSession(created.id);
+      setSessionsVersion((v) => v + 1);
+      ensureSyncConnected(created.id)?.setBaseline(
+        {},
+        { seq: typeof created.seq === 'number' ? created.seq : 0 }
+      );
+      settleDirect();
+    },
+    [adoptSessionPayload, ensureSyncConnected, setSessionId]
+  );
+  settleStartingSessionRef.current = (capabilities) =>
+    settleStartingSession(capabilities).finally(() => setSettlingStartId(null));
 
   // Keep the sync client's handlers pointed at the latest closures. A remote op
   // or resync triggers a debounced authoritative apply; a remote delete of the
@@ -2164,12 +2537,31 @@ function App() {
   // a remote rename refreshes the recents name.
   useEffect(() => {
     syncHandlersRef.current = {
-      onReady: () => {},
+      // The stream's first snapshot: the server holds this session now. A
+      // session this tab never read from the server (browser-only until now)
+      // may have been switched to staged by someone else meanwhile, and that
+      // op is not replayed to a first connect: read its mode.
+      onReady: () => {
+        const readyId = syncRef.current?.sessionId;
+        api.setSessionOnServer(readyId);
+        if (!readyId || !stagedAvailableRef.current) return;
+        // Staged changes made before the stream existed are not replayed.
+        refreshStagedDiff();
+        api.getSession(readyId).then(
+          (payload) => {
+            if (sessionIdRef.current === readyId) adoptSessionPayload(readyId, payload);
+          },
+          () => {}
+        );
+      },
       // Report recovery status back to the user (task fbd32fc9): a resync
       // that had to replay locally-queued ops means real, user-visible
       // content survived a dropped connection — worth a confirmation rather
       // than a silent reconciliation.
       onResync: async (resyncSessionId = sessionId) => {
+        // Staged-change ops missed while disconnected are not replayed to the
+        // canvas; the diff is read again instead.
+        refreshStagedDiff();
         const recovered = await resyncFromServer(resyncSessionId);
         if (recovered > 0) {
           showNotification('info', t('sessions.reconnect_recovered', { count: recovered }));
@@ -2177,7 +2569,17 @@ function App() {
       },
       onRemoteOps: (ops, meta = {}) => {
         if (meta.sessionId && meta.sessionId !== sessionId) return;
-        (ops || []).forEach((op) => applyRemoteOp(op));
+        (ops || []).forEach((op) => {
+          if (!handleStagedSessionOp(op)) {
+            applyRemoteOp(op);
+          } else if (op.op === 'graph_change_staged') {
+            refreshStagedEntities(op);
+          } else if (op.op === 'graph_changes_merged' || op.op === 'graph_changes_discarded') {
+            // Merged entities now read from the graph; discarded ones are
+            // back to what the graph holds, or gone.
+            refreshStagedEntities(op, { removeMissing: true });
+          }
+        });
       },
       // This client's own annotation write just got acked with a fresh
       // server version/field_versions (dec-annotation-field-patches-and-
@@ -2201,9 +2603,44 @@ function App() {
         sessionStore.renameSession(sessionId, name);
         setSessionsVersion((v) => v + 1);
       },
-      onSessionDeleted: (deletedBy) => {
+      onSessionDeleted: (deletedBy, deletedWriteMode) => {
+        // Either side knowing the session was staged is enough: the notice
+        // can come without its mode (a drained stream), and staged is final.
+        // A mode not yet known counts as staged: leaving it for a direct
+        // session could be the silent switch §13 rules out.
+        const wasStaged =
+          deletedWriteMode === 'staged' ||
+          sessionWriteMode === 'staged' ||
+          (!deletedWriteMode && sessionWriteMode === 'unknown');
+        if (wasStaged) {
+          // Handled by the local delete path only in the tab that deleted it:
+          // the client id is shared by every tab of this browser.
+          if (locallyDeletingRef.current.has(sessionId)) {
+            deletedStagedRef.current.add(sessionId);
+            return;
+          }
+          // Refuse writes naming the deleted id until the replacement exists,
+          // even if this client had not learnt it was staged.
+          adoptWriteMode(sessionId, 'staged');
+          sessionStore.removeSession(sessionId);
+          setSessionsVersion((v) => v + 1);
+          showNotification('info', t('staged.session_deleted_remote'));
+          leaveDeletedSession(sessionId, true).then(() => setSessionsVersion((v) => v + 1));
+          return;
+        }
+        // Per tab, not per client id (shared by every tab of this browser).
+        if (locallyDeletingRef.current.has(sessionId)) return;
+        if (stagedAvailableRef.current && defaultWriteModeRef.current === 'staged') {
+          // The new session is created as the installation's default says.
+          sessionStore.removeSession(sessionId);
+          setSessionsVersion((v) => v + 1);
+          showNotification('info', t('sessions.session_deleted_remote'));
+          leaveDeletedSession(sessionId, false).then(() => setSessionsVersion((v) => v + 1));
+          return;
+        }
+        forgetStagedSession(sessionId);
         const dropped = receiveRemoteSessionDeleted({
-          deletedBy,
+          deletedBy: null,
           clientId: api.getClientId(),
           sessionId,
           generateSessionId: api.generateVisualizationSessionId,
@@ -2266,6 +2703,13 @@ function App() {
     };
   }, [
     sessionId,
+    sessionWriteMode,
+    leaveDeletedSession,
+    adoptWriteMode,
+    forgetStagedSession,
+    handleStagedSessionOp,
+    refreshStagedEntities,
+    refreshStagedDiff,
     resyncFromServer,
     applyRemoteOp,
     applyAnnotationUpsertToCanvas,
@@ -2303,9 +2747,13 @@ function App() {
   );
 
   const handleNewSession = useCallback(() => {
+    if (stagedAvailable) {
+      setNewSessionDialogOpen(true);
+      return;
+    }
     switchToSession(api.generateVisualizationSessionId(), { register: false });
     showNotification('info', t('sessions.new_session_started'));
-  }, [switchToSession, showNotification, t]);
+  }, [stagedAvailable, switchToSession, showNotification, t]);
 
   const handleSelectSession = useCallback(
     (targetId) => {
@@ -2496,50 +2944,257 @@ function App() {
   // warn when other users are connected (design 3.6). The roster is populated
   // only once clients subscribe via the realtime stream (step 7), so in step 4
   // it is typically empty and the warning stays dormant.
-  const handleRequestDeleteSession = useCallback(async (targetId) => {
-    let connectedOthers = 0;
-    try {
-      const payload = await api.getSession(targetId);
-      const roster = payload?.roster || [];
-      connectedOthers = roster.filter((m) => m.client_id !== api.getClientId()).length;
-    } catch {
-      // Session may not exist server-side yet — nothing to warn about.
-    }
-    setDeleteSessionDialog({ id: targetId, connectedOthers });
-  }, []);
+  const handleRequestDeleteSession = useCallback(
+    async (targetId) => {
+      let connectedOthers = 0;
+      let staged = false;
+      try {
+        const payload = await api.getSession(targetId);
+        const roster = payload?.roster || [];
+        connectedOthers = roster.filter((m) => m.client_id !== api.getClientId()).length;
+        staged = payload?.write_mode === 'staged';
+        adoptSessionPayload(targetId, payload);
+      } catch {
+        // Session may not exist server-side yet — nothing to warn about.
+      }
+      // Deleting a staged session drops its unmerged changes with it (§13),
+      // and the dialog must say so whenever the delete will: the confirm
+      // discards exactly when this flag is set. No count: the diff counts
+      // only what this reader may see, and the whole layer goes.
+      if (targetId === sessionId && sessionWriteMode === 'staged') staged = true;
+      setDeleteSessionDialog({ id: targetId, connectedOthers, staged });
+    },
+    [adoptSessionPayload, sessionId, sessionWriteMode]
+  );
 
   const handleConfirmDeleteSession = useCallback(async () => {
     if (!deleteSessionDialog) return;
-    const { id } = deleteSessionDialog;
+    const { id, staged: wasStaged } = deleteSessionDialog;
     setDeleteSessionDialog(null);
+    // The deleted session's own mode: the user may switch sessions while the
+    // delete is in flight.
+    const modeAtConfirm = sessionIdRef.current === id ? sessionWriteModeRef.current : null;
+    const modeOfDeleted = () =>
+      sessionIdRef.current === id ? sessionWriteModeRef.current : modeAtConfirm;
+    locallyDeletingRef.current.add(id);
+    deletesInFlightRef.current.add(id);
+    // What an earlier delete of this id learnt does not decide this one: a
+    // direct id can be opened, and deleted, again.
+    deletedStagedRef.current.delete(id);
     try {
-      await api.deleteServerSession(id, api.getClientId());
-    } catch {
-      // Ignore — the session may only ever have existed locally.
+      let browserOnly = false;
+      try {
+        // The user confirmed a dialog that said a staged session's changes
+        // go with it.
+        const answer = await api.deleteServerSession(id, api.getClientId(), {
+          discardStaged: wasStaged,
+        });
+        // Switched to staged after the dialog opened, with the notice not here yet.
+        if (answer?.write_mode === 'staged') deletedStagedRef.current.add(id);
+      } catch (error) {
+        browserOnly = error?.status === 404;
+        let gone = browserOnly || deletedStagedRef.current.has(id);
+        if (!gone && (typeof error?.status !== 'number' || error.status >= 500)) {
+          // No answer, or a server error that may have come after the delete
+          // landed: ask whether the session is still there rather than report
+          // a failure that did not happen.
+          gone = await api.getSession(id).then(
+            () => false,
+            (e) => e?.status === 404
+          );
+        }
+        if (!gone) {
+          // A session that was not deleted keeps its work: never act as if it
+          // were gone.
+          locallyDeletingRef.current.delete(id);
+          showNotification('error', refusalText(t, error, 'staged.delete_failed'));
+          return;
+        }
+        // 404: the session only ever existed locally.
+      }
+      sessionStore.removeSession(id);
+      // The server's notice may say staged where this tab thought direct (it
+      // was switched meanwhile): then the replacement is staged too. So does a
+      // mode not known yet - unless the server never held the session, which
+      // makes it browser-only and direct (§5.1). The current mode, not the one
+      // this callback closed over: it may have changed during the delete.
+      const modeNow = modeOfDeleted();
+      const leftStaged =
+        wasStaged ||
+        deletedStagedRef.current.has(id) ||
+        modeNow === 'staged' ||
+        (modeNow === 'unknown' && !browserOnly);
+      if (sessionIdRef.current === id) {
+        // Deleting the active session: drop its content and switch into a fresh
+        // one (design 3.6); a staged one into a staged one (§13). Other
+        // connected clients are notified via the server's session_deleted
+        // broadcast.
+        showNotification(
+          'info',
+          t(leftStaged ? 'staged.session_deleted' : 'sessions.session_deleted')
+        );
+        await leaveDeletedSession(id, leftStaged);
+      } else if (leftStaged) {
+        forgetStagedSession(id);
+      }
+      setSessionsVersion((v) => v + 1);
+    } finally {
+      deletesInFlightRef.current.delete(id);
     }
-    sessionStore.removeSession(id);
-    if (id === sessionId) {
-      // Deleting the active session: drop its content and switch into a fresh
-      // one (design 3.6). Other connected clients are notified via the
-      // server's session_deleted broadcast (handled once realtime lands).
-      dropIntoFreshSession({
-        freshId: api.generateVisualizationSessionId(),
-        clearVisualization,
-        resetSessionScopedState: resetSessionScopedUi,
-        setSessionId,
-        reflectSessionUrl,
-      });
-      showNotification('info', t('sessions.session_deleted'));
-    }
-    setSessionsVersion((v) => v + 1);
   }, [
     deleteSessionDialog,
     sessionId,
-    clearVisualization,
-    resetSessionScopedUi,
+    leaveDeletedSession,
+    forgetStagedSession,
     showNotification,
     t,
   ]);
+
+  // Start a new session. Where the backend can stage, the user chooses how it
+  // writes; a staged session is created on the server first (§5.1).
+  const startNewSession = useCallback(
+    async (mode) => {
+      setNewSessionDialogOpen(false);
+      if (mode !== 'staged') {
+        switchToSession(api.generateVisualizationSessionId(), { register: false });
+        showNotification('info', t('sessions.new_session_started'));
+        return;
+      }
+      try {
+        const created = await api.createSession(null, { writeMode: 'staged' });
+        if (created?.write_mode !== 'staged' || !created?.id) {
+          throw new Error(t('staged.create_failed'));
+        }
+        api.setSessionOnServer(created.id);
+        adoptWriteMode(created.id, 'staged');
+        switchToSession(created.id, { eagerConnect: true });
+        showNotification('info', t('staged.new_session_started'));
+      } catch (error) {
+        showNotification('error', refusalText(t, error, 'staged.create_failed'));
+      }
+    },
+    [switchToSession, adoptWriteMode, showNotification, t]
+  );
+
+  // Switch the active session from direct to staged (§5.2): irreversible, so
+  // only after the user confirmed it. A session that so far exists only in
+  // this browser is created on the server first, as direct, then switched.
+  const confirmSwitchToStaged = useCallback(async () => {
+    setSwitchToStagedConfirm(false);
+    const targetId = sessionId;
+    const clientId = api.getClientId();
+    try {
+      let payload;
+      try {
+        payload = await api.setSessionWriteMode(targetId, 'staged', clientId);
+      } catch (error) {
+        if (error.status !== 404) throw error;
+        await api.renameServerSession(targetId, currentSessionName || null);
+        payload = await api.setSessionWriteMode(targetId, 'staged', clientId);
+      }
+      if (payload?.write_mode !== 'staged') throw new Error(t('staged.switch_failed'));
+      adoptWriteMode(targetId, 'staged');
+      // Only while it is still the session the user is in: the stream must
+      // never be bound to one the user has left (its notices act on the
+      // active session).
+      if (sessionIdRef.current === targetId) ensureSyncConnected(targetId);
+      showNotification('info', t('staged.switched'));
+    } catch (error) {
+      if (typeof error?.status !== 'number' || error.status >= 500) {
+        // The switch may have landed with its answer lost: read what the
+        // server holds, so a staged session never goes on looking direct.
+        const now = await api.getSession(targetId).catch(() => null);
+        if (now) adoptSessionPayload(targetId, now);
+        if (now?.write_mode === 'staged') {
+          if (sessionIdRef.current === targetId) ensureSyncConnected(targetId);
+          showNotification('info', t('staged.switched'));
+          return;
+        }
+        if (!now) {
+          // Neither answered: the session may be staged now. Hold its graph
+          // writes until its mode is read again (the bar offers Retry).
+          markModeUnknown(targetId);
+        }
+      }
+      showNotification('error', refusalText(t, error, 'staged.switch_failed'));
+    }
+  }, [
+    sessionId,
+    currentSessionName,
+    adoptWriteMode,
+    adoptSessionPayload,
+    markModeUnknown,
+    ensureSyncConnected,
+    showNotification,
+    t,
+  ]);
+
+  // After a merge or discard from the review: re-read what it touched (its op
+  // does the same when it arrives; this covers a stream that is down), and put
+  // nodes merged as new on the canvas.
+  const handleStagedLayerChanged = useCallback(
+    async (result) => {
+      refreshStagedDiff();
+      await refreshStagedEntities(
+        { removals: result?.removed_entries || [] },
+        { removeMissing: true }
+      );
+      const created = (result?.merged || [])
+        .map((item) => item?.new_entity_id)
+        .filter((id) => typeof id === 'string' && id);
+      if (!created.length) return;
+      const sessionAtStart = sessionId;
+      const found = await Promise.all(
+        created.map((id) => api.getNodeDetails(id).catch(() => null))
+      );
+      if (syncRef.current?.sessionId !== sessionAtStart) return;
+      const nodes = found.map((r) => r?.node).filter(Boolean);
+      if (nodes.length) {
+        addNodesToVisualization(
+          nodes,
+          found.flatMap((r) => r?.edges || [])
+        );
+      }
+    },
+    [refreshStagedDiff, refreshStagedEntities, sessionId, syncRef, addNodesToVisualization]
+  );
+
+  const closeStagedReview = useCallback(() => setStagedReviewOpen(false), []);
+
+  // The diff's states; when the diff cannot be read, those the composed reads
+  // put on each entity (`staged_state`), so a staged entity stays marked.
+  const canvasStagedStates = useMemo(() => {
+    if (!stagedDiffError) return stagedStates;
+    const fromReads = (list) =>
+      Object.fromEntries(
+        (list || [])
+          .filter((e) => e?.staged_state && e.staged_state !== 'none')
+          .map((e) => [e.id, e.staged_state])
+      );
+    return {
+      nodes: { ...fromReads(nodes), ...stagedStates.nodes },
+      edges: { ...fromReads(edges), ...stagedStates.edges },
+    };
+  }, [nodes, edges, stagedStates, stagedDiffError]);
+
+  const stagedStateLabels = useMemo(
+    () => ({
+      created: t('staged.marker.created'),
+      updated: t('staged.marker.updated'),
+      orphaned: t('staged.marker.orphaned'),
+      deleted: t('staged.marker.deleted'),
+    }),
+    [t]
+  );
+
+  const stagedCanvasName = useCallback((kind, id) => {
+    const store = useGraphStore.getState();
+    if (kind === 'node') return store.nodes.find((n) => n.id === id)?.name || null;
+    const edge = store.edges.find((e) => e.id === id);
+    if (!edge) return null;
+    const name = (nid) => store.nodes.find((n) => n.id === nid)?.name || nid;
+    return `${name(edge.source)} → ${name(edge.target)}${edge.type ? ` (${edge.type})` : ''}`;
+  }, []);
 
   // Export full graph from backend API
   const handleExportGraph = useCallback(async () => {
@@ -2658,6 +3313,9 @@ function App() {
     connectDialogOpen ||
     renameDialog ||
     deleteSessionDialog ||
+    newSessionDialogOpen ||
+    stagedReviewOpen ||
+    switchToStagedConfirm ||
     clearConfirm ||
     createNodeType ||
     editingNode ||
@@ -2801,6 +3459,8 @@ function App() {
           nodePreviewEnabled={nodePreviewEnabled}
           schema={schema}
           onContextMenuAction={handleContextMenuAction}
+          stagedStates={sessionWriteMode === 'staged' ? canvasStagedStates : null}
+          stagedStateLabels={stagedStateLabels}
           contextMenuLabels={{
             edit: t('context_menu.edit'),
             hide: t('context_menu.hide'),
@@ -3079,6 +3739,51 @@ function App() {
             ×
           </button>
         </div>
+      )}
+      {sessionId !== settlingStartId && (
+        <WriteModeBar
+          writeMode={sessionWriteMode}
+          stagedAvailable={stagedAvailable}
+          pendingCount={stagedPendingCount}
+          diffUnavailable={!!stagedDiffError}
+          onReview={() => setStagedReviewOpen(true)}
+          onSwitchToStaged={() => setSwitchToStagedConfirm(true)}
+          onRetryMode={() =>
+            // As a switch to this session: a load that answers after the user
+            // moved on then moves the user back, consistently, rather than
+            // leaving canvas, stream and requests on different sessions.
+            switchToSession(sessionId, { register: false, eagerConnect: true })
+          }
+        />
+      )}
+      {newSessionDialogOpen && (
+        <NewSessionDialog
+          defaultMode={defaultWriteMode}
+          onChoose={startNewSession}
+          onCancel={() => setNewSessionDialogOpen(false)}
+        />
+      )}
+      {switchToStagedConfirm && (
+        <ConfirmDialog
+          title={t('staged.switch_title')}
+          message={t('staged.switch_message')}
+          confirmText={t('staged.switch_confirm')}
+          cancelText={t('common.cancel')}
+          onConfirm={confirmSwitchToStaged}
+          onCancel={() => setSwitchToStagedConfirm(false)}
+        />
+      )}
+      {stagedReviewOpen && sessionWriteMode === 'staged' && (
+        <StagedReviewDialog
+          sessionId={sessionId}
+          items={stagedItems}
+          diffError={stagedDiffError}
+          onRefresh={refreshStagedDiff}
+          onMerged={handleStagedLayerChanged}
+          onDiscarded={handleStagedLayerChanged}
+          onClose={closeStagedReview}
+          canvasName={stagedCanvasName}
+        />
       )}
       <SummonNotice
         notice={summonNotice}

@@ -1549,7 +1549,37 @@ describe('SessionSyncClient', () => {
     es.emit({ type: 'session_renamed', name: 'Team map' });
     es.emit({ type: 'session_deleted', deleted_by: 'client-other' });
     expect(onSessionRenamed).toHaveBeenCalledWith('Team map');
-    expect(onSessionDeleted).toHaveBeenCalledWith('client-other');
+    expect(onSessionDeleted).toHaveBeenCalledWith('client-other', null);
+  });
+
+  it('delivers a server-only staged op even when it carries this client id (another tab)', () => {
+    const onRemoteOps = vi.fn();
+    const { client } = makeClient({ handlers: { onRemoteOps } });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, roster: [] });
+    es.emit({
+      type: 'op',
+      seq: 1,
+      client_id: client.clientId,
+      op: { op: 'write_mode_changed', write_mode: 'staged' },
+    });
+    expect(onRemoteOps).toHaveBeenCalledWith(
+      [{ op: 'write_mode_changed', write_mode: 'staged' }],
+      expect.anything()
+    );
+  });
+
+  it('passes the deleted session write mode on, so a staged one is replaced staged', () => {
+    const onSessionDeleted = vi.fn();
+    const { client } = makeClient({ handlers: { onSessionDeleted } });
+    client.connect();
+    FakeEventSource.instances[0].emit({
+      type: 'session_deleted',
+      deleted_by: 'client-other',
+      write_mode: 'staged',
+    });
+    expect(onSessionDeleted).toHaveBeenCalledWith('client-other', 'staged');
   });
 
   it('passes since_seq once a seq is known and stops after close', async () => {

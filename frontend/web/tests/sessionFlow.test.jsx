@@ -55,10 +55,23 @@ vi.mock('../src/services/api', () => {
     getSessionStreamUrl: vi.fn((id) => `http://localhost/api/sessions/${id}/stream`),
     getSessionOpsUrl: vi.fn((id) => `http://localhost/api/sessions/${id}/ops`),
     getClientId: vi.fn(() => 'client-test'),
+    setActiveSessionForRequests: vi.fn(),
+    setSessionStaged: vi.fn(),
+    setSessionModeUnknown: vi.fn(),
+    isActiveSessionPossiblyStaged: vi.fn(() => false),
+    setSessionModeDirect: vi.fn(),
+    setSessionOnServer: vi.fn(),
+    setStagingAvailable: vi.fn(),
+    subscribeStagedMarks: vi.fn(() => () => {}),
+    setMessageTranslator: vi.fn(),
+    getStagedSessionBinding: vi.fn(() => null),
+    getStagedChanges: vi.fn(async () => ({ items: [], count: 0 })),
     getDisplayName: vi.fn(() => null),
     listServerSessions: vi.fn(async () => ({ sessions: [] })),
     renameServerSession: vi.fn(async () => ({})),
     deleteServerSession: vi.fn(async () => ({ deleted: true })),
+    createSession: vi.fn(async () => ({ id: '9999-0001', write_mode: 'staged' })),
+    setSessionWriteMode: vi.fn(async (id) => ({ id, write_mode: 'staged' })),
     getSession: vi.fn(async (id, opts) => {
       if (id === '5555-6666' && opts?.resolve) {
         return {
@@ -2072,6 +2085,335 @@ describe('Server-backed session lifecycle', () => {
     expect(sessionStore.listSessions().find((s) => s.id === '5555-6666').name).toBe(
       'My local name'
     );
+  });
+
+  it('learns that a session it never read from the server is staged once the stream connects', async () => {
+    // Someone else switched this browser-only session to staged; the switch
+    // op is not replayed to a first connect, so the mode is read then.
+    api.getUiCapabilities.mockImplementation(async () => ({
+      llm_available: false,
+      staged_sessions: true,
+    }));
+    api.getSession.mockImplementation(async (id) => ({
+      id,
+      write_mode: 'staged',
+      state: {},
+      resolved: { nodes: [], edges: [] },
+      roster: [],
+    }));
+    const { container } = renderApp();
+    await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+    const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+    fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+    await waitFor(() => expect(api.setSessionOnServer).toHaveBeenCalled());
+    const [sessionId] = api.setSessionOnServer.mock.calls.at(-1);
+    await waitFor(() => expect(api.setSessionStaged).toHaveBeenCalledWith(sessionId, true));
+  });
+
+  it('replaces a session the delete answer says was staged with a staged one', async () => {
+    // Switched to staged after the delete dialog opened; the switch notice
+    // has not reached this tab, only the delete answer says so.
+    api.getUiCapabilities.mockImplementation(async () => ({
+      llm_available: false,
+      staged_sessions: true,
+    }));
+    api.deleteServerSession.mockImplementation(async (id) => ({
+      deleted: true,
+      id,
+      write_mode: 'staged',
+    }));
+    sessionStore.touchSession('7777-8888');
+    renderApp();
+    await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+    fireEvent.click(screen.getByTitle('Menu'));
+    fireEvent.click(screen.getByText('7777-8888'));
+    await waitFor(() =>
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('7777-8888')
+    );
+    // The drawer stays open after picking a session.
+    const rows = await screen.findAllByText('7777-8888');
+    let row = rows.find((el) => el.closest('.session-drawer'));
+    while (!row.querySelector('[aria-label="Session actions"]')) row = row.parentElement;
+    fireEvent.click(row.querySelector('[aria-label="Session actions"]'));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete session' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete' }));
+    await waitFor(() =>
+      expect(api.createSession).toHaveBeenCalledWith(null, { writeMode: 'staged' })
+    );
+  });
+
+  it('leaves a staged session once when the user opens it while deleting it', async () => {
+    // The delete's own notice reaches the tab after it switched to the
+    // session: it is still this tab's delete, not someone else's.
+    api.getUiCapabilities.mockImplementation(async () => ({
+      llm_available: false,
+      staged_sessions: true,
+    }));
+    api.getSession.mockImplementation(async (id) => ({
+      id,
+      write_mode: 'staged',
+      state: {},
+      resolved: { nodes: [], edges: [] },
+      roster: [],
+    }));
+    let answerDelete;
+    api.deleteServerSession.mockImplementation(
+      (id) => new Promise((resolve) => (answerDelete = () => resolve({ deleted: true, id })))
+    );
+    sessionStore.touchSession('7777-8888');
+    renderApp();
+    await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+    fireEvent.click(screen.getByTitle('Menu'));
+    const rows = await screen.findAllByText('7777-8888');
+    let row = rows.find((el) => el.closest('.session-drawer'));
+    while (!row.querySelector('[aria-label="Session actions"]')) row = row.parentElement;
+    fireEvent.click(row.querySelector('[aria-label="Session actions"]'));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete session' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(api.deleteServerSession).toHaveBeenCalled());
+    fireEvent.click(screen.getAllByText('7777-8888').find((el) => el.closest('.session-drawer')));
+    await waitFor(() =>
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('7777-8888')
+    );
+    await waitFor(() =>
+      expect(
+        FakeEventSource.instances.some((es) => es.url.includes('/sessions/7777-8888/stream'))
+      ).toBe(true)
+    );
+    const stream = FakeEventSource.instances.find((es) =>
+      es.url.includes('/sessions/7777-8888/stream')
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    // The replacement is still being created when the delete answers.
+    const created = [];
+    api.createSession.mockImplementation(
+      () =>
+        new Promise((resolve) =>
+          created.push(() => resolve({ id: `9999-000${created.length}`, write_mode: 'staged' }))
+        )
+    );
+    await act(async () => {
+      stream.onmessage?.({
+        data: JSON.stringify({
+          type: 'session_deleted',
+          deleted_by: 'client-test',
+          write_mode: 'staged',
+        }),
+      });
+    });
+    await act(async () => answerDelete());
+    await waitFor(() => expect(api.createSession).toHaveBeenCalled());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    expect(api.createSession).toHaveBeenCalledTimes(1);
+    await act(async () => created.forEach((resolve) => resolve()));
+  });
+
+  describe('the starting session', () => {
+    const stagesByDefault = () =>
+      api.getUiCapabilities.mockImplementation(async () => ({
+        llm_available: false,
+        staged_sessions: true,
+        session_write_mode_default: 'staged',
+      }));
+
+    it('holds writes from the starting id until the capabilities are known', async () => {
+      renderApp();
+      const [startId] = api.setActiveSessionForRequests.mock.calls[0];
+      expect(api.setSessionModeUnknown).toHaveBeenCalledWith(startId);
+      // A direct default settles it as direct, without a server session.
+      await waitFor(() => expect(api.setSessionModeDirect).toHaveBeenCalledWith(startId));
+      expect(api.createSession).not.toHaveBeenCalled();
+    });
+
+    it('shows no mode bar, so no Retry, until the start is settled', async () => {
+      let answerCapabilities;
+      api.getUiCapabilities.mockImplementation(
+        () =>
+          new Promise(
+            (resolve) =>
+              (answerCapabilities = () =>
+                resolve({
+                  llm_available: false,
+                  staged_sessions: true,
+                  session_write_mode_default: 'staged',
+                }))
+          )
+      );
+      api.createSession.mockRejectedValue(Object.assign(new Error('no'), { status: 403 }));
+      renderApp();
+      const [startId] = api.setActiveSessionForRequests.mock.calls[0];
+      await waitFor(() => expect(answerCapabilities).toBeTruthy());
+      expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+      expect(
+        screen.queryByText(
+          'Loading how this session writes — edits are paused until it has loaded.'
+        )
+      ).toBeNull();
+      await act(async () => answerCapabilities());
+      await waitFor(() => expect(api.setSessionModeDirect).toHaveBeenCalledWith(startId));
+      expect(await screen.findByText('Switch to staged…')).toBeTruthy();
+    });
+
+    it('starts in a server-created session where the installation stages by default', async () => {
+      stagesByDefault();
+      api.createSession.mockImplementation(async () => ({
+        id: '9999-0001',
+        write_mode: 'staged',
+      }));
+      renderApp();
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('9999-0001')
+      );
+      // No write mode in the request: the installation's default, past the hook.
+      expect(api.createSession).toHaveBeenCalledWith(null);
+      expect(api.setSessionStaged).toHaveBeenCalledWith('9999-0001', true);
+      // Its stream connects at once, and the diff is read when it is ready,
+      // so staged changes made before then show too.
+      expect(FakeEventSource.instances.some((es) => es.url.includes('/9999-0001/stream'))).toBe(
+        true
+      );
+      await waitFor(() => expect(api.getStagedChanges).toHaveBeenCalledWith('9999-0001'));
+      // Entered without a load a user's own switch could overtake: it is new
+      // and empty.
+      expect(api.getSession).not.toHaveBeenCalledWith('9999-0001', { resolve: true });
+      expect(new URLSearchParams(window.location.search).get('session')).toBe('9999-0001');
+    });
+
+    it('keeps the browser session, direct, when the server refuses to create one', async () => {
+      stagesByDefault();
+      api.createSession.mockRejectedValue(
+        Object.assign(new Error('forbidden'), { status: 403, code: 'forbidden' })
+      );
+      renderApp();
+      const [startId] = api.setActiveSessionForRequests.mock.calls[0];
+      await waitFor(() => expect(api.setSessionModeDirect).toHaveBeenCalledWith(startId));
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith(startId);
+      expect(api.setSessionStaged).not.toHaveBeenCalled();
+    });
+
+    it('keeps a start the user already works in', async () => {
+      stagesByDefault();
+      let answer;
+      api.createSession.mockImplementation(() => new Promise((resolve) => (answer = resolve)));
+      renderApp();
+      const [startId] = api.setActiveSessionForRequests.mock.calls[0];
+      await waitFor(() => expect(api.createSession).toHaveBeenCalled());
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A], []);
+      });
+      await act(async () => answer({ id: '9999-0001', write_mode: 'staged' }));
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith(startId);
+      expect(api.setSessionModeDirect).toHaveBeenCalledWith(startId);
+      expect(api.deleteServerSession).toHaveBeenCalledWith('9999-0001', 'client-test');
+    });
+
+    it('creates the session after a delete as the installation default says', async () => {
+      stagesByDefault();
+      api.createSession
+        .mockImplementationOnce(async () => ({ id: '9999-0001', write_mode: 'staged' }))
+        .mockImplementationOnce(async () => ({ id: '9999-0002', write_mode: 'staged' }));
+      api.getSession.mockImplementation(async (id) => ({
+        id,
+        write_mode: id === '7777-8888' ? 'direct' : 'staged',
+        state: {},
+        resolved: { nodes: [], edges: [] },
+        roster: [],
+      }));
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('9999-0001')
+      );
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getAllByText('7777-8888').find((el) => el.closest('.session-drawer')));
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('7777-8888')
+      );
+      let row = screen.getAllByText('7777-8888').find((el) => el.closest('.session-drawer'));
+      while (!row.querySelector('[aria-label="Session actions"]')) row = row.parentElement;
+      fireEvent.click(row.querySelector('[aria-label="Session actions"]'));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Delete session' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Delete' }));
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('9999-0002')
+      );
+      expect(api.createSession).toHaveBeenLastCalledWith(null);
+    });
+  });
+
+  it('never binds the stream to a session the user left while switching it to staged', async () => {
+    api.getUiCapabilities.mockImplementation(async () => ({
+      llm_available: false,
+      staged_sessions: true,
+    }));
+    let answerSwitch;
+    api.setSessionWriteMode.mockImplementation(
+      (id) => new Promise((resolve) => (answerSwitch = () => resolve({ id, write_mode: 'staged' })))
+    );
+    sessionStore.touchSession('7777-8888');
+    renderApp();
+    const [startId] = api.setActiveSessionForRequests.mock.calls[0];
+    fireEvent.click(await screen.findByText('Switch to staged…'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Switch to staged' }));
+    await waitFor(() =>
+      expect(api.setSessionWriteMode).toHaveBeenCalledWith(startId, 'staged', 'client-test')
+    );
+    fireEvent.click(screen.getByTitle('Menu'));
+    fireEvent.click(screen.getAllByText('7777-8888').find((el) => el.closest('.session-drawer')));
+    await waitFor(() =>
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('7777-8888')
+    );
+    const streamsFor = (id) =>
+      FakeEventSource.instances.filter((es) => es.url.includes(`/${id}/stream`)).length;
+    const before = streamsFor(startId);
+    await act(async () => answerSwitch());
+    expect(streamsFor(startId)).toBe(before);
+  });
+
+  it('a mode retry answering after the user moved on leaves one consistent session', async () => {
+    api.getUiCapabilities.mockImplementation(async () => ({
+      llm_available: false,
+      staged_sessions: true,
+    }));
+    // The switch's answer is lost and the re-read fails: the mode is unknown.
+    api.setSessionWriteMode.mockRejectedValue(new TypeError('Failed to fetch'));
+    const defaultGetSession = api.getSession.getMockImplementation();
+    let startId;
+    let answerRetry = null;
+    api.getSession.mockImplementation(async (id, opts) => {
+      if (id === startId && !opts) throw new TypeError('Failed to fetch');
+      if (id === startId && opts?.resolve) {
+        return new Promise((resolve) => (answerRetry = () => resolve(defaultGetSession(id, opts))));
+      }
+      return defaultGetSession(id, opts);
+    });
+    sessionStore.touchSession('7777-8888');
+    renderApp();
+    [startId] = api.setActiveSessionForRequests.mock.calls[0];
+    fireEvent.click(await screen.findByText('Switch to staged…'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Switch to staged' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(answerRetry).not.toBeNull());
+    fireEvent.click(screen.getByTitle('Menu'));
+    fireEvent.click(screen.getAllByText('7777-8888').find((el) => el.closest('.session-drawer')));
+    await waitFor(() =>
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('7777-8888')
+    );
+    await act(async () => answerRetry());
+    // The late retry is a switch back: requests, stream and URL agree.
+    await waitFor(() => expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith(startId));
+    const lastStream = FakeEventSource.instances
+      .filter((es) => es.url.includes('/api/sessions/'))
+      .at(-1);
+    expect(lastStream.url).toContain(`/${startId}/stream`);
+    expect(new URLSearchParams(window.location.search).get('session')).toBe(startId);
   });
 
   it('a real load failure (non-404) shows an error notice and stays on the current session', async () => {
