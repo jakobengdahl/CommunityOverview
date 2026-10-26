@@ -321,6 +321,14 @@ def test_mcp_switches_a_session_to_staged_and_never_back(client):
         {"session_merge_record_retention_days": "1.5"},
         {"session_merge_record_retention_days": "36501"},
         {"session_merge_record_retention_days": "1000000000"},
+        {"session_merge_record_retention_days": "+30"},
+        {"session_merge_record_retention_days": "1_0"},
+        {"session_merge_record_retention_days": "\u0663\u0660"},
+        {"session_merge_record_retention_days": "3 0"},
+        {"session_merge_record_retention_days": "9" * 5000},
+        {"graph_staged_sessions": "true", "session_layer_max_entries": "+5"},
+        {"graph_staged_sessions": "true", "session_layer_max_entries": "1_000"},
+        {"graph_staged_sessions": "true", "session_layer_max_entries": "9" * 5000},
     ],
 )
 def test_unusable_staged_session_settings_fail_at_boot(app_config, changes):
@@ -335,6 +343,16 @@ def test_unusable_staged_session_settings_fail_at_boot(app_config, changes):
 def test_merge_record_retention_defaults_to_90_days(app_config, raw, days):
     config = dataclasses.replace(app_config, session_merge_record_retention_days=raw)
     assert build_session_settings(config).merge_record_retention_days == days
+
+
+@pytest.mark.parametrize(
+    "raw, cap", [(None, 1000), ("", 1000), (" 5 ", 5), ("1", 1), ("0050", 50)]
+)
+def test_layer_max_entries_takes_digits_and_defaults_to_1000(app_config, raw, cap):
+    config = dataclasses.replace(
+        app_config, graph_staged_sessions="true", session_layer_max_entries=raw
+    )
+    assert build_session_settings(config).layer_max_entries == cap
 
 
 def test_a_staged_store_purges_expired_merge_records_at_start(
@@ -352,6 +370,35 @@ def test_a_staged_store_purges_expired_merge_records_at_start(
     with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
         TestClient(create_app(config))
     assert seen == [timedelta(days=7)]
+
+
+def test_a_backend_without_staged_sessions_starts_no_retention(
+    app_config, mock_llm_provider, monkeypatch
+):
+    from backend.core import merge_record_retention
+
+    seen = []
+    monkeypatch.setattr(
+        merge_record_retention.MergeRecordRetention,
+        "start",
+        lambda self: seen.append(self),
+    )
+    with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
+        TestClient(create_app(app_config))
+    assert seen == []
+
+
+def test_shutdown_stops_the_retention(staged_config, mock_llm_provider, monkeypatch):
+    from backend.core import merge_record_retention
+
+    stopped = []
+    retention = merge_record_retention.MergeRecordRetention
+    monkeypatch.setattr(retention, "start", lambda self: None)
+    monkeypatch.setattr(retention, "stop", lambda self: stopped.append(self))
+    with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
+        with TestClient(create_app(staged_config)):
+            assert stopped == []
+    assert len(stopped) == 1
 
 
 def test_a_staged_default_makes_new_sessions_staged(staged_config, mock_llm_provider):

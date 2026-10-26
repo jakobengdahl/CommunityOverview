@@ -57,6 +57,20 @@ _TRUE = ("1", "true", "yes", "on")
 _FALSE = ("", "0", "false", "no", "off")
 
 
+def _decimal(raw: str) -> int:
+    """`raw` as a number when it is ASCII digits only, else 0 (never usable).
+
+    int() alone also takes '+30', '1_0' and non-ASCII digits, which an
+    operator never means as a count.
+    """
+    if not (raw.isascii() and raw.isdecimal()):
+        return 0
+    try:
+        return int(raw)
+    except ValueError:  # past the interpreter's int-from-text digit limit
+        return 0
+
+
 def build_session_settings(config: AppConfig) -> SessionSettings:
     """The staged-session settings ``config`` asks for, or a boot error.
 
@@ -90,31 +104,25 @@ def build_session_settings(config: AppConfig) -> SessionSettings:
     cap_raw = (config.session_layer_max_entries or "").strip()
     cap = DEFAULT_LAYER_MAX_ENTRIES
     if cap_raw:
-        try:
-            cap = int(cap_raw)
-        except ValueError:
-            cap = 0
+        cap = _decimal(cap_raw)
         if cap < 1:
             raise PersistenceConfigurationError(
                 f"SESSION_LAYER_MAX_ENTRIES={config.session_layer_max_entries!r} "
                 "is not usable; it is the most entries one session's layer may "
-                "hold, so it must be a whole number of at least 1."
+                "hold, so it must be a whole number of at least 1, in digits only."
             )
 
     retention_raw = (config.session_merge_record_retention_days or "").strip()
     retention = DEFAULT_MERGE_RECORD_RETENTION_DAYS
     if retention_raw:
-        try:
-            retention = int(retention_raw)
-        except ValueError:
-            retention = 0
+        retention = _decimal(retention_raw)
         if not 1 <= retention <= MAX_MERGE_RECORD_RETENTION_DAYS:
             raise PersistenceConfigurationError(
                 "SESSION_MERGE_RECORD_RETENTION_DAYS="
                 f"{config.session_merge_record_retention_days!r} is not usable; "
                 "it is how many days a deleted session's merge records are "
                 "kept, so it must be a whole number from 1 to "
-                f"{MAX_MERGE_RECORD_RETENTION_DAYS}."
+                f"{MAX_MERGE_RECORD_RETENTION_DAYS}, in digits only."
             )
     return SessionSettings(
         staged_sessions=staged,
