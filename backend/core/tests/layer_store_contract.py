@@ -1000,6 +1000,12 @@ class LayerStoreContract:
                 self.RETENTION, limit=10, now=after + self.RETENTION
             )
         (message,) = [r.getMessage() for r in caplog.records if r.name == ls.__name__]
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger=ls.__name__):
+            factory().purge_merge_records(
+                self.RETENTION, limit=10, now=after + self.RETENTION
+            )
+        assert [r for r in caplog.records if r.name == ls.__name__] == []
         assert message.endswith(f": {json.dumps(forged)} (session {A})")
         assert "\n" not in message
         assert f'"m-b" (session {B})' not in message

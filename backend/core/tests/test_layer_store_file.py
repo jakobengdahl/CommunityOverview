@@ -1251,6 +1251,18 @@ def test_a_purge_over_a_log_ending_in_a_torn_line_drops_only_the_fragment(staged
     assert reopen(path).load_merge("m2") is not None
 
 
+def test_a_purge_inside_the_window_does_not_move_the_retirement_time(staged, path):
+    merge_a(staged)
+    staged.retire(A)
+    retired = ls.parse_retired_at(
+        json.loads(staged.layers_path.read_text())["sessions"][A]["retired_at"]
+    )
+    halfway = retired + RETENTION / 2
+    assert reopen(path).purge_merge_records(RETENTION, limit=10, now=halfway) == 0
+    past = retired + RETENTION + timedelta(seconds=1)
+    assert reopen(path).purge_merge_records(RETENTION, limit=10, now=past) == 1
+
+
 def test_a_purge_whose_rewrite_fails_logs_nothing(staged, monkeypatch, caplog):
     merge_a(staged)
     now = _retire_long_ago(staged, A)

@@ -131,3 +131,9 @@ def test_an_active_session_with_a_stale_retirement_time_is_never_purged():
     }
     merges = {"m": {"session_id": A, "status": ls.MERGE_APPLIED}}
     assert ls.merge_records_to_purge(merges, active, ls.utc_now(), 10) == []
+
+
+def test_a_retired_session_without_a_retirement_time_is_never_purged():
+    unstamped = {A: {"status": ls.STATUS_RETIRED}}
+    merges = {"m": {"session_id": A, "status": ls.MERGE_APPLIED}}
+    assert ls.merge_records_to_purge(merges, unstamped, ls.utc_now(), 10) == []
