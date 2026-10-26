@@ -108,7 +108,8 @@ def build_session_settings(config: AppConfig) -> SessionSettings:
             raise PersistenceConfigurationError(
                 f"SESSION_LAYER_MAX_ENTRIES={config.session_layer_max_entries!r} "
                 "is not usable; it is the most entries one session's layer may "
-                "hold, so it must be a whole number of at least 1, in digits only."
+                "hold, so it must be a whole number of at least 1, in at most 18 "
+                "digits."
             )
 
     retention_raw = (config.session_merge_record_retention_days or "").strip()
@@ -121,7 +122,7 @@ def build_session_settings(config: AppConfig) -> SessionSettings:
                 f"{config.session_merge_record_retention_days!r} is not usable; "
                 "it is how many days a deleted session's merge records are "
                 "kept, so it must be a whole number from 1 to "
-                f"{MAX_MERGE_RECORD_RETENTION_DAYS}, in digits only."
+                f"{MAX_MERGE_RECORD_RETENTION_DAYS}, in at most 18 digits."
             )
     return SessionSettings(
         staged_sessions=staged,
