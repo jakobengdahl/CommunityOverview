@@ -215,7 +215,28 @@ test('two staged sessions stay apart; a selective merge takes an edge with its n
   const a = await ctxA.newPage();
   const b = await ctxB.newPage();
   const sessionA = await startStagedSession(a);
-  await startStagedSession(b);
+  const sessionB = await startStagedSession(b);
+
+  // B re-reads its diff only on a cue from its own session, so "nothing
+  // pending in B" proves nothing until B has been cued after A's work landed.
+  // Each probe stages one node into B (named without the token, so B's
+  // searches below never offer it) and waits for B to show exactly its own
+  // count: anything of A's leaking into B's diff would show on top of it.
+  const probeToken = uniqueToken();
+  let probes = 0;
+  async function expectBHoldsOnlyItsOwnWork() {
+    probes += 1;
+    const probe = await request.post('/api/nodes', {
+      headers: { 'x-communityoverview-session-id': sessionB },
+      data: {
+        nodes: [{ id: `probe-${probes}-${probeToken}`, type: 'Actor', name: `Probe ${probes}` }],
+      },
+    });
+    expect(probe.ok()).toBe(true);
+    await expect(b.getByTestId('staged-pending-count')).toHaveText(`${probes} pending change(s)`, {
+      timeout: 15000,
+    });
+  }
 
   // A workshop agent stages into A's session over the API, as an MCP client
   // or an import would: two nodes and an edge from one of them into the graph.
@@ -231,7 +252,7 @@ test('two staged sessions stay apart; a selective merge takes an edge with its n
   await expect(a.getByTestId('staged-pending-count')).toHaveText('3 pending change(s)', {
     timeout: 15000,
   });
-  await expect(b.getByTestId('staged-pending-count')).toHaveText('0 pending change(s)');
+  await expectBHoldsOnlyItsOwnWork();
 
   // Search composes per session: A finds its staged node, B and the graph
   // only what the graph holds.
@@ -265,7 +286,7 @@ test('two staged sessions stay apart; a selective merge takes an edge with its n
   // B now finds what was merged, and still nothing A only staged.
   const afterMerge = await searchResultNames(b, token, kelp.name);
   expect(afterMerge).not.toContain(later.name);
-  await expect(b.getByTestId('staged-pending-count')).toHaveText('0 pending change(s)');
+  await expectBHoldsOnlyItsOwnWork();
 
   await ctxA.close();
   await ctxB.close();
