@@ -2656,7 +2656,7 @@ describe('Server-backed session lifecycle', () => {
         data: { detail: 'session not found' },
       });
     const UNREACHABLE_NOTICE =
-      "This session can't be saved: the server refuses its connection. Changes made here are not kept — start a new session to keep working.";
+      "This session can't be saved: the server no longer accepts it. Changes made here are not kept — start a new session to keep working.";
     const streamsFor = (id) =>
       FakeEventSource.instances.filter((es) => es.url.includes(`/api/sessions/${id}/stream`));
     const getSessionAnswering = (answers) => {

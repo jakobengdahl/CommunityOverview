@@ -301,7 +301,7 @@
     "new_session_started": "New session started",
     "link_not_found": "That session link could not be found — it may have been deleted or expired.",
     "link_retired": "This session was deleted and can no longer be saved to — continuing in a new session.",
-    "writes_refused_unreachable": "This session can't be saved: the server refuses its connection. Changes made here are not kept — start a new session to keep working.",
+    "writes_refused_unreachable": "This session can't be saved: the server no longer accepts it. Changes made here are not kept — start a new session to keep working.",
     "search_sessions": "Search previous sessions",
     "search_placeholder": "Search by name or ID...",
     "connect_session": "Connect to session (via ID)",
