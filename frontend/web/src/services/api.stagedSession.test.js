@@ -285,6 +285,14 @@ describe('file upload', () => {
     mockFetch(415, { detail: 'Unsupported file type' });
     const error = await api.uploadFile(new File(['x'], 'a.txt'), false).catch((e) => e);
     expect(error.message).toBe('Unsupported file type');
+    expect(error.statusOnly).toBe(false);
+  });
+
+  it('marks an answer with no reason as status-only, for the UI to word', async () => {
+    mockFetch(502, {});
+    const error = await api.uploadFile(new File(['x'], 'a.txt'), false).catch((e) => e);
+    expect(error.status).toBe(502);
+    expect(error.statusOnly).toBe(true);
   });
 });
 

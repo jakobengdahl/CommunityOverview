@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 
 import * as sessionStore from '../src/services/sessionStore';
 
@@ -47,9 +47,11 @@ vi.mock('@community-graph/ui-graph-canvas/styles', () => ({}));
 const NODE_A = { id: 'node-a', type: 'Actor', name: 'Actor A' };
 const NODE_B = { id: 'node-b', type: 'Theme', name: 'Theme B' };
 
+// The api mock the latest App import was given (a fresh App gets fresh mocks).
+const apiMocks = vi.hoisted(() => ({ latest: null }));
 vi.mock('../src/services/api', () => {
   let idCounter = 0;
-  return {
+  apiMocks.latest = {
     generateVisualizationSessionId: vi.fn(() => `1234-000${++idCounter}`),
     getVisualizationStreamUrl: vi.fn(() => 'http://localhost/stream'),
     getSessionStreamUrl: vi.fn((id) => `http://localhost/api/sessions/${id}/stream`),
@@ -105,6 +107,7 @@ vi.mock('../src/services/api', () => {
     deleteEdge: vi.fn(async () => ({ success: true })),
     exportGraph: vi.fn(async () => ({ nodes: [], edges: [] })),
   };
+  return apiMocks.latest;
 });
 
 // EventSource is not implemented in jsdom. This fake auto-delivers a snapshot so
@@ -2223,6 +2226,57 @@ describe('Server-backed session lifecycle', () => {
         session_write_mode_default: 'staged',
       }));
 
+    // App reads the link's parameters once, at import: each URL gets a fresh
+    // App, and the fresh mocks that come with it.
+    async function renderFreshAppAt(search) {
+      window.history.replaceState(null, '', `/${search}`);
+      vi.resetModules();
+      const [{ default: FreshApp }, { I18nProvider: FreshI18nProvider }] = await Promise.all([
+        import('../src/App'),
+        import('../src/i18n'),
+      ]);
+      const freshApi = apiMocks.latest;
+      freshApi.getUiCapabilities.mockImplementation(async () => ({
+        llm_available: false,
+        staged_sessions: true,
+        session_write_mode_default: 'staged',
+      }));
+      render(
+        <FreshI18nProvider>
+          <FreshApp />
+        </FreshI18nProvider>
+      );
+      return freshApi;
+    }
+
+    describe('a link that fills the canvas or a kiosk', () => {
+      afterEach(() => window.history.replaceState(null, '', '/'));
+
+      it.each(['?view=Overview', '?node=n1', '?akc=kiosk'])(
+        'starts %s in the session it opened with, even where staging is the default',
+        async (search) => {
+          const freshApi = await renderFreshAppAt(search);
+          const [startId] = freshApi.setActiveSessionForRequests.mock.calls[0];
+          await waitFor(() => expect(freshApi.setSessionModeDirect).toHaveBeenCalledWith(startId));
+          expect(freshApi.createSession).not.toHaveBeenCalled();
+        }
+      );
+
+      it('opens ?collect= as the kiosk alone, with no session to create', async () => {
+        const freshApi = await renderFreshAppAt('?collect=survey');
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        });
+        expect(freshApi.setActiveSessionForRequests).not.toHaveBeenCalled();
+        expect(freshApi.createSession).not.toHaveBeenCalled();
+      });
+
+      it('without one, the same harness starts in a created staged session', async () => {
+        const freshApi = await renderFreshAppAt('?other=1');
+        await waitFor(() => expect(freshApi.createSession).toHaveBeenCalledWith(null));
+      });
+    });
+
     it('holds writes from the starting id until the capabilities are known', async () => {
       renderApp();
       const [startId] = api.setActiveSessionForRequests.mock.calls[0];
@@ -2595,6 +2649,14 @@ describe('Server-backed session lifecycle', () => {
     }
     const STREAM_7777 = 'http://localhost/api/sessions/7777-8888/stream';
     const notFound = () => Object.assign(new Error('session not found'), { status: 404 });
+    // As api.js's responseError builds the server's own 404 for a rename.
+    const renameNotFound = () =>
+      Object.assign(new Error('session not found'), {
+        status: 404,
+        data: { detail: 'session not found' },
+      });
+    const UNREACHABLE_NOTICE =
+      "This session can't be saved: the server no longer accepts it. Changes made here are not kept — start a new session to keep working.";
     const streamsFor = (id) =>
       FakeEventSource.instances.filter((es) => es.url.includes(`/api/sessions/${id}/stream`));
     const getSessionAnswering = (answers) => {
@@ -2712,6 +2774,8 @@ describe('Server-backed session lifecycle', () => {
         'Session stream refused again; not leaving a second time:',
         '9999-0001'
       );
+      // Its writes are refused: the user is told rather than left editing.
+      expect(await screen.findByText(UNREACHABLE_NOTICE)).toBeTruthy();
       // A retired session opened while leaving is disarmed is not left, but
       // its writes are refused rather than sent unbound.
       await switchViaDrawer('4444-0000');
@@ -2820,7 +2884,7 @@ describe('Server-backed session lifecycle', () => {
     it('leaves a retired session when renaming it is refused', async () => {
       stagingOn();
       getSessionAnswering({ '7777-8888': notFound() });
-      api.renameServerSession.mockRejectedValue(notFound());
+      api.renameServerSession.mockRejectedValue(renameNotFound());
       sessionStore.touchSession('7777-8888');
       renderApp();
       await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
@@ -2841,7 +2905,7 @@ describe('Server-backed session lifecycle', () => {
 
     it('stays in the active session when renaming another, retired one is refused', async () => {
       stagingOn();
-      api.renameServerSession.mockRejectedValue(notFound());
+      api.renameServerSession.mockRejectedValue(renameNotFound());
       sessionStore.touchSession('7777-8888');
       renderApp();
       await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
@@ -2859,6 +2923,178 @@ describe('Server-backed session lifecycle', () => {
       });
       expect(api.createSession).not.toHaveBeenCalled();
       expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith(startId);
+    });
+
+    it("stays in a session when a rename's 404 is not the server's own", async () => {
+      stagingOn();
+      getSessionAnswering({ '7777-8888': notFound() });
+      // A proxy that does not route the call answers 404 with its own body.
+      api.renameServerSession.mockRejectedValue(
+        Object.assign(new Error('HTTP error: 404'), { status: 404, data: {} })
+      );
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('7777-8888');
+      openSessionAction('7777-8888', 'Name session');
+      await screen.findByText('Session name');
+      fireEvent.change(document.querySelector('.input-dialog input'), {
+        target: { value: 'Mine' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(api.renameServerSession).toHaveBeenCalled());
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+      expect(api.createSession).not.toHaveBeenCalled();
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('7777-8888');
+    });
+
+    it('names a rename, not the stream, when a rename is refused while leaving is disarmed', async () => {
+      stagingOn();
+      getSessionAnswering({ '7777-8888': notFound() });
+      api.renameServerSession.mockRejectedValue(renameNotFound());
+      global.fetch.mockImplementation(async (url) =>
+        String(url).includes('/7777-8888/stream')
+          ? { ok: false, status: 404, json: async () => ({ detail: 'session not found' }) }
+          : { ok: true, status: 200, json: async () => ({ applied: [], seq: 1 }) }
+      );
+      FakeEventSource.microtaskMessagesByUrl[STREAM_7777] = [];
+      FakeEventSource.microtaskMessagesByUrl['http://localhost/api/sessions/9999-0001/stream'] = [];
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('7777-8888');
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A], []);
+      });
+      const toolbarButtons = document.querySelectorAll('.floating-toolbar-item');
+      fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+      await waitFor(() => expect(streamsFor('7777-8888')).toHaveLength(1));
+      await act(async () => {
+        const es = streamsFor('7777-8888')[0];
+        es.readyState = 2;
+        es.onerror?.();
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('9999-0001')
+      );
+      // No stream has opened since, so a refused rename of the replacement is
+      // not left again, and is logged as the rename it was.
+      openSessionAction('9999-0001', 'Name session');
+      await screen.findByText('Session name');
+      // The edit's save left its own dialog open.
+      const renameDialog = [...document.querySelectorAll('.input-dialog')].find(
+        (d) => d.querySelector('h3')?.textContent === 'Name session'
+      );
+      fireEvent.change(renameDialog.querySelector('input'), { target: { value: 'Mine' } });
+      fireEvent.click(within(renameDialog).getByRole('button', { name: 'Save' }));
+      await waitFor(() =>
+        expect(errors).toHaveBeenCalledWith(
+          'Session rename refused again; not leaving a second time:',
+          '9999-0001'
+        )
+      );
+      expect(errors).not.toHaveBeenCalledWith(
+        'Session stream refused again; not leaving a second time:',
+        '9999-0001'
+      );
+      expect(await screen.findByText(UNREACHABLE_NOTICE)).toBeTruthy();
+      expect(api.createSession).toHaveBeenCalledTimes(1);
+    });
+
+    // Shared by the two guard tests below: 7777-8888 is retired, its stream
+    // never opens and the server refuses it.
+    async function openRefusedSession() {
+      stagingOn();
+      getSessionAnswering({ '7777-8888': notFound() });
+      global.fetch.mockImplementation(async (url) =>
+        String(url).includes('/7777-8888/stream')
+          ? { ok: false, status: 404, json: async () => ({ detail: 'session not found' }) }
+          : { ok: true, status: 200, json: async () => ({ applied: [], seq: 1 }) }
+      );
+      FakeEventSource.microtaskMessagesByUrl[STREAM_7777] = [];
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('7777-8888');
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A], []);
+      });
+      const toolbarButtons = document.querySelectorAll('.floating-toolbar-item');
+      fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+      await waitFor(() => expect(streamsFor('7777-8888')).toHaveLength(1));
+    }
+    const refuseStream = async (id) => {
+      await act(async () => {
+        const es = streamsFor(id).at(-1);
+        es.readyState = 2;
+        es.onerror?.();
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+    };
+
+    it('a second refusal of a session already being left is not taken for a disarmed one', async () => {
+      let refuseRename;
+      api.renameServerSession.mockImplementation(
+        () => new Promise((resolve, reject) => (refuseRename = reject))
+      );
+      let created;
+      api.createSession.mockImplementation(() => new Promise((resolve) => (created = resolve)));
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      await openRefusedSession();
+      openSessionAction('7777-8888', 'Name session');
+      await screen.findByText('Session name');
+      const renameDialog = [...document.querySelectorAll('.input-dialog')].find(
+        (d) => d.querySelector('h3')?.textContent === 'Name session'
+      );
+      fireEvent.change(renameDialog.querySelector('input'), { target: { value: 'Mine' } });
+      fireEvent.click(within(renameDialog).getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(api.renameServerSession).toHaveBeenCalled());
+      // The stream's refusal starts the leave; the rename's arrives before the
+      // replacement exists, while the id is still the active one.
+      await refuseStream('7777-8888');
+      await waitFor(() => expect(api.createSession).toHaveBeenCalledTimes(1));
+      await act(async () => {
+        refuseRename(renameNotFound());
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+      expect(errors).not.toHaveBeenCalledWith(
+        'Session rename refused again; not leaving a second time:',
+        '7777-8888'
+      );
+      expect(screen.queryByText(UNREACHABLE_NOTICE)).toBeNull();
+      await act(async () => created({ id: '9999-0001', write_mode: 'staged' }));
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('9999-0001')
+      );
+      expect(api.createSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('a stream refused while this tab deletes the session is left by the delete, not the refusal', async () => {
+      let deleted;
+      api.deleteServerSession.mockImplementation(
+        () => new Promise((resolve) => (deleted = resolve))
+      );
+      await openRefusedSession();
+      await deleteViaDrawer('7777-8888');
+      await waitFor(() => expect(api.deleteServerSession).toHaveBeenCalled());
+      await refuseStream('7777-8888');
+      expect(api.createSession).not.toHaveBeenCalled();
+      expect(
+        screen.queryByText(
+          'This session was deleted and can no longer be saved to — continuing in a new session.'
+        )
+      ).toBeNull();
+      await act(async () => deleted({}));
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).not.toHaveBeenLastCalledWith('7777-8888')
+      );
     });
 
     it('stays in the session when a rename fails for another reason', async () => {
