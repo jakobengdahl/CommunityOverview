@@ -248,6 +248,9 @@ async function responseError(response) {
   error.status = response.status;
   error.code = structured?.error || (typeof errorData.error === 'string' ? errorData.error : null);
   error.data = structured || errorData;
+  // No reason in the body: the message is the status alone, in English, for
+  // a caller that shows it to say in the UI's own language.
+  error.statusOnly = !message;
   return error;
 }
 

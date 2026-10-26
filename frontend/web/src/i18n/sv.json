@@ -84,6 +84,7 @@
     "form_required": "Besvara alla obligatoriska frågor.",
     "extract_error": "Kunde inte extrahera text från filen.",
     "upload_error": "Uppladdning misslyckades: {message}",
+    "upload_status": "servern svarade {status}",
     "approve_node": "Ja, lägg till noden \"{name}\"",
     "reject_node": "Nej, lägg inte till noden.",
     "confirm_delete": "Ja, ta bort noderna.",
