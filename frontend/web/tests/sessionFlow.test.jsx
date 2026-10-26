@@ -2953,6 +2953,96 @@ describe('Server-backed session lifecycle', () => {
       expect(api.createSession).toHaveBeenCalledTimes(1);
     });
 
+    // Shared by the two guard tests below: 7777-8888 is retired, its stream
+    // never opens and the server refuses it.
+    async function openRefusedSession() {
+      stagingOn();
+      getSessionAnswering({ '7777-8888': notFound() });
+      global.fetch.mockImplementation(async (url) =>
+        String(url).includes('/7777-8888/stream')
+          ? { ok: false, status: 404, json: async () => ({ detail: 'session not found' }) }
+          : { ok: true, status: 200, json: async () => ({ applied: [], seq: 1 }) }
+      );
+      FakeEventSource.microtaskMessagesByUrl[STREAM_7777] = [];
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('7777-8888');
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A], []);
+      });
+      const toolbarButtons = document.querySelectorAll('.floating-toolbar-item');
+      fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+      await waitFor(() => expect(streamsFor('7777-8888')).toHaveLength(1));
+    }
+    const refuseStream = async (id) => {
+      await act(async () => {
+        const es = streamsFor(id).at(-1);
+        es.readyState = 2;
+        es.onerror?.();
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+    };
+
+    it('a second refusal of a session already being left is not taken for a disarmed one', async () => {
+      let refuseRename;
+      api.renameServerSession.mockImplementation(
+        () => new Promise((resolve, reject) => (refuseRename = reject))
+      );
+      let created;
+      api.createSession.mockImplementation(() => new Promise((resolve) => (created = resolve)));
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      await openRefusedSession();
+      openSessionAction('7777-8888', 'Name session');
+      await screen.findByText('Session name');
+      const renameDialog = [...document.querySelectorAll('.input-dialog')].find(
+        (d) => d.querySelector('h3')?.textContent === 'Name session'
+      );
+      fireEvent.change(renameDialog.querySelector('input'), { target: { value: 'Mine' } });
+      fireEvent.click(within(renameDialog).getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(api.renameServerSession).toHaveBeenCalled());
+      // The stream's refusal starts the leave; the rename's arrives before the
+      // replacement exists, while the id is still the active one.
+      await refuseStream('7777-8888');
+      await waitFor(() => expect(api.createSession).toHaveBeenCalledTimes(1));
+      await act(async () => {
+        refuseRename(renameNotFound());
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+      expect(errors).not.toHaveBeenCalledWith(
+        'Session rename refused again; not leaving a second time:',
+        '7777-8888'
+      );
+      expect(screen.queryByText(UNREACHABLE_NOTICE)).toBeNull();
+      await act(async () => created({ id: '9999-0001', write_mode: 'staged' }));
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('9999-0001')
+      );
+      expect(api.createSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('a stream refused while this tab deletes the session is left by the delete, not the refusal', async () => {
+      let deleted;
+      api.deleteServerSession.mockImplementation(
+        () => new Promise((resolve) => (deleted = resolve))
+      );
+      await openRefusedSession();
+      await deleteViaDrawer('7777-8888');
+      await waitFor(() => expect(api.deleteServerSession).toHaveBeenCalled());
+      await refuseStream('7777-8888');
+      expect(api.createSession).not.toHaveBeenCalled();
+      expect(
+        screen.queryByText(
+          'This session was deleted and can no longer be saved to — continuing in a new session.'
+        )
+      ).toBeNull();
+      await act(async () => deleted({}));
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).not.toHaveBeenLastCalledWith('7777-8888')
+      );
+    });
+
     it('stays in the session when a rename fails for another reason', async () => {
       api.renameServerSession.mockRejectedValue(new TypeError('Failed to fetch'));
       sessionStore.touchSession('7777-8888');
