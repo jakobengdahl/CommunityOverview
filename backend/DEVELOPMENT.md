@@ -273,9 +273,6 @@ npm run build
 # Run all Python tests
 python -m pytest backend
 
-# Run with coverage
-pytest --cov=backend.core --cov=backend.service --cov=backend.api_host backend
-
 # Run specific test file
 pytest backend/service/tests/test_integration_rest_vs_mcp.py
 
@@ -433,6 +430,19 @@ npm test
 # E2E tests
 ./scripts/test-e2e.sh
 ```
+
+### Measuring Coverage
+
+Coverage is measured on demand, not gated: there is no threshold and no CI
+check, and reports (`coverage/`, `.coverage`) are gitignored. For the backend,
+`pytest-cov` comes with `requirements-dev.txt`; point the suite at a scratch
+PostgreSQL database with `CO_REQUIRE_POSTGRES=1` and `CO_TEST_POSTGRES_DSN`
+(as CI does) so the PostgreSQL backend paths count instead of skipping, then
+run `python -m pytest backend -q --cov=backend --cov-branch --cov-report=term-missing`.
+Each JavaScript workspace (`packages/ui-graph-canvas`, `frontend/web`,
+`frontend/widget`, `frontend/xr`) has `npm run test:coverage`, which runs
+vitest with the v8 provider and writes a report to that workspace's
+`coverage/`.
 
 ### Continuous Integration
 
