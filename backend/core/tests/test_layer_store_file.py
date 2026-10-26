@@ -1216,6 +1216,40 @@ def test_a_retired_record_without_a_time_starts_its_window_at_the_first_purge(
     assert reopen(path).purge_merge_records(RETENTION, limit=10, now=later) == 1
 
 
+def test_retiring_again_keeps_a_back_dated_stored_retirement_time(staged, path):
+    merge_a(staged)
+    staged.retire(A)
+    long_ago = ls.utc_now() - RETENTION - timedelta(days=1)
+    layers = json.loads(staged.layers_path.read_text())
+    layers["sessions"][A]["retired_at"] = ls.format_retired_at(long_ago)
+    staged.layers_path.write_text(json.dumps(layers))
+    reopen(path).retire(A)
+    reopen(path).retire(A, require_empty=True)
+    stored = json.loads(staged.layers_path.read_text())["sessions"][A]["retired_at"]
+    assert ls.parse_retired_at(stored) == long_ago
+    assert reopen(path).purge_merge_records(RETENTION, limit=10) == 1
+
+
+def test_a_purge_over_a_log_ending_in_a_torn_line_drops_only_the_fragment(staged, path):
+    staged.record_staged(B)
+    staged.stage(B, [entry("node", "c", session_id=B)])
+    staged.merge(B, "m-b", [], [], [("node", "c")], {})
+    merge_a(staged)
+    now = _retire_long_ago(staged, B)
+    with open(staged.merge_log_path, "ab") as log:
+        log.write(b'{"merge_id": "m-torn", "sta')
+    # The same instance, which loaded the log before the fragment landed.
+    assert staged.purge_merge_records(RETENTION, limit=10, now=now) == 1
+    raw = staged.merge_log_path.read_bytes()
+    assert raw.endswith(b"\n") and b"m-torn" not in raw and b"m-b" not in raw
+    after = reopen(path)
+    assert after.load_merge("m1")["status"] == ls.MERGE_APPLIED
+    assert after.load_merge("m-b") is None
+    after.stage(A, [entry("node", "b")])
+    after.merge(A, "m2", [], [], [("node", "b")], {})
+    assert reopen(path).load_merge("m2") is not None
+
+
 @pytest.mark.parametrize("stored", ["not a time", "2026-01-01T00:00:00", 12])
 def test_an_unreadable_retirement_time_stops_the_load(staged, path, stored):
     staged.discard(A)
