@@ -257,11 +257,11 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
   return (
     <div className="dialog-overlay" onClick={onClose}>
       <div
-        className="dialog-content subscription-dialog"
+        className="dialog-content subscription-dialog" role="dialog" aria-modal="true" aria-labelledby="akc-dialog-title"
         style={{ maxWidth: '680px' }}
         onClick={(e) => e.stopPropagation()}
       >
-        <h2>
+        <h2 id="akc-dialog-title">
           {initialData
             ? t('active_data_collection.title_edit')
             : t('active_data_collection.title_create')}

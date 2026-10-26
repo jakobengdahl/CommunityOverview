@@ -77,8 +77,8 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
 
   return (
     <div className="dialog-overlay" onClick={onClose}>
-      <div className="dialog-content subscription-dialog" onClick={(e) => e.stopPropagation()}>
-        <h2>{isEditing ? `Edit ${nodeType}` : `Create ${nodeType}`}</h2>
+      <div className="dialog-content subscription-dialog" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="createskilldialog-title">
+        <h2 id="createskilldialog-title">{isEditing ? `Edit ${nodeType}` : `Create ${nodeType}`}</h2>
         <p className="dialog-description">
           Defines reusable instructions for an AI agent. Compatible with the SKILL.md format.
         </p>

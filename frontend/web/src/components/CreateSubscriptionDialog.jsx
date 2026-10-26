@@ -146,8 +146,8 @@ export default function CreateSubscriptionDialog({ onClose, onSave, initialData 
 
   return (
     <div className="dialog-overlay" onClick={onClose}>
-      <div className="dialog-content subscription-dialog" onClick={(e) => e.stopPropagation()}>
-        <h2>{isEditing ? t('subscription_dialog.title_edit') : t('subscription_dialog.title')}</h2>
+      <div className="dialog-content subscription-dialog" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="createsubscriptiondialog-title">
+        <h2 id="createsubscriptiondialog-title">{isEditing ? t('subscription_dialog.title_edit') : t('subscription_dialog.title')}</h2>
         <p className="dialog-description">{t('subscription_dialog.description')}</p>
 
         <form onSubmit={handleSubmit}>
