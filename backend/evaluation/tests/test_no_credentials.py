@@ -24,10 +24,18 @@ every provider variable cleared. See docs/SKILL_EVALUATION.md for the
 operator-facing version.
 """
 
+import contextlib
+import hashlib
 import json
 import os
 import re
+import tempfile
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
 
 import pytest
 from pydantic import ValidationError
@@ -233,6 +241,34 @@ class TestCredentialsComeOnlyFromTheEnvironment:
         )
 
 
+@contextlib.contextmanager
+def _repo_root_dotenv(body: str):
+    """A repo-root `.env` holding `body` for the duration, then removed.
+
+    The path is fixed and shared by every test process, so under pytest-xdist
+    a second worker would otherwise see this file and skip, or remove it while
+    the first one's subprocess still reads it. An exclusive lock on a file
+    outside the repository serialises the writers across processes; without
+    `fcntl` (Windows) the suite runs these serially anyway.
+    """
+    dotenv = REPO_ROOT / ".env"
+    lock_path = Path(tempfile.gettempdir()) / (
+        "co-test-repo-dotenv-"
+        + hashlib.sha256(str(REPO_ROOT).encode()).hexdigest()[:16]
+        + ".lock"
+    )
+    with open(lock_path, "a") as lock:
+        if fcntl is not None:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        if dotenv.exists():  # never clobber a developer's own file
+            pytest.skip("a .env already exists at the repository root")
+        dotenv.write_text(body, encoding="utf-8")
+        try:
+            yield
+        finally:
+            dotenv.unlink()
+
+
 class TestADotEnvFileIsNotAReliableCredentialSource:
     """
     Pinned because this claim has been documented wrongly three times.
@@ -265,12 +301,7 @@ class TestADotEnvFileIsNotAReliableCredentialSource:
         """Run a script with a real repo-root .env present, then remove it."""
         import subprocess
 
-        dotenv = REPO_ROOT / ".env"
-        pre_existing = dotenv.exists()
-        if pre_existing:  # never clobber a developer's own file
-            pytest.skip("a .env already exists at the repository root")
-        dotenv.write_text(env_body, encoding="utf-8")
-        try:
+        with _repo_root_dotenv(env_body):
             return subprocess.run(
                 [sys.executable, "-c", script],
                 cwd=str(REPO_ROOT),
@@ -278,8 +309,6 @@ class TestADotEnvFileIsNotAReliableCredentialSource:
                 text=True,
                 timeout=180,
             )
-        finally:
-            dotenv.unlink()
 
     def test_the_frame_walk_finds_the_repo_root_from_outside_the_repository(
         self, tmp_path
@@ -309,11 +338,7 @@ class TestADotEnvFileIsNotAReliableCredentialSource:
             encoding="utf-8",
         )
 
-        dotenv = REPO_ROOT / ".env"
-        if dotenv.exists():
-            pytest.skip("a .env already exists at the repository root")
-        dotenv.write_text("SKILL_EVAL_DOTENV_PROBE=from-repo-root\n", encoding="utf-8")
-        try:
+        with _repo_root_dotenv("SKILL_EVAL_DOTENV_PROBE=from-repo-root\n"):
             result = subprocess.run(
                 [sys.executable, str(probe)],
                 cwd=str(tmp_path),
@@ -323,8 +348,6 @@ class TestADotEnvFileIsNotAReliableCredentialSource:
                 # Strip any tracer so find_dotenv cannot take the cwd branch.
                 env={**os.environ, "COVERAGE_PROCESS_START": ""},
             )
-        finally:
-            dotenv.unlink()
 
         assert "FOUND: from-repo-root" in result.stdout, (
             "the frame walk did not reach the repository root; got "
