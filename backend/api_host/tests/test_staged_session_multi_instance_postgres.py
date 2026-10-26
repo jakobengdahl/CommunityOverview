@@ -29,6 +29,7 @@ from fastapi.testclient import TestClient
 
 from backend.api_host import AppConfig, create_app
 from backend.runtime.session_context import SESSION_ID_HEADER
+from backend.service.service import MERGE_EVENT_ORIGIN
 
 REQUIRE = os.environ.get("CO_REQUIRE_POSTGRES") == "1"
 DSN = os.environ.get("CO_TEST_POSTGRES_DSN", "")
@@ -140,6 +141,14 @@ def _seed(a, b):
     _eventually(lambda: _main_node(b, "hub") is not None, "the seed reaches B")
 
 
+def _revision_high_water(schema):
+    """The last value the store's revision counter handed out."""
+    with psycopg.connect(DSN) as conn:
+        return conn.execute(
+            f'SELECT last_value FROM "{schema}".graph_revision_seq'
+        ).fetchone()[0]
+
+
 def test_one_instance_stages_and_the_other_reviews_composes_and_merges(instances):
     a, b = instances
     _seed(a, b)
@@ -228,9 +237,23 @@ def test_a_merge_naming_a_version_the_other_instance_restaged_is_raced(instances
     _eventually(lambda: _main_node(b, "hub")["name"] == "Later", "the merge reaches B")
 
 
-def test_a_merge_retried_on_the_other_instance_is_answered_from_its_record(instances):
+def test_a_merge_retried_on_the_other_instance_is_answered_from_its_record(
+    instances, schema
+):
     a, b = instances
     _seed(a, b)
+    # Every merge write either instance applies, as its storage emits it. Only
+    # the merge's own origin counts: an instance replaying another's committed
+    # write into its cache emits that write again as an external change.
+    applied = []
+    for name, client in (("a", a), ("b", b)):
+        client.app.state.graph_storage.add_system_listener(
+            lambda event, name=name: (
+                applied.append((name, event.event_type.value, event.entity.id))
+                if event.origin.event_origin == MERGE_EVENT_ORIGIN
+                else None
+            )
+        )
     sid = _ok(a.post("/api/sessions", json={"name": "w", "write_mode": "staged"}))["id"]
     _ok(
         a.post(
@@ -244,6 +267,7 @@ def test_a_merge_retried_on_the_other_instance_is_answered_from_its_record(insta
     )
     landed = _main_node(a, "once")
     assert landed is not None
+    assert applied == [("a", "node.create", "once")]
 
     # A client that lost A's answer retries on B with the same merge id while
     # the session stages more meanwhile: B returns the recorded merge and
@@ -255,6 +279,7 @@ def test_a_merge_retried_on_the_other_instance_is_answered_from_its_record(insta
             json={"nodes": [{"id": "after", "type": "Actor", "name": "Staged After"}]},
         )
     )
+    high_water = _revision_high_water(schema)
     retry = _ok(
         b.post(f"/api/sessions/{sid}/staged/merge", json={"merge_id": "mi-once"})
     )
@@ -264,6 +289,10 @@ def test_a_merge_retried_on_the_other_instance_is_answered_from_its_record(insta
     assert _main_node(b, "after") is None
     _eventually(lambda: _main_node(b, "once") is not None, "the merge reaches B")
     assert _main_node(b, "once")["revision"] == landed["revision"]
+    # Nothing was written: no instance applied anything, and the store's
+    # revision counter, which every write draws from, did not move.
+    assert applied == [("a", "node.create", "once")]
+    assert _revision_high_water(schema) == high_water
     assert {
         i["entity_id"] for i in _ok(b.get(f"/api/sessions/{sid}/staged"))["items"]
     } == {"after"}
