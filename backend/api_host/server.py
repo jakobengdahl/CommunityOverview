@@ -26,6 +26,7 @@ Usage:
 import logging
 import threading
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -41,6 +42,7 @@ from backend.core.session_auto_add import (
     SessionAutoAddRegistry,
     build_node_create_listener,
 )
+from backend.core.merge_record_retention import MergeRecordRetention
 from backend.core.session_registry import SessionRegistry
 from backend.core.session_store import FileSessionPersistenceBackend, SessionStore
 from backend.core.session_manager import SessionManager
@@ -382,6 +384,16 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
             f"staged sessions cannot be configured: {exc}"
         ) from exc
     app.state.write_modes = write_modes
+    # Merge records of deleted sessions are purged once the retention has
+    # passed (docs/SESSION_OVERLAY_CONTRACT.md §11.5): at start, then
+    # periodically, on a thread of its own, never inside a merge.
+    merge_record_retention = None
+    if graph_storage.layer_store is not None:
+        merge_record_retention = MergeRecordRetention(
+            graph_storage.layer_store,
+            timedelta(days=session_settings.merge_record_retention_days),
+        )
+        merge_record_retention.start()
     sessions_dir = str(config.resolve_sessions_dir())
     session_store = SessionStore(
         FileSessionPersistenceBackend(sessions_dir),
@@ -546,6 +558,8 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         """Gracefully shutdown agent registry and event system."""
         if hasattr(app.state, "session_cleanup_task"):
             app.state.session_cleanup_task.cancel()
+        if merge_record_retention is not None:
+            merge_record_retention.stop()
         runtime.stop()
 
     return app

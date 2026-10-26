@@ -2,6 +2,7 @@
 merge (docs/SESSION_OVERLAY_CONTRACT.md §11.6)."""
 
 import json
+from datetime import timedelta
 
 import pytest
 
@@ -17,6 +18,7 @@ from backend.core.tests.layer_store_contract import (
     A,
     B,
     LayerStoreContract,
+    PinnedClockRetentionContract,
     entry,
     fresh,
 )
@@ -28,7 +30,7 @@ from backend.core.tests.persistence_contract import (
 )
 
 
-class TestFileLayerStoreContract(LayerStoreContract):
+class TestFileLayerStoreContract(LayerStoreContract, PinnedClockRetentionContract):
     @pytest.fixture
     def factory(self, tmp_path):
         path = tmp_path / "graph.json"
@@ -1138,3 +1140,88 @@ def test_an_edge_upsert_journal_contains_only_the_persistent_operation_fields(st
         "upsert",
         "e2",
     )
+
+
+# -- merge-record retention (§11.5) ---------------------------------------------
+
+RETENTION = timedelta(days=90)
+
+
+def _retire_long_ago(backend, session_id):
+    """Retire `session_id`; a moment past its retention window."""
+    backend.retire(session_id)
+    return ls.utc_now() + RETENTION + timedelta(seconds=1)
+
+
+def test_a_purge_rewrites_the_log_without_the_purged_lines(staged, path):
+    staged.record_staged(B)
+    staged.stage(B, [entry("node", "c", session_id=B)])
+    staged.merge(B, "m-b", [], [], [("node", "c")], {})
+    merge_a(staged)
+    staged.discard(A)
+    now = _retire_long_ago(staged, B)
+    assert staged.purge_merge_records(RETENTION, limit=10, now=now) == 1
+    assert "m-b" not in staged.merge_log_path.read_text()
+    after = reopen(path)
+    assert after.load_merge("m-b") is None
+    assert after.load_merge("m1")["status"] == ls.MERGE_APPLIED
+    # The rewritten log takes appends as the old one did.
+    after.stage(A, [entry("node", "b")])
+    after.merge(A, "m2", [], [], [("node", "b")], {})
+    assert reopen(path).load_merge("m2") is not None
+
+
+def test_a_pending_merge_that_cannot_settle_stops_the_purge(staged, path, monkeypatch):
+    staged.record_staged(B)
+    staged.stage(B, [entry("node", "c", session_id=B)])
+    staged.merge(B, "m-b", [], [], [("node", "c")], {})
+    now = _retire_long_ago(staged, B)
+    real = staged._append_merge_log_locked
+    calls = {"n": 0}
+
+    def broken(line):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise OSError("disk gone")
+        return real(line)
+
+    monkeypatch.setattr(staged, "_append_merge_log_locked", broken)
+    merge_a(staged)
+    log_before = staged.merge_log_path.read_bytes()
+    with pytest.raises(OSError):
+        staged.purge_merge_records(RETENTION, limit=10, now=now)
+    assert staged.merge_log_path.read_bytes() == log_before
+    monkeypatch.undo()
+    # Settled first, then purged; the merge that was pending is A's, kept.
+    assert staged.purge_merge_records(RETENTION, limit=10, now=now) == 1
+    after = reopen(path)
+    assert after.load_merge("m1")["status"] == ls.MERGE_APPLIED
+    assert after.load_merge("m-b") is None
+
+
+def test_a_retired_record_without_a_time_starts_its_window_at_the_first_purge(
+    staged, path
+):
+    merge_a(staged)
+    staged.retire(A)
+    layers = json.loads(staged.layers_path.read_text())
+    del layers["sessions"][A]["retired_at"]
+    staged.layers_path.write_text(json.dumps(layers))
+    first = ls.utc_now() + timedelta(days=3650)
+    assert reopen(path).purge_merge_records(RETENTION, limit=10, now=first) == 0
+    assert reopen(path).load_merge("m1") is not None
+    stamped = json.loads(staged.layers_path.read_text())["sessions"][A]
+    assert ls.parse_retired_at(stamped["retired_at"]) == first
+    later = first + RETENTION + timedelta(seconds=1)
+    assert reopen(path).purge_merge_records(RETENTION, limit=10, now=later) == 1
+
+
+@pytest.mark.parametrize("stored", ["not a time", "2026-01-01T00:00:00", 12])
+def test_an_unreadable_retirement_time_stops_the_load(staged, path, stored):
+    staged.discard(A)
+    staged.retire(A)
+    layers = json.loads(staged.layers_path.read_text())
+    layers["sessions"][A]["retired_at"] = stored
+    staged.layers_path.write_text(json.dumps(layers))
+    with pytest.raises(GraphJournalError):
+        reopen(path).staged_status(A)

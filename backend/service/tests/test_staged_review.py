@@ -8,9 +8,12 @@ narrowed reader's view), edges ab, bc and ar.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 
 from backend.core import Edge, Node
+from backend.core.layer_store import utc_now
 from backend.core.events.models import EventContext
 from backend.runtime.session_context import bind_session
 from backend.service.tests.test_composed_reads import REMOTE, make_world
@@ -509,6 +512,20 @@ def test_repeating_a_merge_id_returns_the_first_result_and_writes_nothing(world)
     taken = svc.merge_staged_changes(other, "m")
     assert taken["error"] == "merge_id_taken"
     assert "merged" not in taken and "record" not in taken
+
+
+def test_a_merge_id_replayed_after_its_record_was_purged_is_still_not_found(world):
+    svc, sid = world.service, world.staged_session()
+    _stage(world, sid, ("update_node", ("a",), {"updates": {"description": "x"}}))
+    assert svc.merge_staged_changes(sid, "m")["success"]
+    world.manager.delete_session_sync(sid, discard_staged=True)
+    later = utc_now() + timedelta(days=91)
+    store = world.storage.layer_store
+    assert store.purge_merge_records(timedelta(days=90), limit=10, now=later) == 1
+    events, main = len(world.events), world.main()
+    again = svc.merge_staged_changes(sid, "m")
+    assert again["error"] == "session_not_found"
+    assert len(world.events) == events and world.main() == main
 
 
 def test_an_entry_restaged_after_the_plan_fails_the_merge_whole(world, monkeypatch):
