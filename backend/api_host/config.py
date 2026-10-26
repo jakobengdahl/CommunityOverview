@@ -129,6 +129,8 @@ class AppConfig:
     # file or table. SESSION_WRITE_MODE_DEFAULT is the mode a session created
     # without one gets: direct (the default, today's behaviour) or staged.
     # SESSION_LAYER_MAX_ENTRIES caps a layer; unset is 1000.
+    # SESSION_MERGE_RECORD_RETENTION_DAYS is how long a deleted session's merge
+    # records are kept; unset is 90.
     graph_staged_sessions: Optional[str] = field(
         default_factory=lambda: os.getenv("GRAPH_STAGED_SESSIONS")
     )
@@ -137,6 +139,9 @@ class AppConfig:
     )
     session_layer_max_entries: Optional[str] = field(
         default_factory=lambda: os.getenv("SESSION_LAYER_MAX_ENTRIES")
+    )
+    session_merge_record_retention_days: Optional[str] = field(
+        default_factory=lambda: os.getenv("SESSION_MERGE_RECORD_RETENTION_DAYS")
     )
 
     # Node attachments (docs/adr/0008-node-attachment-storage.md). Read raw and

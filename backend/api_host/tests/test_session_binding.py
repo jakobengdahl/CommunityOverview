@@ -9,6 +9,7 @@ import asyncio
 import dataclasses
 import json
 import uuid
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -314,11 +315,43 @@ def test_mcp_switches_a_session_to_staged_and_never_back(client):
         {"session_write_mode_default": "sometimes"},
         {"graph_staged_sessions": "maybe"},
         {"graph_staged_sessions": "true", "session_layer_max_entries": "0"},
+        {"session_merge_record_retention_days": "0"},
+        {"session_merge_record_retention_days": "-5"},
+        {"session_merge_record_retention_days": "ninety"},
+        {"session_merge_record_retention_days": "1.5"},
+        {"session_merge_record_retention_days": "36501"},
+        {"session_merge_record_retention_days": "1000000000"},
     ],
 )
 def test_unusable_staged_session_settings_fail_at_boot(app_config, changes):
     with pytest.raises(PersistenceConfigurationError):
         build_session_settings(dataclasses.replace(app_config, **changes))
+
+
+@pytest.mark.parametrize(
+    "raw, days",
+    [(None, 90), ("", 90), ("   ", 90), (" 30 ", 30), ("1", 1), ("36500", 36500)],
+)
+def test_merge_record_retention_defaults_to_90_days(app_config, raw, days):
+    config = dataclasses.replace(app_config, session_merge_record_retention_days=raw)
+    assert build_session_settings(config).merge_record_retention_days == days
+
+
+def test_a_staged_store_purges_expired_merge_records_at_start(
+    staged_config, mock_llm_provider, monkeypatch
+):
+    from backend.core import merge_record_retention
+
+    seen = []
+    monkeypatch.setattr(
+        merge_record_retention.MergeRecordRetention,
+        "start",
+        lambda self: seen.append(self._retention),
+    )
+    config = dataclasses.replace(staged_config, session_merge_record_retention_days="7")
+    with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
+        TestClient(create_app(config))
+    assert seen == [timedelta(days=7)]
 
 
 def test_a_staged_default_makes_new_sessions_staged(staged_config, mock_llm_provider):

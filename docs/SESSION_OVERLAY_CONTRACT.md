@@ -479,8 +479,9 @@ must also declare `revision_enforcement` (§4.4). It implements:
 | `drop_layer(session_id)` | Remove the whole layer; used only by an explicit discard-and-delete (§13). |
 | `record_staged(session_id)` | Create the session's staged-session record (§5.3). |
 | `staged_status(session_id)` | `active`, `retired` or `none`. |
-| `retire(session_id)` | Mark the record retired, in the same unit as `drop_layer`. |
+| `retire(session_id)` | Mark the record retired, and store when, in the same unit as `drop_layer`. Retiring again keeps the first time. |
 | `layers_in_use()` | The ids of sessions whose layers are not empty. |
+| `purge_merge_records(retention, limit)` | Remove at most `limit` merge records of sessions retired more than `retention` ago (§11.5). |
 
 `merge` does the following **as one unit**:
 
@@ -872,8 +873,30 @@ On success:
   - per entry: action, entity, base revision, resulting revision and resolution.
 
   It is the audit trail of the merge, and it does not depend on mutation
-  history, which PostgreSQL mode does not keep. How long merge records are kept
-  is *open* (§20).
+  history, which PostgreSQL mode does not keep.
+- **Retention.** A merge record is kept while its session exists, and for
+  `SESSION_MERGE_RECORD_RETENTION_DAYS` (default 90) after the session is
+  deleted; then it is purged.
+  - Deleting a staged session retires its record (§5.3), and the retirement
+    stores its time (the database clock in PostgreSQL mode). Retiring again
+    keeps the first time. A retired record from before that time was stored
+    is stamped by the purge that first reaches it (PostgreSQL stamps at most
+    one batch of such records per call), so its window starts then.
+  - The purge removes, in bounded batches, only applied records whose
+    session's record was retired more than the period ago. It never removes a
+    record of an active session, one inside the window, or a pending one
+    (§11.6), and never the retired session record itself, so the id stays
+    unusable.
+  - Each instance runs it at start and then periodically, on its own thread,
+    never inside a merge unit. Two instances purging one store at once each
+    skip the records the other holds.
+  - A replay of a purged merge id is refused as one for any deleted session
+    is: the session is retired, so the merge is refused with
+    `session_not_found` and nothing is applied.
+  - A purged record no longer holds its merge id, so another session can
+    then merge under it (`merge_id_taken` holds only while the record is
+    kept). Clients mint unpredictable merge ids (a UUID), so a reuse is
+    deliberate; events of the two merges then share a correlation id.
 
 A partial merge leaves the unselected entries in the layer untouched.
 
@@ -1059,7 +1082,7 @@ session-tool code `revision_conflict` is unchanged (§9.2).
 | `merge_blocked` | 409 | an unresolved entry (§11.2) |
 | `merge_raced` | 409 | an expectation or check failing inside the merge unit (§11.3) |
 | `merge_incomplete` | 422 | a selection not closed under dependencies (§11.4) |
-| `merge_id_taken` | 409 | a merge id already used by another session's merge (I9 holds per session) |
+| `merge_id_taken` | 409 | a merge id already used by another session's merge (I9 holds per session); a purged record (§11.5) no longer holds its id |
 | `invalid_merge_request` | 422 | a malformed selection, resolution or merge id (§11.2, §11.4) |
 | `session_not_staged` | 409 | a merge or discard naming a direct session, which holds no layer |
 | `write_mode_irreversible` | 409 | switching a staged session to direct (§5.2) |
@@ -1135,9 +1158,10 @@ recommendation comes first.
    unchanged, and staging is opted into per session or per graph.
 2. **Layer cap.** 1000 entries per layer. That is ample for a workshop, and it
    keeps composition cheap. It is configurable.
-3. **Merge-record retention.** Keep records as long as the session exists, plus
-   90 days after a session is deleted. They are the only audit a merge leaves
-   in PostgreSQL mode.
+3. **Merge-record retention.** *Decided:* records are kept as long as the
+   session exists, plus 90 days (configurable) after the session is deleted,
+   then purged (§11.5). They are the only audit a merge leaves in PostgreSQL
+   mode.
 4. **Staged-work expiry.** None in the core, consistent with D13. A deployment
    that wants expiry adds it on top.
 5. **Embedding layer entries.** *Decided:* embed each entry in the background
