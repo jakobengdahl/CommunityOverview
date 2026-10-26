@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import (
     Any,
     Dict,
@@ -56,6 +57,12 @@ ENTITY_KINDS = ("node", "edge")
 
 # (kind, entity_id): how a layer names an entry, and how a removal names one.
 LayerKey = Tuple[str, str]
+
+# How long the merge records of a deleted session are kept (§11.5): 90 days
+# after its staged-session record was retired, then a purge removes them.
+DEFAULT_MERGE_RECORD_RETENTION_DAYS = 90
+# A century: far past any audit need, and well inside what a date can hold.
+MAX_MERGE_RECORD_RETENTION_DAYS = 36_500
 
 # The longest entity or merge id the store accepts. Far beyond any id the
 # application mints, and short enough that a key can never reach a limit of
@@ -355,6 +362,21 @@ class LayerStoreBackend(Protocol):
     def layers_in_use(self) -> List[str]:
         """Ids of the sessions whose layers are not empty."""
 
+    def purge_merge_records(
+        self,
+        retention: timedelta,
+        *,
+        limit: int,
+        now: Optional[datetime] = None,
+    ) -> int:
+        """Delete at most `limit` merge records whose session was retired
+        more than `retention` before `now` (the store's clock when None), and
+        return how many went. Never one of a session that is not retired, of
+        a retirement inside the window, or a pending one; a retired record
+        from before retirement times were kept is stamped `now` here, so its
+        window starts at the first purge. Idempotent, and safe to run from
+        several instances at once: a record another purge took is skipped."""
+
 
 LAYER_STORE_METHODS = _STAGED_SESSION_METHODS
 
@@ -386,6 +408,66 @@ def check_session_id(session_id: Any) -> str:
     if not is_valid_session_id(session_id):
         raise InvalidLayerRequest("session id is not a valid session id")
     return session_id
+
+
+def check_purge_request(
+    retention: Any, limit: Any, now: Any
+) -> Tuple[timedelta, int, Optional[datetime]]:
+    if not isinstance(retention, timedelta) or retention <= timedelta(0):
+        raise InvalidLayerRequest("retention must be a positive timedelta")
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise InvalidLayerRequest("limit must be an integer of at least 1")
+    if now is not None and (not isinstance(now, datetime) or now.tzinfo is None):
+        raise InvalidLayerRequest("now must be a timezone-aware datetime")
+    return retention, limit, now
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def format_retired_at(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).isoformat()
+
+
+def parse_retired_at(value: Any) -> Optional[datetime]:
+    """A stored retirement time, None when there is none, ValueError when
+    what is stored is not one."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("retired_at is not a string")
+    moment = datetime.fromisoformat(value)
+    if moment.tzinfo is None:
+        raise ValueError("retired_at has no time zone")
+    return moment
+
+
+def merge_records_to_purge(
+    merges: Mapping[str, Mapping[str, Any]],
+    sessions: Mapping[str, Mapping[str, Any]],
+    cutoff: datetime,
+    limit: int,
+) -> List[str]:
+    """The merge ids, at most `limit`, in id order, that a purge removes:
+    applied records whose session's record is retired at a time strictly
+    before `cutoff`. A record of an active session, of one with no record at
+    all, or of a retirement with no time, is kept."""
+    victims: List[str] = []
+    for merge_id in sorted(merges):
+        record = merges[merge_id]
+        if record.get("status") != MERGE_APPLIED:
+            continue
+        session = sessions.get(record.get("session_id"))
+        if session is None or session.get("status") != STATUS_RETIRED:
+            continue
+        retired_at = parse_retired_at(session.get("retired_at"))
+        if retired_at is None or retired_at >= cutoff:
+            continue
+        victims.append(merge_id)
+        if len(victims) == limit:
+            break
+    return victims
 
 
 def check_merge_id(merge_id: Any) -> str:

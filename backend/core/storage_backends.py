@@ -142,6 +142,7 @@ _STAGED_SESSION_METHODS = (
     "staged_status",
     "retire",
     "layers_in_use",
+    "purge_merge_records",
 )
 
 _NOTIFICATION_METHODS = (
@@ -999,8 +1000,43 @@ class FileGraphPersistenceBackend:
             if require_empty and session is not None and session["entries"]:
                 raise _layer.LayerNotEmpty(session_id, len(session["entries"]))
             self._commit_sessions_locked(
-                {session_id: {"status": _layer.STATUS_RETIRED, "entries": {}}}
+                {
+                    session_id: {
+                        "status": _layer.STATUS_RETIRED,
+                        "entries": {},
+                        "retired_at": _layer.format_retired_at(_layer.utc_now()),
+                    }
+                }
             )
+
+    def purge_merge_records(
+        self,
+        retention: Any,
+        *,
+        limit: Any,
+        now: Optional[Any] = None,
+    ) -> int:
+        retention, limit, now = _layer.check_purge_request(retention, limit, now)
+        with self._lock:
+            # Settles a pending merge first, so the log holds none while it
+            # is rewritten below; a pending record is never a candidate.
+            self._begin_layer_write_locked()
+            if self._pending_merge is not None:  # pragma: no cover - settle raised
+                return 0
+            now = now or _layer.utc_now()
+            unstamped = {
+                sid: {**s, "retired_at": _layer.format_retired_at(now)}
+                for sid, s in self._sessions.items()
+                if s["status"] == _layer.STATUS_RETIRED and not s.get("retired_at")
+            }
+            if unstamped:
+                self._commit_sessions_locked(unstamped)
+            victims = _layer.merge_records_to_purge(
+                self._merges, self._sessions, now - retention, limit
+            )
+            if victims:
+                self._rewrite_merge_log_locked(set(victims))
+            return len(victims)
 
     def stage(
         self,
@@ -1255,7 +1291,16 @@ class FileGraphPersistenceBackend:
 
     def _commit_sessions_locked(self, changed: Dict[str, Dict[str, Any]]) -> None:
         """Write the layers file with `changed` laid over the current state,
-        then adopt it. A failed write leaves memory and disk as they were."""
+        then adopt it. A failed write leaves memory and disk as they were.
+        A record's retirement time is kept: once retired, it never changes."""
+        changed = {
+            sid: (
+                {**s, "retired_at": self._sessions[sid]["retired_at"]}
+                if self._sessions.get(sid, {}).get("retired_at")
+                else s
+            )
+            for sid, s in changed.items()
+        }
         sessions = {**self._sessions, **changed}
         self._write_layers_file(sessions)
         self._sessions = sessions
@@ -1264,7 +1309,11 @@ class FileGraphPersistenceBackend:
         data = {
             "format": 1,
             "sessions": {
-                sid: {"status": s["status"], "entries": list(s["entries"].values())}
+                sid: {
+                    "status": s["status"],
+                    "entries": list(s["entries"].values()),
+                    **({"retired_at": s["retired_at"]} if s.get("retired_at") else {}),
+                }
                 for sid, s in sorted(sessions.items())
             },
         }
@@ -1285,6 +1334,10 @@ class FileGraphPersistenceBackend:
                         key, stored = _layer.check_entry(entry)
                         entries[key] = stored
                     sessions[sid] = {"status": status, "entries": entries}
+                    retired_at = s.get("retired_at")
+                    if retired_at is not None:
+                        _layer.parse_retired_at(retired_at)
+                        sessions[sid]["retired_at"] = retired_at
             except (ValueError, KeyError, TypeError, AttributeError) as exc:
                 raise GraphJournalError(
                     f"{self.layers_path} cannot be read ({exc}); the graph was "
@@ -1398,6 +1451,38 @@ class FileGraphPersistenceBackend:
                 f.flush()
                 os.fsync(f.fileno())
         return merges, pending
+
+    def _rewrite_merge_log_locked(self, purged: set) -> None:
+        """Replace the merge log with itself less every line of `purged`.
+
+        Only with no merge pending. The log is first read back whole - which
+        also cuts off a fragment a failed append left - so what is rewritten
+        is what a load would accept; then the lines of each purged id, its
+        pending line and its marks, are left out, which keeps every other
+        merge's sequence as it was. Written beside the log and renamed over
+        it, so a crash leaves the old log or the new one, never a mix.
+        """
+        self._read_merge_log()
+        self._merge_log_needs_repair = False
+        kept = []
+        for line in self.merge_log_path.read_bytes().split(b"\n"):
+            if line and json.loads(line)["merge_id"] not in purged:
+                kept.append(line + b"\n")
+        self.merge_log_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_fd, temp_path = tempfile.mkstemp(
+            suffix=".ndjson", prefix="merges_", dir=self.merge_log_path.parent
+        )
+        try:
+            with os.fdopen(temp_fd, "wb") as f:
+                f.write(b"".join(kept))
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, self.merge_log_path)
+        except BaseException:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+            raise
+        self._merges = {k: v for k, v in self._merges.items() if k not in purged}
 
     def _append_merge_log_locked(self, line: Dict[str, Any]) -> None:
         if self._merge_log_needs_repair:
