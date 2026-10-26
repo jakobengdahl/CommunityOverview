@@ -11,6 +11,7 @@ from __future__ import annotations
 import secrets
 import threading
 import uuid
+from datetime import timedelta
 
 import pytest
 
@@ -629,6 +630,35 @@ class TestALeastPrivilegeRole:
         with pytest.raises(RuntimeError, match="provision the layer tables"):
             backend.load_graph_data()
 
+    def test_a_provisioned_table_without_retired_at_says_what_to_add(
+        self, lowpriv, backends
+    ):
+        name, schema, password = lowpriv
+        from backend.core.postgres_backend import _LAYER_TABLE_COLUMNS
+
+        old_shape = {
+            **_LAYER_TABLE_COLUMNS,
+            "graph_staged_sessions": _LAYER_TABLE_COLUMNS[
+                "graph_staged_sessions"
+            ].replace(", retired_at timestamptz", ""),
+        }
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            for table in LAYER_TABLES:
+                conn.execute(
+                    psycopg.sql.SQL("CREATE TABLE {}.{} ({})").format(
+                        psycopg.sql.Identifier(schema),
+                        psycopg.sql.Identifier(table),
+                        psycopg.sql.SQL(old_shape[table]),
+                    )
+                )
+        self._grant(schema, name)
+        backend = PostgresGraphPersistenceBackend(
+            _dsn_as_role(name, password), schema=schema, staged_sessions=True
+        )
+        backends.append(backend)
+        with pytest.raises(RuntimeError, match="no retired_at"):
+            backend.load_graph_data()
+
     def test_with_the_tables_provisioned_it_boots_and_stages(self, lowpriv, backends):
         name, schema, password = lowpriv
         from backend.core.postgres_backend import _LAYER_TABLE_COLUMNS
@@ -651,3 +681,203 @@ class TestALeastPrivilegeRole:
         backend.record_staged(A)
         backend.stage(A, [entry("node", "a")])
         assert [e["entity_id"] for e in backend.load_layer(A)] == ["a"]
+
+
+class TestMergeRecordRetention:
+    RETENTION = timedelta(days=90)
+
+    @staticmethod
+    def _merged(backend, session_id, merge_id, entity="a"):
+        backend.stage(session_id, [entry("node", entity, session_id=session_id)])
+        backend.merge(session_id, merge_id, [], [], [("node", entity)], {})
+
+    def test_a_store_from_before_retention_gets_the_column_and_a_window(
+        self, make, schema
+    ):
+        backend = make()
+        backend.save_graph_data(snapshot([node_payload("a", revision=1)]))
+        backend.record_staged(A)
+        self._merged(backend, A, "m")
+        backend.retire(A)
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                psycopg.sql.SQL(
+                    "ALTER TABLE {}.graph_staged_sessions DROP COLUMN retired_at"
+                ).format(psycopg.sql.Identifier(schema))
+            )
+        upgraded = make()
+        first = ls.utc_now() + timedelta(days=3650)
+        assert upgraded.purge_merge_records(self.RETENTION, limit=10, now=first) == 0
+        assert upgraded.load_merge("m") is not None
+        with psycopg.connect(DSN) as conn:
+            stamped = conn.execute(
+                psycopg.sql.SQL(
+                    "SELECT retired_at FROM {}.graph_staged_sessions WHERE session_id = %s"
+                ).format(psycopg.sql.Identifier(schema)),
+                (A,),
+            ).fetchone()[0]
+        assert stamped == first
+        later = first + self.RETENTION + timedelta(seconds=1)
+        assert make().purge_merge_records(self.RETENTION, limit=10, now=later) == 1
+
+    def test_a_record_not_marked_applied_is_never_purged(self, make, schema):
+        backend = make()
+        backend.save_graph_data(snapshot([node_payload("a", revision=1)]))
+        backend.retire(A)
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                psycopg.sql.SQL(
+                    "INSERT INTO {}.graph_merge_records (merge_id, session_id, doc)"
+                    " VALUES ('m-pending', %s, %s)"
+                ).format(psycopg.sql.Identifier(schema)),
+                (A, psycopg.types.json.Jsonb({"status": ls.MERGE_PENDING})),
+            )
+        far = ls.utc_now() + timedelta(days=3650)
+        assert backend.purge_merge_records(self.RETENTION, limit=10, now=far) == 0
+        assert backend.load_merge("m-pending") is not None
+
+    def test_the_window_is_judged_on_the_database_clock(self, make, schema):
+        backend = make()
+        backend.save_graph_data(snapshot([node_payload("a", revision=1)]))
+        backend.record_staged(A)
+        self._merged(backend, A, "m")
+        backend.retire(A)
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                psycopg.sql.SQL(
+                    "UPDATE {}.graph_staged_sessions"
+                    " SET retired_at = clock_timestamp() - %s WHERE session_id = %s"
+                ).format(psycopg.sql.Identifier(schema)),
+                (self.RETENTION - timedelta(minutes=1), A),
+            )
+        assert backend.purge_merge_records(self.RETENTION, limit=10) == 0
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                psycopg.sql.SQL(
+                    "UPDATE {}.graph_staged_sessions"
+                    " SET retired_at = clock_timestamp() - %s WHERE session_id = %s"
+                ).format(psycopg.sql.Identifier(schema)),
+                (self.RETENTION + timedelta(minutes=1), A),
+            )
+        assert backend.purge_merge_records(self.RETENTION, limit=10) == 1
+
+    def test_two_instances_purging_at_once_delete_each_record_once(self, make):
+        backend = make()
+        backend.save_graph_data(snapshot([node_payload("a", revision=1)]))
+        backend.record_staged(A)
+        ids = [f"m-{n}" for n in range(12)]
+        for merge_id in ids:
+            self._merged(backend, A, merge_id)
+        backend.retire(A)
+        now = ls.utc_now() + self.RETENTION + timedelta(seconds=5)
+        counts, errors = [], []
+        start = threading.Barrier(4)
+
+        def purge():
+            instance = make()
+            start.wait()
+            try:
+                while True:
+                    count = instance.purge_merge_records(
+                        self.RETENTION, limit=1, now=now
+                    )
+                    counts.append(count)
+                    if count == 0:
+                        return
+            except Exception as exc:  # pragma: no cover - the failure reported
+                errors.append(exc)
+
+        threads = [threading.Thread(target=purge) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(60)
+        assert errors == []
+        assert sum(counts) == len(ids)
+        assert all(backend.load_merge(merge_id) is None for merge_id in ids)
+
+    def test_a_purge_takes_only_its_own_scopes_records(self, make):
+        first, second = make(scope="scope-a"), make(scope="scope-b")
+        first.save_graph_data(snapshot([node_payload("a", revision=1)]))
+        first.record_staged(A)
+        self._merged(first, A, "m-a")
+        first.retire(A)
+        far = ls.utc_now() + timedelta(days=3650)
+        assert second.purge_merge_records(self.RETENTION, limit=10, now=far) == 0
+        assert first.load_merge("m-a") is not None
+        assert first.purge_merge_records(self.RETENTION, limit=10, now=far) == 1
+
+    @staticmethod
+    def _set_retired_at(schema, session_id, moment):
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                psycopg.sql.SQL(
+                    "UPDATE {}.graph_staged_sessions SET retired_at = %s"
+                    " WHERE session_id = %s"
+                ).format(psycopg.sql.Identifier(schema)),
+                (moment, session_id),
+            )
+
+    def _retired_with_record(self, make):
+        backend = make()
+        backend.save_graph_data(snapshot([node_payload("a", revision=1)]))
+        backend.record_staged(A)
+        self._merged(backend, A, "m")
+        backend.retire(A)
+        return backend
+
+    def test_a_record_exactly_at_the_cutoff_is_kept(self, make, schema):
+        backend = self._retired_with_record(make)
+        retired = ls.utc_now().replace(microsecond=0)
+        self._set_retired_at(schema, A, retired)
+        at = retired + self.RETENTION
+        assert backend.purge_merge_records(self.RETENTION, limit=9, now=at) == 0
+        past = at + timedelta(microseconds=1)
+        assert backend.purge_merge_records(self.RETENTION, limit=9, now=past) == 1
+
+    def test_retiring_again_keeps_the_first_time(self, make, schema):
+        backend = self._retired_with_record(make)
+        first = ls.utc_now() - timedelta(days=30)
+        self._set_retired_at(schema, A, first)
+        backend.retire(A)
+        with psycopg.connect(DSN) as conn:
+            kept = conn.execute(
+                psycopg.sql.SQL(
+                    "SELECT retired_at FROM {}.graph_staged_sessions"
+                    " WHERE session_id = %s"
+                ).format(psycopg.sql.Identifier(schema)),
+                (A,),
+            ).fetchone()[0]
+        assert kept == first
+
+    def test_a_purge_skips_rows_another_transaction_holds(self, make, schema):
+        backend = self._retired_with_record(make)
+        backend.record_staged(B)
+        backend.retire(B)
+        self._set_retired_at(schema, B, None)
+        far = ls.utc_now() + timedelta(days=3650)
+        ident = psycopg.sql.Identifier(schema)
+        with psycopg.connect(DSN) as holder:
+            holder.execute(
+                psycopg.sql.SQL(
+                    "SELECT 1 FROM {}.graph_merge_records WHERE merge_id = 'm'"
+                    " FOR UPDATE"
+                ).format(ident)
+            )
+            holder.execute(
+                psycopg.sql.SQL(
+                    "SELECT 1 FROM {}.graph_staged_sessions WHERE session_id = %s"
+                    " FOR UPDATE"
+                ).format(ident),
+                (B,),
+            )
+            done = []
+            worker = threading.Thread(
+                target=lambda: done.append(
+                    backend.purge_merge_records(self.RETENTION, limit=9, now=far)
+                )
+            )
+            worker.start()
+            worker.join(10)
+            assert done == [0], "the purge waited on, or took, a held row"
+        assert backend.purge_merge_records(self.RETENTION, limit=9, now=far) == 1

@@ -132,7 +132,8 @@ _LAYER_TABLE_COLUMNS = {
     "graph_staged_sessions": (
         "session_id text PRIMARY KEY,"
         " status text NOT NULL CHECK (status IN ('active', 'retired')),"
-        " scope_id text"
+        " scope_id text,"
+        " retired_at timestamptz"
     ),
     "graph_layer_entries": (
         "session_id text NOT NULL,"
@@ -690,6 +691,25 @@ class PostgresGraphPersistenceBackend:
                     f"does not exist and this role may not create it; "
                     f"provision the layer tables and grant SELECT, INSERT, "
                     f"UPDATE, DELETE on them - see docs/PERSISTENCE_BACKENDS.md"
+                ) from exc
+        # Added after the table first shipped: a store created before merge
+        # records were retained gets the column now, asked for only when the
+        # catalog lacks it, as the tables are.
+        if not conn.execute(
+            self._COLUMN_PRESENT, (self.schema, "graph_staged_sessions", "retired_at")
+        ).fetchone():
+            try:
+                conn.execute(
+                    sql.SQL(
+                        "ALTER TABLE {} ADD COLUMN IF NOT EXISTS retired_at timestamptz"
+                    ).format(self._table("graph_staged_sessions"))
+                )
+            except psycopg.errors.InsufficientPrivilege as exc:
+                raise RuntimeError(
+                    f"staged sessions are enabled, and "
+                    f"{self.schema}.graph_staged_sessions has no retired_at "
+                    f"column and this role may not add it; add it as "
+                    f"docs/PERSISTENCE_BACKENDS.md shows"
                 ) from exc
 
     def _metadata_without_graph_identity(
@@ -2196,11 +2216,14 @@ class PostgresGraphPersistenceBackend:
             scope_pred, pred_params = self._conflict_scope("graph_staged_sessions")
             row = conn.execute(
                 sql.SQL(
-                    "INSERT INTO {} (session_id, status, {col}) VALUES (%s, %s, %s)"
-                    " ON CONFLICT (session_id) DO UPDATE SET status = EXCLUDED.status"
+                    "INSERT INTO {} (session_id, status, {col}, retired_at)"
+                    " VALUES (%s, %s, %s, clock_timestamp())"
+                    " ON CONFLICT (session_id) DO UPDATE SET status = EXCLUDED.status,"
+                    " retired_at = COALESCE({t}.retired_at, EXCLUDED.retired_at)"
                 ).format(
                     self._table("graph_staged_sessions"),
                     col=sql.Identifier(SCOPE_COLUMN),
+                    t=sql.Identifier("graph_staged_sessions"),
                 )
                 + scope_pred
                 + sql.SQL(" RETURNING status"),
@@ -2217,6 +2240,68 @@ class PostgresGraphPersistenceBackend:
             )
 
         self._run_layer(work)
+
+    def purge_merge_records(
+        self,
+        retention: Any,
+        *,
+        limit: Any,
+        now: Optional[Any] = None,
+    ) -> int:
+        retention, limit, now = layer_store.check_purge_request(retention, limit, now)
+
+        def work(conn):
+            scope, params = self._layer_scope()
+            # The database's clock, so instances whose clocks differ agree on
+            # which records the window has passed.
+            moment = conn.execute(
+                "SELECT COALESCE(%s::timestamptz, clock_timestamp())", (now,)
+            ).fetchone()[0]
+            # SKIP LOCKED: a row another instance's purge holds is its to
+            # change, so two purges at once neither wait on nor fail over
+            # each other, and a row is changed or deleted once.
+            conn.execute(
+                sql.SQL(
+                    "UPDATE {t} SET retired_at = %s WHERE session_id IN ("
+                    "SELECT session_id FROM {t} WHERE status = %s"
+                    " AND retired_at IS NULL{scope}"
+                    " ORDER BY session_id LIMIT %s FOR UPDATE SKIP LOCKED)"
+                ).format(t=self._table("graph_staged_sessions"), scope=scope),
+                (moment, layer_store.STATUS_RETIRED, *params, limit),
+            )
+            s_scope = sql.SQL(" AND s.{col} IS NOT DISTINCT FROM %s").format(
+                col=sql.Identifier(SCOPE_COLUMN)
+            )
+            m_scope = sql.SQL(" AND m.{col} IS NOT DISTINCT FROM %s").format(
+                col=sql.Identifier(SCOPE_COLUMN)
+            )
+            rows = conn.execute(
+                sql.SQL(
+                    "DELETE FROM {m} WHERE merge_id IN ("
+                    "SELECT m.merge_id FROM {m} m JOIN {s} s"
+                    " ON s.session_id = m.session_id"
+                    " WHERE s.status = %s AND s.retired_at < %s"
+                    " AND m.doc->>'status' = %s{s_scope}{m_scope}"
+                    " ORDER BY m.merge_id LIMIT %s FOR UPDATE OF m SKIP LOCKED)"
+                    " RETURNING merge_id"
+                ).format(
+                    m=self._table("graph_merge_records"),
+                    s=self._table("graph_staged_sessions"),
+                    s_scope=s_scope,
+                    m_scope=m_scope,
+                ),
+                (
+                    layer_store.STATUS_RETIRED,
+                    moment - retention,
+                    layer_store.MERGE_APPLIED,
+                    self._scope,
+                    self._scope,
+                    limit,
+                ),
+            ).fetchall()
+            return len(rows)
+
+        return self._run_layer(work)
 
     def stage(
         self,

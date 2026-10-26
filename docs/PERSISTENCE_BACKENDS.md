@@ -580,6 +580,7 @@ def record_staged(session_id) -> None
 def staged_status(session_id) -> "active" | "retired" | "none"
 def retire(session_id, *, require_empty=False) -> None
 def layers_in_use() -> list[str]
+def purge_merge_records(retention, *, limit, now=None) -> int
 ```
 
 - **Arguments are validated before anything is read.** A session id must
@@ -632,6 +633,21 @@ def layers_in_use() -> list[str]
   `MergeRaced`. A delete with nothing left to do is left out of a merge, and
   the file backend's recovery tells a landed delete from one that did not
   land by the entity being gone.
+- **`purge_merge_records` removes at most `limit` merge records** whose
+  session's record was retired more than `retention` (a positive
+  `timedelta`) before `now` (the store's own clock when None), and returns
+  how many (§11.5). `retire` stores the retirement time and a repeated
+  `retire` keeps it; a retired record without one is stamped `now` by the
+  purge, so its window starts there (the file backend stamps every such
+  record in one call, PostgreSQL at most `limit` per call). A record of an active session, of a
+  retirement inside the window, or not marked `applied`, is never removed,
+  nor is the retired record itself. It is idempotent, and the server runs it
+  in batches from a thread of its own (`backend/core/merge_record_retention.py`).
+  The file backend settles a pending merge first and rewrites the merge log
+  without the purged ids' lines, atomically; the PostgreSQL backend judges
+  the window on the database clock and takes its rows `FOR UPDATE SKIP
+  LOCKED`, so two instances purging at once never wait on or fail over each
+  other.
 - **A single-writer store keeps the revision an upsert carries**, which the
   instance assigned (§4.2); the file backend refuses a merge upsert whose
   revision is missing or equal to the stored entity's, because its crash
@@ -1218,8 +1234,12 @@ CREATE SEQUENCE <schema>.graph_revision_seq;
 CREATE TABLE <schema>.graph_staged_sessions (
   session_id text PRIMARY KEY,
   status text NOT NULL CHECK (status IN ('active', 'retired')),
-  scope_id text
+  scope_id text,
+  retired_at timestamptz
 );
+-- A table provisioned before merge-record retention lacks the last column;
+-- an instance that may not add it refuses to boot and says so:
+-- ALTER TABLE <schema>.graph_staged_sessions ADD COLUMN retired_at timestamptz;
 CREATE TABLE <schema>.graph_layer_entries (
   session_id text NOT NULL,
   kind text NOT NULL CHECK (kind IN ('node', 'edge')),

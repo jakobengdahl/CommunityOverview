@@ -327,7 +327,29 @@ class InMemoryGraphPersistenceBackend:
                 return
             if require_empty and session is not None and session["entries"]:
                 raise layer.LayerNotEmpty(session_id, len(session["entries"]))
-            self._swap_session(session_id, layer.STATUS_RETIRED, {})
+            self._swap_session(
+                session_id,
+                layer.STATUS_RETIRED,
+                {},
+                retired_at=layer.format_retired_at(layer.utc_now()),
+            )
+
+    def purge_merge_records(self, retention, *, limit, now=None):
+        retention, limit, now = layer.check_purge_request(retention, limit, now)
+        with self._lock:
+            now = now or layer.utc_now()
+            sessions = dict(self._store["sessions"])
+            for sid, s in sessions.items():
+                if s["status"] == layer.STATUS_RETIRED and not s.get("retired_at"):
+                    sessions[sid] = {**s, "retired_at": layer.format_retired_at(now)}
+            victims = layer.merge_records_to_purge(
+                self._store["merges"], sessions, now - retention, limit
+            )
+            merges = {
+                k: v for k, v in self._store["merges"].items() if k not in victims
+            }
+            self._store.update(sessions=sessions, merges=merges)
+            return len(victims)
 
     def stage(
         self,
@@ -421,11 +443,13 @@ class InMemoryGraphPersistenceBackend:
             )
         return session
 
-    def _swap_session(self, session_id, status, entries):
-        self._store["sessions"] = {
-            **self._store["sessions"],
-            session_id: {"status": status, "entries": entries},
-        }
+    def _swap_session(self, session_id, status, entries, *, retired_at=None):
+        session = {"status": status, "entries": entries}
+        previous = self._store["sessions"].get(session_id) or {}
+        retired_at = retired_at or previous.get("retired_at")
+        if retired_at:
+            session["retired_at"] = retired_at
+        self._store["sessions"] = {**self._store["sessions"], session_id: session}
 
     # -- change notification --------------------------------------------------
 
