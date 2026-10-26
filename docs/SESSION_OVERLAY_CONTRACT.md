@@ -911,7 +911,9 @@ first; an `applied` one is returned (I9).
 - **Scope:** discard all entries, or a list of them. A listed entry may carry
   the `version` its caller reviewed, as for a merge (§11.4): an entry restaged
   since refuses the discard with `merge_raced`, checked in the unit that
-  removes it, and nothing is removed.
+  removes it, and nothing is removed. Versions are read only for the entries
+  in the caller's view, as for a merge: an entry outside it is not discarded,
+  whatever version it is named with, malformed or not.
 - **Effect:** the entries are removed from the layer, and nothing else changes
   (I10).
 - **Visibility:**

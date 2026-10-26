@@ -660,6 +660,8 @@ export class SessionSyncClient {
    *   check — see `_handleEvent`'s `'op'` case), onPresence, onSelections,
    *   onLeases, onPresenceJoined, onPresenceLeft, onSessionRenamed,
    *   onSessionDeleted, onDropped, onCommand, onViewportSummoned,
+   *   onStreamRefused (the stream answered 404 before it ever opened: the
+   *   session id is retired),
    *   onLocalAnnotationsApplied (fired
    *   with the acked annotation_created/annotation_updated `applied` entries
    *   after this client's own op batch lands, so the caller can thread the
@@ -728,6 +730,8 @@ export class SessionSyncClient {
     // guards on, instead of racing the stream's own lazy materialisation.
     this._readyWaiters = [];
     this._hadSnapshot = false;
+    this._refusalProbed = false; // asked once why the stream never opened
+    this._probeController = null;
     // Seq the host's initial REST load reflected (setBaseline's `seq`), or
     // null when the baseline did not come from a load. The first stream
     // snapshot carries no content the host applies, so a snapshot newer than
@@ -1215,12 +1219,44 @@ export class SessionSyncClient {
           /* ignore */
         }
         this._source = null;
+        if (!this._hadSnapshot) this._probeStreamRefusal(url);
         this._scheduleReconnect();
       }
       // readyState 0 (CONNECTING) means a drop of an already-open stream; the
       // browser is already retrying, so native reconnect will recover — no action.
     };
     this._source = source;
+  }
+
+  // An EventSource does not say why it never opened. The stream creates a
+  // session it does not hold, so the server's own 404 there means the id is
+  // retired (a deleted staged session's, §5.3) and nothing will ever save in
+  // it: ask once, by status and body (a proxy's 404 is not that), and tell
+  // the host. Anything else keeps reconnecting.
+  async _probeStreamRefusal(url) {
+    if (this._refusalProbed || !this._fetch || !this.handlers.onStreamRefused) return;
+    this._refusalProbed = true;
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    this._probeController = controller;
+    let refused = false;
+    try {
+      const resp = await this._fetch(url, {
+        headers: { Accept: 'text/event-stream' },
+        signal: controller?.signal,
+      });
+      if (resp?.status === 404) {
+        const body = await resp.json().catch(() => null);
+        refused = body?.detail === 'session not found';
+      }
+    } catch {
+      return;
+    } finally {
+      controller?.abort();
+      this._probeController = null;
+    }
+    if (refused && !this._closed && !this._hadSnapshot) {
+      this.handlers.onStreamRefused(404);
+    }
   }
 
   _resolveReadyWaiters() {
@@ -1914,6 +1950,7 @@ export class SessionSyncClient {
 
   close() {
     this._closed = true;
+    this._probeController?.abort();
     if (this._source) {
       try {
         this._source.close();

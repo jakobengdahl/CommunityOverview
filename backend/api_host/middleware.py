@@ -10,10 +10,26 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.requests import Request
+from starlette.types import ASGIApp, Receive, Scope, Send
+
+from backend.runtime.extensions import RuntimeExtensions, bind_runtime_extensions
 
 from .config import AppConfig
 from .diagnostics import PUBLIC_READINESS_PATH, PUBLIC_STARTUP_DIAGNOSTICS_PATH
 from .session_auth import request_has_valid_session
+
+
+class RuntimeExtensionsMiddleware:
+    """Keep the selected runtime bound through requests and streamed responses."""
+
+    def __init__(self, app: ASGIApp, runtime_extensions: RuntimeExtensions):
+        self.app = app
+        self.runtime_extensions = runtime_extensions
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        with bind_runtime_extensions(self.runtime_extensions):
+            await self.app(scope, receive, send)
+
 
 logger = logging.getLogger(__name__)
 
