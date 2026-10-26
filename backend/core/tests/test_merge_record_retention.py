@@ -85,15 +85,15 @@ def test_stop_ends_the_thread_without_waiting_out_the_interval():
 
 def test_starting_twice_runs_one_thread():
     runner = MergeRecordRetention(_Store(backlog=0), RETENTION, interval_seconds=3600)
+    # Apps other tests built may have runners of their own still alive.
+    before = set(threading.enumerate())
     runner.start()
     try:
         first = runner._thread
         runner.start()
         assert runner._thread is first
-        running = [
-            t for t in threading.enumerate() if t.name == "merge-record-retention"
-        ]
-        assert running == [first]
+        started = [t for t in threading.enumerate() if t not in before]
+        assert started == [first]
     finally:
         runner.stop()
 

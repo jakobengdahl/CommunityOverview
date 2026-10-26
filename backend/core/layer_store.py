@@ -476,13 +476,13 @@ def merge_records_to_purge(
 def log_purged_merge_records(purged: Sequence[Tuple[str, str]]) -> None:
     """Log each purged (merge id, session id) at INFO, so an operator can
     tell a merge id purged by retention from one that never existed. A merge
-    id is client text, so it is logged as a repr: a newline in it cannot
-    forge a log line."""
+    id is client text, so it is logged JSON-encoded (ASCII, every quote and
+    control character escaped): no id can forge a line or another pair."""
     if purged:
         logger.info(
             "merge-record retention purged %d records: %s",
             len(purged),
-            ", ".join(f"{m!r} (session {s})" for m, s in purged),
+            ", ".join(f"{json.dumps(m)} (session {s})" for m, s in purged),
         )
 
 

@@ -890,8 +890,8 @@ On success:
   - Each instance serving the HTTP app (`create_app`) runs it at start and
     then periodically, on its own thread, never inside a merge unit; a worker
     runtime (`create_worker_runtime`) never purges. Each purged merge id is
-    logged at INFO with its session id. Two instances purging one store at once each
-    skip the records the other holds.
+    logged at INFO, JSON-encoded, with its session id. Two instances purging
+    one store at once each skip the records the other holds.
   - A replay of a purged merge id is refused as one for any deleted session
     is: the session is retired, so the merge is refused with
     `session_not_found` and nothing is applied.

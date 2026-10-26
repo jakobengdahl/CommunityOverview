@@ -2,6 +2,7 @@
 merge (docs/SESSION_OVERLAY_CONTRACT.md §11.6)."""
 
 import json
+import logging
 from datetime import timedelta
 
 import pytest
@@ -1248,6 +1249,21 @@ def test_a_purge_over_a_log_ending_in_a_torn_line_drops_only_the_fragment(staged
     after.stage(A, [entry("node", "b")])
     after.merge(A, "m2", [], [], [("node", "b")], {})
     assert reopen(path).load_merge("m2") is not None
+
+
+def test_a_purge_whose_rewrite_fails_logs_nothing(staged, monkeypatch, caplog):
+    merge_a(staged)
+    now = _retire_long_ago(staged, A)
+
+    def broken(purged):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(staged, "_rewrite_merge_log_locked", broken)
+    with caplog.at_level(logging.INFO, logger=ls.__name__):
+        with pytest.raises(OSError):
+            staged.purge_merge_records(RETENTION, limit=10, now=now)
+    assert [r for r in caplog.records if r.name == ls.__name__] == []
+    assert staged.load_merge("m1") is not None
 
 
 @pytest.mark.parametrize("stored", ["not a time", "2026-01-01T00:00:00", 12])

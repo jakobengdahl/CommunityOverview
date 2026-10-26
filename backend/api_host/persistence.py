@@ -58,17 +58,16 @@ _FALSE = ("", "0", "false", "no", "off")
 
 
 def _decimal(raw: str) -> int:
-    """`raw` as a number when it is ASCII digits only, else 0 (never usable).
+    """`raw` as a number when it is at most 18 ASCII digits, else 0 (never
+    usable).
 
     int() alone also takes '+30', '1_0' and non-ASCII digits, which an
-    operator never means as a count.
+    operator never means as a count; the length bound keeps the answer from
+    depending on the interpreter's int-from-text digit limit.
     """
-    if not (raw.isascii() and raw.isdecimal()):
+    if len(raw) > 18 or not (raw.isascii() and raw.isdecimal()):
         return 0
-    try:
-        return int(raw)
-    except ValueError:  # past the interpreter's int-from-text digit limit
-        return 0
+    return int(raw)
 
 
 def build_session_settings(config: AppConfig) -> SessionSettings:
