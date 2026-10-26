@@ -411,6 +411,33 @@ describe('ChatPanel', () => {
     });
   });
 
+  describe('Upload failure text', () => {
+    it("says a bare status in the UI language, not the API layer's English fallback", async () => {
+      api.uploadFile.mockRejectedValueOnce(
+        Object.assign(new Error('HTTP error: 502'), { status: 502, statusOnly: true })
+      );
+      render(<ChatPanel />);
+      const fileInput = document.querySelector('input[type="file"]');
+      fireEvent.change(fileInput, { target: { files: [new File(['x'], 'a.pdf')] } });
+      await waitFor(() => {
+        expect(screen.getByText('Upload failed: the server answered 502')).toBeInTheDocument();
+      });
+      expect(screen.queryByText(/HTTP error/)).not.toBeInTheDocument();
+    });
+
+    it("keeps the server's own reason", async () => {
+      api.uploadFile.mockRejectedValueOnce(
+        Object.assign(new Error('Unsupported file type'), { status: 415, statusOnly: false })
+      );
+      render(<ChatPanel />);
+      const fileInput = document.querySelector('input[type="file"]');
+      fireEvent.change(fileInput, { target: { files: [new File(['x'], 'a.pdf')] } });
+      await waitFor(() => {
+        expect(screen.getByText('Upload failed: Unsupported file type')).toBeInTheDocument();
+      });
+    });
+  });
+
   describe('Keyboard interactions', () => {
     it('sends message on Enter key (without Shift)', async () => {
       api.sendChatMessage.mockResolvedValueOnce({

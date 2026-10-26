@@ -375,6 +375,32 @@ describe('App URL session bootstrap', () => {
     expect(streams()).toHaveLength(1);
   });
 
+  it('reconnects, without a new baseline, the stream an edit connected that has since closed', async () => {
+    await renderApp();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(DEFAULT_REQUEST_TIMEOUT_MS);
+    });
+    await act(async () => {
+      captured.canvas.onSaveView({
+        nodes: [{ id: 'view-node', position: { x: 1, y: 2 } }],
+        edges: [],
+        groups: [],
+      });
+    });
+    const streams = () =>
+      FakeEventSource.instances.filter((es) => es.url.includes('/api/sessions/1111-2222/stream'));
+    expect(streams()).toHaveLength(1);
+    // Refused before it opened: closed, its reconnect still waiting out a backoff.
+    await act(async () => {
+      streams()[0].readyState = 2;
+      streams()[0].onerror?.();
+    });
+    const reset = vi.spyOn(SessionSyncClient.prototype, 'setBaseline');
+    await act(async () => bootstrap.reject(Object.assign(new Error('gone'), { status: 404 })));
+    expect(streams()).toHaveLength(2);
+    expect(reset).not.toHaveBeenCalled();
+  });
+
   it('does not connect the stream of a link the user already left when its late 404 arrives', async () => {
     await renderApp();
     await act(async () => {

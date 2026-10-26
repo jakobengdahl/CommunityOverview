@@ -305,6 +305,37 @@ describe('StagedReviewDialog', () => {
     expect(screen.queryByText('staged.discard_failed')).toBeNull();
   });
 
+  it('clears the selection when a discard whose answer was lost finds its entries gone', async () => {
+    api.discardStagedChanges.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    const onRefresh = vi.fn().mockResolvedValueOnce(ITEMS).mockResolvedValueOnce([CREATE, EDGE]);
+    renderDialog({ onRefresh });
+    fireEvent.click(checkbox('node:n2'));
+    expect(checkbox('node:n2').checked).toBe(true);
+    // The re-read is not handed back as items here, so the row stays to look at.
+    fireEvent.click(screen.getByText('staged.discard_selected'));
+    fireEvent.click(screen.getByText('staged.discard_confirm'));
+    await waitFor(() => expect(screen.getByText('staged.discard_gone')).toBeTruthy());
+    expect(checkbox('node:n2').checked).toBe(false);
+  });
+
+  it('says the outcome is unknown when only some entries of a lost discard are gone', async () => {
+    api.discardStagedChanges.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    // The edge and the node it needs go out together; only the edge is gone.
+    const onRefresh = vi
+      .fn()
+      .mockResolvedValueOnce(ITEMS)
+      .mockResolvedValueOnce([CREATE, CONFLICT]);
+    const { onDiscarded } = renderDialog({ onRefresh });
+    fireEvent.click(checkbox('edge:e1'));
+    fireEvent.click(screen.getByText('staged.discard_selected'));
+    fireEvent.click(screen.getByText('staged.discard_confirm'));
+    await waitFor(() => expect(screen.getByText('staged.discard_unknown')).toBeTruthy());
+    expect(api.discardStagedChanges.mock.calls[0][1]).toHaveLength(2);
+    expect(onDiscarded).not.toHaveBeenCalled();
+    expect(screen.queryByText('staged.discard_gone')).toBeNull();
+    expect(screen.queryByText('staged.discard_failed')).toBeNull();
+  });
+
   it('reports a discard whose answer was lost as failed when the entries are still there', async () => {
     api.discardStagedChanges.mockRejectedValueOnce(Object.assign(new Error('x'), { status: 502 }));
     const { onRefresh, onDiscarded } = renderDialog();
