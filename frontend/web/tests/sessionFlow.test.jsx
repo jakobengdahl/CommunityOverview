@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 
 import * as sessionStore from '../src/services/sessionStore';
 
@@ -2595,6 +2595,14 @@ describe('Server-backed session lifecycle', () => {
     }
     const STREAM_7777 = 'http://localhost/api/sessions/7777-8888/stream';
     const notFound = () => Object.assign(new Error('session not found'), { status: 404 });
+    // As api.js's responseError builds the server's own 404 for a rename.
+    const renameNotFound = () =>
+      Object.assign(new Error('session not found'), {
+        status: 404,
+        data: { detail: 'session not found' },
+      });
+    const UNREACHABLE_NOTICE =
+      "This session can't be saved: the server refuses its connection. Changes made here are not kept — start a new session to keep working.";
     const streamsFor = (id) =>
       FakeEventSource.instances.filter((es) => es.url.includes(`/api/sessions/${id}/stream`));
     const getSessionAnswering = (answers) => {
@@ -2712,6 +2720,8 @@ describe('Server-backed session lifecycle', () => {
         'Session stream refused again; not leaving a second time:',
         '9999-0001'
       );
+      // Its writes are refused: the user is told rather than left editing.
+      expect(await screen.findByText(UNREACHABLE_NOTICE)).toBeTruthy();
       // A retired session opened while leaving is disarmed is not left, but
       // its writes are refused rather than sent unbound.
       await switchViaDrawer('4444-0000');
@@ -2820,7 +2830,7 @@ describe('Server-backed session lifecycle', () => {
     it('leaves a retired session when renaming it is refused', async () => {
       stagingOn();
       getSessionAnswering({ '7777-8888': notFound() });
-      api.renameServerSession.mockRejectedValue(notFound());
+      api.renameServerSession.mockRejectedValue(renameNotFound());
       sessionStore.touchSession('7777-8888');
       renderApp();
       await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
@@ -2841,7 +2851,7 @@ describe('Server-backed session lifecycle', () => {
 
     it('stays in the active session when renaming another, retired one is refused', async () => {
       stagingOn();
-      api.renameServerSession.mockRejectedValue(notFound());
+      api.renameServerSession.mockRejectedValue(renameNotFound());
       sessionStore.touchSession('7777-8888');
       renderApp();
       await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
@@ -2859,6 +2869,88 @@ describe('Server-backed session lifecycle', () => {
       });
       expect(api.createSession).not.toHaveBeenCalled();
       expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith(startId);
+    });
+
+    it("stays in a session when a rename's 404 is not the server's own", async () => {
+      stagingOn();
+      getSessionAnswering({ '7777-8888': notFound() });
+      // A proxy that does not route the call answers 404 with its own body.
+      api.renameServerSession.mockRejectedValue(
+        Object.assign(new Error('HTTP error: 404'), { status: 404, data: {} })
+      );
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('7777-8888');
+      openSessionAction('7777-8888', 'Name session');
+      await screen.findByText('Session name');
+      fireEvent.change(document.querySelector('.input-dialog input'), {
+        target: { value: 'Mine' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(api.renameServerSession).toHaveBeenCalled());
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+      expect(api.createSession).not.toHaveBeenCalled();
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('7777-8888');
+    });
+
+    it('names a rename, not the stream, when a rename is refused while leaving is disarmed', async () => {
+      stagingOn();
+      getSessionAnswering({ '7777-8888': notFound() });
+      api.renameServerSession.mockRejectedValue(renameNotFound());
+      global.fetch.mockImplementation(async (url) =>
+        String(url).includes('/7777-8888/stream')
+          ? { ok: false, status: 404, json: async () => ({ detail: 'session not found' }) }
+          : { ok: true, status: 200, json: async () => ({ applied: [], seq: 1 }) }
+      );
+      FakeEventSource.microtaskMessagesByUrl[STREAM_7777] = [];
+      FakeEventSource.microtaskMessagesByUrl['http://localhost/api/sessions/9999-0001/stream'] = [];
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('7777-8888');
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A], []);
+      });
+      const toolbarButtons = document.querySelectorAll('.floating-toolbar-item');
+      fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+      await waitFor(() => expect(streamsFor('7777-8888')).toHaveLength(1));
+      await act(async () => {
+        const es = streamsFor('7777-8888')[0];
+        es.readyState = 2;
+        es.onerror?.();
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('9999-0001')
+      );
+      // No stream has opened since, so a refused rename of the replacement is
+      // not left again, and is logged as the rename it was.
+      openSessionAction('9999-0001', 'Name session');
+      await screen.findByText('Session name');
+      // The edit's save left its own dialog open.
+      const renameDialog = [...document.querySelectorAll('.input-dialog')].find(
+        (d) => d.querySelector('h3')?.textContent === 'Name session'
+      );
+      fireEvent.change(renameDialog.querySelector('input'), { target: { value: 'Mine' } });
+      fireEvent.click(within(renameDialog).getByRole('button', { name: 'Save' }));
+      await waitFor(() =>
+        expect(errors).toHaveBeenCalledWith(
+          'Session rename refused again; not leaving a second time:',
+          '9999-0001'
+        )
+      );
+      expect(errors).not.toHaveBeenCalledWith(
+        'Session stream refused again; not leaving a second time:',
+        '9999-0001'
+      );
+      expect(await screen.findByText(UNREACHABLE_NOTICE)).toBeTruthy();
+      expect(api.createSession).toHaveBeenCalledTimes(1);
     });
 
     it('stays in the session when a rename fails for another reason', async () => {

@@ -300,6 +300,7 @@
     "new_session_started": "Ny session startad",
     "link_not_found": "Sessionslänken kunde inte hittas — den kan ha tagits bort eller upphört att gälla.",
     "link_retired": "Sessionen har tagits bort och kan inte längre sparas till — fortsätter i en ny session.",
+    "writes_refused_unreachable": "Sessionen kan inte sparas: servern nekar dess anslutning. Ändringar här sparas inte — starta en ny session för att fortsätta arbeta.",
     "search_sessions": "Sök bland tidigare sessioner",
     "search_placeholder": "Sök på namn eller ID...",
     "connect_session": "Anslut till session (via ID)",

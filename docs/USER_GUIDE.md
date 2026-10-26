@@ -1094,7 +1094,10 @@ delete confirmation says so. Everyone who was in it — you included — lands i
 new, empty staged session, so nobody who was staging suddenly edits the graph
 directly. A link to a staged session that was deleted opens empty; once the
 server refuses its live connection or a rename, you are moved to a new session
-with a notice, since the canvas can no longer be saved to the deleted one.
+with a notice, since the canvas can no longer be saved to the deleted one. If
+the next session is refused the same way before it ever connects, you are not
+moved again: a notice says that session cannot be saved either, and its edits
+are refused rather than saved to the graph.
 
 ## 6. Federation — searching across multiple graphs
 
