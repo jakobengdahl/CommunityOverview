@@ -2496,13 +2496,15 @@ function App() {
   // replacement would be refused too, and leaving must not repeat for ever.
   const retiredLeaveArmedRef = useRef(true);
   const leaveRetiredSession = useCallback(
-    (id) => {
+    (id, cause) => {
       if (!id || sessionIdRef.current !== id) return;
       if (retiredLeftRef.current.has(id) || locallyDeletingRef.current.has(id)) return;
       if (!retiredLeaveArmedRef.current) {
-        // Not left, but its writes are refused rather than sent unbound.
+        // Not left, but its writes are refused rather than sent unbound, and
+        // the user is told, or edits would silently go nowhere.
         adoptWriteMode(id, 'staged');
-        console.error('Session stream refused again; not leaving a second time:', id);
+        console.error(`Session ${cause} refused again; not leaving a second time:`, id);
+        showNotification('error', t('sessions.writes_refused_unreachable'));
         return;
       }
       retiredLeaveArmedRef.current = false;
@@ -2712,7 +2714,7 @@ function App() {
         showNotification('info', t('sessions.session_deleted_remote'));
       },
       onViewportSummoned: receiveSummon,
-      onStreamRefused: () => leaveRetiredSession(syncRef.current?.sessionId),
+      onStreamRefused: () => leaveRetiredSession(syncRef.current?.sessionId, 'stream'),
       onCommand: (command) => {
         if (command?.type === 'tool_result' && command.result) {
           applyToolResultCommand(command.result, command.command_id);
@@ -2994,9 +2996,12 @@ function App() {
       const { id } = renameDialog;
       sessionStore.renameSession(id, name);
       api.renameServerSession(id, name).catch((error) => {
-        // A rename creates a session the server does not hold: a 404 means
-        // the id is retired.
-        if (error?.status === 404) leaveRetiredSession(id);
+        // A rename creates a session the server does not hold: its own 404
+        // means the id is retired (a proxy's 404 is not that, as for the
+        // stream).
+        if (error?.status === 404 && error.data?.detail === 'session not found') {
+          leaveRetiredSession(id, 'rename');
+        }
       });
       setSessionsVersion((v) => v + 1);
       setRenameDialog(null);

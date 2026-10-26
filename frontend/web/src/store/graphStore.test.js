@@ -251,3 +251,19 @@ describe('graphStore.pulseNode', () => {
     expect(useGraphStore.getState().pulsedNodeIds.n1).toBeUndefined();
   });
 });
+
+describe('graphStore.setSessionWriteMode', () => {
+  afterEach(() => useGraphStore.getState().setSessionWriteMode('direct'));
+
+  it('keeps staged and unknown, and reads anything else as direct', () => {
+    const { setSessionWriteMode } = useGraphStore.getState();
+    setSessionWriteMode('staged');
+    expect(useGraphStore.getState().sessionWriteMode).toBe('staged');
+    setSessionWriteMode('unknown');
+    expect(useGraphStore.getState().sessionWriteMode).toBe('unknown');
+    setSessionWriteMode('bogus');
+    expect(useGraphStore.getState().sessionWriteMode).toBe('direct');
+    setSessionWriteMode(undefined);
+    expect(useGraphStore.getState().sessionWriteMode).toBe('direct');
+  });
+});
