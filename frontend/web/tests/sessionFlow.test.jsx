@@ -47,9 +47,11 @@ vi.mock('@community-graph/ui-graph-canvas/styles', () => ({}));
 const NODE_A = { id: 'node-a', type: 'Actor', name: 'Actor A' };
 const NODE_B = { id: 'node-b', type: 'Theme', name: 'Theme B' };
 
+// The api mock the latest App import was given (a fresh App gets fresh mocks).
+const apiMocks = vi.hoisted(() => ({ latest: null }));
 vi.mock('../src/services/api', () => {
   let idCounter = 0;
-  return {
+  apiMocks.latest = {
     generateVisualizationSessionId: vi.fn(() => `1234-000${++idCounter}`),
     getVisualizationStreamUrl: vi.fn(() => 'http://localhost/stream'),
     getSessionStreamUrl: vi.fn((id) => `http://localhost/api/sessions/${id}/stream`),
@@ -105,6 +107,7 @@ vi.mock('../src/services/api', () => {
     deleteEdge: vi.fn(async () => ({ success: true })),
     exportGraph: vi.fn(async () => ({ nodes: [], edges: [] })),
   };
+  return apiMocks.latest;
 });
 
 // EventSource is not implemented in jsdom. This fake auto-delivers a snapshot so
@@ -2222,6 +2225,57 @@ describe('Server-backed session lifecycle', () => {
         staged_sessions: true,
         session_write_mode_default: 'staged',
       }));
+
+    // App reads the link's parameters once, at import: each URL gets a fresh
+    // App, and the fresh mocks that come with it.
+    async function renderFreshAppAt(search) {
+      window.history.replaceState(null, '', `/${search}`);
+      vi.resetModules();
+      const [{ default: FreshApp }, { I18nProvider: FreshI18nProvider }] = await Promise.all([
+        import('../src/App'),
+        import('../src/i18n'),
+      ]);
+      const freshApi = apiMocks.latest;
+      freshApi.getUiCapabilities.mockImplementation(async () => ({
+        llm_available: false,
+        staged_sessions: true,
+        session_write_mode_default: 'staged',
+      }));
+      render(
+        <FreshI18nProvider>
+          <FreshApp />
+        </FreshI18nProvider>
+      );
+      return freshApi;
+    }
+
+    describe('a link that fills the canvas or a kiosk', () => {
+      afterEach(() => window.history.replaceState(null, '', '/'));
+
+      it.each(['?view=Overview', '?node=n1', '?akc=kiosk'])(
+        'starts %s in the session it opened with, even where staging is the default',
+        async (search) => {
+          const freshApi = await renderFreshAppAt(search);
+          const [startId] = freshApi.setActiveSessionForRequests.mock.calls[0];
+          await waitFor(() => expect(freshApi.setSessionModeDirect).toHaveBeenCalledWith(startId));
+          expect(freshApi.createSession).not.toHaveBeenCalled();
+        }
+      );
+
+      it('opens ?collect= as the kiosk alone, with no session to create', async () => {
+        const freshApi = await renderFreshAppAt('?collect=survey');
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        });
+        expect(freshApi.setActiveSessionForRequests).not.toHaveBeenCalled();
+        expect(freshApi.createSession).not.toHaveBeenCalled();
+      });
+
+      it('without one, the same harness starts in a created staged session', async () => {
+        const freshApi = await renderFreshAppAt('?other=1');
+        await waitFor(() => expect(freshApi.createSession).toHaveBeenCalledWith(null));
+      });
+    });
 
     it('holds writes from the starting id until the capabilities are known', async () => {
       renderApp();
