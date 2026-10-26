@@ -16,6 +16,7 @@ rather than assume either.
 from __future__ import annotations
 
 import itertools
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
@@ -982,6 +983,22 @@ class LayerStoreContract:
         factory().retire(A, require_empty=True)
         inside = before + self.RETENTION
         assert factory().purge_merge_records(self.RETENTION, limit=10, now=inside) == 0
+
+    def test_a_purge_logs_each_purged_merge_id_with_its_session(
+        self, seeded, factory, caplog
+    ):
+        seeded.record_staged(B)
+        self._merged(seeded, A, "m-a\nforged line")
+        self._merged(seeded, B, "m-b")
+        _, after = self._retired_between(seeded, A)
+        with caplog.at_level(logging.INFO, logger=ls.__name__):
+            factory().purge_merge_records(
+                self.RETENTION, limit=10, now=after + self.RETENTION
+            )
+        (message,) = [r.getMessage() for r in caplog.records if r.name == ls.__name__]
+        assert f"'m-a\\nforged line' (session {A})" in message
+        assert "\n" not in message
+        assert "m-b" not in message
 
     @pytest.mark.parametrize(
         "retention, limit, now",

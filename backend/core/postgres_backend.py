@@ -2283,7 +2283,7 @@ class PostgresGraphPersistenceBackend:
                     " WHERE s.status = %s AND s.retired_at < %s"
                     " AND m.doc->>'status' = %s{s_scope}{m_scope}"
                     " ORDER BY m.merge_id LIMIT %s FOR UPDATE OF m SKIP LOCKED)"
-                    " RETURNING merge_id"
+                    " RETURNING merge_id, session_id"
                 ).format(
                     m=self._table("graph_merge_records"),
                     s=self._table("graph_staged_sessions"),
@@ -2299,9 +2299,13 @@ class PostgresGraphPersistenceBackend:
                     limit,
                 ),
             ).fetchall()
-            return len(rows)
+            return [(row[0], row[1]) for row in rows]
 
-        return self._run_layer(work)
+        purged = self._run_layer(work)
+        # Logged once the unit has committed, so a rolled-back purge is
+        # never reported.
+        layer_store.log_purged_merge_records(purged)
+        return len(purged)
 
     def stage(
         self,
