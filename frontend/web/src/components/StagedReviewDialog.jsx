@@ -343,18 +343,41 @@ function StagedReviewDialog({
     if (!prints?.size) return;
     setBusy(true);
     setMessage(null);
-    try {
-      const fresh = await freshUnchanged(prints);
-      if (!fresh) return;
-      const entries = fresh.filter((item) => prints.has(itemKey(item))).map(entryRef);
-      const result = await api.discardStagedChanges(sessionId, entries);
+    let entries = [];
+    const discarded = (result) => {
       setSelected(new Map());
       setMessage({
         kind: 'success',
         text: t('staged.discarded', { count: (result?.removed_entries || []).length }),
       });
       onDiscarded?.(result);
+    };
+    try {
+      const fresh = await freshUnchanged(prints);
+      if (!fresh) return;
+      entries = fresh.filter((item) => prints.has(itemKey(item))).map(entryRef);
+      discarded(await api.discardStagedChanges(sessionId, entries));
     } catch (error) {
+      if (entries.length && mergeOutcomeUnknown(error)) {
+        // The answer was lost, not necessarily the discard: the diff says
+        // whether its entries are still staged. A discard removes all of them
+        // or none, but so may someone else's merge, so all gone is reported
+        // as no longer staged, not as discarded.
+        const after = await onRefresh();
+        const left = new Set((after || []).map(itemKey));
+        const gone = entries.filter((ref) => !left.has(entryKey(ref.kind, ref.entity_id)));
+        if (after && gone.length === entries.length) {
+          setSelected(new Map());
+          setMessage({ kind: 'success', text: t('staged.discard_gone', { count: gone.length }) });
+          onDiscarded?.({ removed_entries: gone.map((ref) => [ref.kind, ref.entity_id]) });
+          return;
+        }
+        setMessage({
+          kind: 'error',
+          text: t(after && !gone.length ? 'staged.discard_failed' : 'staged.discard_unknown'),
+        });
+        return;
+      }
       if (error?.code === 'merge_raced') {
         // Restaged since it was reviewed: read again, and the changed entries
         // lose their ticks until looked at again.

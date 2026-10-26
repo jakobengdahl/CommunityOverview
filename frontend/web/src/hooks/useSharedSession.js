@@ -115,7 +115,10 @@ export function useSharedSession({
   );
 
   const loadSessionFromServer = useCallback(
-    async (targetId, { eagerConnect = false, onMissing = null, isStale = () => false } = {}) => {
+    async (
+      targetId,
+      { eagerConnect = false, onMissing = null, onStaleMissing = null, isStale = () => false } = {}
+    ) => {
       try {
         const payload = await api.getSession(targetId, { resolve: true });
         // Adopt the mode even from a stale reply: it is a fact about targetId,
@@ -145,7 +148,11 @@ export function useSharedSession({
         }
       } catch (error) {
         if (error?.status === 404) onSessionPayload?.(targetId, null);
-        if (isStale()) return;
+        if (isStale()) {
+          // Settled direct all the same; the caller decides what that needs.
+          if (error?.status === 404) onStaleMissing?.(targetId);
+          return;
+        }
         // Session does not exist server-side yet — new / not-yet-saved share URL.
         if (error?.status === 404) {
           clearVisualization();

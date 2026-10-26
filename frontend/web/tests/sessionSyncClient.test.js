@@ -3278,3 +3278,111 @@ describe('foldAckedAnnotationOp', () => {
     expect(a.field_versions).toEqual({ style: 2 });
   });
 });
+
+describe('SessionSyncClient — a stream that never opens', () => {
+  const probing = (status, body = { detail: 'session not found' }) =>
+    vi.fn(async () => ({ ok: status < 400, status, json: async () => body }));
+
+  it('tells the host once when the stream answers 404: the session id is retired', async () => {
+    const fetchImpl = probing(404);
+    const { client, handlers } = makeClient({ fetchImpl });
+    handlers.onStreamRefused = vi.fn();
+    client.connect();
+    FakeEventSource.instances[0].error(true);
+    await flush();
+    expect(fetchImpl).toHaveBeenCalledWith(
+      expect.stringContaining('/api/sessions/1234-5678/stream?'),
+      expect.objectContaining({ headers: { Accept: 'text/event-stream' } })
+    );
+    expect(handlers.onStreamRefused).toHaveBeenCalledWith(404);
+    // The next failed connect does not ask again.
+    client.connect();
+    FakeEventSource.instances.at(-1).error(true);
+    await flush();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(handlers.onStreamRefused).toHaveBeenCalledTimes(1);
+    client.close();
+  });
+
+  it('says nothing for a refusal that is not a 404, or a network failure', async () => {
+    for (const fetchImpl of [
+      // A 404 from something in front of the server, not the stream route's.
+      probing(404, { message: 'Not Found' }),
+      vi.fn(async () => ({
+        ok: false,
+        status: 404,
+        json: async () => Promise.reject(new Error('html')),
+      })),
+      probing(429),
+      probing(503),
+      vi.fn(async () => {
+        throw new TypeError('Failed to fetch');
+      }),
+    ]) {
+      FakeEventSource.instances = [];
+      const { client, handlers } = makeClient({ fetchImpl });
+      handlers.onStreamRefused = vi.fn();
+      client.connect();
+      FakeEventSource.instances[0].error(true);
+      await flush();
+      expect(handlers.onStreamRefused).not.toHaveBeenCalled();
+      client.close();
+    }
+  });
+
+  it('does not ask about a stream that was open before it dropped', async () => {
+    const fetchImpl = probing(404);
+    const { client, handlers } = makeClient({ fetchImpl });
+    handlers.onStreamRefused = vi.fn();
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 1, session: { state: {} } });
+    FakeEventSource.instances[0].error(true);
+    await flush();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(handlers.onStreamRefused).not.toHaveBeenCalled();
+    client.close();
+  });
+
+  it('does not tell a client whose stream opened while the probe was asked', async () => {
+    let answer;
+    const fetchImpl = vi.fn(() => new Promise((resolve) => (answer = resolve)));
+    const { client, handlers } = makeClient({ fetchImpl });
+    handlers.onStreamRefused = vi.fn();
+    client.connect();
+    FakeEventSource.instances[0].error(true);
+    client.connect();
+    FakeEventSource.instances.at(-1).emit({ type: 'snapshot', seq: 1, session: { state: {} } });
+    answer({ ok: false, status: 404, json: async () => ({ detail: 'session not found' }) });
+    await flush();
+    expect(handlers.onStreamRefused).not.toHaveBeenCalled();
+    client.close();
+  });
+
+  it('aborts a probe still waiting when the client closes', async () => {
+    let signal;
+    const fetchImpl = vi.fn((url, opts) => {
+      signal = opts.signal;
+      return new Promise(() => {});
+    });
+    const { client, handlers } = makeClient({ fetchImpl });
+    handlers.onStreamRefused = vi.fn();
+    client.connect();
+    FakeEventSource.instances[0].error(true);
+    expect(signal.aborted).toBe(false);
+    client.close();
+    expect(signal.aborted).toBe(true);
+  });
+
+  it('does not tell a closed client', async () => {
+    let answer;
+    const fetchImpl = vi.fn(() => new Promise((resolve) => (answer = resolve)));
+    const { client, handlers } = makeClient({ fetchImpl });
+    handlers.onStreamRefused = vi.fn();
+    client.connect();
+    FakeEventSource.instances[0].error(true);
+    client.close();
+    answer({ ok: false, status: 404, json: async () => ({ detail: 'session not found' }) });
+    await flush();
+    expect(handlers.onStreamRefused).not.toHaveBeenCalled();
+  });
+});

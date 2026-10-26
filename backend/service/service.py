@@ -521,9 +521,6 @@ class GraphService:
         since - possibly out of that view - refuses the discard in the store,
         and it is decided again on the layer as it is then."""
         store = self._session_gate.session_manager.write_modes.layer_store
-        # The versions the caller reviewed (§12): an entry restaged since is
-        # not discarded unseen.
-        pinned = staged_review.expected_versions(entries)
         for attempt in range(self.STAGING_ATTEMPTS):
             review = self._load_review(session_id, graph_access)
             if entries == "all":
@@ -543,6 +540,20 @@ class GraphService:
                     ]
             if not keys:
                 return []
+            # The versions the caller reviewed (§12): an entry restaged since
+            # is not discarded unseen. Read only for the entries in view, as a
+            # merge does, so an entry outside it answers the same whatever
+            # version it is named with.
+            selected = set(keys)
+            pinned = staged_review.expected_versions(
+                [
+                    item
+                    for item in entries
+                    if (item.get("kind"), item.get("entity_id")) in selected
+                ]
+                if isinstance(entries, list)
+                else entries
+            )
             expected = {
                 key: layer_store.entry_version(review.entries[key]) for key in keys
             }

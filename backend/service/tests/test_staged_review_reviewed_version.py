@@ -227,3 +227,70 @@ def test_a_refusal_names_no_version_of_an_entry_outside_the_view(world):
     current = world.layer(sid)[("node", "a")]
     for answer in (merged, discarded):
         assert current["stage_token"] not in str(answer)
+
+
+@pytest.mark.parametrize("version", ["", 7, "x" * 201])
+def test_a_malformed_version_on_an_entry_outside_the_view_answers_as_any_other_version(
+    world, version
+):
+    """Discard decides the view before the versions, as merge does: an entry
+    the reader cannot see is never refused for the shape of its version."""
+    svc, sid = world.service, world.staged_session()
+    _stage(world, sid, ("update_node", ("a",), {"updates": {"description": "x"}}))
+    _restage_as_another_instance(
+        world, sid, "a", {"metadata": {"origin_graph_id": "remote"}}
+    )
+    world.hook.narrow = True
+    entry = {"kind": "node", "entity_id": "a", "version": version}
+    merged = svc.merge_staged_changes(sid, "m", entries=[entry])
+    discarded = svc.discard_staged_changes(sid, entries=[entry])
+    well_formed = svc.discard_staged_changes(sid, entries=[{**entry, "version": "v"}])
+    world.hook.narrow = False
+    assert merged["error"] == "merge_raced"
+    assert discarded == well_formed
+    assert discarded["removed_entries"] == []
+    assert ("node", "a") in world.layer(sid)
+
+
+def test_a_discard_checks_the_versions_of_the_entries_in_view_only(world):
+    """One entry in view, reviewed; one outside it, named with a malformed
+    version and the same id under the other kind: the in-view entry is
+    discarded, as it would be named alone."""
+    svc, sid = world.service, world.staged_session()
+    _stage(
+        world,
+        sid,
+        ("update_node", ("a",), {"updates": {"description": "x"}}),
+        ("update_node", ("b",), {"updates": {"description": "x"}}),
+    )
+    reviewed_b = _reviewed(world, sid, "b")
+    _restage_as_another_instance(
+        world, sid, "a", {"metadata": {"origin_graph_id": "remote"}}
+    )
+    world.hook.narrow = True
+    entries = [
+        reviewed_b,
+        {"kind": "node", "entity_id": "a", "version": ""},
+        {"kind": "edge", "entity_id": "b", "version": ""},
+    ]
+    result = svc.discard_staged_changes(sid, entries=entries)
+    world.hook.narrow = False
+    assert result["removed_entries"] == [["node", "b"]], result
+    assert ("node", "a") in world.layer(sid)
+
+
+def test_a_discard_still_refuses_a_malformed_version_on_an_entry_in_view(world):
+    svc, sid = world.service, world.staged_session()
+    _stage(
+        world,
+        sid,
+        ("update_node", ("a",), {"updates": {"description": "x"}}),
+        ("update_node", ("b",), {"updates": {"description": "x"}}),
+    )
+    entries = [
+        {"kind": "node", "entity_id": "a", "version": ""},
+        _reviewed(world, sid, "b"),
+    ]
+    result = svc.discard_staged_changes(sid, entries=entries)
+    assert result["error"] == "invalid_merge_request"
+    assert ("node", "a") in world.layer(sid) and ("node", "b") in world.layer(sid)

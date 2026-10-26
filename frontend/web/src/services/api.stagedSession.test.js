@@ -270,6 +270,22 @@ describe('file upload', () => {
     expect(calls).toHaveLength(2);
     api.setSessionModeDirect('5555-6666-7777-8888');
   });
+
+  it('keeps a structured refusal\'s code and message instead of "[object Object]"', async () => {
+    mockFetch(409, {
+      detail: { error: 'write_not_stageable', message: 'Cannot stage this upload.' },
+    });
+    const error = await api.uploadFile(new File(['x'], 'a.txt'), true).catch((e) => e);
+    expect(error.message).toBe('Cannot stage this upload.');
+    expect(error.code).toBe('write_not_stageable');
+    expect(error.status).toBe(409);
+  });
+
+  it('keeps a plain string detail as the message', async () => {
+    mockFetch(415, { detail: 'Unsupported file type' });
+    const error = await api.uploadFile(new File(['x'], 'a.txt'), false).catch((e) => e);
+    expect(error.message).toBe('Unsupported file type');
+  });
 });
 
 describe('possibly staged', () => {
