@@ -234,12 +234,15 @@ def _install_mcp_no_redirect_rewrite(app: FastAPI) -> None:
         return await call_next(request)
 
 
-def mount_mcp(app: FastAPI, mcp, tools_map) -> None:
+def mount_mcp(app: FastAPI, mcp, tools_map):
     """Mount the MCP HTTP endpoints at /mcp.
 
     Two transports are supported:
       1. Legacy SSE  (GET /mcp/sse + POST /mcp/messages) – for older clients
       2. Streamable HTTP (POST /mcp) – for ChatGPT, Claude, and MCP spec ≥2025-03-26
+
+    Returns the Streamable HTTP session lifecycle, an async context manager
+    the caller enters from the app's lifespan.
     """
     _install_mcp_no_redirect_rewrite(app)
 
@@ -255,7 +258,7 @@ def mount_mcp(app: FastAPI, mcp, tools_map) -> None:
     )
 
     streamable_state = {"started": False}
-    _attach_streamable_session_lifecycle(app, mcp, streamable_state)
+    session_lifecycle = _streamable_session_lifecycle(mcp, streamable_state)
 
     app.mount(
         "/mcp",
@@ -266,31 +269,33 @@ def mount_mcp(app: FastAPI, mcp, tools_map) -> None:
             streamable_ready=lambda: streamable_state["started"],
         ),
     )
+    return session_lifecycle
 
 
-def _attach_streamable_session_lifecycle(app: FastAPI, mcp, state: dict) -> None:
-    """Run the Streamable HTTP session manager for the lifetime of *app*.
+def _streamable_session_lifecycle(mcp, state: dict):
+    """Run the Streamable HTTP session manager for the lifetime of the host app.
 
     FastMCP starts that manager from its own app's lifespan. We mount the app
-    instead of running it, so the lifespan never fires and the first request
-    fails with "Task group is not initialized". Tie it to this app's lifecycle.
+    instead of running it, so that lifespan never fires and the first request
+    fails with "Task group is not initialized". The host app's lifespan enters
+    the returned context manager instead.
     """
-    stack = contextlib.AsyncExitStack()
 
-    async def _start() -> None:
-        try:
-            await stack.enter_async_context(mcp.session_manager.run())
-            state["started"] = True
-            logger.info("Streamable HTTP session manager started")
-        except Exception:  # noqa: BLE001 - never block startup over a transport
-            logger.exception(
-                "Could not start the Streamable HTTP session manager; "
-                "only the legacy SSE transport will work."
-            )
+    @contextlib.asynccontextmanager
+    async def lifecycle():
+        async with contextlib.AsyncExitStack() as stack:
+            try:
+                await stack.enter_async_context(mcp.session_manager.run())
+                state["started"] = True
+                logger.info("Streamable HTTP session manager started")
+            except Exception:  # noqa: BLE001 - never block startup over a transport
+                logger.exception(
+                    "Could not start the Streamable HTTP session manager; "
+                    "only the legacy SSE transport will work."
+                )
+            try:
+                yield
+            finally:
+                state["started"] = False
 
-    async def _stop() -> None:
-        state["started"] = False
-        await stack.aclose()
-
-    app.router.on_startup.append(_start)
-    app.router.on_shutdown.append(_stop)
+    return lifecycle
