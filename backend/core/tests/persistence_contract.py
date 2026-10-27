@@ -345,10 +345,12 @@ class InMemoryGraphPersistenceBackend:
             victims = layer.merge_records_to_purge(
                 self._store["merges"], sessions, now - retention, limit
             )
+            purged = [(m, self._store["merges"][m]["session_id"]) for m in victims]
             merges = {
                 k: v for k, v in self._store["merges"].items() if k not in victims
             }
             self._store.update(sessions=sessions, merges=merges)
+            layer.log_purged_merge_records(purged)
             return len(victims)
 
     def stage(
