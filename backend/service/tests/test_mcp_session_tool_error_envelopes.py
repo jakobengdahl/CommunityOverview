@@ -12,10 +12,13 @@ an envelope that does not echo the exception by design (``OpError``, the
 lease conflict and the image budget do) must not leak it.
 """
 
+import base64
+import io
 import os
 from unittest.mock import MagicMock, Mock
 
 import pytest
+from PIL import Image
 
 from backend.core import GraphStorage, layer_store
 from backend.core.session_manager import (
@@ -79,6 +82,14 @@ def _too_large(what):
 
 def _not_found(message):
     return {"success": False, "error": "not_found", "message": message}
+
+
+def _png_data_url():
+    """A real image, so create_image_annotation's ingest runs unstubbed and
+    the failure is injected only at the write behind it."""
+    buffer = io.BytesIO()
+    Image.new("RGB", (4, 4), (255, 0, 0)).save(buffer, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
 
 
 @pytest.fixture
@@ -181,6 +192,11 @@ ANNOTATION_TOOLS = {
             ),
         },
     ),
+    "create_image_annotation": (
+        "upsert_image_annotation",
+        lambda ids: {"x": 0, "y": 0, "image_data": _png_data_url()},
+        {"image_budget": True},
+    ),
     "create_group_annotation": (
         "upsert_annotation",
         lambda ids: {"x": 0, "y": 0},
@@ -207,6 +223,7 @@ ANNOTATION_TOOLS = {
 CREATING_TOOLS = {
     "create_sticky_note": "annotation_id",
     "create_annotation": "annotation_id",
+    "create_image_annotation": "annotation_id",
     "duplicate_annotation": "new_annotation_id",
     "create_group_annotation": "annotation_id",
 }
@@ -217,7 +234,7 @@ CREATING_TOOLS = {
 TARGETED_TOOL_NAMES = sorted(
     set(ANNOTATION_TOOLS)
     - {"create_sticky_note", "create_annotation"}
-    - {"create_group_annotation"}
+    - {"create_image_annotation", "create_group_annotation"}
 )
 
 
