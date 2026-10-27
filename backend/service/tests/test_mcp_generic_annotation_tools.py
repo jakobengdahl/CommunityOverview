@@ -16,7 +16,7 @@ thin wrappers over ``SessionManager.upsert_annotation``/``update_annotation``/
 ``delete_annotation`` plus the generic-shape helpers in
 ``backend/core/session_annotations.py``; the op semantics themselves are
 covered in ``backend/core/tests/test_session_manager.py`` and the shape
-building/patching in ``backend/core/tests/test_session_annotations_generic.py``.
+building/patching in ``backend/core/tests/test_session_annotations.py``.
 """
 
 import os
@@ -729,7 +729,7 @@ class TestCreateAnnotationSemanticDefaultLayer:
     docs/ANNOTATION_CONTRACT.md's Layer order section for the reasoning.
     Only `shape` moves off the shared 0; this pins that through the real MCP
     tool, not just the pure `build_annotation` helper
-    (test_session_annotations_generic.py already covers that leg).
+    (test_session_annotations.py already covers that leg).
     """
 
     def test_shape_created_without_z_defaults_to_minus_one(self, annotation_tools):

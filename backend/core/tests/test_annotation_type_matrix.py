@@ -281,7 +281,7 @@ class TestSequentialWritesDoNotRollBackEarlierSuccesses:
     ``apply_ops``/``POST /sessions/{id}/ops`` op batch, a different and
     deliberately *non*-partial-success mechanism pinned by
     ``test_a_poisoned_op_rolls_back_the_whole_batch`` in
-    ``backend/core/tests/test_session_annotations_image_guard.py``). So "a
+    ``backend/core/tests/test_session_annotations_guards.py``). So "a
     batch where some entries are invalid saves the valid ones and returns a
     per-object error for the rest" is a property of a *sequence* of
     independent create/update calls, one per v1 type: a later call's error
