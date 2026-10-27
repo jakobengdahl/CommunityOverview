@@ -358,6 +358,10 @@ describe('CreateAgentDialog', () => {
       ['agent:p-node', 'external-change'],
     ],
     [['agent:p', 'agent:p-node'], ['agent:p-node']],
+    [
+      ['agent:p', 'agent:p-other'],
+      ['agent:p-node', 'agent:p-other'],
+    ],
   ])(
     'saving an agent stored with the legacy loop guard %j persists the node-id form',
     async (stored, saved) => {
@@ -427,5 +431,16 @@ describe('CreateAgentDialog', () => {
     });
 
     expect(delivery.ignore_origins).toEqual(['x', 'x']);
+  });
+
+  it('does not heal on an origin that only shares the legacy prefix', async () => {
+    // Listed twice: healing would also de-duplicate, so a wrongly entered
+    // heal shows even though no entry equals agent:p.
+    const delivery = await editUiAgent({
+      webhook_url: 'internal://agent/p-node',
+      ignore_origins: ['agent:p-other', 'agent:p-other'],
+    });
+
+    expect(delivery.ignore_origins).toEqual(['agent:p-other', 'agent:p-other']);
   });
 });

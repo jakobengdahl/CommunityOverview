@@ -374,6 +374,17 @@ class TestLegacyAgentLoopGuardRepair:
         )
         assert self.LEGACY["ignore_origins"] == ["agent:p"]
 
+    def test_an_origin_sharing_the_legacy_prefix_is_kept_and_does_not_count(self):
+        sibling = {**self.LEGACY, "ignore_origins": ["agent:p", "agent:p-other"]}
+        assert _repair_legacy_agent_delivery("p-subscription", "p-node", sibling)[
+            "ignore_origins"
+        ] == ["agent:p", "agent:p-other", "agent:p-node"]
+
+        only_sibling = {**self.LEGACY, "ignore_origins": ["agent:p-other"]}
+        assert _repair_legacy_agent_delivery("p-subscription", "p-node", only_sibling)[
+            "ignore_origins"
+        ] == ["agent:p-other"]
+
     def test_a_correctly_formed_agent_delivery_is_unchanged(self):
         delivery = {
             "webhook_url": "internal://agent/p-node",
