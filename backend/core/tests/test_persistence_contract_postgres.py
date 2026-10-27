@@ -15,6 +15,7 @@ is what lets one server serve the whole suite.
 from __future__ import annotations
 
 import itertools
+import hashlib
 import json
 import logging
 import os
@@ -118,10 +119,20 @@ _UNPACED_FLOOR = 30
 # PR. `CO_TEST_PG_LENGTH_SEED` pins the seed for an exact rerun, and every
 # case that draws from it prints the seed as its first line, so a failure's
 # own captured output already carries what reproduces it.
+#
+# Under pytest-xdist every worker imports this module and collects on its
+# own, and the controller aborts the run unless all of them collect the same
+# parametrized ids. A seed drawn per process would hand each worker different
+# lengths, so without an explicit seed the draw comes from the run's xdist
+# id instead: one value per run, shared by every worker, new on the next run.
 def _pg_length_seed() -> int:
     override = os.environ.get("CO_TEST_PG_LENGTH_SEED")
     if override is not None:
         return int(override)
+    testrun = os.environ.get("PYTEST_XDIST_TESTRUNUID")
+    if testrun is not None:
+        digest = hashlib.sha256(testrun.encode()).digest()
+        return int.from_bytes(digest[:4], "big") % 2**31
     return random.SystemRandom().randrange(2**31)
 
 
