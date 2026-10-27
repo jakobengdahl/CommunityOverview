@@ -114,6 +114,38 @@ class TestPruneActivityLog:
         ]
         assert [r["seq"] for r in kept] == [1, 4, 5, 6]
 
+    def _frozen(self, monkeypatch, now):
+        class _FixedNow(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now
+
+        monkeypatch.setattr(session_activity, "datetime", _FixedNow)
+
+    def test_a_record_exactly_at_a_whole_second_cutoff_is_kept(self, monkeypatch):
+        self._frozen(monkeypatch, datetime(2026, 10, 20, 12, 0, 0, tzinfo=timezone.utc))
+        records = [_record(seq=0), _record(seq=1)]
+        records[0]["occurred_at"] = "2026-10-13T12:00:00Z"  # == cutoff
+        records[1]["occurred_at"] = "2026-10-13T11:59:59Z"
+        kept = prune_activity_log(records, max_records=None, max_age_days=7)
+        assert [r["seq"] for r in kept] == [0]
+
+    def test_a_lowercase_older_timestamp_is_parsed_not_shortcut(self, monkeypatch):
+        """strptime accepts a lowercase ``t``/``z``, and ``t`` sorts after
+        ``T``: an older lowercase timestamp on the cutoff's own day must
+        still be parsed and pruned."""
+        self._frozen(monkeypatch, datetime(2026, 10, 20, 12, 0, 0, tzinfo=timezone.utc))
+        records = [_record(seq=0)]
+        records[0]["occurred_at"] = "2026-10-13t00:00:00z"
+        assert prune_activity_log(records, max_records=None, max_age_days=7) == []
+
+    def test_age_filter_runs_before_the_record_cap(self):
+        """An expired record in the tail must not take a slot from the cap."""
+        records = [_record(seq=i) for i in range(4)]
+        records[-1]["occurred_at"] = "2000-01-01T00:00:00Z"
+        kept = prune_activity_log(records, max_records=3, max_age_days=7)
+        assert [r["seq"] for r in kept] == [0, 1, 2]
+
 
 class TestFindLatestUndoable:
     def test_returns_newest_matching_actor(self):

@@ -358,8 +358,8 @@ class TestTwoClientsOneSession:
 
     async def test_default_caps_wrap_and_hold_their_bounds(self, tmp_path):
         """The sustained-moves test above injects small caps; this pins the
-        real defaults, so a change to either default or to what a wrapped
-        structure keeps is caught. Moves go in multi-op batches to keep it
+        real defaults: a store built without caps wraps both structures at
+        the default constants and keeps exactly the newest window. Moves go in multi-op batches to keep it
         fast; each batch still takes the rollback and snapshot path."""
         mgr = SessionManager(
             SessionStore(FileSessionPersistenceBackend(tmp_path)),
