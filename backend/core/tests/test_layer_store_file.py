@@ -1,5 +1,6 @@
-"""The file backend against the layer-store contract, and its write-ahead
-merge (docs/SESSION_OVERLAY_CONTRACT.md §11.6)."""
+"""The file backend against the layer-store contract, its write-ahead
+merge (docs/SESSION_OVERLAY_CONTRACT.md §11.6), the check of every staged
+expectation, and the deep copies the layer store hands out."""
 
 import json
 import logging
@@ -1287,3 +1288,116 @@ def test_an_unreadable_retirement_time_stops_the_load(staged, path, stored):
     staged.layers_path.write_text(json.dumps(layers))
     with pytest.raises(GraphJournalError):
         reopen(path).staged_status(A)
+
+
+# ==== Every staged expectation is verified ===================================
+
+
+class TestFile(LayerStoreContract):
+    @pytest.fixture
+    def factory(self, tmp_path):
+        path = tmp_path / "graph.json"
+        return lambda: FileGraphPersistenceBackend(path, staged_sessions=True)
+
+    # LS05
+    def test_every_expectation_is_verified_not_only_the_first(self, seeded, factory):
+        seeded.stage(A, [entry("node", "a", session_seq=1)])
+        before = factory().load_layer(A)
+        with pytest.raises(ls.LayerRaced) as raised:
+            seeded.stage(
+                A,
+                [entry("node", "a", session_seq=9)],
+                expected={("node", "a"): 1, ("node", "b"): 1},
+            )
+        assert raised.value.key == ("node", "b")
+        assert factory().load_layer(A) == before
+
+
+# ==== Deep copies ============================================================
+# Copies the layer store hands out are deep: a caller mutating one cannot
+# change what is stored (the file backend, and layer_store.json_copy).
+
+REC = {"actor": "t", "entries": [{"n": {"x": 1}}]}
+
+
+def merge_nested(backend, merge_id="m1"):
+    current = by_id(backend.load_graph_data(), "nodes")["a"]
+    op = EntityOperation(
+        "node",
+        "upsert",
+        "a",
+        fresh({**current, "name": "M"}),
+        expected_revision=current["revision"],
+    )
+    return backend.merge(
+        A, merge_id, [op], [], [("node", "a")], dict(REC, entries=[{"n": {"x": 1}}])
+    )
+
+
+def poke(record):
+    record["entries"][0]["n"]["x"] = 99
+
+
+def test_json_copy_is_deep():
+    for fn in (ls.json_copy,):
+        src = {"a": {"b": [1, {"c": 2}]}}
+        out = fn(src)
+        out["a"]["b"][1]["c"] = 3
+        out["a"]["b"].append(4)
+        assert src == {"a": {"b": [1, {"c": 2}]}}
+
+
+def test_staging_json_copy_is_deep():
+    from backend.service.staging import json_copy
+
+    src = {"a": {"b": [1, {"c": 2}]}}
+    out = json_copy(src)
+    out["a"]["b"][1]["c"] = 3
+    assert src == {"a": {"b": [1, {"c": 2}]}}
+
+
+def test_load_layer_copies_are_deep(staged):
+    staged.stage(A, [entry("node", "c", staged={"metadata": {"k": {"v": 1}}})])
+    got = {e["entity_id"]: e for e in staged.load_layer(A)}
+    got["c"]["staged"]["metadata"]["k"]["v"] = 99
+    again = {e["entity_id"]: e for e in staged.load_layer(A)}
+    assert again["c"]["staged"]["metadata"]["k"]["v"] == 1
+
+
+def test_merge_result_record_is_a_deep_copy(staged):
+    result = merge_nested(staged)
+    poke(result.record)
+    assert staged.load_merge("m1")["entries"][0]["n"]["x"] == 1
+
+
+def test_load_merge_answer_is_a_deep_copy(staged):
+    merge_nested(staged)
+    first = staged.load_merge("m1")
+    poke(first)
+    assert staged.load_merge("m1")["entries"][0]["n"]["x"] == 1
+
+
+def test_load_merge_pending_answer_is_a_deep_copy(staged, monkeypatch):
+    def broken(sessions):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(staged, "_write_layers_file", broken)
+    merge_nested(staged)
+    first = staged.load_merge("m1")
+    poke(first)
+    assert staged.load_merge("m1")["entries"][0]["n"]["x"] == 1
+    assert staged._pending_merge["record"]["entries"][0]["n"]["x"] == 1
+
+
+def test_landed_after_failed_commit_record_is_a_deep_copy(staged, monkeypatch):
+    real = staged._append_journal_locked
+
+    def durable_then_raise(ops, stored):
+        real(ops, stored)
+        raise OSError("close failed")
+
+    monkeypatch.setattr(staged, "_append_journal_locked", durable_then_raise)
+    result = merge_nested(staged)
+    monkeypatch.undo()
+    poke(result.record)
+    assert staged.load_merge("m1")["entries"][0]["n"]["x"] == 1
