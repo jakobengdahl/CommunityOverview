@@ -66,16 +66,8 @@ def _assert_disconnected(manager, session_id):
     assert manager.roster(session_id) == []
 
 
-@pytest.mark.asyncio
-async def test_queue_wait_timeout_emits_ping_comment_and_keeps_streaming(
-    stream_env, monkeypatch
-):
-    manager, endpoint = stream_env
-    request = _FakeRequest()
-    session_id, body = await _open_stream(endpoint, manager, request)
-
-    assert (await anext(body)).startswith("data: ")  # catch-up snapshot
-    assert '"presence_joined"' in await anext(body)
+def _time_out_queue_waits(monkeypatch):
+    """Make every queue wait in the generator time out at once."""
 
     async def _timeout(awaitable, timeout):
         awaitable.close()
@@ -87,8 +79,23 @@ async def test_queue_wait_timeout_emits_ping_comment_and_keeps_streaming(
         wait_for=_timeout,
         TimeoutError=asyncio.TimeoutError,
         CancelledError=asyncio.CancelledError,
+        QueueEmpty=asyncio.QueueEmpty,
     )
     monkeypatch.setattr(rest_api_module, "asyncio", fake_asyncio)
+
+
+@pytest.mark.asyncio
+async def test_queue_wait_timeout_emits_ping_comment_and_keeps_streaming(
+    stream_env, monkeypatch
+):
+    manager, endpoint = stream_env
+    request = _FakeRequest()
+    session_id, body = await _open_stream(endpoint, manager, request)
+
+    assert (await anext(body)).startswith("data: ")  # catch-up snapshot
+    assert '"presence_joined"' in await anext(body)
+
+    _time_out_queue_waits(monkeypatch)
 
     assert await anext(body) == ": ping\n\n"
     # The loop continues after a ping rather than ending the stream.
@@ -122,7 +129,9 @@ async def test_resync_after_session_deleted_becomes_session_deleted_and_ends(
 
 
 @pytest.mark.asyncio
-async def test_delete_before_first_catch_up_forwards_the_queued_notice(stream_env):
+async def test_delete_before_first_catch_up_forwards_the_queued_notice(
+    stream_env, monkeypatch
+):
     manager, endpoint = stream_env
     request = _FakeRequest()
     session_id, body = await _open_stream(endpoint, manager, request)
@@ -138,7 +147,8 @@ async def test_delete_before_first_catch_up_forwards_the_queued_notice(stream_en
         "write_mode": "direct",
     }
     # Like a mid-stream delete, the stream stays open until the client leaves.
-    assert manager.bus.subscriber_count(session_id) == 1
+    _time_out_queue_waits(monkeypatch)
+    assert await anext(body) == ": ping\n\n"
     request.disconnected = True
     with pytest.raises(StopAsyncIteration):
         await anext(body)
@@ -147,7 +157,7 @@ async def test_delete_before_first_catch_up_forwards_the_queued_notice(stream_en
 
 @pytest.mark.asyncio
 async def test_unannounced_delete_before_first_catch_up_synthesises_notice(
-    stream_env,
+    stream_env, monkeypatch
 ):
     manager, endpoint = stream_env
     request = _FakeRequest()
@@ -158,6 +168,8 @@ async def test_unannounced_delete_before_first_catch_up_synthesises_notice(
 
     chunk = await anext(body)
     assert chunk == 'data: {"type": "session_deleted", "deleted_by": null}\n\n'
+    _time_out_queue_waits(monkeypatch)
+    assert await anext(body) == ": ping\n\n"
     request.disconnected = True
     with pytest.raises(StopAsyncIteration):
         await anext(body)
