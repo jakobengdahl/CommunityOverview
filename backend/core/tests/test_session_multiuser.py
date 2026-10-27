@@ -11,7 +11,9 @@ reconnect catch-up.
 
 import pytest
 
+from backend.core.session_activity import DEFAULT_MAX_ACTIVITY_RECORDS
 from backend.core.session_store import (
+    _DEFAULT_RING_SIZE,
     FileSessionPersistenceBackend,
     InMemorySessionPersistenceBackend,
     OpError,
@@ -291,10 +293,9 @@ class TestTwoClientsOneSession:
         """
         # Generous rate limit so the tight loop measures persistence/mirroring,
         # not the per-client token bucket (which real drag cadence never hits).
-        # Small ring and activity caps let a short sequence wrap both bounded
-        # structures: each batch deep-copies the activity log for rollback and
-        # snapshot, so per-op cost grows with it and wrapping the production
-        # defaults (500 each) took ~20 s.
+        # Small ring and activity caps let a short sequence of one-op batches
+        # wrap both bounded structures; the production defaults are pinned by
+        # test_default_caps_wrap_and_hold_their_bounds below.
         bound = 20
         mgr = SessionManager(
             SessionStore(
@@ -354,6 +355,51 @@ class TestTwoClientsOneSession:
         reloaded = SessionStore(FileSessionPersistenceBackend(tmp_path)).get(sid)
         for nid, pos in last.items():
             assert reloaded.state["positions"][nid] == pos
+
+    async def test_default_caps_wrap_and_hold_their_bounds(self, tmp_path):
+        """The sustained-moves test above injects small caps; this pins the
+        real defaults, so a change to either default or to what a wrapped
+        structure keeps is caught. Moves go in multi-op batches to keep it
+        fast; each batch still takes the rollback and snapshot path."""
+        mgr = SessionManager(
+            SessionStore(FileSessionPersistenceBackend(tmp_path)),
+            bucket_capacity=100_000,
+            bucket_refill_per_sec=100_000,
+        )
+        sid = mgr.create_session(name="Shared").id
+        await mgr.apply_ops(
+            sid, "A", 0, [{"op": "nodes_added", "node_ids": ["n0", "n1"]}]
+        )
+
+        moves = max(_DEFAULT_RING_SIZE, DEFAULT_MAX_ACTIVITY_RECORDS) + 20
+        batch = 50
+        for start in range(0, moves, batch):
+            await mgr.apply_ops(
+                sid,
+                "A" if start % 2 == 0 else "B",
+                None,
+                [
+                    {
+                        "op": "node_moved",
+                        "node_id": f"n{i % 2}",
+                        "position": {"x": float(i), "y": 0.0},
+                    }
+                    for i in range(start, min(start + batch, moves))
+                ],
+            )
+
+        session = mgr.get_session(sid)
+        ring = mgr.store.ring(sid)
+        assert len(ring) == _DEFAULT_RING_SIZE
+        assert ring[-1]["seq"] == session.seq == moves + 1
+        assert ring[0]["seq"] == session.seq - _DEFAULT_RING_SIZE + 1
+        log = session.activity_log
+        assert len(log) == DEFAULT_MAX_ACTIVITY_RECORDS
+        assert log[-1]["seq"] == session.seq
+        assert log[0]["seq"] == session.seq - DEFAULT_MAX_ACTIVITY_RECORDS + 1
+        reloaded = SessionStore(FileSessionPersistenceBackend(tmp_path)).get(sid)
+        assert [r["id"] for r in reloaded.activity_log] == [r["id"] for r in log]
+        assert reloaded.state["positions"]["n1"] == {"x": moves - 1.0, "y": 0.0}
 
     async def test_reconnect_catches_up_missed_ops(self):
         mgr = _manager()
