@@ -282,16 +282,25 @@ class TestTwoClientsOneSession:
 
         Backbone invariant behind the "shared session silently loses node-move
         persistence over time" bug: after a sustained sequence of ops (here well
-        past the 500-op ring buffer, from both clients), every node's latest
-        position must be (a) converged in server state, (b) delivered to *both*
-        clients, and (c) reloadable from disk by a fresh store — the exact three
+        past the op ring buffer and the activity-log cap, from both clients),
+        every node's latest position must be (a) converged in server state, (b)
+        delivered to *both* clients, and (c) reloadable from disk by a fresh
+        store — the exact three
         things the founder report found broken ("not reflected in the other
         client's view … reloading shows none of the moves were stored").
         """
         # Generous rate limit so the tight loop measures persistence/mirroring,
         # not the per-client token bucket (which real drag cadence never hits).
+        # Small ring and activity caps let a short sequence wrap both bounded
+        # structures: every move fsyncs the session file, so wrapping the
+        # production defaults (500 each) took ~20 s.
+        bound = 20
         mgr = SessionManager(
-            SessionStore(FileSessionPersistenceBackend(tmp_path)),
+            SessionStore(
+                FileSessionPersistenceBackend(tmp_path),
+                ring_size=bound,
+                max_activity_records=bound,
+            ),
             bucket_capacity=100_000,
             bucket_refill_per_sec=100_000,
         )
@@ -309,7 +318,7 @@ class TestTwoClientsOneSession:
         )
 
         last: dict[str, dict[str, float]] = {}
-        moves = 600  # > ring_size (500): forces the ring to trim mid-session
+        moves = 3 * bound  # forces the ring and activity log to trim mid-session
         for i in range(moves):
             who = "A" if i % 2 == 0 else "B"
             nid = f"n{i % 5}"
@@ -318,6 +327,11 @@ class TestTwoClientsOneSession:
                 sid, who, None, [{"op": "node_moved", "node_id": nid, "position": pos}]
             )
             last[nid] = pos
+
+        # Both bounded structures really wrapped, so (a)-(c) hold past a trim.
+        ring = mgr.store.ring(sid)
+        assert len(ring) == bound and ring[0]["seq"] > 1
+        assert len(mgr.get_session(sid).activity_log) == bound
 
         # (a) Server state converged to each node's final move.
         state = mgr.get_session(sid).state
