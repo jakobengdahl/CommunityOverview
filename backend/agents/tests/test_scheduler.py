@@ -211,14 +211,14 @@ class TestAgentSchedulerRegistration:
         config = make_config(schedule=AgentSchedule(day_of_week=0, hour=9, minute=0))
         worker = make_worker()
         scheduler.register("agent-1", config, worker)
-        assert "agent-1" in scheduler._entries
+        assert "agent-1" in scheduler.registrations()
 
     def test_register_agent_without_schedule_is_noop(self):
         scheduler = AgentScheduler()
         config = make_config(schedule=None)
         worker = make_worker()
         scheduler.register("agent-1", config, worker)
-        assert "agent-1" not in scheduler._entries
+        assert "agent-1" not in scheduler.registrations()
 
     def test_unregister_removes_entry(self):
         scheduler = AgentScheduler()
@@ -226,7 +226,16 @@ class TestAgentSchedulerRegistration:
         worker = make_worker()
         scheduler.register("agent-1", config, worker)
         scheduler.unregister("agent-1")
-        assert "agent-1" not in scheduler._entries
+        assert "agent-1" not in scheduler.registrations()
+
+    def test_registrations_is_a_snapshot(self):
+        scheduler = AgentScheduler()
+        config = make_config(schedule=AgentSchedule(day_of_week=0, hour=9, minute=0))
+        scheduler.register("agent-1", config, make_worker())
+
+        scheduler.registrations().clear()
+
+        assert "agent-1" in scheduler.registrations()
 
     def test_unregister_unknown_agent_is_noop(self):
         scheduler = AgentScheduler()
