@@ -691,6 +691,7 @@ def test_core_calls_reusable_scans_with_the_existing_scope():
     assert set(workflow["jobs"]) == {"pip-audit", "npm-audit", "secret-sast"}
     assert workflow["jobs"]["secret-sast"] == {
         "name": "Secret and SAST",
+        "permissions": {"contents": "read", "pull-requests": "read"},
         "uses": "./.github/workflows/reusable-secret-sast-scan.yml",
         "with": CORE_INPUTS,
     }
@@ -698,7 +699,7 @@ def test_core_calls_reusable_scans_with_the_existing_scope():
     assert _jobs()["gitleaks"]["name"] == "gitleaks (secret scan)"
 
 
-def test_reusable_contract_has_only_scan_inputs_and_read_permission():
+def test_reusable_contract_has_only_scan_inputs():
     workflow = _workflow(REUSABLE_WORKFLOW)
     assert set(workflow["jobs"]) == {"bandit", "gitleaks"}
     assert set(_triggers(workflow)) == {"workflow_call"}
@@ -714,10 +715,17 @@ def test_reusable_contract_has_only_scan_inputs_and_read_permission():
                 "" if key == "bandit-excludes" else CORE_INPUTS[key]
             )
     assert contract["secrets"]["GITLEAKS_LICENSE"]["required"] is False
-    for path in WORKFLOWS:
-        assert _workflow(path)["permissions"] == {"contents": "read"}
-    for job in _jobs().values():
-        assert job.get("permissions", {"contents": "read"}) == {"contents": "read"}
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.stem)
+def test_only_gitleaks_and_its_caller_can_read_pull_requests(path):
+    workflow = _workflow(path)
+    assert workflow["permissions"] == {"contents": "read"}
+    for job_id, job in workflow["jobs"].items():
+        expected = {"contents": "read"}
+        if job_id in {"gitleaks", "secret-sast"}:
+            expected["pull-requests"] = "read"
+        assert job.get("permissions", workflow["permissions"]) == expected
 
 
 def test_bandit_setup_does_not_require_a_dependency_manifest():
