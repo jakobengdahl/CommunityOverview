@@ -453,8 +453,9 @@ which coverage cannot reach without loosening the isolation they exist for:
   reaches it, and it sets `RLIMIT_FSIZE` to zero, so it could not write a data
   file anyway. `_worker_main` and `_apply_resource_limits` run only there.
   The format extractors (`_extract_*` and their helpers) run there whenever a
-  test goes through `extract()`, so they count only where a test calls
-  `_extract_in_process` directly (today part of the DOCX path).
+  test goes through `extract()`, so they count only where a test calls them
+  in-process: `_extract_in_process` (today part of the DOCX path) or a shared
+  helper such as `_Collector` or `_bounded_join`.
   `_exchange_threads` is the non-POSIX path and does not run on Linux at all.
 - **`backend/functions/sandbox.py`** — the supervisor starts as `python -I -S`,
   so no `.pth` hook runs and coverage is not importable, and its forked child
