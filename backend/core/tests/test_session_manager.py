@@ -41,6 +41,8 @@ from backend.core.session_manager import (
     _DEFAULT_IMAGE_BUCKET_REFILL_PER_SEC,
     _TokenBucket,
     _UNDO_REPLAY_CLIENT_ID,
+    _detached_snapshot,
+    _document_bytes,
 )
 from backend.core.tests.rate_buckets import REQUIRED_BUCKET_ATTRS, bucket_attrs
 from backend.service.rest_api import _resolve_stream_event
@@ -5344,3 +5346,75 @@ class TestActivityLogRollbackIsExact:
             mgr.undo_last_action(s.id, "c1")
 
         assert record == legacy
+
+
+class TestDocumentBudgetIsExact:
+    """The document-size budget caches each activity record's encoded length
+    rather than re-encoding the log every batch; the total must still equal
+    ``len(json.dumps(snapshot))`` byte for byte."""
+
+    @staticmethod
+    def _move(x, node_id="a"):
+        return {"op": "node_moved", "node_id": node_id, "position": {"x": x, "y": 0}}
+
+    @staticmethod
+    def _size(session):
+        return len(json.dumps(_detached_snapshot(session)))
+
+    async def test_cached_sizes_track_every_edit_a_record_can_get(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        assert _document_bytes(_detached_snapshot(s), s) == self._size(s)
+        mgr.upsert_annotation(s.id, "c1", {"id": "n", "type": "note", "text": "åäö"})
+        for i in range(3):
+            await mgr.apply_ops(s.id, "c1", None, [self._move(i)])
+
+        def check():
+            assert _document_bytes(_detached_snapshot(s), s) == self._size(s)
+
+        check()  # warms the cache
+        mgr.undo_last_action(s.id, "c1")  # flips undone/undone_at in place
+        check()
+        record = s.activity_log[-1]
+        record["undone"] = 1  # == True, encodes differently
+        check()
+        record["undone"] = True
+        del record["undone_at"]  # missing vs None
+        check()
+        record["undone_at"] = None
+        check()
+        record["undone"] = None
+        check()
+        del record["undone"]  # missing vs None
+        check()
+        del s.activity_log[0]
+        check()
+        s.activity_log.clear()
+        check()
+
+    async def test_a_document_exactly_at_budget_is_accepted_one_byte_over_is_not(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        for i in range(3):
+            await mgr.apply_ops(s.id, "c1", None, [self._move(i)])
+        mgr.undo_last_action(s.id, "c1")  # a record changed after it was cached
+        before = self._size(s)
+        # Record ids and timestamps are fixed-width, so a refused attempt
+        # predicts the accepted document's length exactly.
+        with pytest.raises(ImageBudgetExceeded) as exc:
+            await mgr.apply_ops(
+                s.id, "c1", None, [self._move(9)], max_session_document_bytes=0
+            )
+        assert self._size(s) == before
+        needed = int(str(exc.value).split(" bytes")[0].rsplit(" ", 1)[1])
+
+        with pytest.raises(ImageBudgetExceeded):
+            await mgr.apply_ops(
+                s.id, "c1", None, [self._move(9)], max_session_document_bytes=needed - 1
+            )
+        assert self._size(s) == before
+
+        await mgr.apply_ops(
+            s.id, "c1", None, [self._move(9)], max_session_document_bytes=needed
+        )
+        assert self._size(s) == needed

@@ -257,6 +257,12 @@ class Session:
     _deleted_annotation_ids: Deque[str] = field(
         default_factory=lambda: deque(maxlen=200)
     )
+    # Ephemeral: each activity record's encoded length, for the document-size
+    # budget (session_manager._document_bytes). Rebuilt from the live log on
+    # every use, so it never outlives the records it describes.
+    _activity_record_bytes: Dict[int, Any] = field(
+        default_factory=dict, repr=False, compare=False
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         return {

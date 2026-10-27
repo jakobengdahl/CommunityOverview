@@ -381,6 +381,51 @@ def _detached_snapshot(session: Session) -> Dict[str, Any]:
     return snapshot
 
 
+_ABSENT = object()
+
+
+def _document_bytes(snapshot: Dict[str, Any], session: Session) -> int:
+    """``len(json.dumps(snapshot))`` for a ``_detached_snapshot`` of ``session``,
+    taken with no await in between.
+
+    Re-encoding the whole activity log on every batch was most of apply_ops'
+    event-loop time at the default 500-record cap. A record is never edited
+    after it is built except for its top-level ``undone``/``undone_at`` flags
+    (the same invariant ``_detached_snapshot`` relies on), so each record's
+    encoded length is cached against the record object and those two values.
+    The sum is exact, not an estimate: with the default separators a
+    non-empty list encodes as ``[`` + items joined by ``", "`` + ``]``.
+    """
+    log = session.activity_log
+    total = len(json.dumps({**snapshot, "activity_log": []}))
+    if not log:
+        session._activity_record_bytes = {}
+        return total
+    cached = session._activity_record_bytes
+    fresh: Dict[int, Any] = {}
+    total += 2 * (len(log) - 1)
+    for record in log:
+        # A missing key and None, or False and 0, encode differently: hence
+        # the sentinel and the identity check (undone_at is only ever a str).
+        undone = record.get("undone", _ABSENT)
+        undone_at = record.get("undone_at", _ABSENT)
+        hit = cached.get(id(record))
+        if (
+            hit is not None
+            and hit[0] is record
+            and hit[1] is undone
+            and hit[2] == undone_at
+        ):
+            size = hit[3]
+        else:
+            size = len(json.dumps(record))
+        # Holding the record keeps its id from being reused while cached.
+        fresh[id(record)] = (record, undone, undone_at, size)
+        total += size
+    session._activity_record_bytes = fresh
+    return total
+
+
 def _claimed_annotation_target(op: Dict[str, Any], session: Session) -> Optional[str]:
     """Return the id of the *existing* annotation ``op`` would mutate, if any.
 
@@ -1358,7 +1403,7 @@ class SessionManager:
                             f"bytes, over the {max_session_image_bytes}-byte "
                             "session limit"
                         )
-                    total_doc_bytes = len(json.dumps(snapshot))
+                    total_doc_bytes = _document_bytes(snapshot, session)
                     if total_doc_bytes > max_session_document_bytes:
                         raise ImageBudgetExceeded(
                             f"this batch would bring the session document to "
