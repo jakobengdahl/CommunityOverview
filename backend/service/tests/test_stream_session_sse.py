@@ -9,6 +9,7 @@ without waiting on the real 25-second queue timeout.
 """
 
 import asyncio
+import json
 import os
 from types import SimpleNamespace
 
@@ -121,17 +122,43 @@ async def test_resync_after_session_deleted_becomes_session_deleted_and_ends(
 
 
 @pytest.mark.asyncio
-async def test_session_deleted_before_first_catch_up_becomes_session_deleted(
+async def test_delete_before_first_catch_up_forwards_the_queued_notice(stream_env):
+    manager, endpoint = stream_env
+    request = _FakeRequest()
+    session_id, body = await _open_stream(endpoint, manager, request)
+
+    # The handshake passed; the session goes before the body is first iterated.
+    assert await manager.delete_session(session_id, deleted_by="bob")
+
+    chunk = await anext(body)
+    assert chunk.startswith("data: ")
+    assert json.loads(chunk[len("data: ") :]) == {
+        "type": "session_deleted",
+        "deleted_by": "bob",
+        "write_mode": "direct",
+    }
+    # Like a mid-stream delete, the stream stays open until the client leaves.
+    assert manager.bus.subscriber_count(session_id) == 1
+    request.disconnected = True
+    with pytest.raises(StopAsyncIteration):
+        await anext(body)
+    _assert_disconnected(manager, session_id)
+
+
+@pytest.mark.asyncio
+async def test_unannounced_delete_before_first_catch_up_synthesises_notice(
     stream_env,
 ):
     manager, endpoint = stream_env
-    session_id, body = await _open_stream(endpoint, manager, _FakeRequest())
+    request = _FakeRequest()
+    session_id, body = await _open_stream(endpoint, manager, request)
 
-    # The handshake passed; the session goes before the body is first iterated.
+    # A removal that published nothing still must not abort the stream.
     assert manager.store.delete(session_id)
 
     chunk = await anext(body)
     assert chunk == 'data: {"type": "session_deleted", "deleted_by": null}\n\n'
+    request.disconnected = True
     with pytest.raises(StopAsyncIteration):
         await anext(body)
     _assert_disconnected(manager, session_id)

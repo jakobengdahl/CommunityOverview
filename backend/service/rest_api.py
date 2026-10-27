@@ -1894,6 +1894,17 @@ def _register_session_endpoints(
             f"data: {json.dumps({'type': 'session_deleted', 'deleted_by': None})}\n\n"
         )
 
+        def queued_session_deleted() -> Optional[str]:
+            # The subscription predates the delete, so delete_session's own
+            # notice (with deleted_by and write_mode, §13) is already queued.
+            while True:
+                try:
+                    event = subscription.queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return None
+                if event.get("type") == "session_deleted":
+                    return f"data: {json.dumps(event)}\n\n"
+
         async def event_generator():
             try:
                 try:
@@ -1902,10 +1913,12 @@ def _register_session_endpoints(
                     # Deleted between the handshake above and the first body
                     # iteration. Without the notice a direct-mode client's
                     # EventSource reconnect would silently re-materialise an
-                    # empty session under the same id.
-                    yield session_deleted
-                    return
-                yield f"data: {json.dumps(catch_up)}\n\n"
+                    # empty session under the same id. The stream then stays
+                    # open, as after a mid-stream delete, so the browser does
+                    # not reconnect before the client has moved off the id.
+                    yield queued_session_deleted() or session_deleted
+                else:
+                    yield f"data: {json.dumps(catch_up)}\n\n"
                 while True:
                     if await request.is_disconnected():
                         break
