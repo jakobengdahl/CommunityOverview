@@ -1497,6 +1497,9 @@ class TestQueryAndDownloadHandling:
 
         asyncio.run(run())
 
+    # Only the 2.4 case exercises the deferred close: below 2.4 anyio waits for
+    # the reading thread before the response's finally runs, so [None] passes
+    # with or without it and guards against starlette/anyio regressions only.
     @pytest.mark.parametrize("spec_version", [None, "2.4"])
     def test_disconnect_never_closes_the_handle_during_an_active_read(
         self, storage, store, spec_version
@@ -1552,9 +1555,7 @@ class TestQueryAndDownloadHandling:
                 return {"type": "http.disconnect"}
 
             async def send(message):
-                if spec_version is not None and stream.reads >= 2:
-                    # ASGI spec 2.4+: a send to a gone client raises.
-                    raise OSError("client disconnected")
+                pass
 
             scope = {
                 "type": "http",
@@ -1595,6 +1596,33 @@ class TestQueryAndDownloadHandling:
             assert events == ["read returned", "close"]
 
         asyncio.run(run())
+
+
+class TestCloseAfterRead:
+    def test_a_read_after_close_returns_eof_without_touching_the_stream(self):
+        from backend.service.rest_api import _CloseAfterRead
+
+        class Stream:
+            def __init__(self):
+                self.reads = 0
+                self.closes = 0
+
+            def read(self, size=-1):
+                self.reads += 1
+                return b"data"
+
+            def close(self):
+                self.closes += 1
+
+        stream = Stream()
+        guarded = _CloseAfterRead(stream)
+        guarded.close()
+
+        # The body iterator may still ask for a chunk after the response's
+        # finally closed the source; it must see EOF, not read a closed file.
+        assert guarded.read(1024) == b""
+        assert stream.reads == 0
+        assert stream.closes == 1
 
 
 class TestStoreCallsRunOffTheEventLoop:
