@@ -20,7 +20,17 @@ Usage:
 import asyncio
 import json
 import logging
-from typing import TYPE_CHECKING, Annotated, List, Literal, Optional, Dict, Any, Union
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    BinaryIO,
+    List,
+    Literal,
+    Optional,
+    Dict,
+    Any,
+    Union,
+)
 from urllib.parse import quote
 from fastapi import (
     APIRouter,
@@ -34,8 +44,8 @@ from fastapi import (
 )
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import Response, StreamingResponse
-from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
+from starlette.types import Receive, Scope, Send
 from pydantic import BaseModel, Field, field_validator
 from pydantic import ValidationError as PydanticValidationError
 
@@ -2325,6 +2335,26 @@ def _attachment_download_headers(record: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
+class _AttachmentDownload(StreamingResponse):
+    """Stream an open attachment and close it however the response ends.
+
+    A ``background`` task cannot do the closing: under ASGI spec 2.4+ a client
+    disconnect raises out of the response before background tasks run, which
+    would leave the handle to be closed whenever garbage collection frees the
+    body iterator.
+    """
+
+    def __init__(self, stream: BinaryIO, **kwargs: Any) -> None:
+        super().__init__(copy_stream(stream), **kwargs)
+        self._stream = stream
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._stream.close()
+
+
 def _register_attachment_endpoints(router: APIRouter, service: GraphService) -> None:
     # The store reads files and takes OS locks, so its calls run off the event
     # loop. asyncio.to_thread copies the context, so the request authorization
@@ -2380,11 +2410,10 @@ def _register_attachment_endpoints(router: APIRouter, service: GraphService) -> 
         media_type = record["content_type"]
         if media_type in TEXT_TYPES:
             media_type = f"{media_type}; charset=utf-8"
-        return StreamingResponse(
-            copy_stream(stream),
+        return _AttachmentDownload(
+            stream,
             media_type=media_type,
             headers=_attachment_download_headers(record),
-            background=BackgroundTask(stream.close),
         )
 
     @router.delete("/nodes/{node_id}/attachments/{attachment_id}")

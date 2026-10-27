@@ -1460,8 +1460,10 @@ class TestQueryAndDownloadHandling:
             async def send(message):
                 if message["type"] == "http.response.start":
                     sent_start.set()
-                    # Stall the body so the disconnect arrives mid-stream.
-                    await asyncio.sleep(0.2)
+                    if spec_version is None:
+                        # Stall until the disconnect cancels this send, so it
+                        # always lands mid-stream.
+                        await asyncio.Event().wait()
                 elif spec_version is not None:
                     # ASGI spec 2.4+: a send to a gone client raises.
                     raise OSError("client disconnected")
@@ -1489,13 +1491,11 @@ class TestQueryAndDownloadHandling:
                 # Spec 2.4+ servers see this raised out of the app.
                 raised = True
             assert raised == (spec_version is not None)
-            # The handle must close while the loop runs, not at teardown.
-            for _ in range(10):
-                await asyncio.sleep(0)
+            # Closed by the time the response returns, not whenever garbage
+            # collection frees the body iterator.
             assert len(opened) == 1 and opened[0].closed
 
         asyncio.run(run())
-        assert len(opened) == 1 and opened[0].closed
 
 
 class TestStoreCallsRunOffTheEventLoop:
