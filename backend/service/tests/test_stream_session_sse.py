@@ -56,12 +56,15 @@ class _FakeRequest:
 
 
 async def _next_chunk(body):
-    try:
-        return await asyncio.wait_for(anext(body), _CHUNK_TIMEOUT)
-    except asyncio.TimeoutError:
-        raise AssertionError(
-            f"the stream yielded nothing within {_CHUNK_TIMEOUT}s"
-        ) from None
+    # Not wait_for: its cancel lands in the generator, which swallows it and
+    # ends, so a stuck stream would surface as StopAsyncIteration and read as
+    # a clean end of stream.
+    pending = asyncio.ensure_future(anext(body))
+    done, _ = await asyncio.wait({pending}, timeout=_CHUNK_TIMEOUT)
+    if not done:
+        pending.cancel()
+        raise AssertionError(f"the stream yielded nothing within {_CHUNK_TIMEOUT}s")
+    return pending.result()
 
 
 @pytest.fixture
