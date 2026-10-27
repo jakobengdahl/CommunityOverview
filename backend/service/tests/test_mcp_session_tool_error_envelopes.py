@@ -31,7 +31,9 @@ from backend.core.session_manager import (
     SessionManager,
     SessionNotFound,
 )
+from backend.core.session_annotations import project_annotation, project_note
 from backend.core.session_store import (
+    AnnotationFieldConflict,
     InMemorySessionPersistenceBackend,
     OpError,
     SessionStore,
@@ -314,6 +316,37 @@ def test_annotation_tool_maps_each_manager_failure_to_its_envelope(
     assert result == expected(ids)
     if failure not in ("op_error", "image_budget"):
         assert SENTINEL not in repr(result)
+
+
+@pytest.mark.parametrize(
+    "tool,target,key,project",
+    [
+        ("update_sticky_note", "note", "note", project_note),
+        ("update_annotation", "label", "annotation", project_annotation),
+    ],
+)
+def test_field_conflict_returns_the_server_copy_to_rebase_on(
+    seeded, monkeypatch, tool, target, key, project
+):
+    tools, manager, ids = seeded
+    server_copy = next(
+        a
+        for a in manager.get_session(ids["sid"]).state["annotations"]
+        if a["id"] == ids[target]
+    )
+    conflict = AnnotationFieldConflict(ids[target], {"geometry": 2}, server_copy)
+    monkeypatch.setattr(manager, "update_annotation", Mock(side_effect=conflict))
+
+    result = tools[tool](session_id=ids["sid"], **ANNOTATION_TOOLS[tool][1](ids))
+
+    assert result == {
+        "success": False,
+        "error": "field_conflict",
+        "message": str(conflict),
+        "conflicting_fields": {"geometry": 2},
+        "server_version": conflict.server_version,
+        key: project(server_copy),
+    }
 
 
 @pytest.mark.parametrize("tool", sorted(CREATING_TOOLS))
