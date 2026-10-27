@@ -5157,3 +5157,120 @@ class TestUndoLastAction:
         records = mgr.list_activity(s.id)
 
         assert [r["affected"]["id"] for r in records] == ["note-2", "note-1"]
+
+
+class TestActivityLogRollbackIsExact:
+    """A failed batch leaves the activity log, live and persisted, exactly as
+    it was — including when the failed batch already pruned it at its cap.
+    The rollback copies are shallow, so these also pin the invariants that
+    makes that safe (records are never shared with state or the snapshot)."""
+
+    @staticmethod
+    def _at_cap(cap):
+        backend = InMemorySessionPersistenceBackend()
+        store = SessionStore(backend, max_activity_records=cap)
+        mgr = SessionManager(store)
+        return backend, store, mgr
+
+    @staticmethod
+    def _move(x, node_id="a"):
+        return {"op": "node_moved", "node_id": node_id, "position": {"x": x, "y": 0}}
+
+    async def _fill(self, mgr, sid, count):
+        for i in range(count):
+            await mgr.apply_ops(sid, "c1", None, [self._move(i)])
+
+    async def test_a_mid_batch_op_error_restores_a_log_the_batch_pruned(self):
+        backend, store, mgr = self._at_cap(3)
+        s = mgr.create_session()
+        await self._fill(mgr, s.id, 3)
+        log_before = copy.deepcopy(s.activity_log)
+        assert len(log_before) == 3
+
+        # The first move appends a fourth record and prunes the oldest; the
+        # second fails validation after that has happened.
+        with pytest.raises(OpError):
+            await mgr.apply_ops(
+                s.id,
+                "c1",
+                None,
+                [self._move(99), {"op": "node_moved", "node_id": "a", "position": 1}],
+            )
+
+        assert s.activity_log == log_before
+        assert SessionStore(backend).get(s.id).activity_log == log_before
+        # The restored log is live, not a frozen copy: the next batch prunes it.
+        await mgr.apply_ops(s.id, "c1", None, [self._move(100)])
+        assert s.activity_log[:2] == log_before[1:]
+
+    async def test_a_persist_failure_restores_a_log_the_batch_pruned(self):
+        backend, store, mgr = self._at_cap(3)
+        s = mgr.create_session()
+        await self._fill(mgr, s.id, 3)
+        log_before = copy.deepcopy(s.activity_log)
+
+        def _boom(snapshot):
+            raise OSError("disk full")
+
+        store.persist_snapshot = _boom
+        with pytest.raises(OSError):
+            await mgr.apply_ops(s.id, "c1", None, [self._move(98), self._move(99)])
+
+        assert s.activity_log == log_before
+        assert SessionStore(backend).get(s.id).activity_log == log_before
+
+    async def test_apply_op_sync_restores_a_log_the_op_pruned(self):
+        _, store, mgr = self._at_cap(1)
+        s = mgr.create_session()
+        mgr._apply_op_sync(s, s.id, "mcp", {**self._move(1), "client_id": "mcp"})
+        log_before = copy.deepcopy(s.activity_log)
+
+        def boom(_session):
+            raise IOError("disk full")
+
+        store.persist = boom
+        with pytest.raises(IOError):
+            mgr._apply_op_sync(s, s.id, "mcp", {**self._move(2), "client_id": "mcp"})
+        assert s.activity_log == log_before
+
+    async def test_the_persisted_snapshot_shares_no_record_with_the_live_log(self):
+        """The worker serialises the snapshot while the loop may run other
+        writers; a later change to a live record (undo sets ``undone``) must
+        not reach a snapshot already handed off."""
+        _, store, mgr = self._at_cap(500)
+        s = mgr.create_session()
+        snapshots = []
+        real_persist = store.persist_snapshot
+
+        def _capture(snapshot):
+            snapshots.append(snapshot)
+            real_persist(snapshot)
+
+        store.persist_snapshot = _capture
+        await self._fill(mgr, s.id, 2)
+        snapshot = snapshots[-1]
+        assert snapshot == json.loads(json.dumps(s.to_dict()))
+
+        for record in s.activity_log:
+            record["undone"] = True
+        s.state["positions"]["a"]["x"] = -1.0
+        assert [r["undone"] for r in snapshot["activity_log"]] == [False, False]
+        assert snapshot["state"]["positions"]["a"]["x"] == 1.0
+
+    async def test_an_undo_replay_shares_no_object_with_its_record(self):
+        """State restored by undo is a copy of the record's inverse op, so a
+        later in-place state edit can never rewrite a logged record."""
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id, "c1", {"id": "note-1", "type": "note", "position": {"x": 1, "y": 2}}
+        )
+        mgr.delete_annotation(s.id, "c1", "note-1")
+        record = mgr.store.find_latest_undoable(s, "c1")
+        logged = record["inverse_op"]["annotation"]
+
+        mgr.undo_last_action(s.id, "c1")
+
+        restored = next(a for a in s.state["annotations"] if a["id"] == "note-1")
+        assert restored["position"] == logged["position"]
+        assert restored["position"] is not logged["position"]
