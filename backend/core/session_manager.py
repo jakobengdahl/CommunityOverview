@@ -381,6 +381,59 @@ def _detached_snapshot(session: Session) -> Dict[str, Any]:
     return snapshot
 
 
+def _restore_deleted_ids(session: Session, saved: List[str]) -> None:
+    """Put back the store's "recently deleted" ids after a rollback: a
+    delete appends to them, an undone delete removes from them, and neither
+    is part of the persisted document the other rollback copies cover."""
+    session._deleted_annotation_ids.clear()
+    session._deleted_annotation_ids.extend(saved)
+
+
+_ABSENT = object()
+
+
+def _document_bytes(snapshot: Dict[str, Any], session: Session) -> int:
+    """``len(json.dumps(snapshot))`` for a ``_detached_snapshot`` of ``session``,
+    taken with no await in between.
+
+    Re-encoding the whole activity log on every batch was most of apply_ops'
+    event-loop time at the default 500-record cap. A record is never edited
+    after it is built except for its top-level ``undone``/``undone_at`` flags
+    (the same invariant ``_detached_snapshot`` relies on), so each record's
+    encoded length is cached against the record object and those two values.
+    The sum is exact, not an estimate: with the default separators a
+    non-empty list encodes as ``[`` + items joined by ``", "`` + ``]``.
+    """
+    log = session.activity_log
+    total = len(json.dumps({**snapshot, "activity_log": []}))
+    if not log:
+        session._activity_record_bytes = {}
+        return total
+    cached = session._activity_record_bytes
+    fresh: Dict[int, Any] = {}
+    total += 2 * (len(log) - 1)
+    for record in log:
+        # A missing key and None, or False and 0, encode differently: hence
+        # the sentinel and the identity check (undone_at is a str or None).
+        undone = record.get("undone", _ABSENT)
+        undone_at = record.get("undone_at", _ABSENT)
+        hit = cached.get(id(record))
+        if (
+            hit is not None
+            and hit[0] is record
+            and hit[1] is undone
+            and hit[2] == undone_at
+        ):
+            size = hit[3]
+        else:
+            size = len(json.dumps(record))
+        # Holding the record keeps its id from being reused while cached.
+        fresh[id(record)] = (record, undone, undone_at, size)
+        total += size
+    session._activity_record_bytes = fresh
+    return total
+
+
 def _claimed_annotation_target(op: Dict[str, Any], session: Session) -> Optional[str]:
     """Return the id of the *existing* annotation ``op`` would mutate, if any.
 
@@ -1270,6 +1323,7 @@ class SessionManager:
             saved_name = session.name
             saved_updated_at = session.updated_at
             saved_activity_log = list(session.activity_log)
+            saved_deleted_ids = list(session._deleted_annotation_ids)
             ring = self.store.ring(session_id)
             saved_ring = list(ring) if ring is not None else None
 
@@ -1358,7 +1412,7 @@ class SessionManager:
                             f"bytes, over the {max_session_image_bytes}-byte "
                             "session limit"
                         )
-                    total_doc_bytes = len(json.dumps(snapshot))
+                    total_doc_bytes = _document_bytes(snapshot, session)
                     if total_doc_bytes > max_session_document_bytes:
                         raise ImageBudgetExceeded(
                             f"this batch would bring the session document to "
@@ -1372,6 +1426,7 @@ class SessionManager:
                 session.name = saved_name
                 session.updated_at = saved_updated_at
                 session.activity_log = saved_activity_log
+                _restore_deleted_ids(session, saved_deleted_ids)
                 self.store.restore_ring(session_id, saved_ring)
                 raise
 
@@ -2193,6 +2248,7 @@ class SessionManager:
             if holder is not None and holder != client_id:
                 raise LeaseConflict(conflict_id, holder)
 
+        saved_deleted_ids = list(session._deleted_annotation_ids)
         if inverse_op.get("op") == "annotation_created":
             ann_id = (inverse_op.get("annotation") or {}).get("id")
             if isinstance(ann_id, str):
@@ -2208,23 +2264,39 @@ class SessionManager:
         # self-echo.
         inverse_op["client_id"] = _UNDO_REPLAY_CLIENT_ID
 
-        applied = self._apply_op_sync(
-            session,
-            session_id,
-            _UNDO_REPLAY_CLIENT_ID,
-            inverse_op,
-            record_activity=False,
-            trusted_replay=True,
-        )
+        # Marked before the replay so its one persist writes the reverted state
+        # and the flag together; a second write afterwards could fail and leave
+        # the record undone in memory but not on disk. ``_apply_op_sync`` rolls
+        # back the state on failure; the record is not part of its (shallow)
+        # log copy, so its flags are restored here — but only while seq shows
+        # nothing was committed: a broadcast that fails after the persist
+        # landed must leave memory matching what is now on disk.
+        saved_flags = {k: record[k] for k in ("undone", "undone_at") if k in record}
+        seq_before = session.seq
+        record["undone"] = True
+        record["undone_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        applied = None
+        try:
+            applied = self._apply_op_sync(
+                session,
+                session_id,
+                _UNDO_REPLAY_CLIENT_ID,
+                inverse_op,
+                record_activity=False,
+                trusted_replay=True,
+            )
+        finally:
+            if session.seq == seq_before:
+                record.pop("undone", None)
+                record.pop("undone_at", None)
+                record.update(saved_flags)
+                _restore_deleted_ids(session, saved_deleted_ids)
         if applied is None:
             # The conflict check above passed but the replay still turned out
             # to be a no-op (e.g. the store dropped it as an update on a
             # since-deleted annotation) — surface it the same way any other
             # unsafe-to-undo state does, rather than marking the record undone.
             raise UndoConflict(record["id"], "action could not be reverted")
-        record["undone"] = True
-        record["undone_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        self.store.persist(session)
 
         return {
             "undone_activity_id": record["id"],
@@ -2294,6 +2366,7 @@ class SessionManager:
         saved_updated_at = session.updated_at
         # Shallow, as in apply_ops: an op only appends to and prunes the log.
         saved_activity_log = list(session.activity_log)
+        saved_deleted_ids = list(session._deleted_annotation_ids)
         ring = self.store.ring(session_id)
         saved_ring = list(ring) if ring is not None else None
         try:
@@ -2311,6 +2384,7 @@ class SessionManager:
             session.name = saved_name
             session.updated_at = saved_updated_at
             session.activity_log = saved_activity_log
+            _restore_deleted_ids(session, saved_deleted_ids)
             self.store.restore_ring(session_id, saved_ring)
             raise
 
