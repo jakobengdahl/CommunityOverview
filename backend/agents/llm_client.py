@@ -19,6 +19,7 @@ from backend.llm.llm_providers import (
     LLMResponse,
     ClaudeProvider,
     OpenAIProvider,
+    tool_input_type_error,
 )
 
 logger = logging.getLogger(__name__)
@@ -221,6 +222,17 @@ class LLMClient:
             # Execute tool calls and build response
             tool_results = []
             for tc in turn.tool_calls:
+                input_error = tool_input_type_error(tc.name, tc.input)
+                if input_error is not None:
+                    tool_results.append(
+                        {
+                            "tool_use_id": tc.id,
+                            "name": tc.name,
+                            "result": {"error": input_error},
+                            "is_error": True,
+                        }
+                    )
+                    continue
                 try:
                     result = tool_executor(tc.name, tc.input)
                     tool_results.append(

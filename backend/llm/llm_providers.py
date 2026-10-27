@@ -266,7 +266,8 @@ class OpenAIProvider(LLMProvider):
     def _parse_tool_arguments(arguments: Optional[str]) -> Any:
         # Some OpenAI-compatible servers send "" or "null" for no-argument
         # tools, and dispatch reads the input as a dict, so those become {}.
-        # Any other JSON is returned as parsed; malformed JSON still raises.
+        # Any other JSON is returned as parsed (dispatch reports a non-object as
+        # a tool error); malformed JSON still raises.
         if arguments is None or not arguments.strip():
             return {}
         parsed = json.loads(arguments)
@@ -281,6 +282,33 @@ class OpenAIProvider(LLMProvider):
             "content_filter": "end_turn",
         }
         return mapping.get(finish_reason, "end_turn")
+
+
+_JSON_TYPE_NAMES = {
+    list: "array",
+    str: "string",
+    bool: "boolean",
+    int: "number",
+    float: "number",
+    type(None): "null",
+}
+
+
+def tool_input_type_error(tool_name: Optional[str], tool_input: Any) -> Optional[str]:
+    """Return an error message when a tool call's input is not a JSON object.
+
+    A provider can hand back arguments that are valid JSON but not an object
+    ("[]", "5", "false"). Every dispatcher checks this before running a tool so
+    that call fails on its own with a clear message instead of crashing the turn
+    or running with coerced arguments; returns None for a dict input.
+    """
+    if isinstance(tool_input, dict):
+        return None
+    got = _JSON_TYPE_NAMES.get(type(tool_input), type(tool_input).__name__)
+    return (
+        f"Tool '{tool_name}' was not run: its arguments must be a JSON object, "
+        f"got {got}."
+    )
 
 
 def get_llm_availability() -> Dict[str, Any]:

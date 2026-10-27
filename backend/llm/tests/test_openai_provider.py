@@ -549,3 +549,22 @@ def test_malformed_tool_call_arguments_still_raise(provider):
     )
     with pytest.raises(json.JSONDecodeError):
         provider.create_completion([{"role": "user", "content": "q"}], "", TOOLS)
+
+
+def test_raw_control_character_in_tool_call_arguments_still_raises(provider):
+    # A literal newline inside a JSON string is invalid JSON; strict parsing
+    # must reject it rather than hand dispatch a value no conforming server sends.
+    provider.client.chat.completions.create.return_value = _completion(
+        None,
+        [
+            SimpleNamespace(
+                id="call_1",
+                function=SimpleNamespace(
+                    name="search_graph", arguments='{"query": "a\nb"}'
+                ),
+            )
+        ],
+        finish_reason="tool_calls",
+    )
+    with pytest.raises(json.JSONDecodeError, match="Invalid control character"):
+        provider.create_completion([{"role": "user", "content": "q"}], "", TOOLS)
