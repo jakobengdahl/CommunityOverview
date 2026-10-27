@@ -108,6 +108,26 @@ describe('CreateAgentDialog', () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it('titles the dialog for creating, and for editing when given an agent', async () => {
+    const { unmount } = render(<CreateAgentDialog onClose={vi.fn()} onSave={vi.fn()} />);
+    await screen.findByRole('checkbox', { name: /GRAPH/ });
+    expect(screen.getByRole('heading', { level: 2 })).toHaveTextContent(d.title);
+    unmount();
+
+    render(
+      <CreateAgentDialog
+        onClose={vi.fn()}
+        onSave={vi.fn()}
+        initialData={{
+          agent: { id: 'a1', name: 'Old', aliases: [], metadata: { subscription_id: 's1' } },
+          subscription: { id: 's1', metadata: { filters: {}, delivery: {} } },
+        }}
+      />
+    );
+    await screen.findByRole('checkbox', { name: /GRAPH/ });
+    expect(screen.getByRole('heading', { level: 2 })).toHaveTextContent(d.title_edit);
+  });
+
   it('says no integrations are configured and saves an agent with none', async () => {
     global.fetch.mockResolvedValue({ ok: true, json: async () => [] });
     const onSave = vi.fn();
