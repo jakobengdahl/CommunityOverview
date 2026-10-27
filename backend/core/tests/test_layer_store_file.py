@@ -38,6 +38,19 @@ class TestFileLayerStoreContract(LayerStoreContract, PinnedClockRetentionContrac
         path = tmp_path / "graph.json"
         return lambda: FileGraphPersistenceBackend(path, staged_sessions=True)
 
+    # LS05
+    def test_every_expectation_is_verified_not_only_the_first(self, seeded, factory):
+        seeded.stage(A, [entry("node", "a", session_seq=1)])
+        before = factory().load_layer(A)
+        with pytest.raises(ls.LayerRaced) as raised:
+            seeded.stage(
+                A,
+                [entry("node", "a", session_seq=9)],
+                expected={("node", "a"): 1, ("node", "b"): 1},
+            )
+        assert raised.value.key == ("node", "b")
+        assert factory().load_layer(A) == before
+
 
 class Crash(BaseException):
     """The process dying: not an Exception, so no handler in the backend runs."""
@@ -1288,29 +1301,6 @@ def test_an_unreadable_retirement_time_stops_the_load(staged, path, stored):
     staged.layers_path.write_text(json.dumps(layers))
     with pytest.raises(GraphJournalError):
         reopen(path).staged_status(A)
-
-
-# ==== Every staged expectation is verified ===================================
-
-
-class TestFile(LayerStoreContract):
-    @pytest.fixture
-    def factory(self, tmp_path):
-        path = tmp_path / "graph.json"
-        return lambda: FileGraphPersistenceBackend(path, staged_sessions=True)
-
-    # LS05
-    def test_every_expectation_is_verified_not_only_the_first(self, seeded, factory):
-        seeded.stage(A, [entry("node", "a", session_seq=1)])
-        before = factory().load_layer(A)
-        with pytest.raises(ls.LayerRaced) as raised:
-            seeded.stage(
-                A,
-                [entry("node", "a", session_seq=9)],
-                expected={("node", "a"): 1, ("node", "b"): 1},
-            )
-        assert raised.value.key == ("node", "b")
-        assert factory().load_layer(A) == before
 
 
 # ==== Deep copies ============================================================
