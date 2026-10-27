@@ -22,6 +22,7 @@ diff (§10) belong to the slices that stage and merge.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import (
@@ -45,6 +46,8 @@ from .storage_backends import (
     EntityOperation,
     EntityRevisionConflict,
 )
+
+logger = logging.getLogger(__name__)
 
 STATUS_ACTIVE = "active"
 STATUS_RETIRED = "retired"
@@ -468,6 +471,19 @@ def merge_records_to_purge(
         if len(victims) == limit:
             break
     return victims
+
+
+def log_purged_merge_records(purged: Sequence[Tuple[str, str]]) -> None:
+    """Log each purged (merge id, session id) at INFO, so an operator can
+    tell a merge id purged by retention from one that never existed. A merge
+    id is client text, so it is logged JSON-encoded (ASCII, every quote and
+    control character escaped): no id can forge a line or another pair."""
+    if purged:
+        logger.info(
+            "merge-record retention purged %d records: %s",
+            len(purged),
+            ", ".join(f"{json.dumps(m)} (session {s})" for m, s in purged),
+        )
 
 
 def check_merge_id(merge_id: Any) -> str:
