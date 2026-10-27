@@ -263,12 +263,14 @@ class OpenAIProvider(LLMProvider):
         return openai_messages
 
     @staticmethod
-    def _parse_tool_arguments(arguments: Optional[str]) -> Dict:
-        # Some OpenAI-compatible servers send "" for no-argument tools;
-        # malformed JSON still raises.
+    def _parse_tool_arguments(arguments: Optional[str]) -> Any:
+        # Some OpenAI-compatible servers send "" or "null" for no-argument
+        # tools, and dispatch reads the input as a dict, so those become {}.
+        # Any other JSON is returned as parsed; malformed JSON still raises.
         if arguments is None or not arguments.strip():
             return {}
-        return json.loads(arguments)
+        parsed = json.loads(arguments)
+        return {} if parsed is None else parsed
 
     def _map_finish_reason(self, finish_reason: str) -> str:
         """Map OpenAI finish_reason to Claude stop_reason"""
