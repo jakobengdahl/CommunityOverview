@@ -986,8 +986,8 @@ class SessionManager:
     def check_layer_op(self, session_id: str) -> None:
         """Refuse a discard or merge up front, as a staging op is refused:
         ``SessionNotFound`` without the session's document, ``LayoutBusy``
-        while an ``apply_ops`` batch or ``delete_session`` holds its lock - so
-        the op that follows the layer change can always be applied."""
+        while an ``apply_ops`` batch holds its lock - so the op that follows
+        the layer change can always be applied."""
         if not is_valid_session_id(session_id):
             raise SessionNotFound()
         if self.store.get(session_id) is None:
@@ -1003,8 +1003,7 @@ class SessionManager:
         only. The layer change is the commit point; this follows it, and a
         failure here is logged, never undoes it. Records a session activity
         entry with no inverse. Returns the applied op, or None when there was
-        no document left to apply it to or the session lock was held (an
-        ``apply_ops`` batch or ``delete_session``)."""
+        no document left to apply it to or the session lock was held."""
         session = (
             self.store.get(session_id) if is_valid_session_id(session_id) else None
         )
@@ -1015,10 +1014,10 @@ class SessionManager:
             )
             return None
         # Callers run check_layer_op first with no await in between, so the
-        # lock is free here; one that awaited in between could otherwise apply
-        # and persist this op inside an apply_ops batch, or persist a session
-        # that delete_session is removing. Withheld rather than raised: the
-        # layer change has already committed.
+        # lock is free here. One that awaited in between could find an
+        # apply_ops batch holding it across its persist (the one holder that
+        # awaits under it) and interleave this op with that write. Withheld
+        # rather than raised: the layer change has already committed.
         if self._lock(session_id).locked():
             logger.warning(
                 "layer of session %s changed while its lock was held; no op fans out",

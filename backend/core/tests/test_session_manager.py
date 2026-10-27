@@ -5586,6 +5586,23 @@ class TestAnnounceLayerChange:
         assert persisted == [1]
         assert [event["seq"] for _, event in published] == [1]
 
+    async def test_a_failed_persist_is_logged_and_the_op_still_fans_out(self, caplog):
+        mgr = _manager()
+        s = mgr.create_session()
+        published = _spy_publish(mgr)
+
+        def broken_persist(session):
+            raise OSError("disk full")
+
+        mgr.store.persist = broken_persist
+
+        with caplog.at_level("ERROR"):
+            applied = mgr.announce_layer_change(s.id, dict(self._OP))
+
+        assert applied["seq"] == s.seq == 1
+        assert [event["seq"] for _, event in published] == [1]
+        assert "persisting its seq failed" in caplog.text
+
 
 class TestSessionActivityByteCache:
     """The cache is derived state: it must not make two otherwise equal
