@@ -68,6 +68,12 @@ effort; mutation reviewer and classification/triage `claude-sonnet-5-5` or
 
 - Fix a round's accepted `production-defect` findings as one batch, validate
   locally once, push once, then run the next round.
+- Test fixes follow `CLAUDE.md` Testing: put review residue in the module's
+  existing test file, never a round-named file (`*_r4.py`); don't add a test file
+  under ~100 lines when a sibling for that module exists. Docstrings state the
+  invariant in at most a few lines; history and rationale go in the PR body or
+  planning graph. Trim old long docstrings only in files touched anyway; no
+  bulk rewrite.
 - **The loop ends at the first round with no `production-defect`.**
 - Residue: every surviving `test-durability` and `unfalsifiable` finding goes
   into **one** `small-fix`-tagged Task node for the whole residue, with a
