@@ -76,18 +76,18 @@ def test_the_runner_purges_before_its_first_wait():
 
 def test_the_runner_waits_its_interval_between_purges():
     runs = []
-    again = threading.Event()
+    first, again = threading.Event(), threading.Event()
 
     class Store:
         def purge_merge_records(self, retention, *, limit, now=None):
             runs.append(limit)
-            if len(runs) > 1:
-                again.set()
+            (again if first.is_set() else first).set()
             return 0
 
     runner = MergeRecordRetention(Store(), RETENTION, interval_seconds=3600)
     runner.start()
     try:
+        assert first.wait(5)
         # A loop that never waits purges again at once; caught here in half a
         # second rather than by the suite's timeout.
         assert not again.wait(0.5), "the runner purged again without waiting"
