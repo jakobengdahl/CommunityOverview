@@ -87,3 +87,72 @@ def test_non_object_input_is_an_error_and_never_becomes_a_proposal(
         f'a JSON object, got {json_type}."}}'
     )
     assert (good["tool_use_id"], good["is_error"]) == ("t1", False)
+
+
+def test_tool_result_messages_carry_exactly_id_content_and_error_flag():
+    # Pins the full provider-facing messages for every tool-result branch
+    # (bad input, success, executor exception) so the internal bookkeeping
+    # can change without altering what the provider receives.
+    def executor(name, args):
+        if name == "graph.boom":
+            raise RuntimeError("kaput")
+        return {"ok": True}
+
+    provider = ScriptedProvider(
+        [
+            ("graph.add_nodes", []),
+            ("graph.search_graph", {"query": "x"}),
+            ("graph.boom", {}),
+        ]
+    )
+
+    LLMClient(llm_provider=provider).execute_with_tools(
+        system_prompt="", user_message="event", tools=[], tool_executor=executor
+    )
+
+    assert provider.received_messages[1][1:] == [
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "t0",
+                    "name": "graph.add_nodes",
+                    "input": [],
+                },
+                {
+                    "type": "tool_use",
+                    "id": "t1",
+                    "name": "graph.search_graph",
+                    "input": {"query": "x"},
+                },
+                {"type": "tool_use", "id": "t2", "name": "graph.boom", "input": {}},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "t0",
+                    "content": (
+                        '{"error": "Tool \'graph.add_nodes\' was not run: its '
+                        'arguments must be a JSON object, got array."}'
+                    ),
+                    "is_error": True,
+                },
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "t1",
+                    "content": '{"ok": true}',
+                    "is_error": False,
+                },
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "t2",
+                    "content": '{"error": "kaput"}',
+                    "is_error": True,
+                },
+            ],
+        },
+    ]
