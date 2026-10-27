@@ -25,7 +25,7 @@ vi.mock('reactflow', () => ({
 }));
 
 // The same unsafe set the backend gate is pinned against
-// (backend/core/tests/test_session_annotations_reference.py), so the two sides
+// (backend/core/tests/test_session_annotations_guards.py), so the two sides
 // of the stack cannot drift into disagreeing about what a link may be.
 const UNSAFE_TARGETS = [
   'javascript:alert(1)',
@@ -164,7 +164,7 @@ describe('reference URL gate — the whitespace enumeration itself', () => {
 // The fixture's per-character cases enumerate the class, so they never reach
 // these four, and round 5's mutation pass narrowed the backend's control check
 // to `< 0x1C` with the whole backend green. This is the canvas half of the pin
-// on that delegation; test_session_annotations_reference.py carries the other.
+// on that delegation; test_session_annotations_guards.py carries the other.
 const C0_SEPARATORS = ['001C', '001D', '001E', '001F'];
 
 describe('reference URL gate — the C0 separators are left to the control check', () => {
@@ -183,7 +183,7 @@ describe('reference URL gate — the C0 separators are left to the control check
 });
 
 // The other half of the shared cross-language fixture that
-// backend/core/tests/test_session_annotations_reference.py drives. The backend
+// backend/core/tests/test_session_annotations_guards.py drives. The backend
 // gate and this one are separate implementations by design — the backend
 // decides what may be STORED, this decides what may be DRAWN AS CLICKABLE, and
 // this side must not trust what it is handed. Separate implementations drift,

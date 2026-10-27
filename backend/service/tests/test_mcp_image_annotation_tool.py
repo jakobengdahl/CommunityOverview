@@ -690,7 +690,7 @@ class TestImageIngestIsTheOnlyWayIn:
 
 class TestLegacyRemoteUrlAnnotationsThroughTheTools:
     """The store-level half of this is in
-    ``backend/core/tests/test_session_annotations_image_guard.py``'s
+    ``backend/core/tests/test_session_annotations_guards.py``'s
     ``TestLegacyRemoteUrlAnnotationsStayUsable``; these pin what the generic
     *tools* do with an annotation whose stored URL predates the ingest rule.
 
