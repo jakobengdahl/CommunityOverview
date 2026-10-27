@@ -25,6 +25,7 @@ from typing import (
     TYPE_CHECKING,
     Annotated,
     BinaryIO,
+    Callable,
     List,
     Literal,
     Optional,
@@ -1900,6 +1901,17 @@ def _register_session_endpoints(
             raise HTTPException(status_code=404, detail="session not found")
 
         subscription, _member = session_manager.connect(session_id, client_id, name)
+        disconnected = False
+
+        def release() -> None:
+            # Runs from the generator's finally and from the response's, so
+            # it must count once: a second presence leave would drop a sibling
+            # connection of the same client_id.
+            nonlocal disconnected
+            if disconnected:
+                return
+            disconnected = True
+            session_manager.disconnect(session_id, client_id, subscription)
 
         session_deleted = (
             f"data: {json.dumps({'type': 'session_deleted', 'deleted_by': None})}\n\n"
@@ -1943,23 +1955,24 @@ def _register_session_endpoints(
                             event, session_manager, session_id
                         )
                     except SessionNotFound:
-                        # The session was deleted in the narrow window between
-                        # this subscriber's queue overflowing (which may have
-                        # drained an already-queued session_deleted event
-                        # too, per session_hub.py's drain-on-overflow) and the
-                        # resync translation running catch_up against a store
-                        # entry that no longer exists. Give the client the
-                        # notice it would otherwise have missed.
-                        yield session_deleted
-                        break
+                        # The session was deleted in the window between this
+                        # subscriber's queue overflowing and the resync
+                        # translation running catch_up. The overflow drain may
+                        # have discarded delete_session's notice, or it may
+                        # still be queued behind the resync sentinel. As on
+                        # the first catch_up, the stream stays open so the
+                        # browser does not reconnect into an empty session.
+                        yield queued_session_deleted() or session_deleted
+                        continue
                     yield f"data: {json.dumps(event)}\n\n"
             except asyncio.CancelledError:
                 pass
             finally:
-                session_manager.disconnect(session_id, client_id, subscription)
+                release()
 
-        return StreamingResponse(
+        return _SessionStream(
             event_generator(),
+            release,
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -1967,6 +1980,27 @@ def _register_session_endpoints(
                 "X-Accel-Buffering": "no",
             },
         )
+
+
+class _SessionStream(StreamingResponse):
+    """Release a session stream's subscription however the response ends.
+
+    The generator's ``finally`` only runs once the body has been iterated: if
+    sending the response start fails or is cancelled first, the subscription
+    and presence entry taken before the response was built would leak.
+    """
+
+    def __init__(
+        self, content: Any, release: Callable[[], None], **kwargs: Any
+    ) -> None:
+        super().__init__(content, **kwargs)
+        self._release = release
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._release()
 
 
 def _register_export_endpoints(router: APIRouter, service: GraphService) -> None:

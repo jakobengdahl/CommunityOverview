@@ -14,6 +14,7 @@ import os
 from types import SimpleNamespace
 
 import pytest
+from starlette.requests import ClientDisconnect
 
 from backend.core import GraphStorage
 from backend.core.session_manager import SessionManager
@@ -66,11 +67,24 @@ def _assert_disconnected(manager, session_id):
     assert manager.roster(session_id) == []
 
 
+# More queue waits than any test here drives. A generator that times out
+# without yielding (a dropped ping) never suspends, so without this bound it
+# would spin until the pytest timeout instead of failing at once.
+_MAX_QUEUE_WAITS = 10
+
+
 def _time_out_queue_waits(monkeypatch):
     """Make every queue wait in the generator time out at once."""
+    waits = 0
 
     async def _timeout(awaitable, timeout):
+        nonlocal waits
         awaitable.close()
+        waits += 1
+        if waits > _MAX_QUEUE_WAITS:
+            raise AssertionError(
+                f"{waits} queue waits timed out without the stream yielding"
+            )
         raise asyncio.TimeoutError
 
     # Swap only the module's view of asyncio so the real wait_for elsewhere
@@ -107,22 +121,60 @@ async def test_queue_wait_timeout_emits_ping_comment_and_keeps_streaming(
 
 
 @pytest.mark.asyncio
-async def test_resync_after_session_deleted_becomes_session_deleted_and_ends(
-    stream_env,
+async def test_resync_after_unannounced_delete_synthesises_notice_and_stays_open(
+    stream_env, monkeypatch
 ):
     manager, endpoint = stream_env
-    session_id, body = await _open_stream(endpoint, manager, _FakeRequest())
+    request = _FakeRequest()
+    session_id, body = await _open_stream(endpoint, manager, request)
 
     await anext(body)  # catch-up snapshot
     await anext(body)  # own presence_joined echo
 
-    # The overflow sentinel is queued, then the session vanishes before the
-    # generator translates it into a fresh catch_up snapshot.
+    # The overflow sentinel is queued, then the session vanishes (with any
+    # notice drained by the overflow) before the generator translates it into
+    # a fresh catch_up snapshot.
     manager.bus.publish(session_id, {"type": "resync"})
     assert manager.store.delete(session_id)
 
     chunk = await anext(body)
     assert chunk == 'data: {"type": "session_deleted", "deleted_by": null}\n\n'
+    # Like the first catch_up path, the stream stays open until the client
+    # leaves, so the browser does not reconnect into an empty session.
+    _time_out_queue_waits(monkeypatch)
+    assert await anext(body) == ": ping\n\n"
+    request.disconnected = True
+    with pytest.raises(StopAsyncIteration):
+        await anext(body)
+    _assert_disconnected(manager, session_id)
+
+
+@pytest.mark.asyncio
+async def test_resync_after_delete_forwards_the_notice_queued_behind_it(
+    stream_env, monkeypatch
+):
+    manager, endpoint = stream_env
+    request = _FakeRequest()
+    session_id, body = await _open_stream(endpoint, manager, request)
+
+    await anext(body)  # catch-up snapshot
+    await anext(body)  # own presence_joined echo
+
+    # The overflow sentinel is queued, then delete_session's own notice lands
+    # behind it; the resync translation finds the session gone.
+    manager.bus.publish(session_id, {"type": "resync"})
+    assert await manager.delete_session(session_id, deleted_by="bob")
+
+    chunk = await anext(body)
+    assert chunk.startswith("data: ")
+    assert json.loads(chunk[len("data: ") :]) == {
+        "type": "session_deleted",
+        "deleted_by": "bob",
+        "write_mode": "direct",
+    }
+    _time_out_queue_waits(monkeypatch)
+    assert await anext(body) == ": ping\n\n"
+    request.disconnected = True
     with pytest.raises(StopAsyncIteration):
         await anext(body)
     _assert_disconnected(manager, session_id)
@@ -228,4 +280,83 @@ async def test_unexpected_error_propagates_and_still_unsubscribes(
 
     with pytest.raises(RuntimeError, match="translation failed"):
         await anext(body)
+    _assert_disconnected(manager, session_id)
+
+
+@pytest.mark.asyncio
+# How the failure surfaces depends on starlette's per-spec path; the release
+# is the invariant. Below ASGI 2.4 the send runs in a task group, which
+# re-raises an OSError as is and absorbs the cancellation of its own task.
+@pytest.mark.parametrize(
+    ("spec_version", "failure", "raised"),
+    [
+        ("2.4", OSError, ClientDisconnect),
+        ("2.4", asyncio.CancelledError, asyncio.CancelledError),
+        ("2.0", OSError, OSError),
+        ("2.0", asyncio.CancelledError, None),
+    ],
+)
+async def test_failed_response_start_unsubscribes_without_iterating_the_body(
+    stream_env, failure, raised, spec_version
+):
+    manager, endpoint = stream_env
+    session = manager.create_session()
+    response = await endpoint(
+        session_id=session.id,
+        request=_FakeRequest(),
+        client_id="c1",
+        name="Alice",
+        since_seq=None,
+    )
+    assert manager.bus.subscriber_count(session.id) == 1
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        # The client is gone before the status line is written.
+        assert message["type"] == "http.response.start"
+        raise failure
+
+    scope = {"type": "http", "asgi": {"spec_version": spec_version}}
+    if raised is None:
+        await response(scope, receive, send)
+    else:
+        with pytest.raises(raised):
+            await response(scope, receive, send)
+    _assert_disconnected(manager, session.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spec_version", ["2.0", "2.4"])
+async def test_completed_response_releases_once_and_keeps_sibling_presence(
+    stream_env, spec_version
+):
+    manager, endpoint = stream_env
+    request = _FakeRequest()
+    session_id, sibling = await _open_stream(endpoint, manager, _FakeRequest())
+    await anext(sibling)  # the sibling connection's generator is running
+    response = await endpoint(
+        session_id=session_id,
+        request=request,
+        client_id="c1",
+        name="Alice",
+        since_seq=None,
+    )
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        # The client leaves after the first chunk, so the generator's finally
+        # and the response's both run.
+        if message["type"] == "http.response.body":
+            request.disconnected = True
+
+    scope = {"type": "http", "asgi": {"spec_version": spec_version}}
+    await response(scope, receive, send)
+
+    assert manager.bus.subscriber_count(session_id) == 1
+    assert [m["client_id"] for m in manager.roster(session_id)] == ["c1"]
+    await sibling.aclose()
     _assert_disconnected(manager, session_id)
