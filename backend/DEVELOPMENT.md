@@ -451,17 +451,18 @@ which coverage cannot reach without loosening the isolation they exist for:
 - **`backend/core/attachment_extract.py`** — the extraction worker starts as
   `python -I` with an empty environment, so coverage's configuration never
   reaches it, and it sets `RLIMIT_FSIZE` to zero, so it could not write a data
-  file anyway. The format extractors (`_extract_*` and their helpers),
-  `_worker_main` and `_apply_resource_limits` run only there and report as
-  missed even when tests exercise them through `extract()`.
+  file anyway. `_worker_main` and `_apply_resource_limits` run only there.
+  The format extractors (`_extract_*` and their helpers) run there whenever a
+  test goes through `extract()`, so they count only where a test calls
+  `_extract_in_process` directly (today part of the DOCX path).
   `_exchange_threads` is the non-POSIX path and does not run on Linux at all.
 - **`backend/functions/sandbox.py`** — the supervisor starts as `python -I -S`,
   so no `.pth` hook runs and coverage is not importable, and its forked child
   then applies Landlock and seccomp and replaces itself with `execve`.
   `supervise`, `probe`, `_child`, `_reap_all` and `main` run only there.
 
-Read those two modules' figures as covering the parent-side code only, and
-judge the child code by its tests.
+Read those two modules' figures as covering the code that runs in the test
+process, and judge the child code by its tests.
 Each JavaScript workspace (`packages/ui-graph-canvas`, `frontend/web`,
 `frontend/widget`, `frontend/xr`) has `npm run test:coverage`, which runs
 vitest with the v8 provider and writes a report to that workspace's
