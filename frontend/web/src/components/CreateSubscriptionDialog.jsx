@@ -123,7 +123,9 @@ export default function CreateSubscriptionDialog({ onClose, onSave, initialData 
         id: initialData.id,
         updates: {
           name: name.trim(),
-          description: description.trim() || t('subscription_dialog.webhook_description', { name }),
+          description:
+            description.trim() ||
+            t('subscription_dialog.webhook_description', { name: name.trim() }),
           summary: t('subscription_dialog.webhook_summary', { events: activeOps }),
           aliases: aliasList,
           metadata,
@@ -134,7 +136,8 @@ export default function CreateSubscriptionDialog({ onClose, onSave, initialData 
         id: crypto.randomUUID(),
         name: name.trim(),
         type: 'EventSubscription',
-        description: description.trim() || t('subscription_dialog.webhook_description', { name }),
+        description:
+          description.trim() || t('subscription_dialog.webhook_description', { name: name.trim() }),
         summary: t('subscription_dialog.webhook_summary', { events: activeOps }),
         aliases: aliasList,
         metadata,
