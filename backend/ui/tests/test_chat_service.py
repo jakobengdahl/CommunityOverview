@@ -1281,6 +1281,34 @@ class TestToolAllowlist:
         for advertised in mock_llm.received_tools:
             assert {t["name"] for t in advertised} == {"search_graph"}
 
+    def test_allowlist_refusal_wins_over_non_object_input(self, chat_service):
+        """A disallowed tool with non-object arguments is refused by the allowlist,
+        not reported as a malformed call: the allowlist gate runs first, so the
+        LLM is never told how to fix the arguments of a tool it may not use."""
+        service, mock_llm = chat_service
+        akc_node = _make_akc_node(
+            "coll", ACTOR_ONLY_PERMS, tool_allowlist=["search_graph"]
+        )
+        mock_llm.mock_tool_calls = [{"name": "add_nodes", "input": []}]
+
+        with patch.object(
+            service._graph_service,
+            "search_graph",
+            return_value={"nodes": [akc_node], "edges": [], "total": 1},
+        ):
+            service.process_message(
+                messages=[{"role": "user", "content": "go"}],
+                collection_short_name="coll",
+            )
+
+        (tool_result,) = _tool_result_payloads(mock_llm)
+        assert tool_result == {
+            "error": (
+                "Tool 'add_nodes' is not in this collection's tool allowlist "
+                "and was blocked."
+            )
+        }
+
     def test_allowlist_ignored_outside_collection_mode(self, chat_service):
         """Without a collection_short_name the assistant is unrestricted (all tools)."""
         service, mock_llm = chat_service
