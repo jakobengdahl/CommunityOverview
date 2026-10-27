@@ -41,6 +41,8 @@ from backend.core.session_manager import (
     _DEFAULT_IMAGE_BUCKET_REFILL_PER_SEC,
     _TokenBucket,
     _UNDO_REPLAY_CLIENT_ID,
+    _detached_snapshot,
+    _document_bytes,
 )
 from backend.core.tests.rate_buckets import REQUIRED_BUCKET_ATTRS, bucket_attrs
 from backend.service.rest_api import _resolve_stream_event
@@ -5274,3 +5276,282 @@ class TestActivityLogRollbackIsExact:
         restored = next(a for a in s.state["annotations"] if a["id"] == "note-1")
         assert restored["position"] == logged["position"]
         assert restored["position"] is not logged["position"]
+
+    @staticmethod
+    def _deleted_note(mgr):
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "c1", {"id": "note-1", "type": "note"})
+        mgr.delete_annotation(s.id, "c1", "note-1")
+        return s, mgr.store.find_latest_undoable(s, "c1")
+
+    async def test_a_failed_undo_write_leaves_memory_matching_disk(self):
+        """The write that records an undo can fail like any other. Memory must
+        then match disk: the record is not undone, the delete stands, nothing
+        was broadcast, and the undo can simply be retried."""
+        backend, store, mgr = self._at_cap(500)
+        s, record = self._deleted_note(mgr)
+        sub, _ = mgr.connect(s.id, "c2", "Watcher")
+        await _drain(sub)
+        real_persist = store.persist
+
+        def fail_once_undone(session):
+            if record.get("undone"):
+                raise OSError("disk full")
+            real_persist(session)
+
+        s._deleted_annotation_ids.appendleft("older")
+        s._deleted_annotation_ids.append("newer")
+        store.persist = fail_once_undone
+        with pytest.raises(OSError):
+            mgr.undo_last_action(s.id, "c1")
+
+        on_disk = SessionStore(backend).get(s.id).to_dict()
+        assert json.loads(json.dumps(s.to_dict())) == on_disk
+        assert record["undone"] is False and record["undone_at"] is None
+        assert s.state["annotations"] == []
+        assert list(s._deleted_annotation_ids) == ["older", "note-1", "newer"]
+        assert [e for e in await _drain(sub) if e.get("type") == "op"] == []
+
+        writes = []
+
+        def counting(session):
+            writes.append(session.seq)
+            real_persist(session)
+
+        store.persist = counting
+        mgr.undo_last_action(s.id, "c1")
+        assert len(writes) == 1  # state and flags land in one write
+        persisted = SessionStore(backend).get(s.id)
+        assert [r["undone"] for r in persisted.activity_log] == [False, True]
+        assert persisted.activity_log[-1]["undone_at"] == record["undone_at"]
+        assert record["undone"] is True and isinstance(record["undone_at"], str)
+        assert [a["id"] for a in persisted.state["annotations"]] == ["note-1"]
+
+    async def test_a_broadcast_failure_after_the_undo_landed_keeps_it_undone(self):
+        """Once the write has landed, the undo is committed: a failing bus
+        must not roll the record back in memory while disk keeps it undone."""
+        backend, store, mgr = self._at_cap(500)
+        s, record = self._deleted_note(mgr)
+
+        def broken_publish(*_args, **_kwargs):
+            raise RuntimeError("bus down")
+
+        mgr.bus.publish = broken_publish
+        with pytest.raises(RuntimeError):
+            mgr.undo_last_action(s.id, "c1")
+
+        on_disk = SessionStore(backend).get(s.id).to_dict()
+        assert json.loads(json.dumps(s.to_dict())) == on_disk
+        assert record["undone"] is True
+        assert [a["id"] for a in s.state["annotations"]] == ["note-1"]
+        assert "note-1" not in s._deleted_annotation_ids
+
+    async def test_a_failed_undo_adds_no_deleted_id_it_had_not_removed(self):
+        _, store, mgr = self._at_cap(500)
+        s, _ = self._deleted_note(mgr)
+        s._deleted_annotation_ids.clear()  # evicted by the deque's maxlen
+
+        def boom(_session):
+            raise OSError("disk full")
+
+        store.persist = boom
+        with pytest.raises(OSError):
+            mgr.undo_last_action(s.id, "c1")
+
+        assert list(s._deleted_annotation_ids) == []
+
+    async def test_an_undo_replay_that_turns_out_a_no_op_leaves_the_record_undoable(
+        self,
+    ):
+        _, store, mgr = self._at_cap(500)
+        s, record = self._deleted_note(mgr)
+        store.apply_state_op = lambda *args, **kwargs: None
+
+        with pytest.raises(UndoConflict):
+            mgr.undo_last_action(s.id, "c1")
+
+        assert record["undone"] is False and record["undone_at"] is None
+        assert "note-1" in s._deleted_annotation_ids
+        assert mgr.store.find_latest_undoable(s, "c1") is record
+
+    async def test_a_failed_undo_restores_flags_a_legacy_record_lacked(self):
+        """A record loaded from an older document may carry no undone keys;
+        a rollback puts it back exactly, not with keys it never had."""
+        backend, store, mgr = self._at_cap(500)
+        s, record = self._deleted_note(mgr)
+        del record["undone"], record["undone_at"]
+        legacy = dict(record)
+
+        def boom(_session):
+            raise OSError("disk full")
+
+        store.persist = boom
+        with pytest.raises(OSError):
+            mgr.undo_last_action(s.id, "c1")
+
+        assert record == legacy
+
+
+class TestDocumentBudgetIsExact:
+    """The document-size budget caches each activity record's encoded length
+    rather than re-encoding the log every batch; the total must still equal
+    ``len(json.dumps(snapshot))`` byte for byte."""
+
+    @staticmethod
+    def _move(x, node_id="a"):
+        return {"op": "node_moved", "node_id": node_id, "position": {"x": x, "y": 0}}
+
+    @staticmethod
+    def _size(session):
+        return len(json.dumps(_detached_snapshot(session)))
+
+    async def test_cached_sizes_track_every_edit_a_record_can_get(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        assert _document_bytes(_detached_snapshot(s), s) == self._size(s)
+        mgr.upsert_annotation(s.id, "c1", {"id": "n", "type": "note", "text": "åäö"})
+        for i in range(3):
+            await mgr.apply_ops(s.id, "c1", None, [self._move(i)])
+
+        def check():
+            assert _document_bytes(_detached_snapshot(s), s) == self._size(s)
+
+        check()  # warms the cache
+        mgr.undo_last_action(s.id, "c1")  # flips undone/undone_at in place
+        check()
+        record = s.activity_log[-1]
+        record["undone"] = 1  # == True, encodes differently
+        check()
+        record["undone"] = True
+        del record["undone_at"]  # missing vs None
+        check()
+        record["undone_at"] = None
+        check()
+        record["undone"] = None
+        check()
+        del record["undone"]  # missing vs None
+        check()
+        del s.activity_log[0]
+        check()
+        s.activity_log.clear()
+        check()
+
+    async def test_the_cache_holds_the_live_log_and_is_reused(self, monkeypatch):
+        mgr = _manager()
+        s = mgr.create_session()
+        for i in range(4):
+            await mgr.apply_ops(s.id, "c1", None, [self._move(i)])
+        assert set(s._activity_record_bytes) == {id(r) for r in s.activity_log}
+
+        del s.activity_log[:2]
+        snapshot = _detached_snapshot(s)
+        encoded = []
+        real_dumps = json.dumps
+
+        def counting_dumps(obj, *args, **kwargs):
+            encoded.append(obj)
+            return real_dumps(obj, *args, **kwargs)
+
+        monkeypatch.setattr(json, "dumps", counting_dumps)
+        size = _document_bytes(snapshot, s)
+        monkeypatch.undo()
+
+        assert size == len(json.dumps(snapshot))
+        assert len(encoded) == 1  # only the log-less head; every record hit
+        assert set(s._activity_record_bytes) == {id(r) for r in s.activity_log}
+        s.activity_log.clear()
+        _document_bytes(_detached_snapshot(s), s)
+        assert s._activity_record_bytes == {}
+
+    async def test_a_document_exactly_at_budget_is_accepted_one_byte_over_is_not(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        for i in range(3):
+            await mgr.apply_ops(s.id, "c1", None, [self._move(i)])
+        mgr.undo_last_action(s.id, "c1")  # a record changed after it was cached
+        before = self._size(s)
+        # Record ids and timestamps are fixed-width, so a refused attempt
+        # predicts the accepted document's length exactly.
+        with pytest.raises(ImageBudgetExceeded) as exc:
+            await mgr.apply_ops(
+                s.id, "c1", None, [self._move(9)], max_session_document_bytes=0
+            )
+        assert self._size(s) == before
+        needed = int(str(exc.value).split(" bytes")[0].rsplit(" ", 1)[1])
+
+        with pytest.raises(ImageBudgetExceeded):
+            await mgr.apply_ops(
+                s.id, "c1", None, [self._move(9)], max_session_document_bytes=needed - 1
+            )
+        assert self._size(s) == before
+
+        await mgr.apply_ops(
+            s.id, "c1", None, [self._move(9)], max_session_document_bytes=needed
+        )
+        assert self._size(s) == needed
+
+
+class TestRollbackRestoresRecentlyDeletedIds:
+    """The store's "recently deleted" ids live outside the persisted document,
+    so every rollback must put them back itself: a stray id makes a later
+    undo of the real delete fail forever, or evicts another id from the
+    bounded deque."""
+
+    @staticmethod
+    def _failing_store():
+        store = SessionStore(InMemorySessionPersistenceBackend())
+
+        def boom(*_args):
+            raise OSError("disk full")
+
+        return store, boom
+
+    @staticmethod
+    def _full(session):
+        """Fill the deque to its cap, so a stray append would evict the oldest
+        id and a rollback has to put back exactly what was there."""
+        ids = [f"old-{i}" for i in range(session._deleted_annotation_ids.maxlen)]
+        session._deleted_annotation_ids.extend(ids)
+        return ids
+
+    @staticmethod
+    def _assert_unchanged(session, ids):
+        assert list(session._deleted_annotation_ids) == ids
+        assert session._deleted_annotation_ids.maxlen == len(ids)
+
+    async def test_a_failed_undo_of_a_create_leaves_no_deleted_id(self):
+        store, boom = self._failing_store()
+        mgr = SessionManager(store)
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "c1", {"id": "note-1", "type": "note"})
+        store.persist = boom
+        with pytest.raises(OSError):
+            mgr.undo_last_action(s.id, "c1")
+        assert list(s._deleted_annotation_ids) == []
+
+    async def test_a_failed_sync_delete_leaves_no_deleted_id(self):
+        store, boom = self._failing_store()
+        mgr = SessionManager(store)
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "c1", {"id": "note-1", "type": "note"})
+        ids = self._full(s)
+        store.persist = boom
+        with pytest.raises(OSError):
+            mgr.delete_annotation(s.id, "c1", "note-1")
+        self._assert_unchanged(s, ids)
+
+    async def test_a_failed_batch_delete_leaves_no_deleted_id(self):
+        store, boom = self._failing_store()
+        mgr = SessionManager(store)
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "c1", {"id": "note-1", "type": "note"})
+        ids = self._full(s)
+        store.persist_snapshot = boom
+        with pytest.raises(OSError):
+            await mgr.apply_ops(
+                s.id,
+                "c1",
+                None,
+                [{"op": "annotation_deleted", "annotation_id": "note-1"}],
+            )
+        self._assert_unchanged(s, ids)
