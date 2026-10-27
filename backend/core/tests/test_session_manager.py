@@ -5561,21 +5561,29 @@ class TestRollbackRestoresRecentlyDeletedIds:
 class TestAnnounceLayerChange:
     _OP = {"op": "graph_changes_discarded", "removals": [["node", "n1"]]}
 
-    async def test_an_announcement_while_a_batch_holds_the_lock_is_withheld(self):
+    async def test_an_announcement_while_the_session_lock_is_held_is_withheld(self):
         mgr = _manager()
         s = mgr.create_session()
         published = _spy_publish(mgr)
+        persisted = []
+        real_persist = mgr.store.persist
+        mgr.store.persist = lambda session: (
+            persisted.append(session.seq),
+            real_persist(session),
+        )
         await mgr._lock(s.id).acquire()
 
         assert mgr.announce_layer_change(s.id, dict(self._OP)) is None
         assert s.seq == 0
         assert s.activity_log == []
         assert published == []
+        assert persisted == []
 
         mgr._lock(s.id).release()
         applied = mgr.announce_layer_change(s.id, dict(self._OP))
         assert applied["op"] == "graph_changes_discarded"
         assert s.seq == applied["seq"] == 1
+        assert persisted == [1]
         assert [event["seq"] for _, event in published] == [1]
 
 
