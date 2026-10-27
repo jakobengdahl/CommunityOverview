@@ -777,7 +777,7 @@ class TestPostgresPlansHelperSkipsMaintenance:
         assert _plans([(query, None)]) == []
 
 
-def _wait_until_blocking(pid, timeout=15.0, count=1):
+def _wait_until_blocking(pid, timeout=15.0, count=1, application_name=None):
     """Wait until `count` distinct sessions are blocked on the session `pid`.
 
     Attributed on purpose. A fixed sleep plus `thread.is_alive()` cannot
@@ -794,6 +794,13 @@ def _wait_until_blocking(pid, timeout=15.0, count=1):
     apart from "the first one is still there": the first blocking already
     satisfies count=1 on its own, so re-calling with the default would
     return immediately without the second ever having been checked.
+
+    `application_name` narrows the waiters to the caller's own sessions.
+    The pid alone is enough while the blocker holds a lock only this test
+    can want; it is not when the lock is global - the migration lock is
+    one key for every schema, so under pytest-xdist another worker's
+    migrating backend blocks on the same pid and would answer for this
+    test's thread.
     """
     deadline = time.monotonic() + timeout
     with psycopg.connect(DSN, autocommit=True) as conn:
@@ -801,8 +808,9 @@ def _wait_until_blocking(pid, timeout=15.0, count=1):
             waiting = conn.execute(
                 "SELECT count(*) FROM pg_stat_activity"
                 " WHERE datname = current_database()"
-                " AND %s = ANY(pg_blocking_pids(pid))",
-                (pid,),
+                " AND %s = ANY(pg_blocking_pids(pid))"
+                " AND (%s::text IS NULL OR application_name = %s::text)",
+                (pid, application_name, application_name),
             ).fetchone()[0]
             if waiting >= count:
                 return True
@@ -1096,7 +1104,12 @@ class TestPostgresSchemaIsSafeToMigrateConcurrently:
         and the migration blocks on the advisory lock whenever another
         instance is migrating, which is the autoscale boot this guards.
         """
-        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        # Named so the blocking checks below count only this backend's
+        # sessions: the migration lock is global, and another xdist worker
+        # migrating its own schema would otherwise block on the same pid.
+        application_name = f"co_migrate_memo_{uuid.uuid4().hex[:12]}"
+        dsn = psycopg.conninfo.make_conninfo(DSN, application_name=application_name)
+        backend = PostgresGraphPersistenceBackend(dsn, schema=schema)
         backends.append(backend)
         blocker = psycopg.connect(DSN, autocommit=False)
         errors = []
@@ -1120,9 +1133,9 @@ class TestPostgresSchemaIsSafeToMigrateConcurrently:
             # short here starts the second thread before the first has even
             # reached the lock - which would not exercise the memo-set-too-
             # early bug this test is for.
-            assert _wait_until_blocking(blocker.info.backend_pid), (
-                "the first thread never blocked on the migration lock"
-            )
+            assert _wait_until_blocking(
+                blocker.info.backend_pid, application_name=application_name
+            ), "the first thread never blocked on the migration lock"
             # The first thread now holds `backend._migrate_lock` - it only
             # reaches the advisory-lock wait below after acquiring it - and
             # `_ensure_schema` holds that Python lock across its whole
@@ -1149,7 +1162,9 @@ class TestPostgresSchemaIsSafeToMigrateConcurrently:
             # Confirm the first thread is still genuinely blocked, rather
             # than assumed to still be: the wait above proves nothing about
             # ordering if the first thread had somehow already finished.
-            assert _wait_until_blocking(blocker.info.backend_pid), (
+            assert _wait_until_blocking(
+                blocker.info.backend_pid, application_name=application_name
+            ), (
                 "the first thread stopped blocking on the migration lock "
                 "while the second thread was still waiting on it"
             )
