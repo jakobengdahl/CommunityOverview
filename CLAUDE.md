@@ -67,7 +67,7 @@ A session owns its task end to end — solve, PR, review loop, docs, merge to `m
 4. **Regression test** for the exact scenario that motivated the change.
 5. **Run the checks CI runs**, all before the PR is opened:
    ```bash
-   pytest backend/ -q                  # pytest backend/<module>/tests/ -q while iterating
+   pytest backend/ -q -n auto          # parallel, as CI runs it; plain -q is serial; backend/<module>/tests/ while iterating
    npm run test:unit
    (cd services/mcp_oauth_gateway && pytest test_oauth_flow.py test_upstream_auth.py test_lockfiles.py -q)
    python3 -m ruff check backend scripts && python3 -m ruff format --check backend scripts
