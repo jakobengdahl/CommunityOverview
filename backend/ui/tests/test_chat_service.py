@@ -2392,7 +2392,13 @@ class TestNonObjectToolInput:
     )
     @pytest.mark.parametrize(
         "tool_input, json_type",
-        [([], "array"), (5, "number"), (False, "boolean"), ("x", "string")],
+        [
+            ([], "array"),
+            (5, "number"),
+            (False, "boolean"),
+            ("x", "string"),
+            (None, "null"),
+        ],
     )
     def test_non_object_input_is_a_tool_error_and_the_turn_continues(
         self, chat_service, tool_name, tool_input, json_type

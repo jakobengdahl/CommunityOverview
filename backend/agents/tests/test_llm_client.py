@@ -43,7 +43,14 @@ class ScriptedProvider:
 
 @pytest.mark.parametrize(
     "tool_input, json_type",
-    [([], "array"), ([["nodes", []]], "array"), (5, "number"), (False, "boolean")],
+    [
+        ([], "array"),
+        ([["nodes", []]], "array"),
+        (5, "number"),
+        (False, "boolean"),
+        ("x", "string"),
+        (None, "null"),
+    ],
 )
 def test_non_object_input_is_an_error_and_never_becomes_a_proposal(
     tool_input, json_type
