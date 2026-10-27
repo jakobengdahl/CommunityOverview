@@ -2193,11 +2193,13 @@ class SessionManager:
             if holder is not None and holder != client_id:
                 raise LeaseConflict(conflict_id, holder)
 
+        forgotten_deleted_id: Optional[str] = None
         if inverse_op.get("op") == "annotation_created":
             ann_id = (inverse_op.get("annotation") or {}).get("id")
             if isinstance(ann_id, str):
                 try:
                     session._deleted_annotation_ids.remove(ann_id)
+                    forgotten_deleted_id = ann_id
                 except ValueError:
                     pass
         # Attribution for the broadcast only — see _UNDO_REPLAY_CLIENT_ID's
@@ -2208,23 +2210,37 @@ class SessionManager:
         # self-echo.
         inverse_op["client_id"] = _UNDO_REPLAY_CLIENT_ID
 
-        applied = self._apply_op_sync(
-            session,
-            session_id,
-            _UNDO_REPLAY_CLIENT_ID,
-            inverse_op,
-            record_activity=False,
-            trusted_replay=True,
-        )
+        # Marked before the replay so its one persist writes the reverted state
+        # and the flag together; a second write afterwards could fail and leave
+        # the record undone in memory but not on disk. ``_apply_op_sync`` rolls
+        # back the state on failure; the record is not part of its (shallow)
+        # log copy, so its flags are restored here.
+        saved_flags = {k: record[k] for k in ("undone", "undone_at") if k in record}
+        record["undone"] = True
+        record["undone_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        applied = None
+        try:
+            applied = self._apply_op_sync(
+                session,
+                session_id,
+                _UNDO_REPLAY_CLIENT_ID,
+                inverse_op,
+                record_activity=False,
+                trusted_replay=True,
+            )
+        finally:
+            if applied is None:
+                record.pop("undone", None)
+                record.pop("undone_at", None)
+                record.update(saved_flags)
+                if forgotten_deleted_id is not None:
+                    session._deleted_annotation_ids.append(forgotten_deleted_id)
         if applied is None:
             # The conflict check above passed but the replay still turned out
             # to be a no-op (e.g. the store dropped it as an update on a
             # since-deleted annotation) — surface it the same way any other
             # unsafe-to-undo state does, rather than marking the record undone.
             raise UndoConflict(record["id"], "action could not be reverted")
-        record["undone"] = True
-        record["undone_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        self.store.persist(session)
 
         return {
             "undone_activity_id": record["id"],

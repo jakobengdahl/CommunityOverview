@@ -5274,3 +5274,73 @@ class TestActivityLogRollbackIsExact:
         restored = next(a for a in s.state["annotations"] if a["id"] == "note-1")
         assert restored["position"] == logged["position"]
         assert restored["position"] is not logged["position"]
+
+    @staticmethod
+    def _deleted_note(mgr):
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "c1", {"id": "note-1", "type": "note"})
+        mgr.delete_annotation(s.id, "c1", "note-1")
+        return s, mgr.store.find_latest_undoable(s, "c1")
+
+    async def test_a_failed_undo_write_leaves_memory_matching_disk(self):
+        """The write that records an undo can fail like any other. Memory must
+        then match disk: the record is not undone, the delete stands, nothing
+        was broadcast, and the undo can simply be retried."""
+        backend, store, mgr = self._at_cap(500)
+        s, record = self._deleted_note(mgr)
+        sub, _ = mgr.connect(s.id, "c2", "Watcher")
+        await _drain(sub)
+        real_persist = store.persist
+
+        def fail_once_undone(session):
+            if record.get("undone"):
+                raise OSError("disk full")
+            real_persist(session)
+
+        store.persist = fail_once_undone
+        with pytest.raises(OSError):
+            mgr.undo_last_action(s.id, "c1")
+
+        on_disk = SessionStore(backend).get(s.id).to_dict()
+        assert json.loads(json.dumps(s.to_dict())) == on_disk
+        assert record["undone"] is False and record["undone_at"] is None
+        assert s.state["annotations"] == []
+        assert "note-1" in s._deleted_annotation_ids
+        assert [e for e in await _drain(sub) if e.get("type") == "op"] == []
+
+        store.persist = real_persist
+        mgr.undo_last_action(s.id, "c1")
+        persisted = SessionStore(backend).get(s.id)
+        assert [r["undone"] for r in persisted.activity_log] == [False, True]
+        assert [a["id"] for a in persisted.state["annotations"]] == ["note-1"]
+
+    async def test_an_undo_replay_that_turns_out_a_no_op_leaves_the_record_undoable(
+        self,
+    ):
+        _, store, mgr = self._at_cap(500)
+        s, record = self._deleted_note(mgr)
+        store.apply_state_op = lambda *args, **kwargs: None
+
+        with pytest.raises(UndoConflict):
+            mgr.undo_last_action(s.id, "c1")
+
+        assert record["undone"] is False and record["undone_at"] is None
+        assert "note-1" in s._deleted_annotation_ids
+        assert mgr.store.find_latest_undoable(s, "c1") is record
+
+    async def test_a_failed_undo_restores_flags_a_legacy_record_lacked(self):
+        """A record loaded from an older document may carry no undone keys;
+        a rollback puts it back exactly, not with keys it never had."""
+        backend, store, mgr = self._at_cap(500)
+        s, record = self._deleted_note(mgr)
+        del record["undone"], record["undone_at"]
+        legacy = dict(record)
+
+        def boom(_session):
+            raise OSError("disk full")
+
+        store.persist = boom
+        with pytest.raises(OSError):
+            mgr.undo_last_action(s.id, "c1")
+
+        assert record == legacy
