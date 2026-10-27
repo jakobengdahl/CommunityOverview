@@ -5,6 +5,7 @@ import dataclasses
 import gc
 import threading
 import weakref
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -84,11 +85,15 @@ def test_the_teardown_hook_stops_every_app_the_test_built(app_config, request):
         hook.send(None)
 
 
-def test_pytest_runs_the_teardown_hook_as_a_wrapper(pytester):
+def test_pytest_runs_the_teardown_hook_as_a_wrapper(pytester, monkeypatch):
     """The tests above drive the hook by hand; only pluggy shows that it
     actually runs. Registered without ``wrapper=True``, the generator would be
-    called and never advanced, so an app's workers would outlive its test."""
-    before = len(_delivery_workers())
+    called and never advanced, so an app's workers would outlive its test.
+
+    A subprocess, not ``runpytest_inprocess``: that restores ``sys.modules``
+    afterwards, dropping modules such as numpy that the inner app imported
+    first and that cannot be imported twice in one process."""
+    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[3]))
     pytester.makeconftest('pytest_plugins = ["backend.api_host.tests.conftest"]')
     pytester.makepyfile(
         """
@@ -96,17 +101,24 @@ def test_pytest_runs_the_teardown_hook_as_a_wrapper(pytester):
 
         from backend.api_host import create_app
 
+        workers = []
+
+        def _delivery_workers():
+            return [t for t in threading.enumerate() if t.name == "event-delivery-worker"]
+
         def test_builds_an_app_and_leaves_it_unstarted(app_config):
             create_app(app_config)
-            assert "event-delivery-worker" in [t.name for t in threading.enumerate()]
+            workers.extend(_delivery_workers())
+            assert workers
+
+        def test_its_worker_was_stopped_at_teardown():
+            assert not any(worker.is_alive() for worker in workers)
         """
     )
 
-    pytester.runpytest_inprocess(
-        "-p", "no:cacheprovider", "-p", "no:asyncio"
-    ).assert_outcomes(passed=1)
+    result = pytester.runpytest_subprocess("-p", "no:cacheprovider", "-p", "no:asyncio")
 
-    assert len(_delivery_workers()) == before
+    result.assert_outcomes(passed=2)
 
 
 def test_a_failing_shutdown_reaches_fixture_teardown_before_it_is_raised(
