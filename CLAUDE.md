@@ -127,7 +127,11 @@ a session ends, sweep unlogged notes into the graph. Never add to `SMALL_FIXES.m
 
 ## Testing
 
-- Tests live next to their code in `*/tests/`; a test's name states the invariant.
+- A test's name states the invariant. Python tests live next to their code in
+  `*/tests/`. New `frontend/web` unit tests sit beside their module
+  (`src/hooks/useViewportMode.test.jsx` next to `useViewportMode.js`), as most
+  there already do; the older files in `frontend/web/tests/` stay where they
+  are. Other JS workspaces keep their current layout.
 - Don't test what cannot fail. Ranking/scoring logic gets cross-tier tests (can a
   secondary signal beat a stronger primary one?), not just happy-path order.
 - Async tests use `pytest-asyncio`; LLM calls are mocked, never a real key. CI

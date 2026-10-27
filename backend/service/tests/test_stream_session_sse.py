@@ -34,6 +34,10 @@ _MAX_POLLS_AFTER_DISCONNECT = 3
 # real 25-second queue wait.
 _CHUNK_TIMEOUT = 1
 
+# How long a test waits for a whole response to end once its client has left.
+# Ending takes no waiting either, so this only bounds a stream that never ends.
+_RESPONSE_TIMEOUT = 2
+
 
 class _FakeRequest:
     """The slice of ``starlette.requests.Request`` the stream route reads."""
@@ -384,7 +388,18 @@ async def test_completed_response_releases_once_and_keeps_sibling_presence(
             request.disconnected = True
 
     scope = {"type": "http", "asgi": {"spec_version": spec_version}}
-    await response(scope, receive, send)
+    # Bounded with asyncio.wait for the same reason as _next_chunk: a stream
+    # that ignores the disconnect otherwise blocks here until the pytest
+    # timeout, and wait_for's cancel would end it as if it had completed.
+    serving = asyncio.ensure_future(response(scope, receive, send))
+    done, _ = await asyncio.wait({serving}, timeout=_RESPONSE_TIMEOUT)
+    if not done:
+        serving.cancel()
+        raise AssertionError(
+            f"the response did not end within {_RESPONSE_TIMEOUT}s "
+            "of the client disconnecting"
+        )
+    serving.result()
 
     assert manager.bus.subscriber_count(session_id) == 1
     assert [m["client_id"] for m in manager.roster(session_id)] == ["c1"]
