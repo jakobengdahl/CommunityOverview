@@ -135,13 +135,19 @@ class DocumentService:
 
         # Save to temp directory
         try:
-            file_path = Path(self._upload_dir) / safe_filename
 
             def _write_file():
-                with open(file_path, "wb") as f:
+                # Atomically reserve a distinct path, even for simultaneous same-name uploads.
+                with tempfile.NamedTemporaryFile(
+                    dir=self._upload_dir,
+                    prefix="upload_",
+                    suffix=f"_{safe_filename}",
+                    delete=False,
+                ) as f:
                     f.write(file_content)
+                    return f.name
 
-            await asyncio.to_thread(_write_file)
+            file_path = await asyncio.to_thread(_write_file)
 
             return {
                 "success": True,
@@ -187,7 +193,7 @@ class DocumentService:
         except Exception:
             pass  # Ignore cleanup errors
 
-        # extract_text_from_file names the timestamp-prefixed storage file, but
+        # extract_text_from_file names the temporary storage file, but
         # callers show this name in the chat and send it to the LLM.
         extract_result["filename"] = self._display_filename(filename)
         return extract_result
@@ -207,21 +213,15 @@ class DocumentService:
             filename: Original filename
 
         Returns:
-            Sanitized filename with timestamp prefix
+            Sanitized filename preserving the extension
         """
-        import time
         import re
 
         # Remove path components
         name = Path(filename).name
 
         # Replace unsafe characters
-        safe_name = re.sub(r"[^\w\-_\.]", "_", name)
-
-        # Add timestamp prefix for uniqueness
-        timestamp = int(time.time() * 1000)
-
-        return f"{timestamp}_{safe_name}"
+        return re.sub(r"[^\w\-_\.]", "_", name)
 
     def cleanup_old_files(self, max_age_hours: int = 24) -> int:
         """
