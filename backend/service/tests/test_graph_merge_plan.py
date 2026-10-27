@@ -1102,11 +1102,38 @@ class TestUnusualIds:
         assert plan.digest.startswith("sha256:")
 
 
-class TestSettleCost:
-    def test_settling_many_duplicates_of_retyped_edges_stays_linear(self, storage):
-        import time
+class _CountingId(str):
+    """An edge id that counts how often it is hashed or compared."""
 
-        count = 8_000
+    touches = 0
+
+    def __hash__(self):
+        _CountingId.touches += 1
+        return str.__hash__(self)
+
+    def __eq__(self, other):
+        _CountingId.touches += 1
+        return str.__eq__(self, other)
+
+
+class TestSettleCost:
+    def test_settling_many_duplicates_of_retyped_edges_stays_linear(
+        self, storage, monkeypatch
+    ):
+        # Counts work instead of timing it, so a loaded runner (coverage,
+        # xdist) cannot fail it: every listed live edge id is a _CountingId,
+        # and each look at a live edge hashes or compares its id.
+        def snapshot(edges):
+            return [
+                graph_merge_plan._Listed(
+                    _CountingId(e.id), e.revision, e.type_str, e.source, e.target
+                )
+                for e in edges
+            ]
+
+        monkeypatch.setattr(graph_merge_plan, "_snapshot", snapshot)
+        monkeypatch.setattr(_CountingId, "touches", 0)
+        count = 2_000
         storage.add_nodes(
             [],
             [
@@ -1122,13 +1149,15 @@ class TestSettleCost:
             {"id": f"n{i:05d}", "source": "a1", "target": "i1", "type": "RELATES_TO"}
             for i in range(count)
         ]
-        started = time.perf_counter()
         plan = _plan(storage, [], retypes + creates, policy=MergePolicy("overwrite"))
-        elapsed = time.perf_counter() - started
         assert plan.report["adds"]["edges"]["count"] == count
-        # Quadratic settling took several seconds here; linear takes well
-        # under one. The bound leaves room for a slow runner.
-        assert elapsed < 3.0
+        # Each of the `count` pending duplicates shares one pair and type with
+        # all `count` retyped live edges. Rescanning that list per duplicate
+        # touches about 2 * count ids per edge (8,022,000 in all); answering
+        # once per pair and type touches 13 per edge today. The bound of 100
+        # per edge leaves room for unrelated planner changes and stays 40
+        # times below the quadratic count.
+        assert _CountingId.touches < 100 * count, _CountingId.touches
 
 
 class TestSubtypeLength:
