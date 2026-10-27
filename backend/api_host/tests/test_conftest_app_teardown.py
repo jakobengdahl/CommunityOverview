@@ -1,5 +1,6 @@
 """The conftest teardown that stops apps a test built but never started."""
 
+import contextlib
 import gc
 import threading
 import weakref
@@ -77,12 +78,17 @@ def test_a_failing_shutdown_reaches_fixture_teardown_before_it_is_raised(
     failing = create_app(app_config)
     healthy = create_app(app_config)
 
-    async def broken():
+    real_lifespan = failing.router.lifespan_context
+
+    @contextlib.asynccontextmanager
+    async def broken(app):
+        async with real_lifespan(app):
+            yield
         raise RuntimeError("shutdown broke")
 
-    # After the real handler, so only the raise is under test; the healthy app
+    # After the real shutdown, so only the raise is under test; the healthy app
     # recorded after it must still be shut down.
-    failing.router.on_shutdown.append(broken)
+    failing.router.lifespan_context = broken
     del failing, healthy
 
     hook = conftest.pytest_runtest_teardown(request.node, None)

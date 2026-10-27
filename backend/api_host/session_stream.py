@@ -10,7 +10,7 @@ import json
 import logging
 import re
 import secrets
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -100,10 +100,12 @@ def register_session_stream(
     session_manager=None,
     graph_service=None,
     auto_add_registry=None,
-) -> None:
-    """Register the session-registry startup lifecycle and the SSE stream route."""
+) -> Callable[[], Awaitable[None]]:
+    """Register the SSE stream route; return the session-registry startup.
 
-    @app.on_event("startup")
+    The caller runs the returned coroutine function from the app's lifespan.
+    """
+
     async def _session_registry_startup():
         session_registry.set_event_loop(asyncio.get_running_loop())
 
@@ -418,3 +420,5 @@ def register_session_stream(
         if not auto_add_registry.remove_rule(session_id, agent_id):
             return JSONResponse({"error": "auto-add agent not found"}, status_code=404)
         return JSONResponse({"success": True})
+
+    return _session_registry_startup

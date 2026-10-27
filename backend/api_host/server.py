@@ -23,6 +23,7 @@ Usage:
     app = create_app(config)
 """
 
+import contextlib
 import logging
 import threading
 from dataclasses import dataclass
@@ -303,10 +304,22 @@ def create_app(
 
 
 def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
+    # The hooks it runs are bound further down, once their services exist.
+    # Startup failing before the try skips shutdown, as with on_startup hooks.
+    @contextlib.asynccontextmanager
+    async def lifespan(app):
+        await start_session_registry()
+        try:
+            async with streamable_session_lifecycle():
+                yield
+        finally:
+            await shutdown()
+
     app = FastAPI(
         title="Community Knowledge Graph",
         description="REST API and MCP server for community knowledge graph operations",
         version="1.0.0",
+        lifespan=lifespan,
     )
 
     app.add_middleware(
@@ -495,7 +508,7 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         build_node_create_listener(auto_add_registry, _auto_add_push)
     )
 
-    register_session_stream(
+    start_session_registry = register_session_stream(
         app,
         session_registry,
         session_manager=session_manager,
@@ -529,7 +542,7 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
     app.state.mcp = mcp
     app.state.tools_map = tools_map
 
-    mount_mcp(app, mcp, tools_map)
+    streamable_session_lifecycle = mount_mcp(app, mcp, tools_map)
 
     # Direct tool-execution and export endpoints
     register_tool_routes(app, graph_service, tools_map, _auth_active)
@@ -552,9 +565,7 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
     # Federation + agent-system status endpoints
     register_agent_routes(app, agent_registry, graph_service, federation_manager)
 
-    # Shutdown handler for graceful cleanup
-    @app.on_event("shutdown")
-    async def shutdown_event():
+    async def shutdown():
         """Gracefully shutdown agent registry and event system."""
         if hasattr(app.state, "session_cleanup_task"):
             app.state.session_cleanup_task.cancel()
