@@ -8,7 +8,7 @@ mechanics). What is specific to a reference, and covered here, is:
 * the tool layer reporting an unsafe-scheme target as ``invalid_content``
   rather than letting it reach storage — the gate itself and its other write
   paths are pinned in
-  ``backend/core/tests/test_session_annotations_reference.py``,
+  ``backend/core/tests/test_session_annotations_guards.py``,
 * a partial update being genuinely partial (rename without resending the
   target, repoint without resending the label),
 * a move preserving the payload,
