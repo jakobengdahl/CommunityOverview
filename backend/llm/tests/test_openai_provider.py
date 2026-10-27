@@ -527,6 +527,15 @@ def test_empty_tool_call_arguments_parse_as_empty_input(provider, arguments):
     ]
 
 
+@pytest.mark.parametrize(
+    "arguments, parsed", [("0", 0), ("[]", []), ("false", False), ('""', "")]
+)
+def test_other_falsy_json_arguments_are_returned_as_parsed(arguments, parsed):
+    result = OpenAIProvider._parse_tool_arguments(arguments)
+    assert result == parsed
+    assert type(result) is type(parsed)
+
+
 def test_malformed_tool_call_arguments_still_raise(provider):
     provider.client.chat.completions.create.return_value = _completion(
         None,
