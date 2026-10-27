@@ -370,7 +370,12 @@ def test_constructor_resolves_base_url_and_model(openai_cls, monkeypatch):
 
 
 def test_create_provider_selects_by_argument(openai_cls):
-    assert isinstance(create_provider("k", provider_type="openai"), OpenAIProvider)
+    provider = create_provider(
+        "k", provider_type="openai", model="m", base_url="http://b"
+    )
+    assert isinstance(provider, OpenAIProvider)
+    openai_cls.assert_called_once_with(api_key="k", base_url="http://b")
+    assert provider.model == "m"
     with patch("anthropic.Anthropic") as anthropic_cls:
         provider = create_provider(
             "k", provider_type="claude", model="m", base_url="http://b"
