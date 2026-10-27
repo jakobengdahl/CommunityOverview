@@ -443,6 +443,10 @@ check, and reports (`coverage/`, `.coverage`) are gitignored. For the backend,
 PostgreSQL database with `CO_REQUIRE_POSTGRES=1` and `CO_TEST_POSTGRES_DSN`
 (as CI does) so the PostgreSQL backend paths count instead of skipping, then
 run `python -m pytest backend -q --cov=backend --cov-branch --cov-report=term-missing`.
+A pytest process that never imports the `--cov` target (a narrow target with a
+test subset, or an xdist worker that drew none of the tests importing it) ends
+with coverage's "No data was collected" warning; there was no data to lose, and
+the full `--cov=backend` run prints none.
 
 Python subprocesses the tests start are measured too (`[tool.coverage.run]
 patch = ["subprocess"]` in `pyproject.toml`), except the two isolated children,
@@ -459,8 +463,8 @@ which coverage cannot reach without loosening the isolation they exist for:
   table path. The text, PDF, XLSX, PPTX and ODF extractors read as unrun
   although tests exercise each of them through `extract()`. The parent side
   (`_run_worker`, `_exchange_posix`, `_from_wire`) runs in the test process
-  and counts in full; `_exchange_threads` is the non-POSIX path and does not
-  run on Linux at all.
+  and is measured normally; `_exchange_threads` is the non-POSIX path and does
+  not run on Linux at all.
 - **`backend/functions/sandbox.py`** — the supervisor starts as `python -I -S`,
   so no `.pth` hook runs and coverage is not importable, and its forked child
   then applies Landlock and seccomp and replaces itself with `execve`. The
