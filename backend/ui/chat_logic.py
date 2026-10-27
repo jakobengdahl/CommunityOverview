@@ -4,7 +4,11 @@ import json
 import logging
 from dotenv import load_dotenv
 import inspect
-from backend.llm.llm_providers import create_provider, LLMProvider
+from backend.llm.llm_providers import (
+    create_provider,
+    LLMProvider,
+    tool_input_type_error,
+)
 from backend.config import config_loader
 from backend.core.storage_search import MATCH_MODES
 from backend.config.model_profiles import (
@@ -1445,6 +1449,13 @@ class ChatProcessor:
                             )
                         },
                     }
+                )
+                continue
+
+            input_error = tool_input_type_error(tool_name, tool_input)
+            if input_error is not None:
+                tool_results.append(
+                    {"tool_use_id": tool_id, "result": {"error": input_error}}
                 )
                 continue
 

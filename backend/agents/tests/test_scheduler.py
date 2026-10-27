@@ -237,6 +237,50 @@ class TestAgentSchedulerRegistration:
 
         assert "agent-1" in scheduler.registrations()
 
+    def test_registrations_reads_entries_only_while_holding_the_lock(self):
+        """The scheduler thread snapshots while API threads register/unregister,
+        so every read of _entries during the copy must happen under _lock."""
+        scheduler = AgentScheduler()
+        config = make_config(schedule=AgentSchedule(day_of_week=0, hour=9, minute=0))
+        scheduler.register("agent-1", config, make_worker())
+        lock_held_on_read: List[bool] = []
+
+        class LockCheckingDict(dict):
+            # Overriding __iter__ also routes dict(self) through keys()/__getitem__.
+            def _record(self):
+                lock_held_on_read.append(scheduler._lock.locked())
+
+            def __iter__(self):
+                self._record()
+                return super().__iter__()
+
+            def keys(self):
+                self._record()
+                return super().keys()
+
+            def items(self):
+                self._record()
+                return super().items()
+
+            def values(self):
+                self._record()
+                return super().values()
+
+            def __getitem__(self, key):
+                self._record()
+                return super().__getitem__(key)
+
+            def copy(self):
+                self._record()
+                return dict(super().items())
+
+        scheduler._entries = LockCheckingDict(scheduler._entries)
+
+        snapshot = scheduler.registrations()
+
+        assert list(snapshot) == ["agent-1"]
+        assert lock_held_on_read and all(lock_held_on_read)
+
     def test_unregister_unknown_agent_is_noop(self):
         scheduler = AgentScheduler()
         scheduler.unregister("no-such-agent")  # must not raise
