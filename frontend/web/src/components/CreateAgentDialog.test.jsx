@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import CreateAgentDialog from './CreateAgentDialog';
 import en from '../i18n/en.json';
-import { missingKeys } from '../test/strictI18n';
+import { expectAllKeysResolved, missingKeys } from '../test/strictI18n';
 
 vi.mock('../i18n', async () => (await import('../test/strictI18n')).strictI18nModule);
 
@@ -36,7 +36,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   // Every t() call, including placeholders and alert messages, resolved.
-  expect(missingKeys).toEqual([]);
+  expectAllKeysResolved();
 });
 
 const typeInto = (label, value) =>
@@ -106,6 +106,45 @@ describe('CreateAgentDialog', () => {
       edges: [{ source: agentId, target: subscriptionId, type: 'RELATES_TO' }],
     });
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it('says no integrations are configured and saves an agent with none', async () => {
+    global.fetch.mockResolvedValue({ ok: true, json: async () => [] });
+    const onSave = vi.fn();
+    render(<CreateAgentDialog onClose={vi.fn()} onSave={onSave} />);
+
+    expect(await screen.findByText(d.integrations_empty)).toBeInTheDocument();
+    typeInto(d.name_label, 'Lone');
+    typeInto(d.task_prompt_label, 'Do it');
+    fireEvent.click(screen.getByRole('button', { name: d.submit }));
+
+    const agent = onSave.mock.calls[0][0].nodes[1];
+    expect(agent.summary).toBe('MCP agent with 0 integration(s)');
+    expect(agent.metadata.mcp_integration_ids).toEqual([]);
+  });
+
+  it('shows the translated placeholder on every free-text field', async () => {
+    render(<CreateAgentDialog onClose={vi.fn()} onSave={vi.fn()} />);
+    await screen.findByRole('checkbox', { name: /GRAPH/ });
+    for (const field of ['name', 'description', 'aliases', 'task_prompt', 'keywords']) {
+      expect(screen.getByLabelText(d[`${field}_label`])).toHaveAttribute(
+        'placeholder',
+        d[`${field}_placeholder`]
+      );
+    }
+  });
+
+  it('falls back to "AI agent: <name>" for a whitespace-only description', async () => {
+    const onSave = vi.fn();
+    render(<CreateAgentDialog onClose={vi.fn()} onSave={onSave} />);
+    await screen.findByRole('checkbox', { name: /GRAPH/ });
+
+    typeInto(d.name_label, ' Enricher ');
+    typeInto(d.description_label, ' \n\t ');
+    typeInto(d.task_prompt_label, 'Do it');
+    fireEvent.click(screen.getByRole('button', { name: d.submit }));
+
+    expect(onSave.mock.calls[0][0].nodes[1].description).toBe('AI agent: Enricher');
   });
 
   it('refuses a blank name or task prompt without saving', async () => {
