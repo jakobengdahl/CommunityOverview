@@ -132,6 +132,12 @@ a session ends, sweep unlogged notes into the graph. Never add to `SMALL_FIXES.m
   (`src/hooks/useViewportMode.test.jsx` next to `useViewportMode.js`), as most
   there already do; the older files in `frontend/web/tests/` stay where they
   are. Other JS workspaces keep their current layout.
+- A test's docstring states the invariant in at most a few lines; history and
+  rationale go in the PR body or planning graph. Trim existing long docstrings
+  only when touching that file anyway; no bulk rewrite.
+- Review residue becomes a case in the module's existing test file, never a
+  file named after the review round (`*_r4.py`). Don't add a test file under
+  ~100 lines when a sibling test file for the same module exists.
 - Don't test what cannot fail. Ranking/scoring logic gets cross-tier tests (can a
   secondary signal beat a stronger primary one?), not just happy-path order.
 - Async tests use `pytest-asyncio`; LLM calls are mocked, never a real key. CI
