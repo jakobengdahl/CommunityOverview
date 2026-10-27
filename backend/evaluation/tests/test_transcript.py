@@ -8,6 +8,7 @@ turn an ID-resolution pass into a failure.
 
 import pytest
 
+from backend.evaluation.scoring import score_tool_calls_valid
 from backend.evaluation.transcript import (
     RecordingProvider,
     TokenUsage,
@@ -73,6 +74,26 @@ class TestRecordingProvider:
         assert recorder.transcript.tool_call_names == ["search_graph", "update_node"]
         assert recorder.transcript.tool_calls[0].turn == 0
         assert recorder.transcript.tool_calls[1].turn == 1
+
+    @pytest.mark.parametrize("arguments", [[], 0, False, "", None])
+    def test_non_object_tool_input_is_recorded_as_sent_and_scored_invalid(
+        self, arguments
+    ):
+        """Dispatch rejects a non-object input, so the transcript must not
+        coerce it to {} and let a no-argument tool's schema accept it."""
+        inner = ScriptedProvider([[("list_node_types", arguments)], "done"])
+        recorder = RecordingProvider(inner)
+        recorder.create_completion([], "sys", [{"name": "list_node_types"}])
+
+        recorded = recorder.transcript.tool_calls[0].input
+        assert recorded == arguments
+        assert type(recorded) is type(arguments)
+        no_args_tool = {
+            "name": "list_node_types",
+            "input_schema": {"type": "object", "properties": {}},
+        }
+        result = score_tool_calls_valid(recorder.transcript, [no_args_tool])
+        assert not result.passed
 
     def test_records_parallel_tool_calls_from_one_turn(self):
         inner = ScriptedProvider(

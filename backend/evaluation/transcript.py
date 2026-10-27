@@ -227,7 +227,7 @@ class RecordingProvider(LLMProvider):
                 self.transcript.tool_calls.append(
                     ToolCall(
                         name=block.get("name", ""),
-                        input=block.get("input") or {},
+                        input=block.get("input", {}),
                         tool_use_id=block.get("id"),
                         turn=turn,
                     )

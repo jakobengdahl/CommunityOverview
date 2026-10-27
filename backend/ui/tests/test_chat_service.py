@@ -2376,3 +2376,58 @@ class TestVisualizationActionSemantics:
         tr = result["toolResult"]
         assert tr["action"] == "update_in_visualization"
         assert any(n.get("id") == node_id for n in tr.get("nodes", []))
+
+
+class TestNonObjectToolInput:
+    """A tool call whose arguments are valid JSON but not an object fails alone.
+
+    Providers can hand back "[]", "5", "false" or '"x"' as arguments. The
+    special-case branches used to call tool_input.get() and crash the whole
+    request; the generic path surfaced an AttributeError string. Each such call
+    must yield a clear tool error while the rest of the turn still runs.
+    """
+
+    @pytest.mark.parametrize(
+        "tool_name", ["propose_new_node", "mark_nodes", "present_form", "search_graph"]
+    )
+    @pytest.mark.parametrize(
+        "tool_input, json_type",
+        [
+            ([], "array"),
+            (5, "number"),
+            (False, "boolean"),
+            ("x", "string"),
+            (None, "null"),
+        ],
+    )
+    def test_non_object_input_is_a_tool_error_and_the_turn_continues(
+        self, chat_service, tool_name, tool_input, json_type
+    ):
+        service, mock_llm = chat_service
+        service.graph_service.add_nodes(
+            nodes=[{"type": "Actor", "name": "Findable Agency"}], edges=[]
+        )
+        mock_llm.mock_tool_calls = [
+            {"name": tool_name, "input": tool_input},
+            {"name": "search_graph", "input": {"query": "Findable Agency"}},
+        ]
+
+        result = service.process_message([{"role": "user", "content": "go"}])
+
+        tool_result_ids = [
+            block["tool_use_id"]
+            for block in mock_llm.received_messages[1][-1]["content"]
+        ]
+        assert tool_result_ids == ["mock_tool_0", "mock_tool_1"]
+        bad, good = _tool_result_payloads(mock_llm)
+        assert bad == {
+            "error": (
+                f"Tool '{tool_name}' was not run: its arguments must be a JSON "
+                f"object, got {json_type}."
+            )
+        }
+        assert any(n.get("name") == "Findable Agency" for n in good["nodes"])
+        assert any(
+            n.get("name") == "Findable Agency" for n in result["toolResult"]["nodes"]
+        )
+        assert result["content"] == mock_llm.mock_text_response
