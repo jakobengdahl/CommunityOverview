@@ -38,3 +38,12 @@ quote-style = "double"
 # contract tests enabled), and no single test comes near this; it exists so a
 # deadlock names a red test instead of stalling the job until the runner kills it.
 timeout = 300
+
+[tool.coverage.run]
+# Read only when coverage runs (`pytest --cov`, see backend/DEVELOPMENT.md);
+# a plain `pytest` never imports coverage, so this costs it nothing. Measures
+# the Python subprocesses tests start: coverage hands its configuration to the
+# child in COVERAGE_PROCESS_CONFIG, which its site-packages .pth hook reads.
+# A child started with `env={}`, `-S` or a zero file-size limit (the attachment
+# worker, the function sandbox) is not, and cannot be, measured this way.
+patch = ["subprocess"]
