@@ -5,6 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import CreateSubscriptionDialog from './CreateSubscriptionDialog';
 import en from '../i18n/en.json';
+import { missingKeys } from '../test/strictI18n';
+
+vi.mock('../i18n', async () => (await import('../test/strictI18n')).strictI18nModule);
 
 vi.mock('../store/graphStore', () => ({
   default: (selector) =>
@@ -16,12 +19,15 @@ vi.mock('../store/graphStore', () => ({
 const d = en.subscription_dialog;
 
 beforeEach(() => {
+  missingKeys.length = 0;
   vi.spyOn(crypto, 'randomUUID').mockReturnValue('sub-uuid');
   vi.spyOn(window, 'alert').mockImplementation(() => {});
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
+  // Every t() call, including placeholders and alert messages, resolved.
+  expect(missingKeys).toEqual([]);
 });
 
 const typeInto = (label, value) =>
@@ -31,12 +37,9 @@ describe('CreateSubscriptionDialog', () => {
   it('builds an EventSubscription node with filters and delivery from the form', () => {
     const onSave = vi.fn();
     const onClose = vi.fn();
-    const { container } = render(<CreateSubscriptionDialog onClose={onClose} onSave={onSave} />);
+    render(<CreateSubscriptionDialog onClose={onClose} onSave={onSave} />);
 
-    // Every label comes from the translation table; an unknown key would
-    // render as the raw key.
     expect(screen.getByRole('heading', { name: d.title })).toBeInTheDocument();
-    expect(container.textContent).not.toMatch(/subscription_dialog\./);
 
     typeInto(d.name_label, ' Hook ');
     typeInto(d.aliases_label, 'a, b,');
