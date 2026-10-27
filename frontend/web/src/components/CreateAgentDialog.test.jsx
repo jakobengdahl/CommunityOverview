@@ -46,7 +46,6 @@ describe('CreateAgentDialog', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: /WEB/ }));
 
     typeInto('Name *', ' Enricher ');
-    typeInto('Description', 'Adds facts');
     typeInto('Aliases / synonyms (comma-separated)', 'enr, , bot');
     typeInto('Task Prompt *', ' Enrich new initiatives ');
     expect(screen.queryByRole('checkbox', { name: 'Agent' })).toBeNull();
@@ -86,7 +85,7 @@ describe('CreateAgentDialog', () => {
           id: agentId,
           name: 'Enricher',
           type: 'Agent',
-          description: 'Adds facts',
+          description: 'AI agent: Enricher',
           summary: 'MCP agent with 2 integration(s)',
           aliases: ['enr', 'bot'],
           metadata: {
@@ -131,7 +130,7 @@ describe('CreateAgentDialog', () => {
         initialData={{
           agent: {
             id: 'a1',
-            name: 'Old',
+            name: ' Old ',
             aliases: [],
             metadata: {
               subscription_id: 's1',
@@ -164,6 +163,9 @@ describe('CreateAgentDialog', () => {
     const saved = onSave.mock.calls[0][0];
     expect(saved.agentId).toBe('a1');
     expect(saved.subscriptionId).toBe('s1');
+    expect(saved.agentUpdates.name).toBe('Old');
+    expect(saved.subscriptionUpdates.name).toBe('Old - Subscription');
+    expect(saved.subscriptionUpdates.description).toBe('Event subscription for agent: Old');
     expect(saved.agentUpdates.metadata).toEqual({
       subscription_id: 's1',
       enabled: false,

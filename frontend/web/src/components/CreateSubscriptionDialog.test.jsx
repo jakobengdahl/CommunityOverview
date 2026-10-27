@@ -97,8 +97,7 @@ describe('CreateSubscriptionDialog', () => {
         onSave={onSave}
         initialData={{
           id: 's1',
-          name: 'Hook',
-          description: 'Existing',
+          name: ' Hook ',
           aliases: [],
           metadata: {
             owner: 'x',
@@ -120,7 +119,7 @@ describe('CreateSubscriptionDialog', () => {
       id: 's1',
       updates: {
         name: 'Hook',
-        description: 'Existing',
+        description: 'Webhook subscription: Hook',
         summary: 'Listening on delete events',
         aliases: [],
         metadata: {
