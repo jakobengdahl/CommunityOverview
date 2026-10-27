@@ -5506,6 +5506,19 @@ class TestRollbackRestoresRecentlyDeletedIds:
 
         return store, boom
 
+    @staticmethod
+    def _full(session):
+        """Fill the deque to its cap, so a stray append would evict the oldest
+        id and a rollback has to put back exactly what was there."""
+        ids = [f"old-{i}" for i in range(session._deleted_annotation_ids.maxlen)]
+        session._deleted_annotation_ids.extend(ids)
+        return ids
+
+    @staticmethod
+    def _assert_unchanged(session, ids):
+        assert list(session._deleted_annotation_ids) == ids
+        assert session._deleted_annotation_ids.maxlen == len(ids)
+
     async def test_a_failed_undo_of_a_create_leaves_no_deleted_id(self):
         store, boom = self._failing_store()
         mgr = SessionManager(store)
@@ -5521,16 +5534,18 @@ class TestRollbackRestoresRecentlyDeletedIds:
         mgr = SessionManager(store)
         s = mgr.create_session()
         mgr.upsert_annotation(s.id, "c1", {"id": "note-1", "type": "note"})
+        ids = self._full(s)
         store.persist = boom
         with pytest.raises(OSError):
             mgr.delete_annotation(s.id, "c1", "note-1")
-        assert list(s._deleted_annotation_ids) == []
+        self._assert_unchanged(s, ids)
 
     async def test_a_failed_batch_delete_leaves_no_deleted_id(self):
         store, boom = self._failing_store()
         mgr = SessionManager(store)
         s = mgr.create_session()
         mgr.upsert_annotation(s.id, "c1", {"id": "note-1", "type": "note"})
+        ids = self._full(s)
         store.persist_snapshot = boom
         with pytest.raises(OSError):
             await mgr.apply_ops(
@@ -5539,4 +5554,4 @@ class TestRollbackRestoresRecentlyDeletedIds:
                 None,
                 [{"op": "annotation_deleted", "annotation_id": "note-1"}],
             )
-        assert list(s._deleted_annotation_ids) == []
+        self._assert_unchanged(s, ids)
