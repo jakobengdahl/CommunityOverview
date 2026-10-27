@@ -5694,7 +5694,7 @@ def register_mcp_tools(
             return {
                 "success": False,
                 "error": "not_found",
-                "message": f"No annotation with id {group_id!r} in this session.",
+                "message": f"No group annotation with id {group_id!r} in this session.",
             }
         except LayoutBusy:
             return {
