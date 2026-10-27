@@ -720,6 +720,17 @@ def test_reusable_contract_has_only_scan_inputs_and_read_permission():
         assert job.get("permissions", {"contents": "read"}) == {"contents": "read"}
 
 
+def test_bandit_setup_does_not_require_a_dependency_manifest():
+    steps = _jobs()["bandit"]["steps"]
+    setup = next(
+        step
+        for step in steps
+        if step.get("uses", "").startswith("actions/setup-python@")
+    )
+    # setup-python's pip cache fails without requirements.txt or pyproject.toml.
+    assert not setup.get("with", {}).get("cache")
+
+
 def test_bandit_inputs_are_passed_as_environment_values():
     assert _bandit_step()["env"] == {
         "SCAN_TARGETS": "${{ inputs.bandit-targets }}",
