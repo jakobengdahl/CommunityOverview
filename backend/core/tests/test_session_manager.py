@@ -7,6 +7,7 @@ presence/claim lifecycle on connect/disconnect.
 
 import asyncio
 import copy
+import dataclasses
 import json
 import threading
 
@@ -5555,3 +5556,63 @@ class TestRollbackRestoresRecentlyDeletedIds:
                 [{"op": "annotation_deleted", "annotation_id": "note-1"}],
             )
         self._assert_unchanged(s, ids)
+
+
+class TestAnnounceLayerChange:
+    _OP = {"op": "graph_changes_discarded", "removals": [["node", "n1"]]}
+
+    async def test_an_announcement_while_the_session_lock_is_held_is_withheld(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        published = _spy_publish(mgr)
+        persisted = []
+        real_persist = mgr.store.persist
+        mgr.store.persist = lambda session: (
+            persisted.append(session.seq),
+            real_persist(session),
+        )
+        await mgr._lock(s.id).acquire()
+
+        assert mgr.announce_layer_change(s.id, dict(self._OP)) is None
+        assert s.seq == 0
+        assert s.activity_log == []
+        assert published == []
+        assert persisted == []
+
+        mgr._lock(s.id).release()
+        applied = mgr.announce_layer_change(s.id, dict(self._OP))
+        assert applied["op"] == "graph_changes_discarded"
+        assert s.seq == applied["seq"] == 1
+        assert persisted == [1]
+        assert [event["seq"] for _, event in published] == [1]
+
+    async def test_a_failed_persist_is_logged_and_the_op_still_fans_out(self, caplog):
+        mgr = _manager()
+        s = mgr.create_session()
+        published = _spy_publish(mgr)
+
+        def broken_persist(session):
+            raise OSError("disk full")
+
+        mgr.store.persist = broken_persist
+
+        with caplog.at_level("ERROR"):
+            applied = mgr.announce_layer_change(s.id, dict(self._OP))
+
+        assert applied["seq"] == s.seq == 1
+        assert [event["seq"] for _, event in published] == [1]
+        assert "persisting its seq failed" in caplog.text
+
+
+class TestSessionActivityByteCache:
+    """The cache is derived state: it must not make two otherwise equal
+    sessions differ, nor be printed with the session."""
+
+    async def test_equality_and_repr_ignore_the_activity_byte_cache(self):
+        s = _manager().create_session()
+        cached = dataclasses.replace(s)
+        cached._activity_record_bytes = {1: "record-bytes-marker"}
+
+        assert cached == s
+        assert "_activity_record_bytes" not in repr(cached)
+        assert "record-bytes-marker" not in repr(cached)
