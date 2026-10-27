@@ -692,7 +692,7 @@ class TestSessionOpsImageIngestGuard:
     """This endpoint is the widest of the image-ingest bypasses: no MCP layer is
     involved, so anything holding a session id can post an annotation op
     directly. The guard is unit-tested in
-    ``backend/core/tests/test_session_annotations_image_guard.py``; these assert
+    ``backend/core/tests/test_session_annotations_guards.py``; these assert
     it is actually reachable over HTTP and reported as a 400."""
 
     _EMBEDDED = (
