@@ -367,6 +367,20 @@ class _TokenBucket:
         self._last_sweep = now
 
 
+def _detached_snapshot(session: Session) -> Dict[str, Any]:
+    """``session.to_dict()`` detached from live session objects, for a worker.
+
+    Everything is deep-copied except the activity log, which gets one shallow
+    copy per record: a record's nested values are deep copies taken when it
+    was built and never edited afterwards, and only ``undo_last_action`` sets
+    its top-level ``undone`` flags. That keeps the copy at the default
+    500-record cap in microseconds rather than tens of milliseconds.
+    """
+    snapshot = copy.deepcopy({**session.to_dict(), "activity_log": []})
+    snapshot["activity_log"] = [dict(record) for record in session.activity_log]
+    return snapshot
+
+
 def _claimed_annotation_target(op: Dict[str, Any], session: Session) -> Optional[str]:
     """Return the id of the *existing* annotation ``op`` would mutate, if any.
 
@@ -1246,12 +1260,16 @@ class SessionManager:
             # a persistence-layer failure (disk full, IO error) rolls back too —
             # otherwise in-memory state/seq/ring would advance while disk and all
             # subscribers stayed behind, duplicating non-idempotent ops on retry.
-            # The deepcopy cost is negligible at drag-end op cadence (D9).
+            # The activity log is copied shallowly: inside this region it is
+            # only appended to and pruned (``apply_state_op``), never edited in
+            # place, so a list copy restores it exactly. Deep-copying it here
+            # and again in the snapshot below cost ~28 ms of event-loop time
+            # per batch at the default 500-record cap.
             saved_state = copy.deepcopy(session.state)
             saved_seq = session.seq
             saved_name = session.name
             saved_updated_at = session.updated_at
-            saved_activity_log = copy.deepcopy(session.activity_log)
+            saved_activity_log = list(session.activity_log)
             ring = self.store.ring(session_id)
             saved_ring = list(ring) if ring is not None else None
 
@@ -1317,7 +1335,7 @@ class SessionManager:
                     # the worker must never read ``session.state`` while a
                     # loop-thread writer (the synchronous ``apply_layout`` path)
                     # may be mutating it during this await. See persist_snapshot.
-                    snapshot = copy.deepcopy(session.to_dict())
+                    snapshot = _detached_snapshot(session)
 
                     # Cumulative budget check (smallfix-session-ops-path-ignores-
                     # image-budgets): the per-batch caps above only bound *one*
@@ -2152,7 +2170,10 @@ class SessionManager:
         if conflict_reason is not None:
             raise UndoConflict(record["id"], conflict_reason)
 
-        inverse_op = dict(record["inverse_op"])
+        # Deep, so the replay never shares objects with the record: state an
+        # op later edits in place must not reach back into the activity log,
+        # whose rollback copies are shallow.
+        inverse_op = copy.deepcopy(record["inverse_op"])
         # Undo is a browser write like any other, so it answers to the same
         # edit-lease rule apply_ops does. Actor-scoping is not a substitute:
         # undo reverts *your own* past action, but the annotation it touches
@@ -2271,7 +2292,8 @@ class SessionManager:
         saved_seq = session.seq
         saved_name = session.name
         saved_updated_at = session.updated_at
-        saved_activity_log = copy.deepcopy(session.activity_log)
+        # Shallow, as in apply_ops: an op only appends to and prunes the log.
+        saved_activity_log = list(session.activity_log)
         ring = self.store.ring(session_id)
         saved_ring = list(ring) if ring is not None else None
         try:
