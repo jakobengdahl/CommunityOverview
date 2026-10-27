@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import CreateSkillDialog from './CreateSkillDialog';
 import en from '../i18n/en.json';
-import { missingKeys } from '../test/strictI18n';
+import { expectAllKeysResolved, missingKeys } from '../test/strictI18n';
 
 vi.mock('../i18n', async () => (await import('../test/strictI18n')).strictI18nModule);
 
@@ -17,7 +17,7 @@ beforeEach(() => {
 
 afterEach(() => {
   // Every t() call, including placeholders, resolved.
-  expect(missingKeys).toEqual([]);
+  expectAllKeysResolved();
 });
 
 const typeInto = (label, value) =>
@@ -105,5 +105,58 @@ describe('CreateSkillDialog', () => {
         },
       },
     });
+  });
+
+  it('titles the dialog with the node type when creating and when editing', () => {
+    const { unmount } = render(
+      <CreateSkillDialog nodeType="Playbook" onClose={vi.fn()} onSave={vi.fn()} />
+    );
+    expect(screen.getByRole('heading', { level: 2 }).textContent).toBe(
+      d.title.replace('{type}', 'Playbook')
+    );
+    unmount();
+
+    render(
+      <CreateSkillDialog
+        nodeType="Playbook"
+        onClose={vi.fn()}
+        onSave={vi.fn()}
+        initialData={{ id: 'sk1', name: 'Analyse' }}
+      />
+    );
+    expect(screen.getByRole('heading', { level: 2 }).textContent).toBe(
+      d.title_edit.replace('{type}', 'Playbook')
+    );
+  });
+
+  it('shows the translated placeholder on every prose field', () => {
+    render(<CreateSkillDialog onClose={vi.fn()} onSave={vi.fn()} />);
+    for (const field of ['name', 'description', 'aliases', 'when', 'content']) {
+      expect(screen.getByLabelText(d[`${field}_label`])).toHaveAttribute(
+        'placeholder',
+        d[`${field}_placeholder`]
+      );
+    }
+  });
+
+  it('labels each effort option with its translation', () => {
+    render(<CreateSkillDialog onClose={vi.fn()} onSave={vi.fn()} />);
+    const options = screen.getAllByRole('option');
+    expect(options.map((o) => [o.value, o.textContent])).toEqual([
+      ['', d.effort_unset],
+      ['low', d.effort_low],
+      ['medium', d.effort_medium],
+      ['high', d.effort_high],
+    ]);
+  });
+
+  it('closes on Cancel without saving', () => {
+    const onSave = vi.fn();
+    const onClose = vi.fn();
+    render(<CreateSkillDialog onClose={onClose} onSave={onSave} />);
+    typeInto(d.name_label, 'Analyse');
+    fireEvent.click(screen.getByRole('button', { name: d.cancel }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onSave).not.toHaveBeenCalled();
   });
 });

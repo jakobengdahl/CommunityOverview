@@ -294,10 +294,34 @@ class FakeSkillsLoader:
             raise self.dir_error
         return [("local", s) for s in self.local_skills]
 
+    async def load_full_skill(self, meta):
+        kind, skill = meta
+        if self.url_error and kind == "url":
+            raise self.url_error
+        return skill
+
     async def load_full_skills(self, metas):
         if self.url_error and any(kind == "url" for kind, _ in metas):
             raise self.url_error
         return [s for _, s in metas]
+
+
+class PartiallyFailingSkillsLoader(FakeSkillsLoader):
+    """Upgrades metadata one skill at a time, like SkillsLoader, and raises on
+    the skill named by fail_on after the skills before it have loaded."""
+
+    def __init__(self, fail_on, **kwargs):
+        super().__init__(**kwargs)
+        self.fail_on = fail_on
+
+    async def load_full_skill(self, meta):
+        _, skill = meta
+        if skill.id == self.fail_on:
+            raise RuntimeError(f"cannot load {skill.id}")
+        return skill
+
+    async def load_full_skills(self, metas):
+        return [await self.load_full_skill(meta) for meta in metas]
 
 
 class TestLoadSkills:
@@ -396,6 +420,28 @@ class TestLoadSkills:
 
         assert [s.id for s in skills] == ["from-dir", "skill-node"]
 
+    @pytest.mark.parametrize(
+        "stage, expected",
+        [("url", ["dir-1", "dir-2", "skill-node"]), ("dir", ["url-1", "url-2"])],
+    )
+    def test_source_failing_midway_contributes_none_of_its_skills(
+        self, make_worker, mock_storage, stage, expected
+    ):
+        """A source is all or nothing: skills it produced before failing are dropped."""
+        self._skill_node(mock_storage, "skill-node")
+        loader = PartiallyFailingSkillsLoader(
+            fail_on=f"{stage}-2",
+            url_skills=[_skill("url-1"), _skill("url-2")],
+            local_skills=[_skill("dir-1"), _skill("dir-2")],
+        )
+        worker = make_worker(
+            loader,
+            skills_urls=["https://example.org/SKILL.md"],
+            skill_node_ids=["skill-node"] if stage == "url" else [],
+        )
+
+        assert [s.id for s in worker._load_skills()] == expected
+
     def test_failed_local_dir_load_keeps_url_and_graph_skills(
         self, make_worker, mock_storage
     ):
@@ -447,3 +493,14 @@ class TestLoadSkills:
         worker._skills_config.max_skill_body_chars = 10
 
         assert worker._load_skills()[0].content == "x" * 10
+
+    def test_skill_node_source_url_comes_from_metadata(self, make_worker, mock_storage):
+        self._skill_node(mock_storage, "linked")
+        mock_storage.nodes["linked"].metadata["source_url"] = (
+            "https://example.org/skills/linked/SKILL.md"
+        )
+        worker = make_worker(FakeSkillsLoader(), skill_node_ids=["linked"])
+
+        skill = worker._load_skills()[0]
+
+        assert skill.source_url == "https://example.org/skills/linked/SKILL.md"

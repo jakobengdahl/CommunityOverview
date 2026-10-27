@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import CreateSubscriptionDialog from './CreateSubscriptionDialog';
 import en from '../i18n/en.json';
-import { missingKeys } from '../test/strictI18n';
+import { expectAllKeysResolved, missingKeys } from '../test/strictI18n';
 
 vi.mock('../i18n', async () => (await import('../test/strictI18n')).strictI18nModule);
 
@@ -27,7 +27,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   // Every t() call, including placeholders and alert messages, resolved.
-  expect(missingKeys).toEqual([]);
+  expectAllKeysResolved();
 });
 
 const typeInto = (label, value) =>
