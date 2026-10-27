@@ -21,6 +21,9 @@ const counter = (current, total) =>
 
 beforeEach(() => {
   missingKeys.length = 0;
+  // Shared module mock: without a reset its calls and queued results carry
+  // over between tests.
+  api.searchGraph.mockReset();
 });
 
 afterEach(() => {
@@ -71,6 +74,24 @@ describe('GuideOverlay', () => {
     expect(useGraphStore.getState().guide.userInputs).toEqual({ who: 'Ada' });
   });
 
+  it('stops the guide on Escape pressed inside an input step', () => {
+    render(<GuideOverlay />);
+    start([{ type: 'input', text: 'Your name?', store_as: 'who' }, { text: 'Thanks' }]);
+
+    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Escape' });
+
+    expect(useGraphStore.getState().guide.isActive).toBe(false);
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('stops the guide from the header close button', () => {
+    render(<GuideOverlay />);
+    start([{ text: 'First' }, { text: 'Second' }]);
+    // The header's × comes before the footer Cancel, which shares its label.
+    fireEvent.click(screen.getAllByRole('button', { name: g.cancel })[0]);
+    expect(useGraphStore.getState().guide.isActive).toBe(false);
+  });
+
   it('stops the guide on Escape and on Cancel', () => {
     render(<GuideOverlay />);
     start([{ text: 'First' }, { text: 'Second' }]);
@@ -89,6 +110,7 @@ describe('GuideOverlay', () => {
     start([{ type: 'search_nodes', query: 'ai', text: 'Found' }, { text: 'Next' }]);
 
     expect(await screen.findByText('Found')).toBeInTheDocument();
+    expect(api.searchGraph).toHaveBeenCalledTimes(1);
     expect(api.searchGraph).toHaveBeenCalledWith('ai', { nodeTypes: undefined, limit: 30 });
     expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['n1']);
   });
@@ -101,5 +123,45 @@ describe('GuideOverlay', () => {
 
     expect(await screen.findByText('search down')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: g.next })).toBeEnabled();
+  });
+
+  it('disables Next until the step action settles', async () => {
+    let finish;
+    api.searchGraph.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      })
+    );
+    render(<GuideOverlay />);
+    start([{ type: 'search_nodes', query: 'ai', text: 'Found' }, { text: 'Next' }]);
+
+    expect(screen.getByText(g.loading)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: g.next })).toBeDisabled();
+
+    await act(async () => finish({ nodes: [], edges: [] }));
+    expect(api.searchGraph).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('Found')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: g.next })).toBeEnabled();
+  });
+
+  it('clears the typed input and the action error when the step changes', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    api.searchGraph.mockRejectedValueOnce(new Error('search down'));
+    render(<GuideOverlay />);
+    start([
+      { type: 'search_nodes', query: 'x', text: 'Again' },
+      { type: 'input', text: 'First?', store_as: 'a' },
+      { type: 'input', text: 'Second?', store_as: 'b' },
+    ]);
+
+    expect(await screen.findByText('search down')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: g.next }));
+    expect(screen.getByText('First?')).toBeInTheDocument();
+    expect(screen.queryByText('search down')).toBeNull();
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'typed' } });
+    fireEvent.click(screen.getByRole('button', { name: g.next }));
+    expect(screen.getByText('Second?')).toBeInTheDocument();
+    expect(screen.getByRole('textbox')).toHaveValue('');
   });
 });
