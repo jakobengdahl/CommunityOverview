@@ -273,6 +273,10 @@ npm run build
 # Run all Python tests
 python -m pytest backend
 
+# The same suite across every CPU core (pytest-xdist, in requirements-dev.txt);
+# what CI runs, and several times faster than the serial run above
+python -m pytest backend -n auto
+
 # Run specific test file
 pytest backend/service/tests/test_integration_rest_vs_mcp.py
 
@@ -449,7 +453,7 @@ vitest with the v8 provider and writes a report to that workspace's
 `.github/workflows/ci.yml` runs three test jobs on every push and pull request,
 kept separate so a failure points at the layer that broke:
 
-- **Backend tests** — `pytest backend/ -q` on the base (ML-free) requirements.
+- **Backend tests** — `pytest backend/ -q -n auto` on the base (ML-free) requirements.
   Semantic search and chat use their mock/fallback paths, so no embedding model
   is downloaded in CI.
 - **Frontend tests** — `npm run test:unit` across the web, widget, canvas, and xr

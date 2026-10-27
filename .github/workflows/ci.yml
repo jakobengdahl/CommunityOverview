@@ -237,9 +237,13 @@ jobs:
         run: pip install -r backend/requirements-dev.txt
 
       - name: Run backend test suite
-        run: pytest backend/ -q
+        # One worker per core (pytest-xdist). Every worker collects on its
+        # own, so the postgres contract tests' length seed is pinned once per
+        # run here: identical across workers, still new on every CI run.
+        run: pytest backend/ -q -n auto
         env:
           PYTHONPATH: ${{ github.workspace }}
+          CO_TEST_PG_LENGTH_SEED: ${{ github.run_id }}
           # The tests skip themselves when no server answers, which is right
           # for a contributor and wrong here: CI always sets the DSN, so a
           # service container that failed to start would leave this job green
