@@ -5489,3 +5489,54 @@ class TestDocumentBudgetIsExact:
             s.id, "c1", None, [self._move(9)], max_session_document_bytes=needed
         )
         assert self._size(s) == needed
+
+
+class TestRollbackRestoresRecentlyDeletedIds:
+    """The store's "recently deleted" ids live outside the persisted document,
+    so every rollback must put them back itself: a stray id makes a later
+    undo of the real delete fail forever, or evicts another id from the
+    bounded deque."""
+
+    @staticmethod
+    def _failing_store():
+        store = SessionStore(InMemorySessionPersistenceBackend())
+
+        def boom(*_args):
+            raise OSError("disk full")
+
+        return store, boom
+
+    async def test_a_failed_undo_of_a_create_leaves_no_deleted_id(self):
+        store, boom = self._failing_store()
+        mgr = SessionManager(store)
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "c1", {"id": "note-1", "type": "note"})
+        store.persist = boom
+        with pytest.raises(OSError):
+            mgr.undo_last_action(s.id, "c1")
+        assert list(s._deleted_annotation_ids) == []
+
+    async def test_a_failed_sync_delete_leaves_no_deleted_id(self):
+        store, boom = self._failing_store()
+        mgr = SessionManager(store)
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "c1", {"id": "note-1", "type": "note"})
+        store.persist = boom
+        with pytest.raises(OSError):
+            mgr.delete_annotation(s.id, "c1", "note-1")
+        assert list(s._deleted_annotation_ids) == []
+
+    async def test_a_failed_batch_delete_leaves_no_deleted_id(self):
+        store, boom = self._failing_store()
+        mgr = SessionManager(store)
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "c1", {"id": "note-1", "type": "note"})
+        store.persist_snapshot = boom
+        with pytest.raises(OSError):
+            await mgr.apply_ops(
+                s.id,
+                "c1",
+                None,
+                [{"op": "annotation_deleted", "annotation_id": "note-1"}],
+            )
+        assert list(s._deleted_annotation_ids) == []
