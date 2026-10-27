@@ -1,5 +1,10 @@
+/**
+ * @vitest-environment jsdom
+ */
+import { createElement } from 'react';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { missingKeys, strictI18nModule } from './strictI18n';
+import { render } from '@testing-library/react';
+import { expectAllKeysResolved, missingKeys, strictI18nModule } from './strictI18n';
 import en from '../i18n/en.json';
 
 const { t } = strictI18nModule.useI18n();
@@ -19,6 +24,15 @@ describe('strictI18n', () => {
     expect(t('agent_dialog.name_too_long', { max: 185 })).toBe(
       en.agent_dialog.name_too_long.replace('{max}', '185')
     );
+    expect(missingKeys).toEqual([]);
+  });
+
+  it('unmounts before failing on an unknown key, so the DOM cannot leak into the next test', () => {
+    render(createElement('p', null, 'rendered'));
+    t('no.such.key');
+    expect(() => expectAllKeysResolved()).toThrow();
+    expect(document.body.textContent).toBe('');
+    // Drained, so the next test does not inherit the key either.
     expect(missingKeys).toEqual([]);
   });
 });
