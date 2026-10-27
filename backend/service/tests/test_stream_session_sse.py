@@ -284,12 +284,20 @@ async def test_unexpected_error_propagates_and_still_unsubscribes(
 
 
 @pytest.mark.asyncio
+# How the failure surfaces depends on starlette's per-spec path; the release
+# is the invariant. Below ASGI 2.4 the send runs in a task group, which
+# re-raises an OSError as is and absorbs the cancellation of its own task.
 @pytest.mark.parametrize(
-    ("failure", "raised"),
-    [(OSError, ClientDisconnect), (asyncio.CancelledError, asyncio.CancelledError)],
+    ("spec_version", "failure", "raised"),
+    [
+        ("2.4", OSError, ClientDisconnect),
+        ("2.4", asyncio.CancelledError, asyncio.CancelledError),
+        ("2.0", OSError, OSError),
+        ("2.0", asyncio.CancelledError, None),
+    ],
 )
 async def test_failed_response_start_unsubscribes_without_iterating_the_body(
-    stream_env, failure, raised
+    stream_env, failure, raised, spec_version
 ):
     manager, endpoint = stream_env
     session = manager.create_session()
@@ -310,15 +318,19 @@ async def test_failed_response_start_unsubscribes_without_iterating_the_body(
         assert message["type"] == "http.response.start"
         raise failure
 
-    scope = {"type": "http", "asgi": {"spec_version": "2.4"}}
-    with pytest.raises(raised):
+    scope = {"type": "http", "asgi": {"spec_version": spec_version}}
+    if raised is None:
         await response(scope, receive, send)
+    else:
+        with pytest.raises(raised):
+            await response(scope, receive, send)
     _assert_disconnected(manager, session.id)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("spec_version", ["2.0", "2.4"])
 async def test_completed_response_releases_once_and_keeps_sibling_presence(
-    stream_env,
+    stream_env, spec_version
 ):
     manager, endpoint = stream_env
     request = _FakeRequest()
@@ -341,7 +353,8 @@ async def test_completed_response_releases_once_and_keeps_sibling_presence(
         if message["type"] == "http.response.body":
             request.disconnected = True
 
-    await response({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send)
+    scope = {"type": "http", "asgi": {"spec_version": spec_version}}
+    await response(scope, receive, send)
 
     assert manager.bus.subscriber_count(session_id) == 1
     assert [m["client_id"] for m in manager.roster(session_id)] == ["c1"]
