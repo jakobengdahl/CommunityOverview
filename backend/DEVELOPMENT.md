@@ -443,6 +443,27 @@ check, and reports (`coverage/`, `.coverage`) are gitignored. For the backend,
 PostgreSQL database with `CO_REQUIRE_POSTGRES=1` and `CO_TEST_POSTGRES_DSN`
 (as CI does) so the PostgreSQL backend paths count instead of skipping, then
 run `python -m pytest backend -q --cov=backend --cov-branch --cov-report=term-missing`.
+
+Python subprocesses the tests start are measured too (`[tool.coverage.run]
+patch = ["subprocess"]` in `pyproject.toml`), except the two isolated children,
+which coverage cannot reach without loosening the isolation they exist for:
+
+- **`backend/core/attachment_extract.py`** — the extraction worker starts as
+  `python -I` with an empty environment, so coverage's configuration never
+  reaches it, and it sets `RLIMIT_FSIZE` to zero, so it could not write a data
+  file anyway. `_worker_main` and `_apply_resource_limits` run only there.
+  The format extractors (`_extract_*` and their helpers) run there whenever a
+  test goes through `extract()`, so they count only where a test calls them
+  in-process: `_extract_in_process` (today part of the DOCX path) or a shared
+  helper such as `_Collector` or `_bounded_join`.
+  `_exchange_threads` is the non-POSIX path and does not run on Linux at all.
+- **`backend/functions/sandbox.py`** — the supervisor starts as `python -I -S`,
+  so no `.pth` hook runs and coverage is not importable, and its forked child
+  then applies Landlock and seccomp and replaces itself with `execve`.
+  `supervise`, `probe`, `_child`, `_reap_all` and `main` run only there.
+
+Read those two modules' figures as covering the code that runs in the test
+process, and judge the child code by its tests.
 Each JavaScript workspace (`packages/ui-graph-canvas`, `frontend/web`,
 `frontend/widget`, `frontend/xr`) has `npm run test:coverage`, which runs
 vitest with the v8 provider and writes a report to that workspace's

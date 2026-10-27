@@ -384,8 +384,14 @@ class TestADotEnvFileIsNotAReliableCredentialSource:
                 capture_output=True,
                 text=True,
                 timeout=180,
-                # Strip any tracer so find_dotenv cannot take the cwd branch.
-                env={**os.environ, "COVERAGE_PROCESS_START": ""},
+                # Strip any tracer so find_dotenv cannot take the cwd branch:
+                # coverage's .pth hook starts on either variable, and its
+                # subprocess patch sets COVERAGE_PROCESS_CONFIG.
+                env={
+                    **os.environ,
+                    "COVERAGE_PROCESS_START": "",
+                    "COVERAGE_PROCESS_CONFIG": "",
+                },
             )
 
         assert "FOUND: from-repo-root" in result.stdout, (
