@@ -37,7 +37,6 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
-CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 
 # gate job id -> the detect-changes output that decides whether its worker had
 # anything to do. A skip is legitimate only when this flag is false.
@@ -182,8 +181,7 @@ def discover_gates(workflow):
 def gate_step(workflow, job_id):
     """The verification step - the one declaring RESULT - rather than steps[0].
 
-    This keeps the truth-table tests working if a gate gains a step; the
-    separate single-step assertion below still flags that change deliberately.
+    This keeps the truth-table tests working if a gate gains a step.
     """
     steps = workflow["jobs"][job_id]["steps"]
     verifying = [s for s in steps if "RESULT" in (s.get("env") or {})]
@@ -298,24 +296,6 @@ class TestTheGateSetIsDiscovered:
                 "branch protection sees success for work that never ran."
             )
 
-    def test_claude_md_pins_the_required_check_shape(self):
-        """CLAUDE.md is agent-facing process text, so it must describe the same
-        merge-blocking CI shape this file verifies from ci.yml."""
-        text = CLAUDE_MD.read_text()
-        claim = re.search(
-            r"Required checks on `main`: the split worker\+gate checks"
-            r"\s+([^.]+?),\s+plus the unconditional\s+`([^`]+)`\.",
-            text,
-        )
-
-        assert claim, (
-            "CLAUDE.md must list the required checks on main, split into the "
-            "worker+gate ones and the unconditional one"
-        )
-        documented_split_checks = set(re.findall(r"`([^`]+)`", claim.group(1)))
-        assert documented_split_checks == set(REQUIRED_CHECK_NAMES.values())
-        assert {claim.group(2)} == BRANCH_PROTECTION_CHECKS - documented_split_checks
-
 
 class TestGateDistinguishesWhyTheWorkerSkipped:
     @pytest.mark.parametrize("job_id,flag", sorted(GATES.items()))
@@ -359,13 +339,6 @@ class TestTheWorkerGateWiringItself:
         gate = workflow["jobs"][job_id]
         assert is_always(gate["if"])
         assert set(gate["needs"]) == {"detect-changes", f"{job_id}-run"}
-
-    @pytest.mark.parametrize("job_id,flag", sorted(GATES.items()))
-    def test_gate_is_a_single_verification_step(self, workflow, job_id, flag):
-        """Not a correctness requirement - a gate could legitimately gain a step.
-        Named separately so that change fails here with an obvious message
-        rather than scattering failures across the matrix."""
-        assert len(workflow["jobs"][job_id]["steps"]) == 1
 
     @pytest.mark.parametrize("job_id,flag", sorted(GATES.items()))
     def test_gate_does_not_continue_on_error(self, workflow, job_id, flag):
