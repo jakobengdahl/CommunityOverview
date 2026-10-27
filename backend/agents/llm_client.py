@@ -227,7 +227,6 @@ class LLMClient:
                     tool_results.append(
                         {
                             "tool_use_id": tc.id,
-                            "name": tc.name,
                             "result": {"error": input_error},
                             "is_error": True,
                         }
@@ -238,7 +237,6 @@ class LLMClient:
                     tool_results.append(
                         {
                             "tool_use_id": tc.id,
-                            "name": tc.name,
                             "result": result,
                             "is_error": False,
                         }
@@ -248,7 +246,6 @@ class LLMClient:
                     tool_results.append(
                         {
                             "tool_use_id": tc.id,
-                            "name": tc.name,
                             "result": {"error": str(e)},
                             "is_error": True,
                         }
