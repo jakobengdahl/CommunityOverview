@@ -237,49 +237,50 @@ class TestAgentSchedulerRegistration:
 
         assert "agent-1" in scheduler.registrations()
 
-    def test_registrations_reads_entries_only_while_holding_the_lock(self):
+    def test_registrations_copies_entries_only_while_holding_the_lock(self):
         """The scheduler thread snapshots while API threads register/unregister,
-        so every read of _entries during the copy must happen under _lock."""
+        so the copy of _entries must be taken while _lock is held."""
         scheduler = AgentScheduler()
         config = make_config(schedule=AgentSchedule(day_of_week=0, hour=9, minute=0))
         scheduler.register("agent-1", config, make_worker())
-        lock_held_on_read: List[bool] = []
+        locked_view = dict(scheduler._entries)
+        unlocked_view = {"written-while-unlocked": locked_view["agent-1"]}
+        entries = scheduler._entries
+        real_lock = scheduler._lock
 
-        class LockCheckingDict(dict):
-            # Overriding __iter__ also routes dict(self) through keys()/__getitem__.
-            def _record(self):
-                lock_held_on_read.append(scheduler._lock.locked())
+        def show(view):
+            entries.clear()
+            entries.update(view)
 
-            def __iter__(self):
-                self._record()
-                return super().__iter__()
+        class ViewSwitchingLock:
+            # Stands in for a concurrent writer: _entries holds one content
+            # while the lock is held and another whenever it is free, so the
+            # snapshot reveals when it was taken, however the copy is made.
+            def acquire(self, *args, **kwargs):
+                acquired = real_lock.acquire(*args, **kwargs)
+                if acquired:
+                    show(locked_view)
+                return acquired
 
-            def keys(self):
-                self._record()
-                return super().keys()
+            def release(self):
+                show(unlocked_view)
+                real_lock.release()
 
-            def items(self):
-                self._record()
-                return super().items()
+            def locked(self):
+                return real_lock.locked()
 
-            def values(self):
-                self._record()
-                return super().values()
+            __enter__ = acquire
 
-            def __getitem__(self, key):
-                self._record()
-                return super().__getitem__(key)
+            def __exit__(self, *exc_info):
+                self.release()
 
-            def copy(self):
-                self._record()
-                return dict(super().items())
-
-        scheduler._entries = LockCheckingDict(scheduler._entries)
+        show(unlocked_view)
+        scheduler._lock = ViewSwitchingLock()
 
         snapshot = scheduler.registrations()
 
-        assert list(snapshot) == ["agent-1"]
-        assert lock_held_on_read and all(lock_held_on_read)
+        assert snapshot == locked_view
+        assert not real_lock.locked()
 
     def test_unregister_unknown_agent_is_noop(self):
         scheduler = AgentScheduler()
