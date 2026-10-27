@@ -79,13 +79,22 @@ def _record_built_apps(request, monkeypatch):
 def pytest_runtest_teardown(item, nextitem):
     # Before fixture teardown, so storage flushes while the temp graph files
     # the fixtures created still exist. The list is emptied because items live
-    # for the whole session and would otherwise keep the apps alive.
+    # for the whole session and would otherwise keep the apps alive. A failing
+    # handler is raised only after the yield: raising before it would skip the
+    # fixture teardown and break every later test on the worker.
     built = item.stash.get(_BUILT_APPS, [])
     item.stash[_BUILT_APPS] = []
+    errors = []
     for app in built:
-        shut_down_unstarted_app(app)
+        try:
+            shut_down_unstarted_app(app)
+        except Exception as exc:
+            errors.append(exc)
     release_fastapi_callable_caches()
-    return (yield)
+    result = yield
+    if errors:
+        raise errors[0]
+    return result
 
 
 @pytest.fixture(autouse=True)
