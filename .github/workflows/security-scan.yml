@@ -11,7 +11,7 @@
 #   - workflow_dispatch : on-demand manual run
 #
 # Every scanner is blocking: no step here carries `continue-on-error`. A secret
-# in the range gitleaks scans (see the gitleaks job for what that range is), a
+# in the range gitleaks scans (see the reusable workflow for that range), a
 # known-vulnerable dependency, or a medium+ bandit finding fails the workflow.
 # The reporting-only stage is over - a green run now means nothing was found,
 # which is what makes the run's conclusion worth watching.
@@ -106,63 +106,15 @@ jobs:
           npm audit --omit=dev 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
           exit "${PIPESTATUS[0]}"
 
-  # ---------------------------------------------------------------------------
-  # bandit – Python static application security testing (SAST). Scans the
-  # backend and gateway source for common insecure patterns. Test directories
-  # are excluded (asserts and fixtures produce noise). -ll limits to medium+
-  # severity. Blocking, like the audits above: the source is clean at medium+,
-  # so a finding fails the workflow as well as showing in the job summary.
-  # ---------------------------------------------------------------------------
-  bandit:
-    name: bandit (Python SAST)
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      - name: Install bandit
-        run: pip install bandit
-
-      - name: Run bandit (medium+ severity)
-        run: |
-          echo "## bandit (backend + services, medium+ severity)" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          bandit -r backend services \
-            -x '*/tests/*,*/test_*.py' \
-            -ll 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
-          status="${PIPESTATUS[0]}"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          exit "$status"
-
-  # ---------------------------------------------------------------------------
-  # gitleaks – secret scanning. Complements GitHub's native secret scanning (a
-  # repo setting) with a committed, self-contained check via the maintained
-  # gitleaks-action (which manages the binary version). On pull_request the
-  # action scans only the PR's commits; on schedule and workflow_dispatch it
-  # scans the full history, so a secret already on main is caught by the weekly
-  # run, not by a PR. Blocking: the history is clean, so any hit fails the
-  # workflow.
-  # ---------------------------------------------------------------------------
-  gitleaks:
-    name: gitleaks (secret scan)
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-        with:
-          # Full history, so the scheduled scan can cover every commit and a PR
-          # scan can resolve the PR's commit range.
-          fetch-depth: 0
-
-      - name: Run gitleaks
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # Scanner check names now include this caller prefix: "Secret and SAST / ".
+  # The required checks documented in CLAUDE.md belong to ci.yml and are unchanged.
+  secret-sast:
+    name: Secret and SAST
+    uses: ./.github/workflows/reusable-secret-sast-scan.yml
+    with:
+      bandit-targets: 'backend services'
+      bandit-severity: medium
+      bandit-confidence: all
+      bandit-excludes: '*/tests/*,*/test_*.py'
+      gitleaks-scan-mode: event
+      gitleaks-config: ''
