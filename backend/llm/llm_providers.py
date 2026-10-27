@@ -152,7 +152,9 @@ class OpenAIProvider(LLMProvider):
                         "type": "tool_use",
                         "id": tool_call.id,
                         "name": tool_call.function.name,
-                        "input": json.loads(tool_call.function.arguments),
+                        "input": self._parse_tool_arguments(
+                            tool_call.function.arguments
+                        ),
                     }
                 )
 
@@ -201,27 +203,28 @@ class OpenAIProvider(LLMProvider):
                 if isinstance(content, str):
                     openai_messages.append({"role": "user", "content": content})
                 elif isinstance(content, list):
-                    # Check if this is a tool_result message
-                    if content and content[0].get("type") == "tool_result":
-                        # Convert tool results to OpenAI format
-                        for item in content:
+                    # Tool messages must directly follow the assistant message
+                    # holding the tool_calls, so a user turn mixing tool_result
+                    # and text blocks emits all tool messages first, then the
+                    # text as one user message.
+                    text_parts = []
+                    for block in content:
+                        if not isinstance(block, dict):
+                            continue
+                        if block.get("type") == "tool_result":
                             openai_messages.append(
                                 {
                                     "role": "tool",
-                                    "tool_call_id": item.get("tool_use_id"),
-                                    "content": item.get("content", ""),
+                                    "tool_call_id": block.get("tool_use_id"),
+                                    "content": block.get("content", ""),
                                 }
                             )
-                    else:
-                        # Regular content blocks
-                        text_parts = []
-                        for block in content:
-                            if isinstance(block, dict) and block.get("type") == "text":
-                                text_parts.append(block.get("text", ""))
-                        if text_parts:
-                            openai_messages.append(
-                                {"role": "user", "content": "\n".join(text_parts)}
-                            )
+                        elif block.get("type") == "text":
+                            text_parts.append(block.get("text", ""))
+                    if text_parts:
+                        openai_messages.append(
+                            {"role": "user", "content": "\n".join(text_parts)}
+                        )
 
             elif role == "assistant":
                 # Handle assistant messages with tool calls
@@ -258,6 +261,14 @@ class OpenAIProvider(LLMProvider):
                     openai_messages.append({"role": "assistant", "content": content})
 
         return openai_messages
+
+    @staticmethod
+    def _parse_tool_arguments(arguments: Optional[str]) -> Dict:
+        # Some OpenAI-compatible servers send "" for no-argument tools;
+        # malformed JSON still raises.
+        if arguments is None or not arguments.strip():
+            return {}
+        return json.loads(arguments)
 
     def _map_finish_reason(self, finish_reason: str) -> str:
         """Map OpenAI finish_reason to Claude stop_reason"""
