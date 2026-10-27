@@ -7,16 +7,6 @@ import './CreateSubscriptionDialog.css'; // Reuse the same styles
 // 200-character Node.name limit; a longer name fails the whole create.
 const AGENT_NAME_MAX_LENGTH = 185;
 
-/**
- * Dialog for creating an Agent node with its associated EventSubscription.
- *
- * When creating an Agent, we also create an EventSubscription that the agent
- * will use to receive events. The Agent node links to the subscription via
- * metadata.subscription_id.
- *
- * The agent runtime will start a background worker for enabled agents and
- * route matching events to the agent's LLM-based processing loop.
- */
 // The dialog names an agent `<prefix>-node` and its subscription
 // `<prefix>-subscription`. Agents saved before the loop guard used the node id
 // stored `agent:<prefix>`, which never matches the `agent:<agent node id>`
@@ -31,6 +21,16 @@ function healedIgnoreOrigins(agentId, subscriptionId, origins) {
   return { ignore_origins: [...new Set(healed)] };
 }
 
+/**
+ * Dialog for creating an Agent node with its associated EventSubscription.
+ *
+ * When creating an Agent, we also create an EventSubscription that the agent
+ * will use to receive events. The Agent node links to the subscription via
+ * metadata.subscription_id.
+ *
+ * The agent runtime will start a background worker for enabled agents and
+ * route matching events to the agent's LLM-based processing loop.
+ */
 export default function CreateAgentDialog({
   onClose,
   onSave,

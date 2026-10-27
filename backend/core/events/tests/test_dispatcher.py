@@ -411,6 +411,41 @@ class TestLegacyAgentLoopGuardRepair:
                 == self.LEGACY
             )
 
+    def test_a_paired_agent_without_the_legacy_origin_is_unchanged(self):
+        for origins in ([], ["agent:other"], None):
+            delivery = {"webhook_url": "internal://agent/p-node"}
+            if origins is not None:
+                delivery["ignore_origins"] = origins
+            assert (
+                _repair_legacy_agent_delivery("p-subscription", "p-node", delivery)
+                == delivery
+            )
+        # Malformed: a non-list value is left for the delivery model to judge.
+        odd = {"webhook_url": "internal://agent/p-node", "ignore_origins": "agent:p"}
+        assert _repair_legacy_agent_delivery("p-subscription", "p-node", odd) == odd
+
+    def test_an_agent_with_a_non_string_subscription_id_does_not_stop_loading(self):
+        subs = [
+            create_subscription_node(
+                "p-subscription",
+                "P",
+                webhook_url="internal://agent/p",
+                ignore_origins=["agent:p"],
+            ),
+            create_subscription_node("q-subscription", "Q"),
+        ]
+        agents = [
+            _agent_node("p-node", "p-subscription"),
+            MockNode("x-node", "X", "Agent", {"subscription_id": ["q-subscription"]}),
+            MockNode("y-node", "Y", "Agent", {"subscription_id": {"id": "q"}}),
+        ]
+        dispatcher = EventDispatcher(MockStorage([*subs, *agents]))
+
+        loaded = {s["id"]: s["delivery"] for s in dispatcher._load_subscriptions()}
+
+        assert loaded["p-subscription"].ignore_origins == ["agent:p", "agent:p-node"]
+        assert loaded["q-subscription"].ignore_origins == []
+
     def test_a_non_agent_subscription_keeps_its_origins_when_dispatched(self):
         sub = create_subscription_node(
             "p-subscription", "Webhook", ignore_origins=["agent:p"]

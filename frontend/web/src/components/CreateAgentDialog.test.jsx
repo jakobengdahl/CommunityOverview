@@ -413,4 +413,19 @@ describe('CreateAgentDialog', () => {
       expect(delivery.ignore_origins).toEqual(['agent:p']);
     }
   );
+
+  it('saves a paired agent whose delivery has no ignore_origins without adding one', async () => {
+    expect(
+      await editUiAgent({ webhook_url: 'internal://agent/p', ignore_session_ids: [] })
+    ).toEqual({ webhook_url: 'internal://agent/p-node', ignore_session_ids: [] });
+  });
+
+  it('leaves the origins of a paired agent without the legacy entry untouched', async () => {
+    const delivery = await editUiAgent({
+      webhook_url: 'internal://agent/p-node',
+      ignore_origins: ['x', 'x'],
+    });
+
+    expect(delivery.ignore_origins).toEqual(['x', 'x']);
+  });
 });
