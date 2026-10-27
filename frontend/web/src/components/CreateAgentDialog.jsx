@@ -7,6 +7,20 @@ import './CreateSubscriptionDialog.css'; // Reuse the same styles
 // 200-character Node.name limit; a longer name fails the whole create.
 const AGENT_NAME_MAX_LENGTH = 185;
 
+// The dialog names an agent `<prefix>-node` and its subscription
+// `<prefix>-subscription`. Agents saved before the loop guard used the node id
+// stored `agent:<prefix>`, which never matches the `agent:<agent node id>`
+// origin the runtime stamps on the agent's own writes; saving rewrites it.
+function healedIgnoreOrigins(agentId, subscriptionId, origins) {
+  if (!agentId.endsWith('-node') || !Array.isArray(origins)) return {};
+  const prefix = agentId.slice(0, -'-node'.length);
+  if (subscriptionId !== `${prefix}-subscription` || !origins.includes(`agent:${prefix}`)) {
+    return {};
+  }
+  const healed = origins.map((o) => (o === `agent:${prefix}` ? `agent:${agentId}` : o));
+  return { ignore_origins: [...new Set(healed)] };
+}
+
 /**
  * Dialog for creating an Agent node with its associated EventSubscription.
  *
@@ -237,6 +251,11 @@ export default function CreateAgentDialog({
             delivery: {
               ...initialData.subscription.metadata.delivery,
               webhook_url: webhookUrl.trim() || `internal://agent/${agentId}`,
+              ...healedIgnoreOrigins(
+                agentId,
+                subscriptionId,
+                initialData.subscription.metadata.delivery?.ignore_origins
+              ),
             },
           },
         };

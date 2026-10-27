@@ -91,6 +91,37 @@ def _copy_event(event: Event) -> Event:
     )
 
 
+def _repair_legacy_agent_delivery(
+    subscription_id: str, agent_id: Optional[str], delivery: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Return ``delivery`` with a UI-created agent's legacy loop guard fixed.
+
+    The web UI names an agent ``<prefix>-node`` and its subscription
+    ``<prefix>-subscription``. Before the dialog was fixed it stored
+    ``agent:<prefix>`` in ``ignore_origins`` and ``internal://agent/<prefix>``
+    as the webhook, but the runtime stamps the agent's own writes with
+    ``agent:<agent node id>`` and origins are matched exactly, so such an
+    agent was woken by its own writes. Only that exact pairing is rewritten;
+    the stored node is left as is and the result is the same when repeated.
+    """
+    if not agent_id or not agent_id.endswith("-node"):
+        return delivery
+    prefix = agent_id[: -len("-node")]
+    if subscription_id != f"{prefix}-subscription":
+        return delivery
+    repaired = dict(delivery)
+    origins = delivery.get("ignore_origins")
+    if (
+        isinstance(origins, list)
+        and f"agent:{prefix}" in origins
+        and f"agent:{agent_id}" not in origins
+    ):
+        repaired["ignore_origins"] = [*origins, f"agent:{agent_id}"]
+    if delivery.get("webhook_url") == f"internal://agent/{prefix}":
+        repaired["webhook_url"] = f"internal://agent/{agent_id}"
+    return repaired
+
+
 class EventDispatcher:
     """
     Dispatches graph mutation events to matching subscriptions.
@@ -166,15 +197,22 @@ class EventDispatcher:
             return self._subscriptions_cache
 
         subscriptions = []
+        subscription_nodes = []
+        agent_by_subscription: Dict[str, str] = {}
 
-        # Search for EventSubscription nodes
+        # Search for EventSubscription nodes, and the Agent linked to each
         for node in self._storage.nodes.values():
             node_type = (
                 node.type.value if hasattr(node.type, "value") else str(node.type)
             )
-            if node_type != "EventSubscription":
-                continue
+            if node_type == "EventSubscription":
+                subscription_nodes.append(node)
+            elif node_type == "Agent":
+                linked = (node.metadata or {}).get("subscription_id")
+                if isinstance(linked, str):
+                    agent_by_subscription[linked] = node.id
 
+        for node in subscription_nodes:
             metadata = node.metadata or {}
 
             # Parse filters
@@ -189,7 +227,11 @@ class EventDispatcher:
                 )
                 continue
 
-            delivery = self._parse_delivery(delivery_data)
+            delivery = self._parse_delivery(
+                _repair_legacy_agent_delivery(
+                    node.id, agent_by_subscription.get(node.id), delivery_data
+                )
+            )
 
             subscriptions.append(
                 {
