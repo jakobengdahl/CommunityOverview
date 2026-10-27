@@ -1035,7 +1035,9 @@ class FileGraphPersistenceBackend:
                 self._merges, self._sessions, now - retention, limit
             )
             if victims:
+                purged = [(m, self._merges[m]["session_id"]) for m in victims]
                 self._rewrite_merge_log_locked(set(victims))
+                _layer.log_purged_merge_records(purged)
             return len(victims)
 
     def stage(
