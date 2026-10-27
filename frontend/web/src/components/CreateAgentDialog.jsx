@@ -202,8 +202,8 @@ export default function CreateAgentDialog({
       let subscriptionUpdates = null;
       if (subscriptionId && initialData.subscription) {
         subscriptionUpdates = {
-          name: `${name} - Subscription`,
-          description: `Event subscription for agent: ${name}`,
+          name: `${name.trim()} - Subscription`,
+          description: `Event subscription for agent: ${name.trim()}`,
           summary: `Listens to ${Object.entries(operations)
             .filter(([_, v]) => v)
             .map(([k]) => k)
@@ -248,9 +248,9 @@ export default function CreateAgentDialog({
       // Create the EventSubscription node
       const subscriptionNode = {
         id: subscriptionId,
-        name: `${name} - Subscription`,
+        name: `${name.trim()} - Subscription`,
         type: 'EventSubscription',
-        description: `Event subscription for agent: ${name}`,
+        description: `Event subscription for agent: ${name.trim()}`,
         summary: `Listens to ${Object.entries(operations)
           .filter(([_, v]) => v)
           .map(([k]) => k)
@@ -272,8 +272,10 @@ export default function CreateAgentDialog({
             },
           },
           delivery: {
-            webhook_url: webhookUrl.trim() || `internal://agent/${idPrefix}`,
-            ignore_origins: [`agent:${idPrefix}`], // Prevent loops - ignore events from this agent
+            webhook_url: webhookUrl.trim() || `internal://agent/${agentId}`,
+            // Prevent loops: the runtime stamps the agent's own writes with
+            // `agent:<agent node id>`, and the dispatcher matches it exactly.
+            ignore_origins: [`agent:${agentId}`],
             ignore_session_ids: [],
           },
         },
@@ -284,7 +286,7 @@ export default function CreateAgentDialog({
         id: agentId,
         name: name.trim(),
         type: 'Agent',
-        description: description.trim() || `AI agent: ${name}`,
+        description: description.trim() || `AI agent: ${name.trim()}`,
         summary: `MCP agent with ${selectedIntegrations.length} integration(s)`,
         aliases: aliasList,
         metadata: {

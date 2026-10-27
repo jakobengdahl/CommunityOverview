@@ -425,3 +425,87 @@ def test_assistant_non_dict_and_unknown_blocks_are_skipped(provider):
         "",
     )
     assert converted == [{"role": "assistant", "content": "visible"}]
+
+
+def test_user_turn_mixing_tool_results_and_text_keeps_text_after_tool_messages(
+    provider,
+):
+    converted = provider._convert_messages_to_openai(
+        [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "call_1", "name": "n", "input": {}},
+                    {"type": "tool_use", "id": "call_2", "name": "n", "input": {}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "call_1", "content": "r1"},
+                    {"type": "text", "text": "also consider X"},
+                    {"type": "tool_result", "tool_use_id": "call_2", "content": "r2"},
+                    {"type": "text", "text": "and Y"},
+                ],
+            },
+        ],
+        "",
+    )
+    assert [m["role"] for m in converted] == ["assistant", "tool", "tool", "user"]
+    assert converted[1:] == [
+        {"role": "tool", "tool_call_id": "call_1", "content": "r1"},
+        {"role": "tool", "tool_call_id": "call_2", "content": "r2"},
+        {"role": "user", "content": "also consider X\nand Y"},
+    ]
+
+
+def test_user_turn_with_text_before_tool_result_keeps_tool_result(provider):
+    converted = provider._convert_messages_to_openai(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "note"},
+                    {"type": "tool_result", "tool_use_id": "call_1", "content": "r"},
+                ],
+            }
+        ],
+        "",
+    )
+    assert converted == [
+        {"role": "tool", "tool_call_id": "call_1", "content": "r"},
+        {"role": "user", "content": "note"},
+    ]
+
+
+@pytest.mark.parametrize("arguments", ["", "   ", None])
+def test_empty_tool_call_arguments_parse_as_empty_input(provider, arguments):
+    provider.client.chat.completions.create.return_value = _completion(
+        None,
+        [
+            SimpleNamespace(
+                id="call_1",
+                function=SimpleNamespace(name="get_node_details", arguments=arguments),
+            )
+        ],
+        finish_reason="tool_calls",
+    )
+    response = provider.create_completion([{"role": "user", "content": "q"}], "", TOOLS)
+    assert response.content == [
+        {"type": "tool_use", "id": "call_1", "name": "get_node_details", "input": {}}
+    ]
+
+
+def test_malformed_tool_call_arguments_still_raise(provider):
+    provider.client.chat.completions.create.return_value = _completion(
+        None,
+        [
+            SimpleNamespace(
+                id="call_1",
+                function=SimpleNamespace(name="search_graph", arguments='{"query":'),
+            )
+        ],
+        finish_reason="tool_calls",
+    )
+    with pytest.raises(json.JSONDecodeError):
+        provider.create_completion([{"role": "user", "content": "q"}], "", TOOLS)
