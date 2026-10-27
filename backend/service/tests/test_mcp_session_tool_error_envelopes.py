@@ -7,9 +7,9 @@ injected by replacing the one ``SessionManager`` method the tool writes
 through, so each case reaches the tool's own ``except`` clause; the
 manager's own behaviour is covered in ``backend/core/tests/``.
 
-Each injected exception carries a sentinel in its message: an envelope that
-does not echo the exception by design (``OpError`` and the image budget do)
-must not leak it.
+Exceptions whose message is not part of the envelope carry a sentinel in it:
+an envelope that does not echo the exception by design (``OpError``, the
+lease conflict and the image budget do) must not leak it.
 """
 
 import os
