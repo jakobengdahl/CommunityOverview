@@ -1497,6 +1497,105 @@ class TestQueryAndDownloadHandling:
 
         asyncio.run(run())
 
+    @pytest.mark.parametrize("spec_version", [None, "2.4"])
+    def test_disconnect_never_closes_the_handle_during_an_active_read(
+        self, storage, store, spec_version
+    ):
+        import threading
+
+        record = _seed(store, "doc", b"x" * 90)
+        app = FastAPI()
+        app.include_router(
+            create_rest_router(
+                GraphService(storage, attachment_settings=_settings(store))
+            ),
+            prefix="/api",
+        )
+
+        async def run():
+            loop = asyncio.get_running_loop()
+            read_blocked = asyncio.Event()
+            release = threading.Event()
+            closed = threading.Event()
+            events = []
+
+            class BlockingStream:
+                """Second read blocks until released; records the call order."""
+
+                def __init__(self):
+                    self.reads = 0
+                    self.reading = False
+
+                def read(self, size=-1):
+                    self.reads += 1
+                    if self.reads != 2:
+                        return b"chunk" if self.reads == 1 else b""
+                    self.reading = True
+                    loop.call_soon_threadsafe(read_blocked.set)
+                    # Failsafe only: the test releases this read itself.
+                    released = release.wait(timeout=10)
+                    self.reading = False
+                    events.append("read returned" if released else "read timed out")
+                    return b"chunk"
+
+                def close(self):
+                    events.append("close during read" if self.reading else "close")
+                    closed.set()
+                    # A close that does not wait must not hang the test.
+                    release.set()
+
+            stream = BlockingStream()
+            store.open_read = lambda *args: stream
+
+            async def receive():
+                await read_blocked.wait()
+                return {"type": "http.disconnect"}
+
+            async def send(message):
+                if spec_version is not None and stream.reads >= 2:
+                    # ASGI spec 2.4+: a send to a gone client raises.
+                    raise OSError("client disconnected")
+
+            scope = {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "GET",
+                "scheme": "http",
+                "path": f"/api/nodes/doc/attachments/{record.id}",
+                "raw_path": b"",
+                "query_string": b"",
+                "root_path": "",
+                "headers": [],
+                "client": ("127.0.0.1", 1),
+                "server": ("test", 80),
+            }
+            if spec_version is not None:
+                scope["asgi"]["spec_version"] = spec_version
+            request = asyncio.create_task(app(scope, receive, send))
+            await asyncio.wait_for(read_blocked.wait(), timeout=10)
+            if spec_version is not None:
+                # A 2.4+ app never polls receive, so a server drops the request
+                # mid-read by cancelling its task, a native cancel that anyio's
+                # wait for the worker thread does not cover.
+                request.cancel()
+            # While the read blocks, nothing but the loop runs, so these turns
+            # deterministically let a close that does not wait for the read
+            # happen first.
+            for _ in range(50):
+                await asyncio.sleep(0)
+            release.set()
+            try:
+                await asyncio.wait_for(request, timeout=10)
+            except (ClientDisconnect, asyncio.CancelledError):
+                pass
+            # After a native cancel the reading thread does the close, so it
+            # may land after the request has ended.
+            assert await asyncio.to_thread(closed.wait, 10)
+            assert events == ["read returned", "close"]
+
+        asyncio.run(run())
+
 
 class TestStoreCallsRunOffTheEventLoop:
     """Each store call must run on a worker thread, never on the loop's thread.

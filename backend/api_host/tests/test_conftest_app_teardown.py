@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from backend.api_host import create_app
 from backend.api_host.tests import conftest
+from backend.core.session_registry import SessionRegistry
 from backend.api_host.tests.conftest import (
     _BUILT_APPS,
     release_fastapi_callable_caches,
@@ -97,3 +98,53 @@ def test_a_failing_shutdown_reaches_fixture_teardown_before_it_is_raised(
     assert len(_delivery_workers()) == before
     with pytest.raises(RuntimeError, match="shutdown broke"):
         hook.send(None)
+
+
+def test_an_app_whose_startup_failed_has_its_workers_stopped_at_teardown(
+    app_config, request, monkeypatch
+):
+    def broken_startup(self, loop):
+        raise RuntimeError("registry startup broke")
+
+    # Fails again on every lifespan run, so the teardown's own run fails too.
+    monkeypatch.setattr(SessionRegistry, "set_event_loop", broken_startup)
+    before = len(_delivery_workers())
+    app = create_app(app_config)
+    with pytest.raises(RuntimeError, match="registry startup broke"):
+        with TestClient(app):
+            pass
+    assert len(_delivery_workers()) == before + 1
+    del app
+
+    hook = conftest.pytest_runtest_teardown(request.node, None)
+    next(hook)
+
+    assert len(_delivery_workers()) == before
+    with pytest.raises(RuntimeError, match="registry startup broke"):
+        hook.send(None)
+
+
+def test_a_failed_teardown_lifespan_stops_the_apps_retentions(app_config, request):
+    before = len(_delivery_workers())
+    app = create_app(app_config)
+    # Shut down here; the hook would run the broken lifespan a second time.
+    request.node.stash[_BUILT_APPS].clear()
+    stopped = []
+
+    class Retention:
+        def stop(self):
+            stopped.append(self)
+
+    @contextlib.asynccontextmanager
+    async def broken(app):
+        raise RuntimeError("startup broke")
+        yield
+
+    app.router.lifespan_context = broken
+    retention = Retention()
+
+    with pytest.raises(RuntimeError, match="startup broke"):
+        shut_down_unstarted_app(app, [retention])
+
+    assert stopped == [retention]
+    assert len(_delivery_workers()) == before

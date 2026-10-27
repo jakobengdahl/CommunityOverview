@@ -20,6 +20,7 @@ Usage:
 import asyncio
 import json
 import logging
+import threading
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -2335,6 +2336,48 @@ def _attachment_download_headers(record: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
+class _CloseAfterRead:
+    """Defer a close that arrives during a read until that read returns.
+
+    Reads run on a worker thread. anyio waits for one when it cancels the
+    response itself, but a native cancel of the request task (a server
+    dropping the request) does not, so the response's ``finally`` can run
+    while the read is still in flight. Closing then would race the read, or,
+    for a buffered file, block the event loop on the reader's lock until it
+    returns; instead the reading thread closes once its read is done.
+    """
+
+    def __init__(self, stream: BinaryIO) -> None:
+        self._stream = stream
+        self._lock = threading.Lock()
+        self._reading = False
+        self._close_requested = False
+
+    def read(self, size: int = -1) -> bytes:
+        with self._lock:
+            if self._close_requested:
+                return b""
+            self._reading = True
+        try:
+            return self._stream.read(size)
+        finally:
+            with self._lock:
+                self._reading = False
+                close_now = self._close_requested
+            if close_now:
+                self._stream.close()
+
+    def close(self) -> None:
+        with self._lock:
+            # The body iterator closes its source too, so this runs twice.
+            if self._close_requested:
+                return
+            self._close_requested = True
+            if self._reading:
+                return
+        self._stream.close()
+
+
 class _AttachmentDownload(StreamingResponse):
     """Stream an open attachment and close it however the response ends.
 
@@ -2345,8 +2388,9 @@ class _AttachmentDownload(StreamingResponse):
     """
 
     def __init__(self, stream: BinaryIO, **kwargs: Any) -> None:
-        super().__init__(copy_stream(stream), **kwargs)
-        self._stream = stream
+        guarded = _CloseAfterRead(stream)
+        super().__init__(copy_stream(guarded), **kwargs)
+        self._stream = guarded
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         try:
