@@ -89,7 +89,9 @@ class ToolCall:
     """One tool the model asked for, in the order it was requested."""
 
     name: str
-    input: Dict[str, Any]
+    # Recorded as sent: a non-object input (list, number, null...) is kept, not
+    # coerced, so scorers can see the call dispatch rejected.
+    input: Any
     tool_use_id: Optional[str]
     turn: int
     """0-based index of the provider call that requested this tool."""
