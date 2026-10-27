@@ -3,12 +3,15 @@ Tests for agent worker.
 """
 
 import threading
+from dataclasses import replace
 
 import pytest
 from unittest.mock import MagicMock
 
 from backend.agents.config import AgentConfig, AgentsSettings, AgentPrompts
 from backend.agents.worker import AgentWorker, ProcessingResult
+from backend.agents.tests.conftest import MockNode
+from backend.skills.loader import SkillDefinition
 
 
 @pytest.fixture
@@ -260,3 +263,187 @@ class TestWorkerCallbacks:
 
         # The callback should be set
         assert worker.on_result is not None
+
+
+def _skill(skill_id, content="body", source="https://example.org/SKILL.md"):
+    return SkillDefinition(
+        id=skill_id,
+        name=skill_id,
+        description="",
+        content=content,
+        source_url=source,
+    )
+
+
+class FakeSkillsLoader:
+    """Stands in for SkillsLoader: URL and local skills come from fixed lists."""
+
+    def __init__(self, url_skills=(), local_skills=(), url_error=None, dir_error=None):
+        self.url_skills = list(url_skills)
+        self.local_skills = list(local_skills)
+        self.url_error = url_error
+        self.dir_error = dir_error
+        self.requested_urls = None
+
+    async def load_metadata_from_urls(self, urls):
+        self.requested_urls = list(urls)
+        return [("url", s) for s in self.url_skills]
+
+    async def load_metadata_from_dir(self):
+        if self.dir_error:
+            raise self.dir_error
+        return [("local", s) for s in self.local_skills]
+
+    async def load_full_skills(self, metas):
+        if self.url_error and any(kind == "url" for kind, _ in metas):
+            raise self.url_error
+        return [s for _, s in metas]
+
+
+class TestLoadSkills:
+    """Skills from URLs, the local dir and Skill nodes, deduplicated by id."""
+
+    @pytest.fixture
+    def make_worker(self, agent_config, agent_settings, mock_storage):
+        def make(loader, skills_urls=(), skill_node_ids=()):
+            config = replace(
+                agent_config,
+                skills_urls=list(skills_urls),
+                skill_node_ids=list(skill_node_ids),
+            )
+            worker = AgentWorker(
+                config=config,
+                settings=agent_settings,
+                mcp_loader=None,
+                graph_service=MagicMock(),
+                graph_storage=mock_storage,
+            )
+            worker._skills_loader = loader
+            return worker
+
+        return make
+
+    @staticmethod
+    def _skill_node(storage, node_id, content="graph body", node_type="Skill"):
+        storage.nodes[node_id] = MockNode(
+            id=node_id,
+            name=f"{node_id} name",
+            type=node_type,
+            description="graph skill",
+            metadata={"content": content, "allowed_tools": ["search_graph"]},
+        )
+
+    def test_loads_url_local_and_graph_skills_in_order(self, make_worker, mock_storage):
+        self._skill_node(mock_storage, "skill-node")
+        loader = FakeSkillsLoader(
+            url_skills=[_skill("from-url")], local_skills=[_skill("from-dir")]
+        )
+        worker = make_worker(
+            loader,
+            skills_urls=["https://example.org/SKILL.md"],
+            skill_node_ids=["skill-node"],
+        )
+
+        skills = worker._load_skills()
+
+        assert [s.id for s in skills] == ["from-url", "from-dir", "skill-node"]
+        assert loader.requested_urls == ["https://example.org/SKILL.md"]
+        graph_skill = skills[2]
+        assert graph_skill.content == "graph body"
+        assert graph_skill.allowed_tools == ["search_graph"]
+        assert graph_skill.source_url == "graph://skill/skill-node"
+
+    def test_no_skills_urls_skips_url_loading(self, make_worker):
+        loader = FakeSkillsLoader(url_skills=[_skill("from-url")])
+        worker = make_worker(loader)
+
+        assert worker._load_skills() == []
+        assert loader.requested_urls is None
+
+    def test_duplicate_ids_keep_first_source(self, make_worker, mock_storage):
+        self._skill_node(mock_storage, "shared", content="graph version")
+        loader = FakeSkillsLoader(
+            url_skills=[_skill("shared", content="url version"), _skill("shared")],
+            local_skills=[_skill("shared", content="dir version"), _skill("only-dir")],
+        )
+        worker = make_worker(
+            loader,
+            skills_urls=["https://example.org/SKILL.md"],
+            skill_node_ids=["shared", "shared"],
+        )
+
+        skills = worker._load_skills()
+
+        assert [s.id for s in skills] == ["shared", "only-dir"]
+        assert skills[0].content == "url version"
+
+    def test_failed_url_load_injects_nothing_and_keeps_other_sources(
+        self, make_worker, mock_storage
+    ):
+        self._skill_node(mock_storage, "skill-node")
+        loader = FakeSkillsLoader(
+            url_skills=[_skill("from-url")],
+            local_skills=[_skill("from-dir")],
+            url_error=RuntimeError("fetch failed"),
+        )
+        worker = make_worker(
+            loader,
+            skills_urls=["https://example.org/SKILL.md"],
+            skill_node_ids=["skill-node"],
+        )
+
+        skills = worker._load_skills()
+
+        assert [s.id for s in skills] == ["from-dir", "skill-node"]
+
+    def test_failed_local_dir_load_keeps_url_and_graph_skills(
+        self, make_worker, mock_storage
+    ):
+        self._skill_node(mock_storage, "skill-node")
+        loader = FakeSkillsLoader(
+            url_skills=[_skill("from-url")], dir_error=OSError("unreadable")
+        )
+        worker = make_worker(
+            loader,
+            skills_urls=["https://example.org/SKILL.md"],
+            skill_node_ids=["skill-node"],
+        )
+
+        assert [s.id for s in worker._load_skills()] == ["from-url", "skill-node"]
+
+    def test_failing_skill_node_does_not_stop_later_nodes(
+        self, make_worker, mock_storage, monkeypatch
+    ):
+        self._skill_node(mock_storage, "broken")
+        self._skill_node(mock_storage, "good")
+        real_get_node = mock_storage.get_node
+
+        def get_node(node_id):
+            if node_id == "broken":
+                raise RuntimeError("storage error")
+            return real_get_node(node_id)
+
+        monkeypatch.setattr(mock_storage, "get_node", get_node)
+        worker = make_worker(FakeSkillsLoader(), skill_node_ids=["broken", "good"])
+
+        assert [s.id for s in worker._load_skills()] == ["good"]
+
+    def test_unusable_skill_nodes_are_skipped(self, make_worker, mock_storage):
+        self._skill_node(mock_storage, "not-a-skill", node_type="Initiative")
+        self._skill_node(mock_storage, "empty", content="")
+        self._skill_node(mock_storage, "good")
+        worker = make_worker(
+            FakeSkillsLoader(),
+            skill_node_ids=["missing", "not-a-skill", "empty", "good"],
+        )
+
+        assert [s.id for s in worker._load_skills()] == ["good"]
+
+    def test_skill_node_content_is_truncated_to_body_limit(
+        self, make_worker, mock_storage
+    ):
+        self._skill_node(mock_storage, "long", content="x" * 50)
+        worker = make_worker(FakeSkillsLoader(), skill_node_ids=["long"])
+        worker._skills_config.max_skill_body_chars = 10
+
+        assert worker._load_skills()[0].content == "x" * 10

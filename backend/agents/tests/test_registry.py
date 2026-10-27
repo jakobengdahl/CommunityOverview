@@ -411,3 +411,248 @@ class TestGetAvailableIntegrations:
         worker.enqueue.return_value = False
         registry._workers = {"agent-1": worker}
         assert registry.trigger_agent("agent-1") is False
+
+
+class TestHandleAgentUpdated:
+    """An Agent node update must leave the runtime matching the node."""
+
+    @pytest.fixture
+    def registry(self, mock_storage, mock_service, monkeypatch):
+        """Registry whose workers are mocks, so no threads or LLM clients start."""
+        registry = AgentRegistry(
+            settings=AgentsSettings(enabled=True, mcp_integrations=[]),
+            graph_storage=mock_storage,
+            graph_service=mock_service,
+        )
+        registry._mcp_loader = MagicMock()  # _ensure_initialized short-circuits
+
+        def make_worker(config, **kwargs):
+            worker = MagicMock()
+            worker.config = config
+            worker.reload_config.side_effect = lambda c: setattr(worker, "config", c)
+            return worker
+
+        monkeypatch.setattr("backend.agents.registry.AgentWorker", make_worker)
+        return registry
+
+    @staticmethod
+    def _put_agent(storage, sample_agent_node, **metadata):
+        sample_agent_node.metadata = {**sample_agent_node.metadata, **metadata}
+        storage.nodes[sample_agent_node.id] = sample_agent_node
+
+    def test_enabling_agent_starts_worker_and_binds_subscription(
+        self, registry, mock_storage, sample_agent_node
+    ):
+        self._put_agent(mock_storage, sample_agent_node, enabled=True)
+
+        registry.handle_agent_updated("agent-001")
+
+        worker = registry._workers["agent-001"]
+        worker.start.assert_called_once()
+        assert registry.get_agent_for_subscription("sub-001") == "agent-001"
+
+    def test_enabling_agent_auto_enables_agent_system(
+        self, registry, mock_storage, sample_agent_node
+    ):
+        registry.settings.enabled = False
+        self._put_agent(mock_storage, sample_agent_node, enabled=True)
+
+        registry.handle_agent_updated("agent-001")
+
+        assert registry.settings.enabled is True
+        assert "agent-001" in registry._workers
+
+    def test_enabling_agent_without_runtime_starts_nothing(
+        self, registry, mock_storage, sample_agent_node, monkeypatch
+    ):
+        monkeypatch.setattr(registry, "_ensure_initialized", lambda: False)
+        self._put_agent(mock_storage, sample_agent_node, enabled=True)
+
+        registry.handle_agent_updated("agent-001")
+
+        assert registry._workers == {}
+        assert registry.is_agent_subscription("sub-001") is False
+
+    def test_disabling_agent_stops_worker_and_unbinds_subscription(
+        self, registry, mock_storage, sample_agent_node
+    ):
+        self._put_agent(
+            mock_storage,
+            sample_agent_node,
+            enabled=True,
+            schedule={"day_of_week": 1, "time": "14:00"},
+        )
+        registry.handle_agent_updated("agent-001")
+        worker = registry._workers["agent-001"]
+        assert "agent-001" in registry._scheduler._entries
+
+        self._put_agent(mock_storage, sample_agent_node, enabled=False)
+        registry.handle_agent_updated("agent-001")
+
+        worker.stop.assert_called_once_with(wait=True)
+        assert "agent-001" not in registry._workers
+        assert registry.is_agent_subscription("sub-001") is False
+        assert "agent-001" not in registry._scheduler._entries
+        assert registry.enqueue_for_subscription("sub-001", {"event_id": "e"}) is False
+
+    def test_disabled_agent_without_worker_stays_stopped(
+        self, registry, mock_storage, sample_agent_node
+    ):
+        self._put_agent(mock_storage, sample_agent_node, enabled=False)
+
+        registry.handle_agent_updated("agent-001")
+
+        assert registry._workers == {}
+        assert registry.is_agent_subscription("sub-001") is False
+
+    def test_changed_subscription_moves_binding_to_new_subscription(
+        self, registry, mock_storage, sample_agent_node
+    ):
+        self._put_agent(mock_storage, sample_agent_node, enabled=True)
+        registry.handle_agent_updated("agent-001")
+        worker = registry._workers["agent-001"]
+
+        self._put_agent(mock_storage, sample_agent_node, subscription_id="sub-002")
+        registry.handle_agent_updated("agent-001")
+
+        worker.reload_config.assert_called_once()
+        assert worker.reload_config.call_args.args[0].subscription_id == "sub-002"
+        worker.stop.assert_not_called()
+        assert registry.is_agent_subscription("sub-001") is False
+        assert registry.get_agent_for_subscription("sub-002") == "agent-001"
+        assert registry.enqueue_for_subscription("sub-001", {"event_id": "e"}) is False
+        assert registry.enqueue_for_subscription("sub-002", {"event_id": "e"}) is True
+
+    def test_removed_subscription_unbinds_old_subscription(
+        self, registry, mock_storage, sample_agent_node
+    ):
+        self._put_agent(mock_storage, sample_agent_node, enabled=True)
+        registry.handle_agent_updated("agent-001")
+
+        self._put_agent(mock_storage, sample_agent_node, subscription_id=None)
+        registry.handle_agent_updated("agent-001")
+
+        assert registry._subscription_agent_map == {}
+        assert "agent-001" in registry._workers
+
+    def test_reload_reschedules_with_new_config(
+        self, registry, mock_storage, sample_agent_node, monkeypatch
+    ):
+        self._put_agent(mock_storage, sample_agent_node, enabled=True)
+        registry.handle_agent_updated("agent-001")
+        assert "agent-001" not in registry._scheduler._entries
+
+        registry.settings.scheduler_enabled = True
+        scheduler_start = MagicMock()
+        monkeypatch.setattr(registry._scheduler, "start", scheduler_start)
+        self._put_agent(
+            mock_storage,
+            sample_agent_node,
+            schedule={"day_of_week": 1, "time": "14:00"},
+        )
+        registry.handle_agent_updated("agent-001")
+
+        config, worker = registry._scheduler._entries["agent-001"]
+        assert config.schedule is not None
+        assert config.schedule.day_of_week == 1
+        assert worker is registry._workers["agent-001"]
+        scheduler_start.assert_called_once()
+
+    def test_reload_drops_schedule_removed_from_node(
+        self, registry, mock_storage, sample_agent_node
+    ):
+        self._put_agent(
+            mock_storage,
+            sample_agent_node,
+            enabled=True,
+            schedule={"day_of_week": 1, "time": "14:00"},
+        )
+        registry.handle_agent_updated("agent-001")
+        assert "agent-001" in registry._scheduler._entries
+
+        self._put_agent(mock_storage, sample_agent_node, schedule=None)
+        registry.handle_agent_updated("agent-001")
+
+        assert "agent-001" in registry._workers
+        assert "agent-001" not in registry._scheduler._entries
+        assert registry.get_schedules() == []
+
+    def test_reload_replaces_changed_schedule(
+        self, registry, mock_storage, sample_agent_node, monkeypatch
+    ):
+        scheduler_start = MagicMock()
+        monkeypatch.setattr(registry._scheduler, "start", scheduler_start)
+        self._put_agent(
+            mock_storage,
+            sample_agent_node,
+            enabled=True,
+            schedule={"day_of_week": 1, "time": "14:00"},
+        )
+        registry.handle_agent_updated("agent-001")
+
+        self._put_agent(
+            mock_storage,
+            sample_agent_node,
+            schedule={"day_of_week": "friday", "time": "09:30"},
+        )
+        registry.handle_agent_updated("agent-001")
+
+        schedule = registry._scheduler._entries["agent-001"][0].schedule
+        assert (schedule.day_of_week, schedule.hour, schedule.minute) == (4, 9, 30)
+        scheduler_start.assert_not_called()  # scheduler_enabled defaults to False
+
+    def test_deleted_node_stops_worker(self, registry, mock_storage, sample_agent_node):
+        self._put_agent(
+            mock_storage,
+            sample_agent_node,
+            enabled=True,
+            schedule={"day_of_week": 1, "time": "14:00"},
+        )
+        registry.handle_agent_updated("agent-001")
+        worker = registry._workers["agent-001"]
+        assert "agent-001" in registry._scheduler._entries
+
+        del mock_storage.nodes["agent-001"]
+        registry.handle_agent_updated("agent-001")
+
+        worker.stop.assert_called_once_with(wait=True)
+        assert registry._workers == {}
+        assert registry._subscription_agent_map == {}
+        assert registry._scheduler._entries == {}
+
+    def test_non_agent_node_is_ignored(self, registry, mock_storage, sample_agent_node):
+        sample_agent_node.type = "Initiative"
+        mock_storage.nodes[sample_agent_node.id] = sample_agent_node
+
+        registry.handle_agent_updated("agent-001")
+
+        assert registry._workers == {}
+
+    def test_reload_clears_loop_guard_throttle(
+        self, mock_storage, mock_service, sample_agent_node
+    ):
+        """An operator edit is the documented way out of a burst throttle (#1007)."""
+        from backend.agents.worker import AgentWorker
+
+        registry = AgentRegistry(
+            settings=AgentsSettings(enabled=True, mcp_integrations=[]),
+            graph_storage=mock_storage,
+            graph_service=mock_service,
+        )
+        self._put_agent(mock_storage, sample_agent_node, enabled=True)
+        worker = AgentWorker(
+            config=AgentConfig.from_node(sample_agent_node),
+            settings=registry.settings,
+            mcp_loader=None,
+            graph_service=mock_service,
+        )
+        registry._workers["agent-001"] = worker
+        registry._subscription_agent_map["sub-001"] = "agent-001"
+        worker._pause_reason = "Agent temporarily paused: event rate limit"
+        worker._event_admissions.extend([0.0, 1.0, 2.0])
+
+        registry.handle_agent_updated("agent-001")
+
+        assert registry._workers["agent-001"] is worker
+        assert worker._pause_reason is None
+        assert len(worker._event_admissions) == 0
