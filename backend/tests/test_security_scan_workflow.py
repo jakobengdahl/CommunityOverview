@@ -1,17 +1,4 @@
-"""Pins that the Security Scan workflow reports what its scanners found.
-
-Two layers once hid every finding. `continue-on-error` kept a hit from failing
-the workflow, and underneath it each scanner step piped its report through
-`tee -a "$GITHUB_STEP_SUMMARY"` with no pipefail, so the step took tee's exit
-status and reported success on its own account. Removing `continue-on-error`
-alone would therefore still leave a green run over a real finding.
-
-The step bodies are shell, so they are extracted from the parsed workflow and
-EXECUTED against stub scanners, under the same `bash -e` GitHub uses for a
-`run:` step with no `shell:`. The set of tee'd steps is discovered from the
-workflow rather than listed here, so a new scanner step cannot ship the same
-masking unnoticed.
-"""
+"""Execute core and reusable scanner steps to pin blocking and summary behavior."""
 
 import os
 import re
@@ -27,8 +14,18 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "security-scan.yml"
+REUSABLE_WORKFLOW = WORKFLOW.with_name("reusable-secret-sast-scan.yml")
+WORKFLOWS = (WORKFLOW, REUSABLE_WORKFLOW)
+CORE_INPUTS = {
+    "bandit-targets": "backend services",
+    "bandit-severity": "medium",
+    "bandit-confidence": "all",
+    "bandit-excludes": "*/tests/*,*/test_*.py",
+    "gitleaks-scan-mode": "event",
+    "gitleaks-config": "",
+}
 
-SCANNERS = ("pip-audit", "npm", "bandit")
+SCANNERS = ("pip-audit", "npm", "bandit", "gitleaks")
 # Stubbed too, so every `run:` step - the installs included - can be executed.
 STUBBED = SCANNERS + ("pip",)
 # The only real tools on a step's PATH. Anything else - git, curl, rm - is not
@@ -110,8 +107,9 @@ AUDIT_COMMANDS = {
 # `--exit-zero`, `-lll`, `-s B108`, a dropped `services`, or a widened `-x` each
 # keep the job green over a finding it no longer looks at or no longer reports.
 BANDIT_COMMAND = (
-    "bandit -r backend services -x '*/tests/*,*/test_*.py' -ll 2>&1 "
-    '| tee -a "$GITHUB_STEP_SUMMARY"'
+    'bandit -r --severity-level "$SCAN_SEVERITY" '
+    '--confidence-level "$SCAN_CONFIDENCE" --exclude "$SCAN_EXCLUDES" '
+    '-- "${targets[@]}" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"'
 )
 
 # The whole `run:` body of the bandit step, one normalised line per entry. The
@@ -120,7 +118,9 @@ BANDIT_COMMAND = (
 # scan into the `status=` line, or append one after a `;`, all while the pinned
 # line stays byte-identical.
 BANDIT_STEP_BODY = [
-    'echo "## bandit (backend + services, medium+ severity)" >> "$GITHUB_STEP_SUMMARY"',
+    'read -r -a targets <<< "$SCAN_TARGETS"',
+    'test "${#targets[@]}" -gt 0',
+    'echo "## bandit" >> "$GITHUB_STEP_SUMMARY"',
     "echo '```' >> \"$GITHUB_STEP_SUMMARY\"",
     BANDIT_COMMAND,
     'status="${PIPESTATUS[0]}"',
@@ -354,19 +354,29 @@ def _write_targets(body):
 def _run_steps():
     return [
         pytest.param(step, id=f"{job_id}:{step['name']}")
-        for job_id, job in _workflow()["jobs"].items()
+        for job_id, job in _jobs().items()
         for step in job.get("steps", [])
         if "run" in step
     ]
 
 
-def _workflow():
-    return yaml.safe_load(WORKFLOW.read_text())
+def _workflow(path=WORKFLOW):
+    return yaml.safe_load(path.read_text())
+
+
+def _jobs():
+    # Discover steps in BOTH files, including the reusable jobs that core calls.
+    jobs = {}
+    for path in WORKFLOWS:
+        for job_id, job in _workflow(path)["jobs"].items():
+            assert job_id not in jobs, f"duplicate job id: {job_id}"
+            jobs[job_id] = job
+    return jobs
 
 
 def _teed_steps():
     steps = []
-    for job_id, job in _workflow()["jobs"].items():
+    for job_id, job in _jobs().items():
         for step in job.get("steps", []):
             if TEE.search(step.get("run", "")):
                 steps.append(pytest.param(step, id=f"{job_id}:{step['name']}"))
@@ -374,9 +384,9 @@ def _teed_steps():
 
 
 def test_every_scanner_report_step_is_discovered():
-    # pip-audit x3, npm audit, bandit. A drop here means a step stopped teeing
+    # pip-audit x3, npm audit, bandit, full-history gitleaks. A drop means a step stopped teeing
     # (fine) or the discovery broke (not fine) - either way, look.
-    assert len(_teed_steps()) == 5
+    assert len(_teed_steps()) == 6
 
 
 def _wait_for_process_group(pgid, timeout):
@@ -394,7 +404,7 @@ def _wait_for_process_group(pgid, timeout):
     return False
 
 
-def _run_step(step, tmp_path, scanner_exit, timeout=30):
+def _run_step(step, tmp_path, scanner_exit, timeout=30, inputs=None):
     stub_dir = tmp_path / "bin"
     stub_dir.mkdir()
     # Each stub records the environment it was started with: configuration a
@@ -407,6 +417,7 @@ def _run_step(step, tmp_path, scanner_exit, timeout=30):
         stub = stub_dir / name
         stub.write_text(
             f"#!/bin/sh\n/bin/cat /proc/$$/environ > '{env_capture}/{name}.'$$\n"
+            f"printf '%s\\0' \"$@\" > '{env_capture}/{name}.args'\n"
             f"echo 'stub {name} report'\nexit {scanner_exit}\n"
         )
         stub.chmod(0o755)
@@ -449,6 +460,15 @@ def _run_step(step, tmp_path, scanner_exit, timeout=30):
         RUNNER_TEMP=str(runner_temp),
         **{var: str(path) for var, path in command_files.items()},
     )
+    # workflow_call inputs are runner-provided environment values, never shell
+    # text. Read core's real call so executing tests catch a changed scope too.
+    call_inputs = (
+        _workflow()["jobs"]["secret-sast"]["with"] if inputs is None else inputs
+    )
+    for key, value in (step.get("env") or {}).items():
+        match = re.fullmatch(r"\$\{\{ inputs\.([\w-]+) \}\}", value)
+        assert match, f"unhandled step env expression: {value}"
+        env[key] = call_inputs[match[1]]
     # Its own process group, waited on until empty: a background writer that
     # closed its fds would otherwise land after the check below.
     proc = subprocess.Popen(
@@ -481,6 +501,8 @@ def _run_step(step, tmp_path, scanner_exit, timeout=30):
     )
     assert not written, f"step {step['name']!r} wrote runner command files {written}"
     for record in env_capture.iterdir():
+        if record.name.endswith(".args"):
+            continue
         scanner = record.name.split(".")[0]
         if scanner not in ("npm", "pip-audit"):
             continue
@@ -510,23 +532,25 @@ def test_code_fences_opened_in_the_summary_are_closed_on_a_finding(step, tmp_pat
 
 
 def test_gitleaks_is_blocking():
-    steps = _workflow()["jobs"]["gitleaks"]["steps"]
+    steps = _jobs()["gitleaks"]["steps"]
     scan = [
         s for s in steps if s.get("uses", "").startswith("gitleaks/gitleaks-action")
     ]
     assert len(scan) == 1
     assert not scan[0].get("continue-on-error", False)
-    assert not _workflow()["jobs"]["gitleaks"].get("continue-on-error", False)
+    assert not _jobs()["gitleaks"].get("continue-on-error", False)
 
 
 def _audit_steps(job):
-    return [s for s in job["steps"] if AUDIT_INVOCATION.search(s.get("run", ""))]
+    return [
+        s for s in job.get("steps", []) if AUDIT_INVOCATION.search(s.get("run", ""))
+    ]
 
 
 @pytest.mark.parametrize("job_id", sorted(AUDIT_COMMANDS))
 def test_dependency_audits_cannot_be_skipped(job_id):
     # A skipped job or step reports success, so a condition is a quiet off-switch.
-    job = _workflow()["jobs"][job_id]
+    job = _jobs()[job_id]
     assert "if" not in job, f"job {job_id!r} is conditional"
     assert "needs" not in job, f"job {job_id!r} is skipped when what it needs fails"
     for step in job["steps"]:
@@ -535,7 +559,7 @@ def test_dependency_audits_cannot_be_skipped(job_id):
 
 @pytest.mark.parametrize("job_id", sorted(AUDIT_COMMANDS))
 def test_dependency_audit_scope_is_pinned(job_id):
-    job = _workflow()["jobs"][job_id]
+    job = _jobs()[job_id]
     commands = [
         m.group(0).strip()
         for step in _audit_steps(job)
@@ -549,7 +573,7 @@ def test_every_line_that_could_run_an_audit_is_a_pinned_command():
     # Both sides are normalised, so a line is compared as what bash would run:
     # matching raw text let `p''ip config set global.no-deps true` - a real pip
     # invocation that narrows every later audit in its job - match nothing at all.
-    for job_id, job in _workflow()["jobs"].items():
+    for job_id, job in _jobs().items():
         pinned = {
             _normalised(c)
             for c in AUDIT_COMMANDS.get(job_id, []) + PINNED_PIP_LINES.get(job_id, [])
@@ -610,9 +634,10 @@ def test_audit_mention_leaves_the_non_pip_scanner_lines_alone():
 
 
 @pytest.mark.parametrize("job_id", sorted(AUDIT_COMMANDS))
-def test_dependency_audit_scope_is_not_narrowed_by_configuration(job_id):
-    workflow = _workflow()
-    job = workflow["jobs"][job_id]
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.stem)
+def test_dependency_audit_scope_is_not_narrowed_by_configuration(job_id, path):
+    workflow = _workflow(path)
+    job = _jobs()[job_id]
     assert not job.get("env"), f"job {job_id!r} sets env"
     assert not job.get("defaults"), f"job {job_id!r} sets defaults"
     for step in job["steps"]:
@@ -651,7 +676,7 @@ def test_npmrc_key_parsing_sees_every_spelling_npm_accepts():
 
 
 def test_audits_run_nowhere_but_their_own_jobs():
-    for job_id, job in _workflow()["jobs"].items():
+    for job_id, job in _jobs().items():
         if job_id not in AUDIT_COMMANDS:
             assert not _audit_steps(job), f"{job_id!r} runs an unpinned audit"
 
@@ -661,6 +686,152 @@ def _triggers(workflow):
     return workflow.get("on", workflow.get(True))
 
 
+def test_core_calls_reusable_scans_with_the_existing_scope():
+    workflow = _workflow()
+    assert set(workflow["jobs"]) == {"pip-audit", "npm-audit", "secret-sast"}
+    assert workflow["jobs"]["secret-sast"] == {
+        "name": "Secret and SAST",
+        "uses": "./.github/workflows/reusable-secret-sast-scan.yml",
+        "with": CORE_INPUTS,
+    }
+    assert _jobs()["bandit"]["name"] == "bandit (Python SAST)"
+    assert _jobs()["gitleaks"]["name"] == "gitleaks (secret scan)"
+
+
+def test_reusable_contract_has_only_scan_inputs_and_read_permission():
+    workflow = _workflow(REUSABLE_WORKFLOW)
+    assert set(workflow["jobs"]) == {"bandit", "gitleaks"}
+    assert set(_triggers(workflow)) == {"workflow_call"}
+    contract = _triggers(workflow)["workflow_call"]
+    assert set(contract["inputs"]) == set(CORE_INPUTS)
+    for key, spec in contract["inputs"].items():
+        assert spec["type"] == "string"
+        if key == "bandit-targets":
+            assert spec["required"] is True
+        else:
+            assert not spec.get("required", False)
+            assert spec["default"] == (
+                "" if key == "bandit-excludes" else CORE_INPUTS[key]
+            )
+    assert contract["secrets"]["GITLEAKS_LICENSE"]["required"] is False
+    for path in WORKFLOWS:
+        assert _workflow(path)["permissions"] == {"contents": "read"}
+    for job in _jobs().values():
+        assert job.get("permissions", {"contents": "read"}) == {"contents": "read"}
+
+
+def test_bandit_setup_does_not_require_a_dependency_manifest():
+    steps = _jobs()["bandit"]["steps"]
+    setup = next(
+        step
+        for step in steps
+        if step.get("uses", "").startswith("actions/setup-python@")
+    )
+    # setup-python's pip cache fails without requirements.txt or pyproject.toml.
+    assert not setup.get("with", {}).get("cache")
+
+
+def test_bandit_inputs_are_passed_as_environment_values():
+    assert _bandit_step()["env"] == {
+        "SCAN_TARGETS": "${{ inputs.bandit-targets }}",
+        "SCAN_SEVERITY": "${{ inputs.bandit-severity }}",
+        "SCAN_CONFIDENCE": "${{ inputs.bandit-confidence }}",
+        "SCAN_EXCLUDES": "${{ inputs.bandit-excludes }}",
+    }
+
+
+@pytest.mark.parametrize("scanner_exit", [0, 1, 2])
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {},
+        {"bandit-excludes": ""},
+        {
+            "bandit-targets": "src gateway",
+            "bandit-severity": "high",
+            "bandit-confidence": "medium",
+            "bandit-excludes": "*/fixtures/*,generated",
+        },
+        {"bandit-targets": "src;echo --exit-zero", "bandit-excludes": "$(false)"},
+    ],
+)
+def test_bandit_executes_with_the_callers_scope_and_thresholds(
+    tmp_path, scanner_exit, overrides
+):
+    inputs = CORE_INPUTS | overrides
+    returncode, summary = _run_step(
+        _bandit_step(), tmp_path, scanner_exit=scanner_exit, inputs=inputs
+    )
+    args = (tmp_path / "env" / "bandit.args").read_bytes().split(b"\0")[:-1]
+    assert [arg.decode() for arg in args] == [
+        "-r",
+        "--severity-level",
+        inputs["bandit-severity"],
+        "--confidence-level",
+        inputs["bandit-confidence"],
+        "--exclude",
+        inputs["bandit-excludes"],
+        "--",
+        *inputs["bandit-targets"].split(),
+    ]
+    assert returncode == scanner_exit
+    assert summary.count("```") == 2
+
+
+def test_bandit_rejects_empty_targets_without_running_a_scanner(tmp_path):
+    returncode, _ = _run_step(
+        _bandit_step(),
+        tmp_path,
+        scanner_exit=0,
+        inputs=CORE_INPUTS | {"bandit-targets": " "},
+    )
+    assert returncode != 0
+    assert not (tmp_path / "env" / "bandit.args").exists()
+
+
+def test_gitleaks_preserves_event_ranges_and_can_force_full_history():
+    steps = _jobs()["gitleaks"]["steps"]
+    step = next(s for s in steps if s.get("uses", "").startswith("gitleaks/"))
+    assert step["uses"] == "gitleaks/gitleaks-action@v2"
+    assert step["env"] == {
+        "GITHUB_TOKEN": "${{ secrets.GITHUB_TOKEN }}",
+        "GITLEAKS_LICENSE": "${{ secrets.GITLEAKS_LICENSE }}",
+        "GITLEAKS_CONFIG": "${{ inputs.gitleaks-config }}",
+        "GITLEAKS_ENABLE_COMMENTS": "false",
+    }
+    assert "with" not in step, "gitleaks action configuration changed"
+    assert "needs" not in _jobs()["gitleaks"]
+    full_scan = steps[-1]
+    assert full_scan["env"] == {"GITLEAKS_CONFIG": "${{ inputs.gitleaks-config }}"}
+    assert _normalised_body_lines(full_scan["run"]) == [
+        _normalised(line)
+        for line in [
+            'echo "## gitleaks (full history)" >> "$GITHUB_STEP_SUMMARY"',
+            "echo '```' >> \"$GITHUB_STEP_SUMMARY\"",
+            'gitleaks detect --redact --verbose --exit-code=2 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"',
+            'status="${PIPESTATUS[0]}"',
+            "echo '```' >> \"$GITHUB_STEP_SUMMARY\"",
+            'exit "$status"',
+        ]
+    ]
+
+
+@pytest.mark.parametrize(
+    "mode,expected", [("event", 0), ("full-history", 0), ("typo", 1)]
+)
+def test_invalid_gitleaks_modes_fail_closed(tmp_path, mode, expected):
+    steps = _jobs()["gitleaks"]["steps"]
+    validations = [step for step in steps if "SCAN_MODE" in step.get("env", {})]
+    assert len(validations) == 1
+    returncode, _ = _run_step(
+        validations[0],
+        tmp_path,
+        scanner_exit=0,
+        inputs=CORE_INPUTS | {"gitleaks-scan-mode": mode},
+    )
+    assert returncode == expected
+
+
 def test_trigger_set_is_pinned():
     triggers = _triggers(_workflow())
     assert set(triggers) == {"pull_request", "schedule", "workflow_dispatch"}
@@ -668,8 +839,9 @@ def test_trigger_set_is_pinned():
     assert triggers["schedule"], "the weekly re-audit of unchanged deps is gone"
 
 
-def test_exactly_the_expected_steps_are_reporting_only():
-    workflow = _workflow()
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.stem)
+def test_exactly_the_expected_steps_are_reporting_only(path):
+    workflow = _workflow(path)
     assert not workflow.get("continue-on-error", False)
     reporting_only = set()
     for job_id, job in workflow["jobs"].items():
@@ -683,22 +855,26 @@ def test_exactly_the_expected_steps_are_reporting_only():
 
 
 def test_gitleaks_cannot_be_switched_off_by_a_condition():
-    job = _workflow()["jobs"]["gitleaks"]
+    job = _jobs()["gitleaks"]
     assert "if" not in job
-    for step in job["steps"]:
+    for step in job["steps"][:-1]:
         assert "if" not in step, f"gitleaks:{step.get('name')} is conditional"
+    assert (
+        job["steps"][-1]["if"] == "${{ inputs.gitleaks-scan-mode == 'full-history' }}"
+    )
 
 
 def test_gitleaks_checks_out_the_full_history():
     # A shallow clone leaves the scheduled scan nothing but the tip commit.
-    steps = _workflow()["jobs"]["gitleaks"]["steps"]
+    steps = _jobs()["gitleaks"]["steps"]
     checkout = [s for s in steps if s.get("uses", "").startswith("actions/checkout")]
     assert len(checkout) == 1
     assert checkout[0].get("with", {}).get("fetch-depth") == 0
 
 
-def test_no_env_switches_on_pipefail_behind_the_default_shell():
-    workflow = _workflow()
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.stem)
+def test_no_env_switches_on_pipefail_behind_the_default_shell(path):
+    workflow = _workflow(path)
     scopes = [("workflow", workflow)]
     for job_id, job in workflow["jobs"].items():
         scopes.append((job_id, job))
@@ -739,7 +915,7 @@ def test_no_step_writes_runner_command_files_when_executed(
 def test_only_known_actions_are_used():
     used = {
         step["uses"].split("@")[0]
-        for job in _workflow()["jobs"].values()
+        for job in _jobs().values()
         for step in job.get("steps", [])
         if "uses" in step
     }
@@ -749,7 +925,7 @@ def test_only_known_actions_are_used():
 def test_bandit_is_blocking():
     # Located by its invocation, not its name: a renamed step must still be
     # found, or this passes vacuously the moment someone retitles it.
-    workflow = _workflow()
+    workflow = _workflow(REUSABLE_WORKFLOW)
     job = workflow["jobs"]["bandit"]
     assert not job.get("continue-on-error", False)
     assert "if" not in job, "the bandit job is conditional"
@@ -768,7 +944,7 @@ def test_bandit_is_blocking():
 def test_bandit_scan_is_not_narrowed_by_configuration():
     # An env var or a working-directory change narrows the scan without the
     # command line showing it, exactly as for the audits.
-    workflow = _workflow()
+    workflow = _workflow(REUSABLE_WORKFLOW)
     job = workflow["jobs"]["bandit"]
     assert "working-directory" not in str(job), "bandit runs somewhere unexpected"
     scopes = [workflow.get("env") or {}, job.get("env") or {}]
@@ -780,7 +956,7 @@ def test_bandit_scan_is_not_narrowed_by_configuration():
 
 
 def _bandit_step():
-    job = _workflow()["jobs"]["bandit"]
+    job = _jobs()["bandit"]
     scans = [
         s for s in job["steps"] if re.search(r"^\s*bandit\b", s.get("run", ""), re.M)
     ]
@@ -835,11 +1011,12 @@ def test_in_source_nosec_suppressions_are_pinned():
     assert found == EXPECTED_NOSEC
 
 
-def test_teed_steps_run_under_the_default_shell_the_test_executes():
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.stem)
+def test_teed_steps_run_under_the_default_shell_the_test_executes(path):
     # The steps above are executed under `bash -e`, GitHub's default. An explicit
     # `shell: bash` adds pipefail, under which `-e` kills the bandit step at the
     # pipeline and its summary fence is never closed - so pin the default.
-    workflow = _workflow()
+    workflow = _workflow(path)
     assert "shell" not in workflow.get("defaults", {}).get("run", {})
     for job in workflow["jobs"].values():
         assert "shell" not in job.get("defaults", {}).get("run", {})
@@ -851,14 +1028,14 @@ def test_teed_steps_run_under_the_default_shell_the_test_executes():
 def test_audit_job_setup_action_inputs_are_pinned(job_id):
     used = [
         (step["uses"].split("@")[0], step.get("with") or {})
-        for step in _workflow()["jobs"][job_id]["steps"]
+        for step in _jobs()[job_id]["steps"]
         if "uses" in step
     ]
     assert used == AUDIT_JOB_ACTION_INPUTS[job_id]
 
 
 def _run_bodies():
-    for job_id, job in _workflow()["jobs"].items():
+    for job_id, job in _jobs().items():
         for step in job.get("steps", []):
             if "run" in step:
                 yield f"{job_id}:{step.get('name')}", step["run"].replace("\\\n", "")
