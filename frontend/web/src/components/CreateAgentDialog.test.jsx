@@ -322,4 +322,110 @@ describe('CreateAgentDialog', () => {
       },
     });
   });
+
+  const editUiAgent = async (
+    delivery,
+    { agentId = 'p-node', subscriptionId = 'p-subscription' } = {}
+  ) => {
+    const onSave = vi.fn();
+    render(
+      <CreateAgentDialog
+        onClose={vi.fn()}
+        onSave={onSave}
+        initialData={{
+          agent: {
+            id: agentId,
+            name: 'P',
+            aliases: [],
+            metadata: { subscription_id: subscriptionId, prompts: { task_prompt: 'Do it' } },
+          },
+          subscription: {
+            id: subscriptionId,
+            metadata: { filters: { operations: ['create'] }, delivery },
+          },
+        }}
+      />
+    );
+    await screen.findByRole('checkbox', { name: /GRAPH/ });
+    fireEvent.click(screen.getByRole('button', { name: d.submit_edit }));
+    return onSave.mock.calls[0][0].subscriptionUpdates.metadata.delivery;
+  };
+
+  it.each([
+    [['agent:p'], ['agent:p-node']],
+    [
+      ['agent:p', 'external-change'],
+      ['agent:p-node', 'external-change'],
+    ],
+    [['agent:p', 'agent:p-node'], ['agent:p-node']],
+  ])(
+    'saving an agent stored with the legacy loop guard %j persists the node-id form',
+    async (stored, saved) => {
+      const delivery = await editUiAgent({
+        webhook_url: 'internal://agent/p',
+        ignore_origins: stored,
+        ignore_session_ids: [],
+      });
+
+      expect(delivery).toEqual({
+        webhook_url: 'internal://agent/p-node',
+        ignore_origins: saved,
+        ignore_session_ids: [],
+      });
+    }
+  );
+
+  it('saves a correctly formed agent delivery unchanged', async () => {
+    const stored = {
+      webhook_url: 'internal://agent/p-node',
+      ignore_origins: ['agent:p-node'],
+      ignore_session_ids: ['sess'],
+    };
+    expect(await editUiAgent(stored)).toEqual(stored);
+  });
+
+  it('keeps an external webhook URL while healing the legacy loop guard', async () => {
+    const delivery = await editUiAgent({
+      webhook_url: 'https://hooks.example.org/agent/p',
+      ignore_origins: ['agent:p'],
+      ignore_session_ids: [],
+    });
+
+    expect(delivery).toEqual({
+      webhook_url: 'https://hooks.example.org/agent/p',
+      ignore_origins: ['agent:p-node'],
+      ignore_session_ids: [],
+    });
+  });
+
+  it.each([
+    ['p', 'p-subscription'],
+    ['pxnode', 'p-subscription'],
+    ['p-node', 'other-subscription'],
+  ])(
+    'leaves agent:p alone for agent %s with subscription %s, outside the dialog naming',
+    async (agentId, subscriptionId) => {
+      const delivery = await editUiAgent(
+        { webhook_url: 'https://hooks.example.org/x', ignore_origins: ['agent:p'] },
+        { agentId, subscriptionId }
+      );
+
+      expect(delivery.ignore_origins).toEqual(['agent:p']);
+    }
+  );
+
+  it('saves a paired agent whose delivery has no ignore_origins without adding one', async () => {
+    expect(
+      await editUiAgent({ webhook_url: 'internal://agent/p', ignore_session_ids: [] })
+    ).toEqual({ webhook_url: 'internal://agent/p-node', ignore_session_ids: [] });
+  });
+
+  it('leaves the origins of a paired agent without the legacy entry untouched', async () => {
+    const delivery = await editUiAgent({
+      webhook_url: 'internal://agent/p-node',
+      ignore_origins: ['x', 'x'],
+    });
+
+    expect(delivery.ignore_origins).toEqual(['x', 'x']);
+  });
 });
