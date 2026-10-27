@@ -24,6 +24,17 @@ from backend.service import rest_api as rest_api_module
 from backend.service.rest_api import create_rest_router
 
 
+# More disconnect polls than a stream that ends on disconnect makes. Polling
+# never suspends, so a generator that kept looping after the client left would
+# otherwise spin until the pytest timeout instead of failing at once.
+_MAX_POLLS_AFTER_DISCONNECT = 3
+
+# How long a test waits for the next chunk. Every chunk these tests expect is
+# ready without waiting, so a missing yield fails here instead of after the
+# real 25-second queue wait.
+_CHUNK_TIMEOUT = 1
+
+
 class _FakeRequest:
     """The slice of ``starlette.requests.Request`` the stream route reads."""
 
@@ -32,9 +43,28 @@ class _FakeRequest:
         self.app = SimpleNamespace(state=SimpleNamespace())
         self.headers = {}
         self.disconnected = False
+        self._polls_after_disconnect = 0
 
     async def is_disconnected(self) -> bool:
+        if self.disconnected:
+            self._polls_after_disconnect += 1
+            if self._polls_after_disconnect > _MAX_POLLS_AFTER_DISCONNECT:
+                raise AssertionError(
+                    "the stream kept polling after the client disconnected"
+                )
         return self.disconnected
+
+
+async def _next_chunk(body):
+    # Not wait_for: its cancel lands in the generator, which swallows it and
+    # ends, so a stuck stream would surface as StopAsyncIteration and read as
+    # a clean end of stream.
+    pending = asyncio.ensure_future(anext(body))
+    done, _ = await asyncio.wait({pending}, timeout=_CHUNK_TIMEOUT)
+    if not done:
+        pending.cancel()
+        raise AssertionError(f"the stream yielded nothing within {_CHUNK_TIMEOUT}s")
+    return pending.result()
 
 
 @pytest.fixture
@@ -106,14 +136,14 @@ async def test_queue_wait_timeout_emits_ping_comment_and_keeps_streaming(
     request = _FakeRequest()
     session_id, body = await _open_stream(endpoint, manager, request)
 
-    assert (await anext(body)).startswith("data: ")  # catch-up snapshot
-    assert '"presence_joined"' in await anext(body)
+    assert (await _next_chunk(body)).startswith("data: ")  # catch-up snapshot
+    assert '"presence_joined"' in await _next_chunk(body)
 
     _time_out_queue_waits(monkeypatch)
 
-    assert await anext(body) == ": ping\n\n"
+    assert await _next_chunk(body) == ": ping\n\n"
     # The loop continues after a ping rather than ending the stream.
-    assert await anext(body) == ": ping\n\n"
+    assert await _next_chunk(body) == ": ping\n\n"
     assert manager.bus.subscriber_count(session_id) == 1
 
     await body.aclose()
@@ -128,8 +158,8 @@ async def test_resync_after_unannounced_delete_synthesises_notice_and_stays_open
     request = _FakeRequest()
     session_id, body = await _open_stream(endpoint, manager, request)
 
-    await anext(body)  # catch-up snapshot
-    await anext(body)  # own presence_joined echo
+    await _next_chunk(body)  # catch-up snapshot
+    await _next_chunk(body)  # own presence_joined echo
 
     # The overflow sentinel is queued, then the session vanishes (with any
     # notice drained by the overflow) before the generator translates it into
@@ -137,15 +167,15 @@ async def test_resync_after_unannounced_delete_synthesises_notice_and_stays_open
     manager.bus.publish(session_id, {"type": "resync"})
     assert manager.store.delete(session_id)
 
-    chunk = await anext(body)
+    chunk = await _next_chunk(body)
     assert chunk == 'data: {"type": "session_deleted", "deleted_by": null}\n\n'
     # Like the first catch_up path, the stream stays open until the client
     # leaves, so the browser does not reconnect into an empty session.
     _time_out_queue_waits(monkeypatch)
-    assert await anext(body) == ": ping\n\n"
+    assert await _next_chunk(body) == ": ping\n\n"
     request.disconnected = True
     with pytest.raises(StopAsyncIteration):
-        await anext(body)
+        await _next_chunk(body)
     _assert_disconnected(manager, session_id)
 
 
@@ -157,15 +187,15 @@ async def test_resync_after_delete_forwards_the_notice_queued_behind_it(
     request = _FakeRequest()
     session_id, body = await _open_stream(endpoint, manager, request)
 
-    await anext(body)  # catch-up snapshot
-    await anext(body)  # own presence_joined echo
+    await _next_chunk(body)  # catch-up snapshot
+    await _next_chunk(body)  # own presence_joined echo
 
     # The overflow sentinel is queued, then delete_session's own notice lands
     # behind it; the resync translation finds the session gone.
     manager.bus.publish(session_id, {"type": "resync"})
     assert await manager.delete_session(session_id, deleted_by="bob")
 
-    chunk = await anext(body)
+    chunk = await _next_chunk(body)
     assert chunk.startswith("data: ")
     assert json.loads(chunk[len("data: ") :]) == {
         "type": "session_deleted",
@@ -173,10 +203,10 @@ async def test_resync_after_delete_forwards_the_notice_queued_behind_it(
         "write_mode": "direct",
     }
     _time_out_queue_waits(monkeypatch)
-    assert await anext(body) == ": ping\n\n"
+    assert await _next_chunk(body) == ": ping\n\n"
     request.disconnected = True
     with pytest.raises(StopAsyncIteration):
-        await anext(body)
+        await _next_chunk(body)
     _assert_disconnected(manager, session_id)
 
 
@@ -191,7 +221,7 @@ async def test_delete_before_first_catch_up_forwards_the_queued_notice(
     # The handshake passed; the session goes before the body is first iterated.
     assert await manager.delete_session(session_id, deleted_by="bob")
 
-    chunk = await anext(body)
+    chunk = await _next_chunk(body)
     assert chunk.startswith("data: ")
     assert json.loads(chunk[len("data: ") :]) == {
         "type": "session_deleted",
@@ -200,10 +230,10 @@ async def test_delete_before_first_catch_up_forwards_the_queued_notice(
     }
     # Like a mid-stream delete, the stream stays open until the client leaves.
     _time_out_queue_waits(monkeypatch)
-    assert await anext(body) == ": ping\n\n"
+    assert await _next_chunk(body) == ": ping\n\n"
     request.disconnected = True
     with pytest.raises(StopAsyncIteration):
-        await anext(body)
+        await _next_chunk(body)
     _assert_disconnected(manager, session_id)
 
 
@@ -218,13 +248,13 @@ async def test_unannounced_delete_before_first_catch_up_synthesises_notice(
     # A removal that published nothing still must not abort the stream.
     assert manager.store.delete(session_id)
 
-    chunk = await anext(body)
+    chunk = await _next_chunk(body)
     assert chunk == 'data: {"type": "session_deleted", "deleted_by": null}\n\n'
     _time_out_queue_waits(monkeypatch)
-    assert await anext(body) == ": ping\n\n"
+    assert await _next_chunk(body) == ": ping\n\n"
     request.disconnected = True
     with pytest.raises(StopAsyncIteration):
-        await anext(body)
+        await _next_chunk(body)
     _assert_disconnected(manager, session_id)
 
 
@@ -234,11 +264,11 @@ async def test_client_disconnect_ends_stream_and_unsubscribes(stream_env):
     request = _FakeRequest()
     session_id, body = await _open_stream(endpoint, manager, request)
 
-    await anext(body)
+    await _next_chunk(body)
     request.disconnected = True
 
     with pytest.raises(StopAsyncIteration):
-        await anext(body)
+        await _next_chunk(body)
     _assert_disconnected(manager, session_id)
 
 
@@ -247,8 +277,8 @@ async def test_cancellation_while_waiting_for_an_event_unsubscribes(stream_env):
     manager, endpoint = stream_env
     session_id, body = await _open_stream(endpoint, manager, _FakeRequest())
 
-    await anext(body)  # catch-up snapshot
-    await anext(body)  # own presence_joined echo
+    await _next_chunk(body)  # catch-up snapshot
+    await _next_chunk(body)  # own presence_joined echo
 
     pending = asyncio.ensure_future(anext(body))
     # Let the generator reach its await on the empty subscription queue.
@@ -271,7 +301,7 @@ async def test_unexpected_error_propagates_and_still_unsubscribes(
     manager, endpoint = stream_env
     session_id, body = await _open_stream(endpoint, manager, _FakeRequest())
 
-    await anext(body)  # catch-up snapshot
+    await _next_chunk(body)  # catch-up snapshot
 
     def _boom(event, session_manager, sid):
         raise RuntimeError("translation failed")
@@ -279,7 +309,7 @@ async def test_unexpected_error_propagates_and_still_unsubscribes(
     monkeypatch.setattr(rest_api_module, "_resolve_stream_event", _boom)
 
     with pytest.raises(RuntimeError, match="translation failed"):
-        await anext(body)
+        await _next_chunk(body)
     _assert_disconnected(manager, session_id)
 
 
@@ -335,7 +365,7 @@ async def test_completed_response_releases_once_and_keeps_sibling_presence(
     manager, endpoint = stream_env
     request = _FakeRequest()
     session_id, sibling = await _open_stream(endpoint, manager, _FakeRequest())
-    await anext(sibling)  # the sibling connection's generator is running
+    await _next_chunk(sibling)  # the sibling connection's generator is running
     response = await endpoint(
         session_id=session_id,
         request=request,
