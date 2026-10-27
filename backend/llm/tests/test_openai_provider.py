@@ -459,6 +459,37 @@ def test_user_turn_mixing_tool_results_and_text_keeps_text_after_tool_messages(
     ]
 
 
+def test_user_non_dict_blocks_are_skipped(provider):
+    converted = provider._convert_messages_to_openai(
+        [{"role": "user", "content": [None, "x", {"type": "text", "text": "hi"}]}],
+        "",
+    )
+    assert converted == [{"role": "user", "content": "hi"}]
+
+
+@pytest.mark.parametrize(
+    "blocks, expected",
+    [
+        ([{"type": "text", "text": ""}], [{"role": "user", "content": ""}]),
+        (
+            [
+                {"type": "tool_result", "tool_use_id": "call_1", "content": "r"},
+                {"type": "text", "text": ""},
+            ],
+            [
+                {"role": "tool", "tool_call_id": "call_1", "content": "r"},
+                {"role": "user", "content": ""},
+            ],
+        ),
+    ],
+)
+def test_an_empty_text_block_still_emits_a_user_message(provider, blocks, expected):
+    converted = provider._convert_messages_to_openai(
+        [{"role": "user", "content": blocks}], ""
+    )
+    assert converted == expected
+
+
 def test_user_turn_with_text_before_tool_result_keeps_tool_result(provider):
     converted = provider._convert_messages_to_openai(
         [
@@ -478,7 +509,7 @@ def test_user_turn_with_text_before_tool_result_keeps_tool_result(provider):
     ]
 
 
-@pytest.mark.parametrize("arguments", ["", "   ", None])
+@pytest.mark.parametrize("arguments", ["", "   ", None, "null", " null "])
 def test_empty_tool_call_arguments_parse_as_empty_input(provider, arguments):
     provider.client.chat.completions.create.return_value = _completion(
         None,
@@ -494,6 +525,15 @@ def test_empty_tool_call_arguments_parse_as_empty_input(provider, arguments):
     assert response.content == [
         {"type": "tool_use", "id": "call_1", "name": "get_node_details", "input": {}}
     ]
+
+
+@pytest.mark.parametrize(
+    "arguments, parsed", [("0", 0), ("[]", []), ("false", False), ('""', "")]
+)
+def test_other_falsy_json_arguments_are_returned_as_parsed(arguments, parsed):
+    result = OpenAIProvider._parse_tool_arguments(arguments)
+    assert result == parsed
+    assert type(result) is type(parsed)
 
 
 def test_malformed_tool_call_arguments_still_raise(provider):
