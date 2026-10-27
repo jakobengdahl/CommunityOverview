@@ -196,7 +196,7 @@ ANNOTATION_TOOLS = {
         lambda ids: {"group_id": ids["group"]},
         {
             "not_found": lambda ids: _not_found(
-                f"No annotation with id {ids['group']!r} in this session."
+                f"No group annotation with id {ids['group']!r} in this session."
             ),
         },
     ),
