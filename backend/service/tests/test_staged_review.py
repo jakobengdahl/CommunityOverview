@@ -8,15 +8,21 @@ narrowed reader's view), edges ab, bc and ar.
 
 from __future__ import annotations
 
+import copy
 from datetime import timedelta
 
 import pytest
 
 from backend.core import Edge, Node
-from backend.core.layer_store import utc_now
 from backend.core.events.models import EventContext
+from backend.core.layer_store import utc_now
 from backend.runtime.session_context import bind_session
+from backend.service import staged_review as sr
+from backend.service.staging import _apply_staged, _edge, _node, compose
 from backend.service.tests.test_composed_reads import REMOTE, make_world
+
+
+# ==== Diff, merge and discard =================================================
 
 
 @pytest.fixture(params=["file", "postgres"])
@@ -1792,3 +1798,431 @@ def test_an_edge_write_refused_over_a_retyped_endpoint_tells_nothing_of_it(
     finally:
         other.shutdown_events()
         backend.close()
+
+
+# ==== Reviewed versions =======================================================
+
+# A merge or discard bound to the entry versions its caller reviewed
+# (docs/SESSION_OVERLAY_CONTRACT.md §11.4, §12).
+#
+# An entry restaged between the review and the request - by this instance or
+# another one sharing the layer - is refused, not merged or discarded unseen.
+# A request without versions behaves as before. Run over the file backend and,
+# when a server is configured, PostgreSQL.
+
+
+def _reviewed(world, sid, node_id):
+    item = _items(world.service.get_staged_changes(sid))[("node", node_id)]
+    return {"kind": "node", "entity_id": node_id, "version": item["version"]}
+
+
+def _restage_here(world, sid, node_id, description):
+    _stage(
+        world,
+        sid,
+        ("update_node", (node_id,), {"updates": {"description": description}}),
+    )
+
+
+@pytest.mark.parametrize("restage", [_restage_here, None], ids=["this", "another"])
+def test_a_merge_of_an_entry_restaged_since_its_review_is_refused(world, restage):
+    svc, sid = world.service, world.staged_session()
+    _stage(
+        world, sid, ("update_node", ("a",), {"updates": {"description": "reviewed"}})
+    )
+    reviewed = _reviewed(world, sid, "a")
+    if restage:
+        restage(world, sid, "a", "later")
+    else:
+        # Same session_seq, a token of its own.
+        _restage_as_another_instance(world, sid, "a", {"description": "later"})
+    main, events = world.main(), len(world.events)
+    result = svc.merge_staged_changes(sid, "m", entries=[reviewed])
+    assert result["error"] == "merge_raced"
+    assert world.main() == main and len(world.events) == events
+    assert world.layer(sid)[("node", "a")]["staged"] == {"description": "later"}
+    assert world.storage.layer_store.load_merge("m") is None
+
+
+def test_a_restage_inside_the_merge_window_is_refused_against_the_reviewed_version(
+    world, monkeypatch
+):
+    """The plan reads the restaged entry, so only the reviewed version can
+    tell: the unit checks it."""
+    svc, sid = world.service, world.staged_session()
+    _stage(
+        world, sid, ("update_node", ("a",), {"updates": {"description": "reviewed"}})
+    )
+    reviewed = _reviewed(world, sid, "a")
+    original = svc._load_review
+
+    def restage_before_the_plan_reads(*args, **kwargs):
+        monkeypatch.setattr(svc, "_load_review", original)
+        _restage_as_another_instance(world, sid, "a", {"description": "later"})
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(svc, "_load_review", restage_before_the_plan_reads)
+    result = svc.merge_staged_changes(sid, "m", entries=[reviewed])
+    assert result["error"] == "merge_raced"
+    assert world.storage.get_node("a").description != "later"
+
+
+def test_a_merge_of_the_reviewed_versions_lands(world):
+    svc, sid = world.service, world.staged_session()
+    _stage(
+        world, sid, ("update_node", ("a",), {"updates": {"description": "reviewed"}})
+    )
+    result = svc.merge_staged_changes(sid, "m", entries=[_reviewed(world, sid, "a")])
+    assert result["success"] is True, result
+    assert world.storage.get_node("a").description == "reviewed"
+
+
+def test_a_merge_without_versions_merges_what_the_layer_holds_as_before(world):
+    svc, sid = world.service, world.staged_session()
+    _stage(
+        world, sid, ("update_node", ("a",), {"updates": {"description": "reviewed"}})
+    )
+    _restage_as_another_instance(world, sid, "a", {"description": "later"})
+    result = svc.merge_staged_changes(
+        sid, "m", entries=[{"kind": "node", "entity_id": "a"}]
+    )
+    assert result["success"] is True, result
+    assert world.storage.get_node("a").description == "later"
+
+
+@pytest.mark.parametrize("version", ["", 7, "x" * 201])
+def test_a_malformed_version_is_refused(world, version):
+    svc, sid = world.service, world.staged_session()
+    _stage(world, sid, ("update_node", ("a",), {"updates": {"description": "x"}}))
+    entry = {"kind": "node", "entity_id": "a", "version": version}
+    assert svc.merge_staged_changes(sid, "m", entries=[entry])["error"] == (
+        "invalid_merge_request"
+    )
+    assert svc.discard_staged_changes(sid, entries=[entry])["error"] == (
+        "invalid_merge_request"
+    )
+    assert ("node", "a") in world.layer(sid)
+
+
+def test_a_malformed_entry_with_a_version_is_refused_not_a_server_error(world):
+    svc, sid = world.service, world.staged_session()
+    _stage(world, sid, ("update_node", ("a",), {"updates": {"description": "x"}}))
+    entry = {"kind": "node", "entity_id": ["a"], "version": "v"}
+    assert svc.discard_staged_changes(sid, entries=[entry])["error"] == (
+        "invalid_merge_request"
+    )
+    assert svc.merge_staged_changes(sid, "m", entries=[entry])["error"] == (
+        "invalid_merge_request"
+    )
+
+
+@pytest.mark.parametrize("restage", [_restage_here, None], ids=["this", "another"])
+def test_a_discard_of_an_entry_restaged_since_its_review_is_refused(world, restage):
+    svc, sid = world.service, world.staged_session()
+    _stage(
+        world, sid, ("update_node", ("a",), {"updates": {"description": "reviewed"}})
+    )
+    reviewed = _reviewed(world, sid, "a")
+    if restage:
+        restage(world, sid, "a", "later")
+    else:
+        _restage_as_another_instance(world, sid, "a", {"description": "later"})
+    result = svc.discard_staged_changes(sid, entries=[reviewed])
+    assert result["error"] == "merge_raced"
+    assert world.layer(sid)[("node", "a")]["staged"] == {"description": "later"}
+
+
+def test_a_discard_checks_every_entry_it_names_not_only_the_first(world):
+    svc, sid = world.service, world.staged_session()
+    _stage(
+        world,
+        sid,
+        ("update_node", ("a",), {"updates": {"description": "reviewed"}}),
+        ("update_node", ("b",), {"updates": {"description": "reviewed"}}),
+    )
+    reviewed = [_reviewed(world, sid, "a"), _reviewed(world, sid, "b")]
+    _restage_as_another_instance(world, sid, "b", {"description": "later"})
+    result = svc.discard_staged_changes(sid, entries=reviewed)
+    assert result["error"] == "merge_raced"
+    layer = world.layer(sid)
+    assert ("node", "a") in layer and ("node", "b") in layer
+
+
+def test_an_entry_named_with_two_versions_is_refused(world):
+    svc, sid = world.service, world.staged_session()
+    _stage(world, sid, ("update_node", ("a",), {"updates": {"description": "x"}}))
+    reviewed = _reviewed(world, sid, "a")
+    twice = [reviewed, {**reviewed, "version": "another"}]
+    assert svc.merge_staged_changes(sid, "m", entries=twice)["error"] == (
+        "invalid_merge_request"
+    )
+    assert svc.discard_staged_changes(sid, entries=twice)["error"] == (
+        "invalid_merge_request"
+    )
+
+
+def test_a_restage_inside_the_discard_window_is_refused_against_the_reviewed_version(
+    world, monkeypatch
+):
+    svc, sid = world.service, world.staged_session()
+    _stage(
+        world, sid, ("update_node", ("a",), {"updates": {"description": "reviewed"}})
+    )
+    reviewed = _reviewed(world, sid, "a")
+    store = world.storage.layer_store
+    original = store.discard
+
+    def another_instance_first(*args, **kwargs):
+        monkeypatch.setattr(store, "discard", original)
+        _restage_as_another_instance(world, sid, "a", {"description": "later"})
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "discard", another_instance_first)
+    result = svc.discard_staged_changes(sid, entries=[reviewed])
+    assert result["error"] == "merge_raced"
+    assert world.layer(sid)[("node", "a")]["staged"] == {"description": "later"}
+
+
+def test_a_discard_without_versions_discards_what_the_layer_holds_as_before(world):
+    svc, sid = world.service, world.staged_session()
+    _stage(
+        world, sid, ("update_node", ("a",), {"updates": {"description": "reviewed"}})
+    )
+    _restage_as_another_instance(world, sid, "a", {"description": "later"})
+    result = svc.discard_staged_changes(
+        sid, entries=[{"kind": "node", "entity_id": "a"}]
+    )
+    assert result["removed_entries"] == [["node", "a"]]
+
+
+def test_a_refusal_names_no_version_of_an_entry_outside_the_view(world):
+    """A narrowed reader naming an entry it cannot see, with any version,
+    learns nothing of that entry's version."""
+    svc, sid = world.service, world.staged_session()
+    _stage(world, sid, ("update_node", ("a",), {"updates": {"description": "x"}}))
+    version = _items(svc.get_staged_changes(sid))[("node", "a")]["version"]
+    _restage_as_another_instance(
+        world, sid, "a", {"metadata": {"origin_graph_id": "remote"}}
+    )
+    world.hook.narrow = True
+    entry = {"kind": "node", "entity_id": "a", "version": version}
+    merged = svc.merge_staged_changes(sid, "m", entries=[entry])
+    discarded = svc.discard_staged_changes(sid, entries=[entry])
+    world.hook.narrow = False
+    assert merged["error"] == "merge_raced"
+    assert discarded["removed_entries"] == []
+    current = world.layer(sid)[("node", "a")]
+    for answer in (merged, discarded):
+        assert current["stage_token"] not in str(answer)
+
+
+@pytest.mark.parametrize("version", ["", 7, "x" * 201])
+def test_a_malformed_version_on_an_entry_outside_the_view_answers_as_any_other_version(
+    world, version
+):
+    """Discard decides the view before the versions, as merge does: an entry
+    the reader cannot see is never refused for the shape of its version."""
+    svc, sid = world.service, world.staged_session()
+    _stage(world, sid, ("update_node", ("a",), {"updates": {"description": "x"}}))
+    _restage_as_another_instance(
+        world, sid, "a", {"metadata": {"origin_graph_id": "remote"}}
+    )
+    world.hook.narrow = True
+    entry = {"kind": "node", "entity_id": "a", "version": version}
+    merged = svc.merge_staged_changes(sid, "m", entries=[entry])
+    discarded = svc.discard_staged_changes(sid, entries=[entry])
+    well_formed = svc.discard_staged_changes(sid, entries=[{**entry, "version": "v"}])
+    world.hook.narrow = False
+    assert merged["error"] == "merge_raced"
+    assert discarded == well_formed
+    assert discarded["removed_entries"] == []
+    assert ("node", "a") in world.layer(sid)
+
+
+def test_a_discard_checks_the_versions_of_the_entries_in_view_only(world):
+    """One entry in view, reviewed; one outside it, named with a malformed
+    version and the same id under the other kind: the in-view entry is
+    discarded, as it would be named alone."""
+    svc, sid = world.service, world.staged_session()
+    _stage(
+        world,
+        sid,
+        ("update_node", ("a",), {"updates": {"description": "x"}}),
+        ("update_node", ("b",), {"updates": {"description": "x"}}),
+    )
+    reviewed_b = _reviewed(world, sid, "b")
+    _restage_as_another_instance(
+        world, sid, "a", {"metadata": {"origin_graph_id": "remote"}}
+    )
+    world.hook.narrow = True
+    entries = [
+        reviewed_b,
+        {"kind": "node", "entity_id": "a", "version": ""},
+        {"kind": "edge", "entity_id": "b", "version": ""},
+    ]
+    result = svc.discard_staged_changes(sid, entries=entries)
+    world.hook.narrow = False
+    assert result["removed_entries"] == [["node", "b"]], result
+    assert ("node", "a") in world.layer(sid)
+
+
+def test_a_discard_still_refuses_a_malformed_version_on_an_entry_in_view(world):
+    svc, sid = world.service, world.staged_session()
+    _stage(
+        world,
+        sid,
+        ("update_node", ("a",), {"updates": {"description": "x"}}),
+        ("update_node", ("b",), {"updates": {"description": "x"}}),
+    )
+    entries = [
+        {"kind": "node", "entity_id": "a", "version": ""},
+        _reviewed(world, sid, "b"),
+    ]
+    result = svc.discard_staged_changes(sid, entries=entries)
+    assert result["error"] == "invalid_merge_request"
+    assert ("node", "a") in world.layer(sid) and ("node", "b") in world.layer(sid)
+
+
+# ==== Copies (pure helpers) ===================================================
+
+# Staging and merge helpers hand out deep copies: a caller mutating one cannot change an entry, a document or what is stored.
+
+
+def _doc():
+    return {
+        "id": "n",
+        "type": "Actor",
+        "name": "N",
+        "description": "",
+        "metadata": {"k": {"v": 1}},
+        "tags": [1, {"z": 1}],
+    }
+
+
+def test_apply_staged_result_shares_nothing_with_doc_or_staged():
+    doc = _doc()
+    staged = {"tags": [2, {"z": 2}], "metadata": {"j": 1}}
+    d0, s0 = copy.deepcopy(doc), copy.deepcopy(staged)
+    out = _apply_staged(doc, staged)
+    out["metadata"]["k"]["v"] = 9
+    out["tags"][1]["z"] = 9
+    assert doc == d0
+    assert staged == s0
+
+
+def test_apply_staged_replaced_field_shares_nothing_with_staged():
+    doc = _doc()
+    staged = {"tags": [2, {"z": 2}]}
+    out = _apply_staged(doc, staged)
+    out["tags"][1]["z"] = 9
+    assert staged == {"tags": [2, {"z": 2}]}
+
+
+def test_compose_of_a_create_shares_nothing_with_the_entry():
+    entry = {"action": "create", "staged": _doc()}
+    out = compose(entry, None)
+    out["metadata"]["k"]["v"] = 9
+    assert entry["staged"]["metadata"]["k"]["v"] == 1
+
+
+def test_content_copies_deeply():
+    doc = _doc()
+    out = sr._content(doc)
+    out["metadata"]["k"]["v"] = 9
+    assert doc["metadata"]["k"]["v"] == 1
+
+
+def test_with_manual_does_not_alias_doc_or_values():
+    doc = _doc()
+    values = {"metadata.m": {"deep": {"x": 1}}, "tags": [{"q": 1}]}
+    out = sr._with_manual(doc, values, ["metadata.m", "tags"])
+    out["metadata"]["k"]["v"] = 9
+    out["metadata"]["m"]["deep"]["x"] = 9
+    out["tags"][0]["q"] = 9
+    assert doc["metadata"]["k"]["v"] == 1
+    assert values == {"metadata.m": {"deep": {"x": 1}}, "tags": [{"q": 1}]}
+
+
+def test_node_and_edge_builders_do_not_alias_the_document():
+    doc = _doc()
+    del doc["tags"]
+    n = _node(doc)
+    n.metadata["k"]["v"] = 9
+    assert doc["metadata"]["k"]["v"] == 1
+    e = {
+        "id": "e",
+        "source": "a",
+        "target": "b",
+        "type": "RELATES_TO",
+        "metadata": {"k": {"v": 1}},
+    }
+    ed = _edge(e)
+    ed.metadata["k"]["v"] = 9
+    assert e["metadata"]["k"]["v"] == 1
+
+
+# ==== Copies (merge planning and storage) =====================================
+
+# Merge planning never aliases what it reads, and storage.update_node hands its validator the node it replaces and the node it would write.
+
+
+def _plan(world, sid):
+    review = world.service._load_review(sid, None)
+    before = copy.deepcopy(review.entries)
+    selected = sr.normalise_selection(review, "all")
+    plan, results = sr.plan_merge(review, selected, {}, actor="t", merge_id="m1")
+    return review, before, plan, results
+
+
+def _stage_new_pair(world):
+    sid = world.staged_session()
+    with bind_session(sid):
+        world.service.add_nodes(
+            [
+                {
+                    "id": "n1",
+                    "type": "Actor",
+                    "name": "N1",
+                    "metadata": {"k": {"v": 1}},
+                },
+                {"id": "n2", "type": "Actor", "name": "N2"},
+            ],
+            [{"source": "n1", "target": "n2", "type": "RELATES_TO"}],
+        )
+    return sid
+
+
+@pytest.mark.parametrize("world", ["file"], indirect=True)
+def test_the_merge_record_does_not_alias_the_result_items(world):
+    sid = _stage_new_pair(world)
+    review, before, plan, results = _plan(world, sid)
+    results[0]["later"] = "added after planning"
+    assert all("later" not in e for e in plan.record["entries"])
+
+
+@pytest.mark.parametrize("world", ["file"], indirect=True)
+def test_planning_a_create_leaves_the_layer_entries_as_loaded(world):
+    sid = _stage_new_pair(world)
+    review, before, plan, results = _plan(world, sid)
+    assert review.entries == before
+
+
+@pytest.mark.parametrize("world", ["file"], indirect=True)
+def test_validating_an_edge_leaves_the_planned_node_payloads_as_planned(world):
+    sid = _stage_new_pair(world)
+    review, before, plan, results = _plan(world, sid)
+    for w in plan.writes:
+        assert isinstance(w.payload["created_at"], str), (w.entity_id, w.payload)
+
+
+@pytest.mark.parametrize("world", ["file"], indirect=True)
+def test_storage_update_node_hands_validate_the_node_before_and_after(world):
+    seen = []
+
+    def spy(before, after):
+        seen.append((before["name"], after["name"]))
+        return None
+
+    world.storage.update_node("a", {"name": "Renamed"}, validate=spy)
+    assert seen == [("Alpha" if False else seen[0][0], "Renamed")]
+    assert seen[0][0] != "Renamed"

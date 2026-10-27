@@ -2,7 +2,7 @@
   "$comment": [
     "Shared cross-language fixture for the `reference` annotation's URL-scheme",
     "gate (docs/ANNOTATION_CONTRACT.md's 'Reference tiles'). Consumed by:",
-    "  - backend/core/tests/test_session_annotations_reference.py",
+    "  - backend/core/tests/test_session_annotations_guards.py",
     "    (reference_url_error, the gate every backend write path routes through)",
     "  - packages/ui-graph-canvas/tests/ReferenceAnnotation.test.jsx",
     "    (isSafeReferenceUrl, the renderer's own independent gate)",

@@ -903,7 +903,7 @@ operation semantics.
 **Two different meanings of "batch," on purpose.** A raw
 `POST /sessions/{id}/ops` call (`SessionManager.apply_ops`) carries a list of
 ops and applies them **atomically**: `test_a_poisoned_op_rolls_back_the_whole_batch`
-(`backend/core/tests/test_session_annotations_image_guard.py`) pins that a
+(`backend/core/tests/test_session_annotations_guards.py`) pins that a
 valid op earlier in that list does not survive a later op's refusal — the
 whole list commits or none of it does, because a partial commit there would
 leave already-connected browsers and a retried client's next attempt

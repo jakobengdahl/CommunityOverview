@@ -63,7 +63,7 @@ DEFAULT_GROUP_SIZE = {"w": 320, "h": 200}
 # claim to be without any path ever producing one. Kept as a literal rather
 # than imported so this module (which ``session_store`` imports on every
 # annotation op) does not pull Pillow/httpx into the store's import path;
-# ``test_session_annotations_image_guard.py`` pins it to the optimizer's
+# ``test_session_annotations_guards.py`` pins it to the optimizer's
 # output so the two cannot drift apart.
 EMBEDDED_IMAGE_URL_PREFIXES = ("data:image/webp;base64,",)
 
