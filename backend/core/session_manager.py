@@ -2238,15 +2238,18 @@ class SessionManager:
             if holder is not None and holder != client_id:
                 raise LeaseConflict(conflict_id, holder)
 
-        forgotten_deleted_id: Optional[str] = None
+        # (index, id), so a failed undo can put the id back where it was.
+        forgotten_deleted: Optional[Tuple[int, str]] = None
         if inverse_op.get("op") == "annotation_created":
             ann_id = (inverse_op.get("annotation") or {}).get("id")
             if isinstance(ann_id, str):
                 try:
-                    session._deleted_annotation_ids.remove(ann_id)
-                    forgotten_deleted_id = ann_id
+                    index = session._deleted_annotation_ids.index(ann_id)
                 except ValueError:
                     pass
+                else:
+                    del session._deleted_annotation_ids[index]
+                    forgotten_deleted = (index, ann_id)
         # Attribution for the broadcast only — see _UNDO_REPLAY_CLIENT_ID's
         # docstring. Every check above (claim conflict included) has already
         # used the real client_id; only the op that goes to _apply_op_sync
@@ -2259,8 +2262,11 @@ class SessionManager:
         # and the flag together; a second write afterwards could fail and leave
         # the record undone in memory but not on disk. ``_apply_op_sync`` rolls
         # back the state on failure; the record is not part of its (shallow)
-        # log copy, so its flags are restored here.
+        # log copy, so its flags are restored here — but only while seq shows
+        # nothing was committed: a broadcast that fails after the persist
+        # landed must leave memory matching what is now on disk.
         saved_flags = {k: record[k] for k in ("undone", "undone_at") if k in record}
+        seq_before = session.seq
         record["undone"] = True
         record["undone_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         applied = None
@@ -2274,12 +2280,12 @@ class SessionManager:
                 trusted_replay=True,
             )
         finally:
-            if applied is None:
+            if session.seq == seq_before:
                 record.pop("undone", None)
                 record.pop("undone_at", None)
                 record.update(saved_flags)
-                if forgotten_deleted_id is not None:
-                    session._deleted_annotation_ids.append(forgotten_deleted_id)
+                if forgotten_deleted is not None:
+                    session._deleted_annotation_ids.insert(*forgotten_deleted)
         if applied is None:
             # The conflict check above passed but the replay still turned out
             # to be a no-op (e.g. the store dropped it as an update on a

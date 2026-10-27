@@ -259,7 +259,8 @@ class Session:
     )
     # Ephemeral: each activity record's encoded length, for the document-size
     # budget (session_manager._document_bytes). Rebuilt from the live log on
-    # every use, so it never outlives the records it describes.
+    # every use; between uses it can still hold records since pruned or rolled
+    # back, so it stays bounded by the log cap plus one batch.
     _activity_record_bytes: Dict[int, Any] = field(
         default_factory=dict, repr=False, compare=False
     )

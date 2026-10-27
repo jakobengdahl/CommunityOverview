@@ -5299,6 +5299,8 @@ class TestActivityLogRollbackIsExact:
                 raise OSError("disk full")
             real_persist(session)
 
+        s._deleted_annotation_ids.appendleft("older")
+        s._deleted_annotation_ids.append("newer")
         store.persist = fail_once_undone
         with pytest.raises(OSError):
             mgr.undo_last_action(s.id, "c1")
@@ -5307,14 +5309,56 @@ class TestActivityLogRollbackIsExact:
         assert json.loads(json.dumps(s.to_dict())) == on_disk
         assert record["undone"] is False and record["undone_at"] is None
         assert s.state["annotations"] == []
-        assert "note-1" in s._deleted_annotation_ids
+        assert list(s._deleted_annotation_ids) == ["older", "note-1", "newer"]
         assert [e for e in await _drain(sub) if e.get("type") == "op"] == []
 
-        store.persist = real_persist
+        writes = []
+
+        def counting(session):
+            writes.append(session.seq)
+            real_persist(session)
+
+        store.persist = counting
         mgr.undo_last_action(s.id, "c1")
+        assert len(writes) == 1  # state and flags land in one write
         persisted = SessionStore(backend).get(s.id)
         assert [r["undone"] for r in persisted.activity_log] == [False, True]
+        assert persisted.activity_log[-1]["undone_at"] == record["undone_at"]
+        assert record["undone"] is True and isinstance(record["undone_at"], str)
         assert [a["id"] for a in persisted.state["annotations"]] == ["note-1"]
+
+    async def test_a_broadcast_failure_after_the_undo_landed_keeps_it_undone(self):
+        """Once the write has landed, the undo is committed: a failing bus
+        must not roll the record back in memory while disk keeps it undone."""
+        backend, store, mgr = self._at_cap(500)
+        s, record = self._deleted_note(mgr)
+
+        def broken_publish(*_args, **_kwargs):
+            raise RuntimeError("bus down")
+
+        mgr.bus.publish = broken_publish
+        with pytest.raises(RuntimeError):
+            mgr.undo_last_action(s.id, "c1")
+
+        on_disk = SessionStore(backend).get(s.id).to_dict()
+        assert json.loads(json.dumps(s.to_dict())) == on_disk
+        assert record["undone"] is True
+        assert [a["id"] for a in s.state["annotations"]] == ["note-1"]
+        assert "note-1" not in s._deleted_annotation_ids
+
+    async def test_a_failed_undo_adds_no_deleted_id_it_had_not_removed(self):
+        _, store, mgr = self._at_cap(500)
+        s, _ = self._deleted_note(mgr)
+        s._deleted_annotation_ids.clear()  # evicted by the deque's maxlen
+
+        def boom(_session):
+            raise OSError("disk full")
+
+        store.persist = boom
+        with pytest.raises(OSError):
+            mgr.undo_last_action(s.id, "c1")
+
+        assert list(s._deleted_annotation_ids) == []
 
     async def test_an_undo_replay_that_turns_out_a_no_op_leaves_the_record_undoable(
         self,
@@ -5391,6 +5435,33 @@ class TestDocumentBudgetIsExact:
         check()
         s.activity_log.clear()
         check()
+
+    async def test_the_cache_holds_the_live_log_and_is_reused(self, monkeypatch):
+        mgr = _manager()
+        s = mgr.create_session()
+        for i in range(4):
+            await mgr.apply_ops(s.id, "c1", None, [self._move(i)])
+        assert set(s._activity_record_bytes) == {id(r) for r in s.activity_log}
+
+        del s.activity_log[:2]
+        snapshot = _detached_snapshot(s)
+        encoded = []
+        real_dumps = json.dumps
+
+        def counting_dumps(obj, *args, **kwargs):
+            encoded.append(obj)
+            return real_dumps(obj, *args, **kwargs)
+
+        monkeypatch.setattr(json, "dumps", counting_dumps)
+        size = _document_bytes(snapshot, s)
+        monkeypatch.undo()
+
+        assert size == len(json.dumps(snapshot))
+        assert len(encoded) == 1  # only the log-less head; every record hit
+        assert set(s._activity_record_bytes) == {id(r) for r in s.activity_log}
+        s.activity_log.clear()
+        _document_bytes(_detached_snapshot(s), s)
+        assert s._activity_record_bytes == {}
 
     async def test_a_document_exactly_at_budget_is_accepted_one_byte_over_is_not(self):
         mgr = _manager()
