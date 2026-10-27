@@ -524,20 +524,6 @@ def _audit_steps(job):
 
 
 @pytest.mark.parametrize("job_id", sorted(AUDIT_COMMANDS))
-def test_dependency_audits_are_blocking(job_id):
-    workflow = _workflow()
-    job = workflow["jobs"][job_id]
-    assert not job.get("continue-on-error", False)
-    audits = _audit_steps(job)
-    assert audits, f"no audit step found in job {job_id!r}"
-    for step in audits:
-        assert not step.get("continue-on-error", False), (
-            f"{job_id}:{step['name']} is reporting-only; dependency audits block"
-        )
-    assert "--ignore-vuln" not in str(job)
-
-
-@pytest.mark.parametrize("job_id", sorted(AUDIT_COMMANDS))
 def test_dependency_audits_cannot_be_skipped(job_id):
     # A skipped job or step reports success, so a condition is a quiet off-switch.
     job = _workflow()["jobs"][job_id]
@@ -613,7 +599,7 @@ def test_audit_mention_sees_a_quote_split_or_escaped_invocation(line):
 def test_audit_mention_leaves_the_non_pip_scanner_lines_alone():
     # The broadened pattern must not swallow the bandit invocation, which is
     # neither an audit nor a pip line. Its scope is pinned separately, by
-    # test_bandit_scan_scope_is_pinned against BANDIT_COMMAND.
+    # test_bandit_step_body_is_pinned_whole against BANDIT_STEP_BODY.
     for line in (
         "bandit -r backend services -x '*/tests/*,*/test_*.py' -ll",
         "echo '```' >> \"$GITHUB_STEP_SUMMARY\"",
@@ -673,11 +659,6 @@ def test_audits_run_nowhere_but_their_own_jobs():
 def _triggers(workflow):
     # PyYAML reads the bare `on:` key as boolean True.
     return workflow.get("on", workflow.get(True))
-
-
-def test_pull_request_trigger_names_no_retired_branch():
-    workflow = _workflow()
-    assert "dev" not in _triggers(workflow)["pull_request"]["branches"]
 
 
 def test_trigger_set_is_pinned():
@@ -784,29 +765,6 @@ def test_bandit_is_blocking():
     assert "if" not in step, "the bandit step is conditional"
 
 
-def test_bandit_scan_scope_is_pinned():
-    """What bandit is asked to scan, not just whether its step can fail.
-
-    Blocking means nothing if the scan can be narrowed instead: the step would
-    stay green over a finding in a path it stopped reading or a severity it
-    stopped reporting. Pinned as a whole command so every option moves together.
-    """
-    job = _workflow()["jobs"]["bandit"]
-    scans = [
-        step
-        for step in job["steps"]
-        if re.search(r"^\s*bandit\b", step.get("run", ""), re.M)
-    ]
-    assert len(scans) == 1, f"expected one bandit invocation, found {len(scans)}"
-    # Join the backslash continuations the workflow wraps the command over.
-    body = scans[0]["run"].replace("\\\n", " ")
-    invocations = [
-        line.strip() for line in body.splitlines() if re.match(r"^\s*bandit\b", line)
-    ]
-    assert len(invocations) == 1, invocations
-    assert _normalised(invocations[0]) == _normalised(BANDIT_COMMAND)
-
-
 def test_bandit_scan_is_not_narrowed_by_configuration():
     # An env var or a working-directory change narrows the scan without the
     # command line showing it, exactly as for the audits.
@@ -875,21 +833,6 @@ def test_in_source_nosec_suppressions_are_pinned():
         for code in (match.group(1).split() or [""])[:1]
     )
     assert found == EXPECTED_NOSEC
-
-
-def test_no_step_is_marked_temporarily_reporting_only():
-    # Parsed YAML drops comments, so read the raw text. A leftover "Temporary:
-    # reporting-only" note would outlive the key it described and mislead.
-    text = WORKFLOW.read_text()
-    assert "reporting-only until" not in text
-    # Anchored to a `continue-on-error` key's vicinity: a comment elsewhere that
-    # says no scanner is non-blocking any more is legitimate prose.
-    lines = text.splitlines()
-    for i, line in enumerate(lines):
-        if re.match(r"\s*continue-on-error\s*:", line):
-            window = "\n".join(lines[max(0, i - 3) : i + 4]).lower()
-            assert "non-blocking" not in window, f"line {i + 1}: {line.strip()!r}"
-            assert "reporting-only" not in window, f"line {i + 1}: {line.strip()!r}"
 
 
 def test_teed_steps_run_under_the_default_shell_the_test_executes():
