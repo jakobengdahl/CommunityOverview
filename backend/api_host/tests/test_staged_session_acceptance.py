@@ -242,23 +242,34 @@ def test_semantic_search_composes_in_the_owning_session_only(client):
     store.model = KeywordModel()
     store.load_vectors({})
     store.update_nodes_embeddings(storage.get_all_nodes())
+    indexed = store.get_embedding_count()
+
+    def main_index_holds_main_content_only():
+        # Checked after every step, so a staged write that reaches the index
+        # and is later overwritten or removed still fails here.
+        assert store.get_embedding_count() == indexed
+        assert not store.has_embedding("watch")
+        assert store.get_vector_list("node-3")[:3] == [1.0, 0.0, 0.0]
+
+    main_index_holds_main_content_only()
     a = _session(client)
     b = _session(client)
     _add(client, a, [{"id": "watch", "type": "Actor", "name": "Ocean Watch"}])
+    main_index_holds_main_content_only()
     # A also moves node-3 off the topic: its main vector must not answer in A.
     _patch(client, a, "node-3", {"description": "a guide to the forest floor"})
+    main_index_holds_main_content_only()
 
     def semantic(sid, query):
-        return _search(client, sid, query, semantic=True)
+        found = _search(client, sid, query, semantic=True)
+        main_index_holds_main_content_only()
+        return found
 
     assert semantic(a, "ocean") == {"watch": "created"}
     assert semantic(a, "forest") == {"node-3": "updated"}
     for sid in (b, None):
         assert set(semantic(sid, "ocean")) == {"node-3"}
         assert semantic(sid, "forest") == {}
-    # The main index holds main content only.
-    assert not store.has_embedding("watch")
-    assert store.get_vector_list("node-3")[:3] == [1.0, 0.0, 0.0]
 
 
 def test_traversal_walks_staged_edges_in_the_owning_session_only(client):
