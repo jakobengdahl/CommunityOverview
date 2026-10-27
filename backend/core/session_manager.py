@@ -1003,13 +1003,25 @@ class SessionManager:
         only. The layer change is the commit point; this follows it, and a
         failure here is logged, never undoes it. Records a session activity
         entry with no inverse. Returns the applied op, or None when there was
-        no document left to apply it to."""
+        no document left to apply it to or an ``apply_ops`` batch held its
+        lock."""
         session = (
             self.store.get(session_id) if is_valid_session_id(session_id) else None
         )
         if session is None:
             logger.warning(
                 "layer of session %s changed; its document is gone, so no op fans out",
+                session_id,
+            )
+            return None
+        # Callers run check_layer_op first with no await in between, so the
+        # lock is free here; one that awaited in between could otherwise apply
+        # and persist this op inside an apply_ops batch. Withheld rather than
+        # raised: the layer change has already committed.
+        if self._lock(session_id).locked():
+            logger.warning(
+                "layer of session %s changed while a batch held its lock; "
+                "no op fans out",
                 session_id,
             )
             return None
