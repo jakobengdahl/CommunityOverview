@@ -68,6 +68,24 @@ SENTINEL = "sk-test-SENTINEL-must-never-be-written-anywhere-0123456789"
 PROSE_SENTINEL = "ZZQQ-model-prose-marker-ZZQQ"
 
 
+def _files_matching(root, patterns):
+    """Relative paths of the files under `root` whose text matches a pattern."""
+    offenders = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.suffix == ".pyc":
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except FileNotFoundError:
+            # Removed between the walk and the read by another test or
+            # xdist worker; a file that is gone cannot hold a committed key.
+            continue
+        for pattern in patterns:
+            if pattern.search(text):
+                offenders.append(str(path.relative_to(root)))
+    return offenders
+
+
 class TestNoCredentialInTheRepository:
     def test_no_harness_file_contains_a_key_shaped_literal(self):
         """
@@ -81,15 +99,36 @@ class TestNoCredentialInTheRepository:
             re.compile(r"sk-proj-[A-Za-z0-9_\-]{20,}"),
             re.compile(r"\bsk-[A-Za-z0-9]{32,}\b"),
         ]
-        offenders = []
-        for path in sorted(EVAL_DIR.rglob("*")):
-            if not path.is_file() or path.suffix == ".pyc":
-                continue
-            text = path.read_text(encoding="utf-8", errors="ignore")
-            for pattern in patterns:
-                if pattern.search(text):
-                    offenders.append(str(path.relative_to(EVAL_DIR)))
+        offenders = _files_matching(EVAL_DIR, patterns)
         assert not offenders, f"credential-shaped literal(s) in {offenders}"
+
+    def test_the_scan_survives_a_file_vanishing_and_still_reads_the_rest(
+        self, tmp_path, monkeypatch
+    ):
+        """
+        Under pytest-xdist the scan races other workers writing the tree.
+
+        `test_run_skill_eval.py` plants `.eval_key` files in the checkout and
+        unlinks them, and interpreters write `__pycache__` temp files that are
+        renamed away. A file listed by the walk and gone before it is read must
+        not fail the scan, and must not make it skip a file that is still there.
+        """
+        (tmp_path / "a_vanishes.txt").write_text("nothing", encoding="utf-8")
+        (tmp_path / "b_stays.json").write_text(
+            '{"k": "sk-ant-' + "x" * 24 + '"}', encoding="utf-8"
+        )
+        original = Path.read_text
+
+        def unlink_then_read(self, *args, **kwargs):
+            if self.name == "a_vanishes.txt":
+                self.unlink()
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", unlink_then_read)
+
+        assert _files_matching(tmp_path, [re.compile(r"sk-ant-[A-Za-z0-9]{20,}")]) == [
+            "b_stays.json"
+        ]
 
     def test_no_fixture_declares_a_credential_field(self):
         """
