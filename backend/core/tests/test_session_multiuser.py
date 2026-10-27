@@ -292,8 +292,9 @@ class TestTwoClientsOneSession:
         # Generous rate limit so the tight loop measures persistence/mirroring,
         # not the per-client token bucket (which real drag cadence never hits).
         # Small ring and activity caps let a short sequence wrap both bounded
-        # structures: every move fsyncs the session file, so wrapping the
-        # production defaults (500 each) took ~20 s.
+        # structures: each batch deep-copies the activity log for rollback and
+        # snapshot, so per-op cost grows with it and wrapping the production
+        # defaults (500 each) took ~20 s.
         bound = 20
         mgr = SessionManager(
             SessionStore(
