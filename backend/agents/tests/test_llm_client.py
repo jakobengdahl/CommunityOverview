@@ -81,9 +81,9 @@ def test_non_object_input_is_an_error_and_never_becomes_a_proposal(
     assert store.list_proposals() == []
     raw.assert_called_once_with("graph.search_graph", {"query": "x"})
     bad, good = provider.received_messages[1][-1]["content"]
-    assert bad["is_error"] is True
+    assert (bad["tool_use_id"], bad["is_error"]) == ("t0", True)
     assert bad["content"] == (
         '{"error": "Tool \'graph.add_nodes\' was not run: its arguments must be '
         f'a JSON object, got {json_type}."}}'
     )
-    assert good["is_error"] is False
+    assert (good["tool_use_id"], good["is_error"]) == ("t1", False)

@@ -2414,6 +2414,11 @@ class TestNonObjectToolInput:
 
         result = service.process_message([{"role": "user", "content": "go"}])
 
+        tool_result_ids = [
+            block["tool_use_id"]
+            for block in mock_llm.received_messages[1][-1]["content"]
+        ]
+        assert tool_result_ids == ["mock_tool_0", "mock_tool_1"]
         bad, good = _tool_result_payloads(mock_llm)
         assert bad == {
             "error": (
