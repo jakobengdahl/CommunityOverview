@@ -5,6 +5,7 @@ Provides test fixtures for creating test applications with temporary
 graph files and proper cleanup.
 """
 
+import asyncio
 import pytest
 import tempfile
 import json
@@ -16,6 +17,75 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from backend.api_host import create_app, AppConfig
+from backend.api_host import server as api_host_server
+
+import fastapi.dependencies.models as _fastapi_dependency_models
+
+_BUILT_APPS = pytest.StashKey[list]()
+
+# FastAPI memoises callable classification in module-level LRU caches (4096
+# entries each) keyed on endpoint functions. One app per process never notices;
+# a test process building hundreds of apps keeps the last ~20 alive through
+# them. Names absent from another FastAPI version are skipped.
+_FASTAPI_CALLABLE_CACHES = (
+    "_is_gen_callable_cached",
+    "_is_async_gen_callable_cached",
+    "_is_coroutine_callable_cached",
+)
+
+
+def shut_down_unstarted_app(app) -> None:
+    """Run the shutdown handlers of an app whose startup never ran.
+
+    An app whose startup ran was entered with ``with TestClient(...)``, which
+    owns its shutdown; the startup handler is what sets session_cleanup_task.
+    """
+    if hasattr(app.state, "session_cleanup_task"):
+        return
+    for handler in app.router.on_shutdown:
+        asyncio.run(handler())
+
+
+def release_fastapi_callable_caches() -> None:
+    for name in _FASTAPI_CALLABLE_CACHES:
+        cached = getattr(_fastapi_dependency_models, name, None)
+        if cached is not None:
+            cached.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _record_built_apps(request, monkeypatch):
+    """Record every app a test builds so its shutdown handlers can run.
+
+    TestClient without ``with`` never fires shutdown, so each app's event
+    delivery worker and I/O executor kept running, and the apps stayed
+    reachable. The growing heap made every full GC pass take over a second,
+    which surfaced as ~2 s fixture setups late in the suite.
+    """
+    built = []
+    real = api_host_server._create_app
+
+    def recording(*args, **kwargs):
+        app = real(*args, **kwargs)
+        built.append(app)
+        return app
+
+    monkeypatch.setattr(api_host_server, "_create_app", recording)
+    request.node.stash[_BUILT_APPS] = built
+    yield
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_teardown(item, nextitem):
+    # Before fixture teardown, so storage flushes while the temp graph files
+    # the fixtures created still exist. The list is emptied because items live
+    # for the whole session and would otherwise keep the apps alive.
+    built = item.stash.get(_BUILT_APPS, [])
+    item.stash[_BUILT_APPS] = []
+    for app in built:
+        shut_down_unstarted_app(app)
+    release_fastapi_callable_caches()
+    return (yield)
 
 
 @pytest.fixture(autouse=True)
