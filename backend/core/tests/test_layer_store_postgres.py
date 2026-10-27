@@ -8,6 +8,7 @@ see test_persistence_contract_postgres.py.
 
 from __future__ import annotations
 
+import logging
 import secrets
 import threading
 import uuid
@@ -881,3 +882,51 @@ class TestMergeRecordRetention:
             worker.join(10)
             assert done == [0], "the purge waited on, or took, a held row"
         assert backend.purge_merge_records(self.RETENTION, limit=9, now=far) == 1
+
+    def test_a_purge_rolled_back_after_its_delete_logs_nothing(
+        self, make, schema, caplog
+    ):
+        backend = self._retired_with_record(make)
+        ident = psycopg.sql.Identifier(schema)
+        # A deferred trigger fails the commit, after the DELETE has run and
+        # returned its rows: only a log written after the commit stays quiet.
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                psycopg.sql.SQL(
+                    "CREATE FUNCTION {}.refuse_purge() RETURNS trigger"
+                    " LANGUAGE plpgsql AS"
+                    " $$BEGIN RAISE EXCEPTION 'purge refused at commit'; END$$"
+                ).format(ident)
+            )
+            conn.execute(
+                psycopg.sql.SQL(
+                    "CREATE CONSTRAINT TRIGGER refuse_purge"
+                    " AFTER DELETE ON {}.graph_merge_records"
+                    " DEFERRABLE INITIALLY DEFERRED FOR EACH ROW"
+                    " EXECUTE FUNCTION {}.refuse_purge()"
+                ).format(ident, ident)
+            )
+        far = ls.utc_now() + timedelta(days=3650)
+        with caplog.at_level(logging.INFO, logger=ls.__name__):
+            with pytest.raises(psycopg.errors.RaiseException):
+                backend.purge_merge_records(self.RETENTION, limit=9, now=far)
+        assert [r for r in caplog.records if r.name == ls.__name__] == []
+        assert backend.load_merge("m") is not None
+
+    def test_a_purge_stamps_at_most_limit_unstamped_sessions(self, make, schema):
+        backend = make()
+        sessions = [A, B, "9999-0000-1111-2222"]
+        for session_id in sessions:
+            backend.record_staged(session_id)
+            backend.retire(session_id)
+            self._set_retired_at(schema, session_id, None)
+        far = ls.utc_now() + timedelta(days=3650)
+        assert backend.purge_merge_records(self.RETENTION, limit=2, now=far) == 0
+        with psycopg.connect(DSN) as conn:
+            stamped = conn.execute(
+                psycopg.sql.SQL(
+                    "SELECT session_id FROM {}.graph_staged_sessions"
+                    " WHERE retired_at IS NOT NULL ORDER BY session_id"
+                ).format(psycopg.sql.Identifier(schema))
+            ).fetchall()
+        assert [row[0] for row in stamped] == sorted(sessions)[:2]
