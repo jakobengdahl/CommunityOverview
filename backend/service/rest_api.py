@@ -1890,9 +1890,21 @@ def _register_session_endpoints(
 
         subscription, _member = session_manager.connect(session_id, client_id, name)
 
+        session_deleted = (
+            f"data: {json.dumps({'type': 'session_deleted', 'deleted_by': None})}\n\n"
+        )
+
         async def event_generator():
             try:
-                catch_up = session_manager.catch_up(session_id, since_seq)
+                try:
+                    catch_up = session_manager.catch_up(session_id, since_seq)
+                except SessionNotFound:
+                    # Deleted between the handshake above and the first body
+                    # iteration. Without the notice a direct-mode client's
+                    # EventSource reconnect would silently re-materialise an
+                    # empty session under the same id.
+                    yield session_deleted
+                    return
                 yield f"data: {json.dumps(catch_up)}\n\n"
                 while True:
                     if await request.is_disconnected():
@@ -1914,7 +1926,7 @@ def _register_session_endpoints(
                         # resync translation running catch_up against a store
                         # entry that no longer exists. Give the client the
                         # notice it would otherwise have missed.
-                        yield f"data: {json.dumps({'type': 'session_deleted', 'deleted_by': None})}\n\n"
+                        yield session_deleted
                         break
                     yield f"data: {json.dumps(event)}\n\n"
             except asyncio.CancelledError:

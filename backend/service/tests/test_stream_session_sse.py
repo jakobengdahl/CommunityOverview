@@ -121,6 +121,23 @@ async def test_resync_after_session_deleted_becomes_session_deleted_and_ends(
 
 
 @pytest.mark.asyncio
+async def test_session_deleted_before_first_catch_up_becomes_session_deleted(
+    stream_env,
+):
+    manager, endpoint = stream_env
+    session_id, body = await _open_stream(endpoint, manager, _FakeRequest())
+
+    # The handshake passed; the session goes before the body is first iterated.
+    assert manager.store.delete(session_id)
+
+    chunk = await anext(body)
+    assert chunk == 'data: {"type": "session_deleted", "deleted_by": null}\n\n'
+    with pytest.raises(StopAsyncIteration):
+        await anext(body)
+    _assert_disconnected(manager, session_id)
+
+
+@pytest.mark.asyncio
 async def test_client_disconnect_ends_stream_and_unsubscribes(stream_env):
     manager, endpoint = stream_env
     request = _FakeRequest()
