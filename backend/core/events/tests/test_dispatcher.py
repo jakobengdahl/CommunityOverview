@@ -11,7 +11,11 @@ from backend.core.events.models import (
     EventContext,
     EntityData,
 )
-from backend.core.events.dispatcher import EventDispatcher, _copy_payload
+from backend.core.events.dispatcher import (
+    EventDispatcher,
+    _copy_payload,
+    _repair_legacy_agent_delivery,
+)
 
 
 class MockNode:
@@ -309,6 +313,115 @@ class TestLoopPrevention:
         dispatcher.dispatch(event)
 
         assert len(delivered) == 1
+
+
+def _agent_node(agent_id: str, subscription_id: str) -> MockNode:
+    return MockNode(agent_id, "Agent", "Agent", {"subscription_id": subscription_id})
+
+
+def _agent_deliveries(dispatcher: EventDispatcher) -> list:
+    delivered = []
+    dispatcher.set_delivery_callback(lambda e, u: None)
+    dispatcher.set_agent_delivery_callback(
+        lambda e, sub_id: delivered.append((e.origin.event_origin, sub_id)) or True
+    )
+    return delivered
+
+
+class TestLegacyAgentLoopGuardRepair:
+    """A UI-created agent stored before its loop guard used the agent node id
+    (``agent:<prefix>`` instead of ``agent:<prefix>-node``) is repaired when
+    the dispatcher reads its subscription."""
+
+    LEGACY = {
+        "webhook_url": "internal://agent/p",
+        "ignore_origins": ["agent:p"],
+        "ignore_session_ids": [],
+    }
+
+    def test_a_legacy_agent_is_not_woken_by_its_own_write(self):
+        sub = create_subscription_node(
+            "p-subscription",
+            "P - Subscription",
+            webhook_url="internal://agent/p",
+            ignore_origins=["agent:p"],
+        )
+        storage = MockStorage([sub, _agent_node("p-node", "p-subscription")])
+        dispatcher = EventDispatcher(storage)
+        delivered = _agent_deliveries(dispatcher)
+
+        dispatcher.dispatch(create_event(event_origin="agent:p-node"))
+        dispatcher.dispatch(create_event(event_origin="web-ui"))
+
+        assert delivered == [("web-ui", "p-subscription")]
+        # Repaired on read only: the stored subscription is not rewritten.
+        assert sub.metadata["delivery"]["ignore_origins"] == ["agent:p"]
+        assert sub.metadata["delivery"]["webhook_url"] == "internal://agent/p"
+
+    def test_the_legacy_guard_and_internal_url_take_the_node_id_form(self):
+        repaired = _repair_legacy_agent_delivery(
+            "p-subscription", "p-node", self.LEGACY
+        )
+
+        assert repaired == {
+            "webhook_url": "internal://agent/p-node",
+            "ignore_origins": ["agent:p", "agent:p-node"],
+            "ignore_session_ids": [],
+        }
+        assert (
+            _repair_legacy_agent_delivery("p-subscription", "p-node", repaired)
+            == repaired
+        )
+        assert self.LEGACY["ignore_origins"] == ["agent:p"]
+
+    def test_a_correctly_formed_agent_delivery_is_unchanged(self):
+        delivery = {
+            "webhook_url": "internal://agent/p-node",
+            "ignore_origins": ["agent:p-node"],
+            "ignore_session_ids": ["s"],
+        }
+        assert (
+            _repair_legacy_agent_delivery("p-subscription", "p-node", delivery)
+            == delivery
+        )
+
+    def test_an_external_webhook_url_is_kept_while_the_guard_is_repaired(self):
+        delivery = {
+            **self.LEGACY,
+            "webhook_url": "https://example.com/internal/agent/p",
+        }
+
+        repaired = _repair_legacy_agent_delivery("p-subscription", "p-node", delivery)
+
+        assert repaired["webhook_url"] == "https://example.com/internal/agent/p"
+        assert repaired["ignore_origins"] == ["agent:p", "agent:p-node"]
+
+    def test_subscriptions_outside_the_ui_agent_pairing_are_unchanged(self):
+        # No linked agent; agent ids without the "-node" suffix, including one
+        # that still leaves "p" once five characters are cut; and a UI-style
+        # agent linked to a subscription of another prefix.
+        for subscription_id, agent_id in [
+            ("p-subscription", None),
+            ("p-subscription", "p"),
+            ("p-subscription", "pxnode"),
+            ("q-subscription", "p-node"),
+        ]:
+            assert (
+                _repair_legacy_agent_delivery(subscription_id, agent_id, self.LEGACY)
+                == self.LEGACY
+            )
+
+    def test_a_non_agent_subscription_keeps_its_origins_when_dispatched(self):
+        sub = create_subscription_node(
+            "p-subscription", "Webhook", ignore_origins=["agent:p"]
+        )
+        dispatcher = EventDispatcher(MockStorage([sub]))
+        delivered = []
+        dispatcher.set_delivery_callback(lambda e, u: delivered.append(u))
+
+        dispatcher.dispatch(create_event(event_origin="agent:p-node"))
+
+        assert delivered == ["https://example.com/hook"]
 
 
 class TestMultipleSubscriptions:

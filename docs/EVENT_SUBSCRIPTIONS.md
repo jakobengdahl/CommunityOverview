@@ -216,6 +216,16 @@ clients can continue using origin and session exclusions:
 2. **Use unique session IDs**: Each client should use a consistent session ID
 3. **Agent self-exclusion**: Agents should set their origin to `agent:<id>` and exclude themselves
 
+Built-in agents write with the origin `agent:<Agent node id>`, and origins are
+matched exactly, so an agent subscription excludes itself with that exact
+value. Agents created in the web UI before this was fixed stored
+`agent:<prefix>` and `internal://agent/<prefix>` instead (their nodes are
+`<prefix>-node` and `<prefix>-subscription`). The dispatcher repairs that pair
+when it reads the subscription, adding `agent:<prefix>-node` and using
+`internal://agent/<prefix>-node`, without rewriting the stored node; saving
+the agent from its edit dialog stores the node-id form. Other subscriptions,
+and external webhook URLs, are not changed.
+
 Example: An agent subscription that ignores its own changes:
 ```json
 {
