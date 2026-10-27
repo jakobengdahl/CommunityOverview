@@ -144,6 +144,19 @@ describe('CreateAgentDialog', () => {
     expect(subscription.name).toHaveLength(200);
   });
 
+  it('measures the cap on the trimmed name', async () => {
+    const onSave = vi.fn();
+    render(<CreateAgentDialog onClose={vi.fn()} onSave={onSave} />);
+    await screen.findByRole('checkbox', { name: /GRAPH/ });
+
+    typeInto(d.name_label, `  ${'n'.repeat(185)}  `);
+    typeInto(d.task_prompt_label, 'Do it');
+    fireEvent.click(screen.getByRole('button', { name: d.submit }));
+
+    expect(window.alert).not.toHaveBeenCalled();
+    expect(onSave.mock.calls[0][0].nodes[1].name).toHaveLength(185);
+  });
+
   it('refuses a 186-character name instead of sending a create the backend rejects', async () => {
     const onSave = vi.fn();
     const onClose = vi.fn();
@@ -159,6 +172,28 @@ describe('CreateAgentDialog', () => {
     expect(window.alert).toHaveBeenCalledWith(d.name_too_long.replace('{max}', '185'));
     expect(onSave).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('refuses a 186-character name when editing too', async () => {
+    const onSave = vi.fn();
+    render(
+      <CreateAgentDialog
+        onClose={vi.fn()}
+        onSave={onSave}
+        initialData={{
+          agent: { id: 'a1', name: 'Old', aliases: [], metadata: { subscription_id: 's1' } },
+          subscription: { id: 's1', metadata: { filters: {}, delivery: {} } },
+        }}
+      />
+    );
+    await screen.findByRole('checkbox', { name: /GRAPH/ });
+
+    typeInto(d.name_label, 'n'.repeat(186));
+    typeInto(d.task_prompt_label, 'Do it');
+    fireEvent.click(screen.getByRole('button', { name: d.submit_edit }));
+
+    expect(window.alert).toHaveBeenCalledWith(d.name_too_long.replace('{max}', '185'));
+    expect(onSave).not.toHaveBeenCalled();
   });
 
   it('keeps the subscription link and delivery when editing, and drops the legacy agent key', async () => {
