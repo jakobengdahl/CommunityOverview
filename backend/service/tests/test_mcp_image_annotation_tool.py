@@ -22,7 +22,7 @@ import pytest
 from PIL import Image
 
 from backend.core import GraphStorage, image_ingest
-from backend.core.session_manager import SessionManager
+from backend.core.session_manager import SessionManager, _TokenBucket
 from backend.core.session_store import InMemorySessionPersistenceBackend, SessionStore
 from backend.runtime.authorization import AUTHORIZATION_MODE_ENV
 from backend.service import GraphService, mcp_tools, register_mcp_tools
@@ -422,6 +422,29 @@ class TestCreateImageAnnotationConcurrencyAndBudgets:
         assert result["success"] is False
         assert result["error"] == "revision_conflict"
         assert result["current_revision"] == session.seq
+
+    def test_charges_its_own_labelled_rate_bucket_not_the_shared_marker(
+        self, image_tools
+    ):
+        """The tool forwards ``rate_limit_label``, so its writes draw from the
+        ``mcp-agent:create_image_annotation`` key: a spent unlabelled marker
+        key does not block it, and its own key is what runs out."""
+        tools_map, manager = image_tools
+        session = manager.create_session()
+        manager._mcp_bucket = _TokenBucket(1.0, 0.0)  # one token per key, no refill
+        assert manager._mcp_bucket.consume(mcp_tools._MCP_LAYOUT_CLIENT_ID, 1.0)
+
+        admitted = tools_map["create_image_annotation"](
+            session_id=session.id, x=0, y=0, image_data=_png_data_url()
+        )
+        spent = tools_map["create_image_annotation"](
+            session_id=session.id, x=1, y=1, image_data=_png_data_url()
+        )
+
+        assert admitted["success"] is True
+        assert spent["success"] is False
+        assert spent["error"] == "rate_limited"
+        assert len(session.state["annotations"]) == 1
 
     def test_lease_conflict_is_reported_and_does_not_replace(self, image_tools):
         """task-mcp-annotation-human-edit-guard: replacing an existing image
