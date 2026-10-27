@@ -35,15 +35,21 @@ _FASTAPI_CALLABLE_CACHES = (
 
 
 def shut_down_unstarted_app(app) -> None:
-    """Run the shutdown handlers of an app whose startup never ran.
+    """Run the lifespan of an app whose startup never ran, to reach its shutdown.
 
-    An app whose startup ran was entered with ``with TestClient(...)``, which
-    owns its shutdown; the startup handler is what sets session_cleanup_task.
+    The app's background workers start when it is built, and only its lifespan
+    stops them. An app whose startup ran was entered with
+    ``with TestClient(...)``, which owns its shutdown; the startup is what sets
+    session_cleanup_task.
     """
     if hasattr(app.state, "session_cleanup_task"):
         return
-    for handler in app.router.on_shutdown:
-        asyncio.run(handler())
+
+    async def run_lifespan():
+        async with app.router.lifespan_context(app):
+            pass
+
+    asyncio.run(run_lifespan())
 
 
 def release_fastapi_callable_caches() -> None:
@@ -55,7 +61,7 @@ def release_fastapi_callable_caches() -> None:
 
 @pytest.fixture(autouse=True)
 def _record_built_apps(request, monkeypatch):
-    """Record every app a test builds so its shutdown handlers can run.
+    """Record every app a test builds so its shutdown can run.
 
     TestClient without ``with`` never fires shutdown, so each app's event
     delivery worker and I/O executor kept running, and the apps stayed
@@ -80,7 +86,7 @@ def pytest_runtest_teardown(item, nextitem):
     # Before fixture teardown, so storage flushes while the temp graph files
     # the fixtures created still exist. The list is emptied because items live
     # for the whole session and would otherwise keep the apps alive. A failing
-    # handler is raised only after the yield: raising before it would skip the
+    # shutdown is raised only after the yield: raising before it would skip the
     # fixture teardown and break every later test on the worker.
     built = item.stash.get(_BUILT_APPS, [])
     item.stash[_BUILT_APPS] = []

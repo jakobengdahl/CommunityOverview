@@ -80,7 +80,7 @@ finally:
 `create_worker_runtime` accepts the same arguments as `create_app` and starts
 event delivery, federation and configured agents immediately. `runtime.stop()`
 stops them and flushes storage, including supplied storage. The HTTP application
-calls it from its shutdown handler. Worker-only processes can also use
+calls it when its lifespan shuts down. Worker-only processes can also use
 `runtime.run_function(...)`; each process must receive its own composition at boot.
 
 For independently constructed clients, the existing process default remains
