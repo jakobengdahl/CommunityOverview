@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 
 from backend.api_host import create_app, AppConfig
 from backend.api_host import server as api_host_server
+from backend.core.merge_record_retention import MergeRecordRetention
 
 import fastapi.dependencies.models as _fastapi_dependency_models
 
@@ -34,13 +35,18 @@ _FASTAPI_CALLABLE_CACHES = (
 )
 
 
-def shut_down_unstarted_app(app) -> None:
+def shut_down_unstarted_app(app, retentions=()) -> None:
     """Run the lifespan of an app whose startup never ran, to reach its shutdown.
 
     The app's background workers start when it is built, and only its lifespan
     stops them. An app whose startup ran was entered with
     ``with TestClient(...)``, which owns its shutdown; the startup is what sets
     session_cleanup_task.
+
+    An app whose startup failed has no session_cleanup_task either, and its
+    lifespan fails the same way again before reaching shutdown. Its workers are
+    then stopped directly and the failure is re-raised. ``retentions`` are the
+    app's merge-record retentions, which only its shutdown can otherwise reach.
     """
     if hasattr(app.state, "session_cleanup_task"):
         return
@@ -49,7 +55,13 @@ def shut_down_unstarted_app(app) -> None:
         async with app.router.lifespan_context(app):
             pass
 
-    asyncio.run(run_lifespan())
+    try:
+        asyncio.run(run_lifespan())
+    except Exception:
+        for retention in retentions:
+            retention.stop()
+        app.state.runtime.stop()
+        raise
 
 
 def release_fastapi_callable_caches() -> None:
@@ -69,13 +81,21 @@ def _record_built_apps(request, monkeypatch):
     which surfaced as ~2 s fixture setups late in the suite.
     """
     built = []
+    started_retentions = []
     real = api_host_server._create_app
 
+    class RecordedRetention(MergeRecordRetention):
+        def start(self):
+            started_retentions.append(self)
+            super().start()
+
     def recording(*args, **kwargs):
+        first = len(started_retentions)
         app = real(*args, **kwargs)
-        built.append(app)
+        built.append((app, started_retentions[first:]))
         return app
 
+    monkeypatch.setattr(api_host_server, "MergeRecordRetention", RecordedRetention)
     monkeypatch.setattr(api_host_server, "_create_app", recording)
     request.node.stash[_BUILT_APPS] = built
     yield
@@ -91,9 +111,9 @@ def pytest_runtest_teardown(item, nextitem):
     built = item.stash.get(_BUILT_APPS, [])
     item.stash[_BUILT_APPS] = []
     errors = []
-    for app in built:
+    for app, retentions in built:
         try:
-            shut_down_unstarted_app(app)
+            shut_down_unstarted_app(app, retentions)
         except Exception as exc:
             errors.append(exc)
     release_fastapi_callable_caches()
