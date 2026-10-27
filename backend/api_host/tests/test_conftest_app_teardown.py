@@ -1,6 +1,7 @@
 """The conftest teardown that stops apps a test built but never started."""
 
 import contextlib
+import dataclasses
 import gc
 import threading
 import weakref
@@ -10,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from backend.api_host import create_app
 from backend.api_host.tests import conftest
+from backend.core.merge_record_retention import MergeRecordRetention
 from backend.core.session_registry import SessionRegistry
 from backend.api_host.tests.conftest import (
     _BUILT_APPS,
@@ -148,3 +150,21 @@ def test_a_failed_teardown_lifespan_stops_the_apps_retentions(app_config, reques
 
     assert stopped == [retention]
     assert len(_delivery_workers()) == before
+
+
+def test_each_built_app_is_recorded_with_only_the_retentions_it_started(
+    app_config, request
+):
+    # Staged first, so retentions credited to a later app, or an app credited
+    # with the ones started before it, both misattribute.
+    staged = create_app(dataclasses.replace(app_config, graph_staged_sessions="true"))
+    plain = create_app(app_config)
+
+    (staged_app, staged_retentions), (plain_app, plain_retentions) = request.node.stash[
+        _BUILT_APPS
+    ]
+
+    assert (staged_app, plain_app) == (staged, plain)
+    assert len(staged_retentions) == 1
+    assert isinstance(staged_retentions[0], MergeRecordRetention)
+    assert plain_retentions == []
