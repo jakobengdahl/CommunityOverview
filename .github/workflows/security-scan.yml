@@ -110,6 +110,9 @@ jobs:
   # The required checks documented in CLAUDE.md belong to ci.yml and are unchanged.
   secret-sast:
     name: Secret and SAST
+    permissions:
+      contents: read
+      pull-requests: read
     uses: ./.github/workflows/reusable-secret-sast-scan.yml
     with:
       bandit-targets: 'backend services'
