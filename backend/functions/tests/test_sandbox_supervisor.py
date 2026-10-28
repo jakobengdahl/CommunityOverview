@@ -268,15 +268,19 @@ def child(spec, setup_w):
         os.kill(os.getpid(), signal.SIGUSR1)
     if case == "stop":
         os.kill(spec["supervisor_pid"], signal.SIGTERM)
-    if case in ("stop", "monitor_error", "scan_timeout"):
+    if case in ("stop", "monitor_error", "empty_monitor_error", "scan_timeout"):
         while True:
             signal.pause()
     os._exit(17)
 sandbox._child = child
 
-if case == "monitor_error":
+if case in ("monitor_error", "empty_monitor_error", "empty_final_monitor_error"):
     def unreadable(spec):
-        raise PermissionError("usage unavailable")
+        if case == "monitor_error":
+            raise PermissionError("usage unavailable")
+        if case == "empty_final_monitor_error" and sandbox._children_of(os.getpid()):
+            return False
+        raise OSError()
     sandbox._work_dir_exceeds_quota = unreadable
 
 if case in ("scan_timeout", "final_scan_timeout"):
@@ -401,6 +405,16 @@ def test_supervisor_terminates_and_reaps_the_child_when_usage_cannot_be_checked(
     final = json.loads(report.splitlines()[-1])
     assert final["stopped"] is True
     assert final["monitor_error"] == "usage unavailable"
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
+
+
+@pytest.mark.parametrize("case", ["empty_monitor_error", "empty_final_monitor_error"])
+def test_empty_scan_error_still_fails_closed(supervisor_report, case):
+    report, child_pid = supervisor_report("supervise", case)
+    final = json.loads(report.splitlines()[-1])
+    assert final["monitor_error"] == "OSError"
+    assert final["stopped"] is (case == "empty_monitor_error")
     with pytest.raises(ProcessLookupError):
         os.kill(child_pid, 0)
 

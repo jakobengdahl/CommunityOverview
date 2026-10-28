@@ -700,7 +700,7 @@ def supervise(spec, status_fd):
     except _Stop:
         stopped = True
     except (OSError, _DiskScanTimeout) as exc:
-        monitor_error = str(exc)
+        monitor_error = str(exc) or type(exc).__name__
         stopped = True
     _reap_all()
     # Catch fast runs and EOF-triggered stop requests between polling ticks.
@@ -708,7 +708,7 @@ def supervise(spec, status_fd):
         try:
             disk_exceeded = _check_work_dir_quota(spec)
         except (OSError, _DiskScanTimeout) as exc:
-            monitor_error = str(exc)
+            monitor_error = str(exc) or type(exc).__name__
     usage = resource.getrusage(resource.RUSAGE_CHILDREN)
     _report(
         status_fd,
