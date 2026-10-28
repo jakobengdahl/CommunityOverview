@@ -44,6 +44,42 @@ def test_disk_scan_counts_both_allocated_and_apparent_bytes(tmp_path, sparse):
     assert sandbox._work_dir_exceeds_quota(spec) is True
 
 
+def test_unlinked_descriptor_accounting_deduplicates_inodes(monkeypatch, tmp_path):
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            """
+import os, sys
+f = open(sys.argv[1], 'w+b', buffering=0)
+os.unlink(sys.argv[1])
+f.truncate(8192)
+duplicate = os.dup(f.fileno())
+print('ready', flush=True)
+sys.stdin.read()
+""",
+            str(tmp_path / "deleted"),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout.readline().strip() == "ready"
+        monkeypatch.setattr(
+            sandbox,
+            "_children_of",
+            lambda pid: [child.pid] if pid == os.getpid() else [],
+        )
+        spec = {"work_dir": str(tmp_path), "disk_limits": {"bytes": 8192, "files": 1}}
+        assert sandbox._work_dir_exceeds_quota(spec) is False
+        spec["disk_limits"]["bytes"] -= 1
+        assert sandbox._work_dir_exceeds_quota(spec) is True
+    finally:
+        child.communicate(timeout=5)
+
+
 @pytest.mark.parametrize(
     "abi, filesystem, network, scope, work_rights",
     [

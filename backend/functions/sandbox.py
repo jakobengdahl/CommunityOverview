@@ -560,6 +560,34 @@ def _work_dir_exceeds_quota(spec):
                 except (FileNotFoundError, NotADirectoryError):
                     continue
                 push(child)
+        # Unlinked open files have no directory entry. Measure before cleanup
+        # closes the run's descriptors and releases their storage.
+        pending = _children_of(os.getpid())
+        seen = set()
+        while pending:
+            pid = pending.pop()
+            pending.extend(_children_of(pid))
+            try:
+                descriptors = os.listdir(f"/proc/{pid}/fd")
+            except FileNotFoundError:
+                continue
+            for descriptor in descriptors:
+                try:
+                    info = os.stat(f"/proc/{pid}/fd/{descriptor}")
+                except FileNotFoundError:
+                    continue  # Closed or exited during the scan.
+                identity = (info.st_dev, info.st_ino)
+                if (
+                    info.st_nlink != 0
+                    or not stat.S_ISREG(info.st_mode)
+                    or identity in seen
+                ):
+                    continue
+                seen.add(identity)
+                total_files += 1
+                total_bytes += max(info.st_size, info.st_blocks * 512)
+                if total_bytes > limits["bytes"] or total_files > limits["files"]:
+                    return True
         return False
     finally:
         for directory, entries in reversed(stack):

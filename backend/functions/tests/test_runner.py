@@ -275,6 +275,27 @@ def test_disk_quota_terminates_the_run_and_overrides_even_a_result(
     assert time.monotonic() - started < 10
 
 
+@pytest.mark.parametrize(
+    "limits", [{"max_disk_bytes": 12 * 1024}, {"max_disk_files": 1}]
+)
+def test_retained_unlinked_files_exceed_the_quota(storage, limits):
+    runner = HardenedSubprocessRunner(**limits)
+    result = execute(
+        runner,
+        storage,
+        handler("""
+        retained = []
+        for name in ('a', 'b'):
+            f = open(name, 'wb', buffering=0)
+            os.unlink(name)
+            f.write(b'x' * 8192)
+            retained.append(f)
+        time.sleep(10)
+        """),
+    )
+    assert (result.status, result.code) == ("failed", "disk_exceeded"), result
+
+
 def test_nested_work_files_at_the_entry_quota_can_succeed(storage):
     runner = HardenedSubprocessRunner(max_disk_bytes=1024 * 1024, max_disk_files=4)
     result = execute(

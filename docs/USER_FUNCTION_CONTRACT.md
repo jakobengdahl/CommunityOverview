@@ -434,12 +434,14 @@ system that started it.
   startup as positive integers no greater than the contract maximums. These
   are instance settings, not manifest `limits` fields.
   Each scan sums the larger of apparent size and allocated bytes for each
-  entry, including directories, without following symbolic links. The
+  entry, including directories, without following symbolic links. Scans also
+  count unlinked regular files held open by the run and its descendants,
+  deduplicating descriptors by inode. The
   supervisor polls every 100 ms and checks again after termination; a detected
   quota violation takes precedence over a function's result. If usage cannot
   be checked, the run is terminated and fails with `runner_lost`.
   Polling is best-effort: usage may overshoot between scans, and transient
-  files or unlinked files still held open may escape accounting. The 16 MiB
+  files closed between scans may escape accounting. The 16 MiB
   per-file limit remains in force. Operators should also cap the backing
   container/host storage (see [Deployment Guide](DEPLOYMENT_GUIDE.md#user-function-temporary-storage)).
 - Termination is forced. The runner does not wait for the function to clean up,

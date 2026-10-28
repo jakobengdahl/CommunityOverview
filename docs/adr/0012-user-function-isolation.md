@@ -114,10 +114,13 @@ allocated bytes per entry, and never follow symbolic links. Exceeding either
 quota terminates the run and its descendants and returns `failed` with
 `disk_exceeded`, even if the function sent a result. A final scan catches usage
 left by runs that finish between polling ticks; scan failures stop the run
-with `runner_lost`. The 16 MiB `RLIMIT_FSIZE` per-file limit remains in place.
+with `runner_lost`. Scans also count unlinked regular files held open by the run
+and its descendants, deduplicating descriptors by inode. The 16 MiB
+`RLIMIT_FSIZE` per-file limit remains in place.
 
 This is best-effort accounting, not a filesystem quota: transient peaks between
-scans and unlinked files held open may escape it. Operators should also limit
+scans, including unlinked files closed between scans, may escape it. Operators
+should also limit
 the container/host storage backing the work directory, using an ephemeral-storage
 limit or size-capped tmpfs with an inode limit where supported (see the
 [Deployment Guide](../DEPLOYMENT_GUIDE.md#user-function-temporary-storage)).
