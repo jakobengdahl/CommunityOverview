@@ -24,6 +24,7 @@ Security:
 - Failed fetches are logged and skipped without crashing
 """
 
+import asyncio
 import html
 import re
 import json
@@ -651,7 +652,7 @@ class SkillsLoader:
         That check resolves DNS, so it runs on cache hits too.
         """
         self._validate_domain(url)
-        if not is_safe_url(url):
+        if not await asyncio.to_thread(is_safe_url, url):
             raise ValueError(f"URL resolves to a disallowed address: {url}")
         # Return cached text if still within TTL
         cached = self._text_cache.get(url)
@@ -683,7 +684,7 @@ class SkillsLoader:
                             )
                         next_url = urljoin(current_url, location)
                         self._validate_domain(next_url)
-                        if not is_safe_url(next_url):
+                        if not await asyncio.to_thread(is_safe_url, next_url):
                             raise ValueError(
                                 f"Redirect to a disallowed address: {next_url}"
                             )
