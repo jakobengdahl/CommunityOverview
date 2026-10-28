@@ -315,6 +315,7 @@ class FunctionBroker:
             call_args["event_correlation_id"] = ctx.correlation_id
         if spec.method == "add_nodes":
             call_args.setdefault("edges", [])
+            call_args["allow_federated_endpoints"] = False
 
         with use_request_authorization(
             **_authorization_kwargs(ctx.authorization_inputs)
@@ -329,10 +330,6 @@ class FunctionBroker:
                     ERR_ACCESS_DENIED,
                     _sanitize(decision.reason or "Graph access denied."),
                 )
-            if spec.method == "add_nodes":
-                # After the decision: this check reads graph state, and an
-                # actor without access must not learn anything from it.
-                self._refuse_reference_endpoints(arguments)
             try:
                 result = getattr(self._service, spec.method)(**call_args)
             except Exception:
@@ -357,37 +354,6 @@ class FunctionBroker:
         # Round-trip so the function receives plain JSON (dates become strings);
         # handle_request then measures the whole response envelope.
         return json.loads(json.dumps(result, default=str))
-
-    def _refuse_reference_endpoints(self, arguments: Mapping[str, Any]) -> None:
-        """Refuse edge endpoints that name a federated reference node.
-
-        Storage resolves an endpoint that is not a node id by name, across all
-        nodes, so a name can land on a host-managed reference node. Names and
-        ids of nodes created in the same call are fine: storage resolves those
-        to the new nodes. Any other name shared with a reference node is refused,
-        whichever node the name would resolve to.
-        """
-        edges = arguments.get("edges") or []
-        names = {edge[end] for edge in edges for end in ("source", "target")}
-        if not names:
-            return
-        nodes = self._service.storage.nodes
-        new_endpoints = {
-            node[key]
-            for node in arguments.get("nodes") or []
-            for key in ("name", "id")
-            if isinstance(node.get(key), str)
-        }
-        candidates = {n for n in names if n not in nodes and n not in new_endpoints}
-        if not candidates:
-            return
-        for node_id, node in list(nodes.items()):
-            if node_id.startswith(FEDERATED_NODE_PREFIX) and node.name in candidates:
-                raise BrokerError(
-                    ERR_INVALID_ARGUMENTS,
-                    "An edge endpoint names a federated reference node; "
-                    "use the id of a local node.",
-                )
 
     @staticmethod
     def _validate_arguments(spec: ToolSpec, arguments: Mapping[str, Any]) -> None:

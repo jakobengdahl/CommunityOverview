@@ -3062,6 +3062,8 @@ class GraphStorage:
         event_context: Optional[EventContext] = None,
         *,
         expect_absent: bool = False,
+        node_visible: Optional[Callable[[Node], bool]] = None,
+        allow_federated_endpoints: bool = True,
     ) -> AddNodesResult:
         """
         Add nodes and edges.
@@ -3078,6 +3080,10 @@ class GraphStorage:
                 anything changes, and again by a store that enforces
                 revisions; a refusal raises EntityRevisionConflict and adds
                 nothing.
+            node_visible: When supplied, existing edge endpoints must pass this
+                predicate. Missing and hidden endpoints get the same refusal.
+            allow_federated_endpoints: Whether edges may resolve to federated
+                reference ids, including through a name. Checked under the lock.
 
         Raises:
             EntityRevisionConflict, GraphWriteFailed, GraphWriteOutcomeUnknown:
@@ -3085,6 +3091,33 @@ class GraphStorage:
                 added and no event fired.
         """
         with self._lock:
+            if edges and (node_visible is not None or not allow_federated_endpoints):
+                endpoints = dict(self.nodes)
+                created = {node.id for node in nodes if node.id not in endpoints}
+                for node in nodes:
+                    endpoints.setdefault(node.id, node)
+                by_name = {node.name: node for node in endpoints.values()}
+                for edge in edges:
+                    for value in (edge.source, edge.target):
+                        node = endpoints.get(value) or by_name.get(value)
+                        if (
+                            node is None
+                            or (
+                                not allow_federated_endpoints
+                                and node.id.startswith("federated::")
+                            )
+                            or (
+                                node_visible is not None
+                                and node.id not in created
+                                and not node_visible(node)
+                            )
+                        ):
+                            return AddNodesResult(
+                                success=False,
+                                added_node_ids=[],
+                                added_edge_ids=[],
+                                message="Could not add edge (source or target not found)",
+                            )
             expectations: Dict[Tuple[str, str], Any] = {}
             if expect_absent:
                 for node in nodes:

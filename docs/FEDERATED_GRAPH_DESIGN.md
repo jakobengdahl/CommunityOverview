@@ -388,6 +388,10 @@ actions in the two places.
 - `GET /federation/status` diagnostics endpoint
 - `POST /federation/sync` on-demand sync endpoint
 - Node adoption: `POST /api/federation/adopt` clones a federated node into the local graph
+- When access narrowing is enabled, batch edge creation checks endpoint visibility
+  under the storage lock. User functions
+  cannot resolve edge endpoints to federated reference nodes, including by name;
+  hidden and missing endpoints receive the same refusal.
 - Teleport navigation: `POST /api/federation/teleport` resolves the canonical route from a
   node to the graph that owns it, with permission-denial, unavailable-graph,
   cross-deployment and backlink behaviour defined (see "Teleport navigation contract")

@@ -1036,6 +1036,30 @@ def test_unknown_and_hidden_endpoint_names_get_the_same_staged_refusal(world):
     assert world.layer(sid) == {}
 
 
+@pytest.mark.parametrize("end", ["source", "target"])
+@pytest.mark.parametrize("by_name", [False, True])
+def test_staged_add_nodes_can_refuse_reference_endpoints(world, end, by_name):
+    """Reference endpoint restrictions also apply to the session layer."""
+    reference = Node(id="federated::g2::ref", name="Reference", type="Actor")
+    world.storage.add_nodes([reference], [])
+    sid = world.staged_session()
+    results = []
+    with bind_session(sid):
+        for endpoint in (reference.name if by_name else reference.id, "missing"):
+            edge = {"source": "a", "target": "a", "type": "RELATES_TO"}
+            edge[end] = endpoint
+            results.append(
+                world.service.add_nodes(
+                    [{"id": "new", "name": "New", "type": "Actor"}],
+                    [edge],
+                    allow_federated_endpoints=False,
+                )
+            )
+    assert results[0] == results[1]
+    assert results[0]["success"] is False
+    assert world.layer(sid) == {}
+
+
 def test_staged_update_of_a_node_outside_the_narrowing_is_not_found(world):
     sid = _narrowed(world)
     with bind_session(sid):

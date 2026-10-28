@@ -655,6 +655,7 @@ class StagedWrite:
         expect_absent: bool,
         graph_access: GraphAccessNarrowing,
         event_context: Optional[EventContext] = None,
+        allow_federated_endpoints: bool = True,
     ) -> Dict[str, Any]:
         layer = self._load()
         failure = {"added_node_ids": [], "added_edge_ids": []}
@@ -684,7 +685,7 @@ class StagedWrite:
                             "success": False,
                             "message": (
                                 "Could not add edge (source or target not found)"
-                                if graph_access.enabled
+                                if graph_access.enabled or not allow_federated_endpoints
                                 else f"{role} node '{value}' does not exist "
                                 "(not found by ID or name)"
                             ),
@@ -692,6 +693,14 @@ class StagedWrite:
                     value = names[value]
                 endpoints.append(value)
             edge.source, edge.target = endpoints
+            if not allow_federated_endpoints and any(
+                nid.startswith("federated::") for nid in endpoints
+            ):
+                return {
+                    **failure,
+                    "success": False,
+                    "message": "Could not add edge (source or target not found)",
+                }
             # A node this op creates carries nothing of main's, so it needs no
             # judging here: as in a direct write, which does not narrow edges
             # to it (a federated adopt's new local copy, say).

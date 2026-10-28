@@ -819,6 +819,7 @@ class GraphService:
         event_correlation_id: Optional[str] = None,
         expect_absent: bool = False,
         expected_session_seq: Optional[int] = None,
+        allow_federated_endpoints: bool = True,
     ) -> Dict[str, Any]:
         def run(staging: Optional[StagedWrite]) -> Dict[str, Any]:
             if staging is not None:
@@ -833,6 +834,7 @@ class GraphService:
                     event_correlation_id=event_correlation_id,
                     expect_absent=expect_absent,
                     staging=staging,
+                    allow_federated_endpoints=allow_federated_endpoints,
                 )
             # Files left under an id whose node was deleted must not become the
             # new node's (ADR 0008 sec 8): note them now, quarantine them once
@@ -855,6 +857,7 @@ class GraphService:
                 event_session_id=event_session_id,
                 event_correlation_id=event_correlation_id,
                 expect_absent=expect_absent,
+                allow_federated_endpoints=allow_federated_endpoints,
                 on_nodes_landed=lambda landed: (
                     attachments.quarantine_leftover_attachments(
                         self._attachment_settings, leftovers, landed

@@ -144,6 +144,7 @@ def add_nodes(
     expect_absent: bool = False,
     on_nodes_landed: Optional[Callable[[List[str]], None]] = None,
     staging: Optional["StagedWrite"] = None,
+    allow_federated_endpoints: bool = True,
 ) -> Dict[str, Any]:
     """``on_nodes_landed`` gets the ids of the nodes this call left in the
     graph, including those a failed call keeps. With ``staging`` the write
@@ -226,44 +227,24 @@ def add_nodes(
                 expect_absent=expect_absent,
                 graph_access=decision.graph_access,
                 event_context=event_context,
+                allow_federated_endpoints=allow_federated_endpoints,
             )
         except EntityRevisionConflict as e:
             return _create_conflict_result(e, added_node_ids=[], added_edge_ids=[])
 
     try:
-        with storage.write_lock:
-            if decision.graph_access.enabled and edge_objects:
-                endpoints = dict(storage.nodes)
-                created = {node.id for node in node_objects if node.id not in endpoints}
-                for node in node_objects:
-                    endpoints.setdefault(node.id, node)
-                by_name = {node.name: node for node in endpoints.values()}
-
-                def shown(end):
-                    node = endpoints.get(end) or by_name.get(end)
-                    # A new node carries no existing endpoint data, as on the staged path.
-                    return node is not None and (
-                        node.id in created
-                        or access.is_node_visible(node, decision.graph_access)
-                    )
-
-                if any(
-                    not shown(end)
-                    for edge in edge_objects
-                    for end in (edge.source, edge.target)
-                ):
-                    return {
-                        "success": False,
-                        "message": "Could not add edge (source or target not found)",
-                        "added_node_ids": [],
-                        "added_edge_ids": [],
-                    }
-            result = storage.add_nodes(
-                node_objects,
-                edge_objects,
-                event_context=event_context,
-                expect_absent=expect_absent,
+        result = storage.add_nodes(
+            node_objects,
+            edge_objects,
+            event_context=event_context,
+            expect_absent=expect_absent,
+            node_visible=(
+                lambda node: access.is_node_visible(node, decision.graph_access)
             )
+            if decision.graph_access.enabled
+            else None,
+            allow_federated_endpoints=allow_federated_endpoints,
+        )
     except EntityRevisionConflict as e:
         return _create_conflict_result(e, added_node_ids=[], added_edge_ids=[])
     except _WRITE_ERRORS as e:

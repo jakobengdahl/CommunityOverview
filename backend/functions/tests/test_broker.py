@@ -810,8 +810,8 @@ def test_an_edge_endpoint_naming_a_federated_reference_node_is_refused(
     broker = make_broker(service)
     edge = {"source": "Local", "target": "Remote Ref", "type": "RELATES_TO"}
     response = call(broker, "graph.add", {"nodes": [], "edges": [edge]})
-    assert error_code(response) == "invalid_arguments"
-    assert service.calls == []
+    assert error_code(response) == "tool_failed"
+    assert service.calls[0]["allow_federated_endpoints"] is False
     assert not any(e.target.startswith("federated::") for e in storage.edges.values())
 
 
@@ -906,9 +906,57 @@ def test_a_reference_node_name_is_refused_on_either_end_without_naming_it_back(
     other = "source" if end == "target" else "target"
     edge = {end: "Remote Ref", other: "Mine", "type": "RELATES_TO"}
     response = call(make_broker(service), "graph.add", {"nodes": [], "edges": [edge]})
-    assert error_code(response) == "invalid_arguments"
+    assert error_code(response) == "tool_failed"
     assert "Remote Ref" not in response["error"]["message"]
-    assert service.calls == []
+    assert not storage.edges
+
+
+@pytest.mark.parametrize("end", ["source", "target"])
+def test_reference_adopted_before_storage_write_cannot_be_resolved_by_name(
+    service, storage, monkeypatch, end
+):
+    """The storage write checks references adopted after broker validation."""
+    storage.add_nodes([Node(id="local", name="Local", type="Actor")], [])
+    original_add = storage.add_nodes
+
+    def adopt_then_add(nodes, edges, **kwargs):
+        original_add(
+            [Node(id="federated::g2::late", name="Late reference", type="Actor")], []
+        )
+        return original_add(nodes, edges, **kwargs)
+
+    monkeypatch.setattr(storage, "add_nodes", adopt_then_add)
+    edge = {"source": "local", "target": "local", "type": "RELATES_TO"}
+    edge[end] = "Late reference"
+    response = call(make_broker(service), "graph.add", {"nodes": [], "edges": [edge]})
+    assert error_code(response) == "tool_failed"
+    assert not storage.edges
+
+
+def test_hidden_reference_names_and_unknown_names_get_the_same_broker_refusal(storage):
+    """A narrowed function cannot probe hidden federated reference names."""
+    _seed_reference(storage, "Local")
+    storage.update_node("federated::g2::n1", {"metadata": {"origin_graph_id": "g2"}})
+    service = SpyService(
+        storage,
+        authorization_hook=RecordingHook(
+            narrowing=GraphAccessNarrowing(enabled=True, allow_local_graph=True)
+        ),
+    )
+    responses = [
+        call(
+            make_broker(service),
+            "graph.add",
+            {
+                "nodes": [],
+                "edges": [{"source": "Local", "target": name, "type": "RELATES_TO"}],
+            },
+        )
+        for name in ("Remote Ref", "Missing")
+    ]
+    assert error_code(responses[0]) == "tool_failed"
+    assert responses[0]["error"] == responses[1]["error"]
+    assert not storage.edges
 
 
 def test_local_nodes_may_be_named_as_edge_endpoints(service, storage):

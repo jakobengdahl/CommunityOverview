@@ -316,6 +316,60 @@ class TestGraphStorageCRUD:
         assert result.success is False
         assert "Source node" in result.message
 
+    @pytest.mark.parametrize("end", ["source", "target"])
+    @pytest.mark.parametrize("by_name", [False, True])
+    def test_add_nodes_can_refuse_federated_endpoints_atomically(
+        self, temp_storage, monkeypatch, end, by_name
+    ):
+        """A restricted write refuses resolved reference ids before adding anything."""
+        monkeypatch.setattr(
+            temp_storage.vector_store, "update_nodes_embeddings", lambda nodes: None
+        )
+        reference = Node(id="federated::g2::ref", name="Reference", type="Actor")
+        temp_storage.add_nodes([reference], [])
+        edge = Edge(source="new", target="new", type="RELATES_TO")
+        setattr(edge, end, reference.name if by_name else reference.id)
+        result = temp_storage.add_nodes(
+            [Node(id="new", name="New", type="Actor")],
+            [edge],
+            allow_federated_endpoints=False,
+        )
+        assert result.success is False
+        assert result.added_node_ids == result.added_edge_ids == []
+        assert set(temp_storage.nodes) == {reference.id}
+        assert not temp_storage.edges
+
+        allowed = temp_storage.add_nodes(
+            [Node(id="new", name="New", type="Actor")], [edge]
+        )
+        assert allowed.success is True
+        assert getattr(temp_storage.edges[edge.id], end) == reference.id
+
+    @pytest.mark.parametrize("by_name", [False, True])
+    def test_add_nodes_checks_resolved_endpoint_visibility(
+        self, temp_storage, monkeypatch, by_name
+    ):
+        """Storage gives invisible and missing endpoints the same refusal."""
+        monkeypatch.setattr(
+            temp_storage.vector_store, "update_nodes_embeddings", lambda nodes: None
+        )
+        hidden = Node(
+            id="hidden", name="Hidden", type="Actor", metadata={"origin_graph_id": "g2"}
+        )
+        temp_storage.add_nodes([hidden], [])
+        results = [
+            temp_storage.add_nodes(
+                [Node(id="new", name="New", type="Actor")],
+                [Edge(source="new", target=endpoint, type="RELATES_TO")],
+                node_visible=lambda node: not node.metadata.get("origin_graph_id"),
+            )
+            for endpoint in (hidden.name if by_name else hidden.id, "missing")
+        ]
+        assert results[0].success is False
+        assert results[0].message == results[1].message
+        assert set(temp_storage.nodes) == {hidden.id}
+        assert not temp_storage.edges
+
     def test_get_node(self, storage_with_data):
         """Test getting a node by ID"""
         node = storage_with_data.get_node("actor-1")
