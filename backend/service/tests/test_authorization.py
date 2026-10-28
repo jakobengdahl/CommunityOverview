@@ -1,9 +1,13 @@
 """Targeted tests for the graph authorization seam."""
 
 import json
+from unittest.mock import Mock
+
+import pytest
 
 from backend.runtime.authorization import (
     GRAPH_ACTION_MUTATE,
+    GRAPH_ACTION_READ,
     DefaultGraphAuthorizationHook,
     GraphAccessNarrowing,
     GraphAuthorizationContext,
@@ -14,6 +18,7 @@ from backend.core import Node, NodeType, GraphStorage
 from backend.federation.config import FederationFileConfig
 from backend.federation.manager import FederationManager
 from backend.service import GraphService
+from backend.service import queries
 
 
 class DenyMutationsHook:
@@ -387,6 +392,97 @@ class TestGraphAuthorizationSeam:
         assert result["authorization"]["target"] == "adopt_federated_node"
         assert result["added_node_ids"] == []
         assert result["added_edge_ids"] == []
+
+
+class TestSimilarityAuthorization:
+    @pytest.mark.parametrize("batch", [False, True], ids=["single", "batch"])
+    def test_denied_similarity_reads_never_access_storage(self, batch):
+        """Both query entry points authorize reads before touching graph data."""
+        storage = Mock()
+        hook = Mock()
+        hook.evaluate.return_value = GraphAuthorizationDecision(
+            allowed=False, reason="Reads disabled", mode="custom", source="test"
+        )
+        target = "find_similar_nodes_batch" if batch else "find_similar_nodes"
+
+        result = getattr(queries, target)(
+            storage, hook, ["Candidate"] if batch else "Candidate"
+        )
+
+        assert result["success"] is False
+        assert result["error_code"] == "access_denied"
+        assert result["message"] == "Reads disabled"
+        assert result["authorization"] == {
+            "action": GRAPH_ACTION_READ,
+            "target": target,
+            "mode": "custom",
+            "source": "test",
+        }
+        hook.evaluate.assert_called_once()
+        context = hook.evaluate.call_args.args[0]
+        assert (context.action, context.target) == (GRAPH_ACTION_READ, target)
+        assert storage.mock_calls == []
+
+    @pytest.mark.parametrize("batch", [False, True], ids=["single", "batch"])
+    @pytest.mark.parametrize("semantic", [False, True], ids=["name", "semantic"])
+    @pytest.mark.parametrize(
+        "allow_local,graph_ids,expected",
+        [
+            (False, ("graph-alpha",), ["alpha"]),
+            (True, (), ["local"]),
+            (True, ("graph-alpha",), ["local"]),
+            (False, (), []),
+        ],
+        ids=["selected-graph", "local", "local-and-selected", "no-graphs"],
+    )
+    def test_similarity_limits_apply_after_graph_access_narrowing(
+        self,
+        empty_storage,
+        monkeypatch,
+        batch,
+        semantic,
+        allow_local,
+        graph_ids,
+        expected,
+    ):
+        """Hidden name and vector matches cannot leak or displace visible matches."""
+        nodes = [
+            Node(
+                id=node_id,
+                type=NodeType.ACTOR,
+                name="Candidate",
+                metadata={"origin_graph_id": graph_id} if graph_id else {},
+            )
+            for node_id, graph_id in (
+                ("beta", "graph-beta"),
+                ("local", ""),
+                ("alpha", "graph-alpha"),
+            )
+        ]
+        empty_storage.add_nodes(nodes, [])
+
+        def vector_search(*, limit, **kwargs):
+            return [("beta", 0.99), ("local", 0.95), ("alpha", 0.9)][:limit]
+
+        monkeypatch.setattr(empty_storage.vector_store, "search", vector_search)
+        service = GraphService(
+            empty_storage,
+            authorization_hook=FixedNarrowingHook(
+                allow_local_graph=allow_local, include_graph_ids=graph_ids
+            ),
+        )
+        name = "Unrelated query" if semantic else "Candidate"
+
+        if batch:
+            result = service.find_similar_nodes_batch([name], threshold=0.9, limit=1)
+            assert result["total_searched"] == 1
+            result = result["results"][name]
+        else:
+            result = service.find_similar_nodes(name, threshold=0.9, limit=1)
+            assert result["search_name"] == name
+
+        assert [item["node"]["id"] for item in result["similar_nodes"]] == expected
+        assert result["total"] == len(expected)
 
 
 class TestMutationScopeNarrowing:
