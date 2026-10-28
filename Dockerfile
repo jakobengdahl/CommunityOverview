@@ -31,6 +31,18 @@ ARG BUILD_SHA=
 ENV BUILD_SHA=${BUILD_SHA}
 RUN npm run build:web && npm run build:widget
 
+# Keep installed production package metadata: minified bundles alone cannot
+# identify all npm dependencies for the release SBOM. Do not copy module code.
+RUN npm ls --all --omit=dev --parseable \
+      --workspace @community-graph/web --workspace @community-graph/widget \
+      --include-workspace-root > /tmp/frontend-packages \
+    && mkdir -p /frontend-dependencies \
+    && while IFS= read -r package_dir; do \
+         destination="/frontend-dependencies${package_dir#/app}"; \
+         mkdir -p "$destination" \
+           && cp "$package_dir/package.json" "$destination/package.json" || exit 1; \
+       done < /tmp/frontend-packages
+
 # -----------------------------------------------------------------------------
 # Stage 2: Python Runtime
 # -----------------------------------------------------------------------------
@@ -78,6 +90,7 @@ COPY config ./config
 # Copy built frontend assets from builder stage
 COPY --from=builder /app/frontend/web/dist ./static/web
 COPY --from=builder /app/frontend/widget/dist ./static/widget
+COPY --from=builder /frontend-dependencies /usr/share/communityoverview/frontend-dependencies
 
 # Create data directory and set permissions
 RUN mkdir -p /data \
