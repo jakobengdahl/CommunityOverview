@@ -4,6 +4,7 @@ backend.service.import_service through backend.service.rest_api's router
 factory. See docs/adr/0006-graph-import-replace-mode.md.
 """
 
+import json
 import os
 import threading
 import time
@@ -81,7 +82,9 @@ class TestImportEndpoint:
             side_effect=AssertionError("body must not be read"),
         ):
             response = client.post(
-                "/api/graph/import", content=b"{}", headers={"Content-Length": "21"}
+                "/api/graph/import",
+                content=b"{}",
+                headers={"Content-Length": "21", "Content-Type": "application/json"},
             )
         assert response.status_code == 413
         assert client.get("/api/graph/nodes/old-1").status_code == 200
@@ -91,7 +94,9 @@ class TestImportEndpoint:
         self, client, monkeypatch, content_length
     ):
         monkeypatch.setattr(rest_api, "_MAX_IMPORT_JSON_BYTES", 20)
-        headers = {} if content_length is None else {"Content-Length": content_length}
+        headers = {"Content-Type": "application/json"}
+        if content_length is not None:
+            headers["Content-Length"] = content_length
         response = client.post(
             "/api/graph/import", content=iter([b"x" * 11, b"x" * 11]), headers=headers
         )
@@ -110,7 +115,9 @@ class TestImportEndpoint:
 
     def test_parse_errors_do_not_echo_the_upload(self, client):
         response = client.post(
-            "/api/graph/import", content=b"caller-controlled-" * 1_000
+            "/api/graph/import",
+            content=b"caller-controlled-" * 1_000,
+            headers={"Content-Type": "application/json"},
         )
         assert response.status_code == 422
         assert len(response.content) < 1_000
@@ -122,6 +129,18 @@ class TestImportEndpoint:
         ]
         assert body["required"] is True
         assert body["content"]["application/json"]["schema"]["type"] == "object"
+
+    @pytest.mark.parametrize(
+        "content_type", ["application/json; charset=utf-8", "application/graph+json"]
+    )
+    def test_json_media_types_are_accepted(self, client, content_type):
+        response = client.post(
+            "/api/graph/import",
+            content=json.dumps(_valid_document()),
+            headers={"Content-Type": content_type},
+        )
+        assert response.status_code == 200
+        assert response.json()["graph_replaced"] is True
 
     def test_post_import_replaces_the_graph(self, client: TestClient):
         response = client.post("/api/graph/import", json=_valid_document())

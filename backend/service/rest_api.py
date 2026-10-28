@@ -2129,6 +2129,18 @@ def _register_import_endpoints(
         live graph exactly, and nothing from the previous graph survives
         unless it also appears in ``document``.
         """
+        # Cookie-authenticated browsers can send simple content types from a
+        # sibling origin without a CORS preflight. Require JSON before reading.
+        media_type = (
+            request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        )
+        if not (
+            media_type == "application/json"
+            or (media_type.startswith("application/") and media_type.endswith("+json"))
+        ):
+            raise HTTPException(
+                status_code=415, detail="Import requires a JSON content type"
+            )
         body = await _read_body_within_cap(
             request,
             _MAX_IMPORT_JSON_BYTES,

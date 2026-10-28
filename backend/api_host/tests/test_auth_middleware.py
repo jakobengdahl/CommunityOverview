@@ -587,6 +587,39 @@ class TestSessionCookieLogin:
         finally:
             os.unlink(path)
 
+    @pytest.mark.parametrize(
+        "content_type",
+        ["text/plain", "application/x-www-form-urlencoded", "multipart/form-data", ""],
+    )
+    def test_cookie_import_rejects_simple_content_types(self, content_type):
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+        try:
+            login = client.post(
+                "/auth/login",
+                data={"username": "admin", "password": "secret"},
+                follow_redirects=False,
+            )
+            assert login.status_code == 303
+            assert SESSION_COOKIE_NAME in client.cookies
+            document = {
+                "nodes": [{"id": "csrf", "type": "Actor", "name": "CSRF"}],
+                "edges": [],
+            }
+            response = client.post(
+                "/api/import",
+                content=json.dumps(document),
+                headers={
+                    "Content-Type": content_type,
+                    "Origin": "https://sibling.example.com",
+                    "Sec-Fetch-Site": "same-site",
+                },
+            )
+            assert response.status_code == 415
+            assert client.get("/api/nodes/csrf").status_code == 404
+            assert client.post("/api/import", json=document).status_code == 200
+        finally:
+            os.unlink(path)
+
     def test_form_login_wrong_password_401_no_cookie(self):
         client, path = self._make_client(auth_enabled=True, auth_password="secret")
         try:
