@@ -6,6 +6,11 @@ proposal store, and the approve/reject/apply manager, plus worker wiring.
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
+from backend.runtime.attachment_access import ATTACHMENT_TOOLS, ATTACHMENT_READ_TOOLS
+from backend.runtime.authorization import GraphAuthorizationDecision
+
 from backend.agents.config import AgentConfig, AgentPrompts, AgentsSettings
 from backend.agents.governance import (
     AutonomyGate,
@@ -601,3 +606,115 @@ def test_causation_schema_migrates_existing_v2_proposals(tmp_path):
     migrated = SqliteProposalStore(db)
     assert migrated.get(p.id).causation_depth == 1
     migrated.close()
+
+
+@pytest.mark.parametrize("name", sorted(ATTACHMENT_TOOLS))
+@pytest.mark.parametrize("allowlist", [None, [], "named"])
+def test_attachment_grant_defaults_to_deny_even_with_allowlist(name, allowlist):
+    """An empty allowlist, or naming a tool, never grants attachment access."""
+    name = "GRAPH__" + name
+    allowlist = [name] if allowlist == "named" else allowlist
+    loader = SimpleNamespace(get_tool=lambda _: None)
+    raw = MagicMock()
+    gate = AutonomyGate(
+        autonomy_level=AutonomyLevel.ACT_AFTER_APPROVAL,
+        tool_allowlist=allowlist,
+        mcp_loader=loader,
+        proposal_store=InMemoryProposalStore(),
+        agent_id="a1",
+    )
+    assert gate.wrap(raw)(name, {})["error_code"] == "access_denied"
+    assert (
+        filter_tool_definitions(
+            [{"name": name}],
+            autonomy_level=AutonomyLevel.ACT_AFTER_APPROVAL,
+            tool_allowlist=allowlist,
+            mcp_loader=loader,
+        )
+        == []
+    )
+    raw.assert_not_called()
+
+
+@pytest.mark.parametrize("level", list(AutonomyLevel))
+@pytest.mark.parametrize("access", ["read", "read_write"])
+@pytest.mark.parametrize("name", sorted(ATTACHMENT_TOOLS))
+def test_attachment_grants_compose_with_autonomy(level, access, name):
+    raw = MagicMock(return_value={"ok": True})
+    store = InMemoryProposalStore()
+    gate = AutonomyGate(
+        autonomy_level=level,
+        tool_allowlist=[],
+        mcp_loader=FakeLoader(),
+        proposal_store=store,
+        agent_id="a1",
+        attachment_access=access,
+    )
+    tool = "graph." + name
+    result = gate.wrap(raw)(tool, {})
+    allowed = name in ATTACHMENT_READ_TOOLS or (
+        access == "read_write" and not level.is_read_only
+    )
+    shown = filter_tool_definitions(
+        [{"name": tool}],
+        autonomy_level=level,
+        tool_allowlist=[],
+        mcp_loader=FakeLoader(),
+        attachment_access=access,
+    )
+    assert bool(shown) == allowed
+    if name in ATTACHMENT_READ_TOOLS:
+        assert result == {"ok": True}
+        raw.assert_called_once()
+    else:
+        raw.assert_not_called()
+        assert result.get("status") == ("proposed" if allowed else None)
+        assert len(store.list_proposals()) == int(allowed)
+
+
+@pytest.mark.parametrize("name", sorted(ATTACHMENT_TOOLS))
+def test_attachment_denying_hook_blocks_execution_and_proposals(name):
+    raw = MagicMock()
+    store = InMemoryProposalStore()
+    hook = SimpleNamespace(evaluate=lambda _: GraphAuthorizationDecision(allowed=False))
+    gate = AutonomyGate(
+        autonomy_level=AutonomyLevel.ACT_AFTER_APPROVAL,
+        tool_allowlist=None,
+        mcp_loader=FakeLoader(),
+        proposal_store=store,
+        agent_id="a1",
+        attachment_access="read_write",
+        authorization_hook=hook,
+    )
+    assert gate.wrap(raw)("graph." + name, {})["error_code"] == "access_denied"
+    raw.assert_not_called()
+    assert store.list_proposals() == []
+
+
+@pytest.mark.parametrize("with_store", [False, True])
+def test_worker_checks_live_attachment_grants_with_or_without_proposal_store(
+    with_store,
+):
+    helper = TestWorkerPreFiltersDefinitions()
+    worker, raw = helper._worker(
+        InMemoryProposalStore() if with_store else None, "act_after_approval"
+    )
+    node = SimpleNamespace(metadata={"attachment_access": "read_write"})
+    worker._graph_storage = SimpleNamespace(get_node=lambda _: node)
+    defs = [{"name": "graph." + name} for name in sorted(ATTACHMENT_TOOLS)]
+    worker.mcp_loader.get_tool_definitions.return_value = defs
+    captured = helper._run_and_capture(worker)
+    shown = {d["name"] for d in captured["tools"]}
+    assert len(shown) == (5 if with_store else 3)
+    if not with_store:
+        assert (
+            captured["executor"]("graph.add_node_attachment", {})["error_code"]
+            == "access_denied"
+        )
+    node.metadata["attachment_access"] = "none"
+    assert (
+        captured["executor"]("graph.read_node_attachment", {})["error_code"]
+        == "access_denied"
+    )
+    assert helper._run_and_capture(worker)["tools"] == []
+    raw.assert_not_called()

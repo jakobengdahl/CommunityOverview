@@ -410,6 +410,8 @@ def register_mcp_tools(
     session_manager=None,
     auto_add_registry=None,
     widget_dist_path=None,
+    *,
+    attachment_access: str = "off",
 ) -> Dict[str, Callable]:
     """
     Register all GraphService methods as MCP tools.
@@ -424,12 +426,22 @@ def register_mcp_tools(
         auto_add_registry: SessionAutoAddRegistry backing the session-scoped
             auto-add agents (create/list/remove tools below). None disables
             those tools (they return an error).
+        attachment_access: Attachment tool grant (off/read/read_write); filters
+            both MCP registration and the returned execution map.
         widget_dist_path: directory holding the built widget bundle inlined
             into the MCP UI resource; defaults to ``frontend/widget/dist``.
 
     Returns:
         Dict mapping tool names to their functions (for ChatProcessor)
     """
+    from backend.runtime.attachment_access import (
+        ATTACHMENT_TOOLS,
+        attachment_tool_allowed,
+        attachment_tool_refusal,
+        validate_attachment_setting,
+    )
+
+    validate_attachment_setting(attachment_access, "MCP_ATTACHMENT_TOOLS")
     tools_map = {}
 
     def _push(session_id, tool_name, result):
@@ -546,6 +558,18 @@ def register_mcp_tools(
 
     def register_tool(func: Callable) -> Callable:
         """Register a function as both MCP tool and in tools_map."""
+        if not attachment_tool_allowed(func.__name__, attachment_access):
+            return func
+        if func.__name__ in ATTACHMENT_TOOLS:
+            original = func
+
+            @functools.wraps(original)
+            def func(*args, **kwargs):
+                refused = attachment_tool_refusal(
+                    original.__name__, attachment_access, service.authorization_hook
+                )
+                return refused if refused is not None else original(*args, **kwargs)
+
         wrapped = _session_aware(
             func,
             lambda sid: _staged_status(sid) == layer_store.STATUS_RETIRED,

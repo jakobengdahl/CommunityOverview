@@ -5,6 +5,8 @@ Tests for agent configuration models.
 import os
 from unittest.mock import patch
 
+import pytest
+
 from backend.agents.config import (
     AGENTS_WORKSPACE_ENV_VAR,
     MCPIntegration,
@@ -324,3 +326,17 @@ class TestAgentWorkspaceDir:
             fallback = agent_workspace_dir()
         with patch.dict(os.environ, {}, clear=True):
             assert fallback == agent_workspace_dir()
+
+
+@pytest.mark.parametrize(
+    "access", [None, "unknown", [], {}, "read", "read_write", "none"]
+)
+def test_agent_attachment_access_fails_closed(sample_agent_node, access, caplog):
+    sample_agent_node.metadata["attachment_access"] = access
+    config = AgentConfig.from_node(sample_agent_node)
+    expected = access if access in ("none", "read", "read_write") else "none"
+    assert config.attachment_access == config.to_dict()["attachment_access"] == expected
+    if access != expected:
+        assert "invalid attachment_access" in caplog.text
+    sample_agent_node.id = "federated::remote::agent"
+    assert AgentConfig.from_node(sample_agent_node).attachment_access == "none"

@@ -17,6 +17,11 @@ from backend.config.model_profiles import (
 )
 from backend.llm.language_policy import format_language_policy_for_prompt
 from backend.service.system_nodes import system_create_tool_definitions
+from backend.runtime.attachment_access import (
+    ATTACHMENT_TOOLS,
+    attachment_tool_allowed,
+    attachment_tool_refusal,
+)
 
 # Initialize logger
 logger = logging.getLogger(__name__)
@@ -520,7 +525,8 @@ Always be helpful, transparent, and data-driven in your responses while minimizi
 
 
 class ChatProcessor:
-    def __init__(self, tools_map: Dict[str, Callable]):
+    def __init__(self, tools_map: Dict[str, Callable], *, authorization_hook=None):
+        self._authorization_hook = authorization_hook
         # Auto-detect provider based on available API keys
         self.provider_type = self._detect_provider()
 
@@ -1159,7 +1165,7 @@ class ChatProcessor:
         ]
 
     def _select_tool_definitions(
-        self, tool_allowlist: Optional[List[str]]
+        self, tool_allowlist: Optional[List[str]], attachment_access=None
     ) -> List[Dict]:
         """
         Return the tool definitions advertised to the LLM for this request.
@@ -1169,12 +1175,22 @@ class ChatProcessor:
         offered (unrestricted); when it is a non-empty list only tools whose
         name is in the list are advertised. This is the "hide from the LLM"
         layer — execution is independently gated in _handle_tool_use so a
-        disallowed tool is blocked even if the model calls it anyway.
+        disallowed tool is blocked even if the model calls it anyway. Attachment
+        tools additionally require the per-request grant resolver.
         """
-        if not tool_allowlist:
-            return self.tool_definitions
-        allowed = set(tool_allowlist)
-        return [t for t in self.tool_definitions if t.get("name") in allowed]
+        allowed = set(tool_allowlist) if tool_allowlist else None
+        return [
+            t
+            for t in self.tool_definitions
+            if (allowed is None or t.get("name") in allowed)
+            and (
+                t.get("name") not in ATTACHMENT_TOOLS
+                or attachment_tool_allowed(
+                    t.get("name"),
+                    attachment_access(t.get("name")) if attachment_access else "off",
+                )
+            )
+        ]
 
     def _resolve_llm_provider(
         self,
@@ -1237,6 +1253,7 @@ class ChatProcessor:
         visualization_context: str = None,
         tool_allowlist: Optional[List[str]] = None,
         llm_provider: Optional[LLMProvider] = None,
+        attachment_access: Optional[Callable[[str], str]] = None,
     ) -> Dict:
         """
         Process a message history, call LLM, handle tools, return final response.
@@ -1263,6 +1280,8 @@ class ChatProcessor:
                 When set, only listed tools are advertised to the LLM and executed;
                 any other tool is blocked server-side. Mirrors the AIAgent
                 tool-permission model (used by the collection kiosk).
+            attachment_access: Resolver returning the current grant for an attachment
+                tool. Missing means no attachment access, independently of the allowlist.
             llm_provider: Optional ready-made LLMProvider to use verbatim,
                 bypassing provider resolution entirely (api_key, provider and
                 model_profile_id are then unused). Used by the evaluation harness
@@ -1301,7 +1320,9 @@ class ChatProcessor:
             # Tools advertised to the LLM: filtered by the per-request allowlist
             # (unrestricted when the allowlist is unset). Execution is gated
             # independently in _handle_tool_use.
-            active_tool_definitions = self._select_tool_definitions(tool_allowlist)
+            active_tool_definitions = self._select_tool_definitions(
+                tool_allowlist, attachment_access
+            )
 
             # First call to LLM
             response = llm_provider.create_completion(
@@ -1321,6 +1342,7 @@ class ChatProcessor:
                     tools_override=tools_override,
                     tool_allowlist=tool_allowlist,
                     active_tool_definitions=active_tool_definitions,
+                    attachment_access=attachment_access,
                 )
 
             # Just text response
@@ -1364,6 +1386,7 @@ class ChatProcessor:
         visualization_action=None,
         tool_allowlist: Optional[List[str]] = None,
         active_tool_definitions: List[Dict] = None,
+        attachment_access: Optional[Callable[[str], str]] = None,
     ) -> Dict:
         """Handle tool use with support for tool chaining and result aggregation.
 
@@ -1394,7 +1417,9 @@ class ChatProcessor:
             system_prompt if system_prompt is not None else self.system_prompt
         )
         if active_tool_definitions is None:
-            active_tool_definitions = self._select_tool_definitions(tool_allowlist)
+            active_tool_definitions = self._select_tool_definitions(
+                tool_allowlist, attachment_access
+            )
         effective_tools = {**self.tools_map, **(tools_override or {})}
 
         # Find ALL tool_use blocks (LLM can request multiple tools in parallel)
@@ -1451,6 +1476,16 @@ class ChatProcessor:
                     }
                 )
                 continue
+
+            if tool_name in ATTACHMENT_TOOLS:
+                refused = attachment_tool_refusal(
+                    tool_name,
+                    attachment_access(tool_name) if attachment_access else "off",
+                    self._authorization_hook,
+                )
+                if refused is not None:
+                    tool_results.append({"tool_use_id": tool_id, "result": refused})
+                    continue
 
             input_error = tool_input_type_error(tool_name, tool_input)
             if input_error is not None:
@@ -1610,6 +1645,7 @@ class ChatProcessor:
                 visualization_action=visualization_action,
                 tool_allowlist=tool_allowlist,
                 active_tool_definitions=active_tool_definitions,
+                attachment_access=attachment_access,
             )
 
         # Extract text from response (handle multiple text blocks)

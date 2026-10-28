@@ -125,3 +125,36 @@ def test_boot_sweeps_stale_staged_uploads(storage, tmp_path):
 
     build_attachment_settings(AppConfig(), storage)
     assert not stale.exists()
+
+
+@pytest.mark.parametrize(
+    "variable", ["ASSISTANT_ATTACHMENT_ACCESS", "MCP_ATTACHMENT_TOOLS"]
+)
+@pytest.mark.parametrize("value", ["", "none", "READ", "unknown"])
+def test_unknown_attachment_tool_setting_refused_at_boot(monkeypatch, variable, value):
+    monkeypatch.setenv(variable, value)
+    with pytest.raises(ValueError, match=variable):
+        AppConfig.from_env()
+
+
+def test_attachment_tool_setting_defaults(monkeypatch):
+    monkeypatch.delenv("ASSISTANT_ATTACHMENT_ACCESS", raising=False)
+    monkeypatch.delenv("MCP_ATTACHMENT_TOOLS", raising=False)
+    config = AppConfig.from_env()
+    assert config.assistant_attachment_access == "read"
+    assert config.mcp_attachment_tools == "off"
+
+
+@pytest.mark.parametrize("bypass", [False, True])
+def test_mcp_attachment_tools_require_authenticated_paths(monkeypatch, bypass):
+    from backend.api_host.server import create_app
+
+    if bypass:
+        monkeypatch.setenv("MCP_AUTH_ENABLED", "0")
+    config = AppConfig(
+        mcp_attachment_tools="read",
+        auth_enabled=bypass,
+        auth_password="test-password" if bypass else None,
+    )
+    with pytest.raises(ValueError, match="authenticated MCP paths"):
+        create_app(config)

@@ -2459,3 +2459,101 @@ class TestNonObjectToolInput:
             n.get("name") == "Findable Agency" for n in result["toolResult"]["nodes"]
         )
         assert result["content"] == mock_llm.mock_text_response
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "list_node_attachments",
+        "read_node_attachment",
+        "search_node_attachments",
+        "add_node_attachment",
+        "delete_node_attachment",
+    ],
+)
+@pytest.mark.parametrize(
+    "mode",
+    ["assistant", "kiosk", "kiosk_granted", "kiosk_failed", "override", "deny_hook"],
+)
+def test_attachment_tools_require_caller_grant_and_hook(chat_service, name, mode):
+    """Hidden tools stay blocked even when the model calls them anyway."""
+    from unittest.mock import MagicMock
+    from backend.runtime.attachment_access import ATTACHMENT_READ_TOOLS
+    from backend.runtime.authorization import GraphAuthorizationDecision
+
+    service, llm = chat_service
+    raw = MagicMock(return_value={"success": True})
+    service._processor.tools_map[name] = raw
+    service._processor.tool_definitions.append(
+        {"name": name, "input_schema": {"type": "object"}}
+    )
+    llm.mock_tool_calls = [{"name": name, "input": {}}]
+    if mode == "deny_hook":
+        service._assistant_attachment_access = "read_write"
+        service._processor._authorization_hook = MagicMock()
+        service._processor._authorization_hook.evaluate.return_value = (
+            GraphAuthorizationDecision(allowed=False)
+        )
+    kiosk = mode.startswith("kiosk")
+    node = _make_akc_node(
+        "coll",
+        ACTOR_ONLY_PERMS,
+        tool_allowlist=[name] if mode == "kiosk_granted" else [],
+    )
+    with (
+        patch.object(
+            service._graph_service, "search_graph", return_value={"nodes": [node]}
+        ),
+        patch.object(
+            service._graph_service, "get_node_details", return_value={"node": node}
+        ),
+    ):
+        if mode == "kiosk_failed":
+            service._resolve_collection = lambda _: ("", {}, False)
+        service.process_message(
+            messages=[{"role": "user", "content": "read files"}],
+            collection_short_name="coll" if kiosk else None,
+            api_key="override-key" if mode == "override" else None,
+        )
+    allowed = mode == "kiosk_granted" or (
+        mode == "assistant" and name in ATTACHMENT_READ_TOOLS
+    )
+    advertised = {t["name"] for t in llm.received_tools[0]}
+    assert (name in advertised) == (allowed or mode == "deny_hook")
+    if allowed:
+        raw.assert_called_once()
+    else:
+        raw.assert_not_called()
+        result = _tool_result_payloads(llm)[0]
+        assert result.get("error_code") == "access_denied"
+
+
+def test_kiosk_attachment_revocation_takes_effect_in_tool_chain(chat_service):
+    from unittest.mock import MagicMock
+
+    service, llm = chat_service
+    name = "read_node_attachment"
+    node = _make_akc_node("coll", ACTOR_ONLY_PERMS, tool_allowlist=[name])
+
+    def read():
+        node["metadata"]["tool_allowlist"] = []
+        return {"success": True}
+
+    raw = MagicMock(side_effect=read)
+    service._processor.tools_map[name] = raw
+    service._processor.tool_definitions.append({"name": name})
+    llm.mock_tool_call_sequence = [[{"name": name, "input": {}}]] * 2
+    with (
+        patch.object(
+            service._graph_service, "search_graph", return_value={"nodes": [node]}
+        ),
+        patch.object(
+            service._graph_service, "get_node_details", return_value={"node": node}
+        ),
+    ):
+        service.process_message(
+            messages=[{"role": "user", "content": "read twice"}],
+            collection_short_name="coll",
+        )
+    raw.assert_called_once()
+    assert "access_denied" in json.dumps(llm.received_messages[-1])

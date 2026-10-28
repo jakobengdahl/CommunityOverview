@@ -22,6 +22,7 @@ from backend.core.storage_search import MATCH_MODE_SUBSTRING
 from backend.ui.chat_logic import ChatProcessor
 from backend.service import GraphService
 from backend.service.system_nodes import SYSTEM_CREATE_MODELS, make_system_create_tools
+from backend.runtime.attachment_access import validate_attachment_setting
 
 logger = logging.getLogger(__name__)
 
@@ -43,20 +44,27 @@ class ChatService:
     All graph operations go through GraphService.
     """
 
-    def __init__(self, graph_service: GraphService):
+    def __init__(
+        self, graph_service: GraphService, *, assistant_attachment_access: str = "read"
+    ):
         """
         Initialize ChatService with a GraphService instance.
 
         Args:
             graph_service: The GraphService instance to use for all graph operations
         """
+        self._assistant_attachment_access = validate_attachment_setting(
+            assistant_attachment_access, "ASSISTANT_ATTACHMENT_ACCESS"
+        )
         self._graph_service = graph_service
 
         # Build tools map that routes to GraphService methods
         self._tools_map = self._build_tools_map()
 
         # Create the underlying ChatProcessor with our tools map
-        self._processor = ChatProcessor(self._tools_map)
+        self._processor = ChatProcessor(
+            self._tools_map, authorization_hook=graph_service.authorization_hook
+        )
         self._current_federation_depth: Optional[int] = None
         # Cache for resolved AKC configs — avoids repeated 500-node scans within a session.
         # Keyed by short_name; value is (prefix, perms, collect_responses) from
@@ -872,6 +880,35 @@ class ChatService:
                     self._collection_nodes.get(collection_short_name) or {}
                 ).get("tool_allowlist")
 
+            def attachment_access(tool_name):
+                if api_key is not None:
+                    return "off"
+                if not collection_short_name or effective_prefix is None:
+                    return self._assistant_attachment_access
+                if effective_prefix == "":
+                    return "off"
+                # Grants are read afresh so another process can revoke them.
+                node_id = (self._collection_nodes.get(collection_short_name) or {}).get(
+                    "id"
+                )
+                if not node_id or node_id.startswith("federated::"):
+                    return "off"
+                try:
+                    result = self._graph_service.get_node_details(node_id)
+                    node = result.get("node") or {}
+                    names = self._normalize_tool_allowlist(
+                        (node.get("metadata") or {}).get("tool_allowlist")
+                    )
+                    return (
+                        "read_write"
+                        if result.get("success") is not False
+                        and names
+                        and tool_name in names
+                        else "off"
+                    )
+                except Exception:
+                    return "off"
+
             # skills_context is passed separately as skills_override so it lands
             # AFTER the base system prompt (recency precedence for behavioral overrides).
             # extra_context (expert persona) stays BEFORE the base prompt.
@@ -887,6 +924,7 @@ class ChatService:
                 visualization_context=visualization_context,
                 tool_allowlist=tool_allowlist,
                 llm_provider=llm_provider,
+                attachment_access=attachment_access,
             )
         finally:
             self._current_federation_depth = None

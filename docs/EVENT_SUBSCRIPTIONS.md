@@ -366,14 +366,35 @@ Each agent has an **autonomy level** (`metadata.autonomy_level`) that bounds wha
 its runs may do, enforced at the tool-execution boundary together with the
 agent's optional `tool_allowlist`:
 
-| Level | Mutating tools (add/update/delete nodes/edges, write_file) |
+| Level | Mutating tools (add/update/delete nodes/edges, write_file, attachment writes) |
 |-------|-----------------------------------------------------------|
 | `observe` | Blocked — read-only |
 | `assist` | Blocked — read-only |
 | `propose` | Recorded as a durable **Proposal**; approving does not apply it (a human applies) |
 | `act_after_approval` | Recorded as a durable Proposal; approving **applies** the captured action |
 
-Read-only tools always run (subject to the allowlist). A mutating call under
+Attachment tools additionally require `metadata.attachment_access`:
+
+| Value | Permitted attachment tools |
+|-------|----------------------------|
+| `none` (default) | None, even with an empty allowlist |
+| `read` | `list_node_attachments`, `read_node_attachment`, `search_node_attachments` |
+| `read_write` | Read tools plus `add_node_attachment`, `delete_node_attachment` |
+
+Unknown values log a warning and grant nothing. Federated Agent IDs grant
+nothing. A non-empty `tool_allowlist` must also name each permitted tool using
+its namespaced MCP name; naming a tool alone never grants attachment access.
+The worker reads the current grant from storage before offering tools and again
+before each attachment call. Revoking it therefore blocks the next call, even
+in a running run. Attachment permission checks also apply to workers without
+a proposal store; those workers refuse attachment writes entirely.
+
+Attachment writes follow the autonomy table above: blocked under `observe` and
+`assist`, proposals under `propose` and `act_after_approval`. Every attachment
+call also requires the authorization hook to allow it. These gates do not add
+attachment tool implementations; see [Node attachments](../backend/DEVELOPMENT.md#node-attachments).
+
+Other read-only tools always run (subject to the allowlist). A mutating call under
 `propose` / `act_after_approval` is **not executed** — it becomes a durable
 `Proposal` (tool, arguments, agent, autonomy level, run correlation) with a
 persistent approve/reject decision and attribution. Advanced multi-approver /

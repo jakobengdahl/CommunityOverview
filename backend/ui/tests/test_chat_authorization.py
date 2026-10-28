@@ -384,3 +384,62 @@ def test_ui_chat_accepts_valid_credentials_when_auth_enabled(auth_enabled_app):
     response = client.get("/ui/info", headers={"Authorization": f"Basic {creds}"})
 
     assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/chat", "/chat/simple", "/upload"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "list_node_attachments",
+        "read_node_attachment",
+        "search_node_attachments",
+        "add_node_attachment",
+        "delete_node_attachment",
+    ],
+)
+async def test_chat_attachment_hook_sees_request_actor(chat_service, path, name):
+    """Each chat route binds the user before an attachment tool checks the hook."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+    from starlette.requests import Request
+    from backend.ui.rest_api import ChatRequest, SimpleChatRequest
+
+    service, llm = chat_service
+    service._assistant_attachment_access = "read_write"
+    hook = MagicMock()
+    hook.evaluate.return_value = GraphAuthorizationDecision(allowed=False)
+    service._processor._authorization_hook = hook
+    raw = MagicMock()
+    service._processor.tools_map[name] = raw
+    service._processor.tool_definitions.append({"name": name})
+    llm.mock_tool_calls = [{"name": name, "input": {}}]
+    documents = SimpleNamespace(
+        process_upload=AsyncMock(return_value={"success": True, "text": "text"})
+    )
+    router = create_ui_router(service, documents)
+    endpoint = next(route.endpoint for route in router.routes if route.path == path)
+    request = Request(
+        {"type": "http", "headers": [(ACTOR_ID_HEADER.encode(), b"outsider")]}
+    )
+    if path == "/chat":
+        await endpoint(
+            ChatRequest(messages=[{"role": "user", "content": "read"}]), request
+        )
+    elif path == "/chat/simple":
+        await endpoint(SimpleChatRequest(message="read"), request)
+    else:
+        upload = SimpleNamespace(read=AsyncMock(return_value=b"text"), filename="a.txt")
+        await endpoint(
+            request,
+            upload,
+            message="read",
+            analyze=True,
+            api_key=None,
+            provider=None,
+            model_profile_id=None,
+        )
+    raw.assert_not_called()
+    hook.evaluate.assert_called_once()
+    assert hook.evaluate.call_args.args[0].actor["actor_id"] == "outsider"
+    assert "access_denied" in json.dumps(llm.received_messages[-1])
