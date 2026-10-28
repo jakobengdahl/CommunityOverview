@@ -6,9 +6,10 @@ The host starts this file as its own process (``python -I -S sandbox.py <spec>``
 with the function's standard streams already attached. It never imports
 application modules: it runs outside the sandbox, as the run's supervisor.
 
-As supervisor it registers as a child subreaper, forks the function process and,
-once that process exits or the host asks it to stop (SIGTERM), kills every
-descendant it can see before it reports on the status descriptor and exits.
+As supervisor it registers as a child subreaper, forks the function process and
+polls its working-directory quota. Once the function exits, exceeds its quota
+or the host asks it to stop (SIGTERM), it kills every descendant it can see
+before it reports on the status descriptor and exits.
 
 The forked child applies, in order: resource limits, ``no_new_privs``, a
 Landlock ruleset and a seccomp filter, each as far as the spec asks, and then
@@ -24,8 +25,10 @@ import json
 import os
 import resource
 import signal
+import stat
 import struct
 import sys
+import time
 
 PR_SET_NO_NEW_PRIVS = 38
 PR_SET_SECCOMP = 22
@@ -34,6 +37,7 @@ PR_SET_PDEATHSIG = 1
 SECCOMP_MODE_FILTER = 2
 
 MIB = 1024 * 1024
+DISK_POLL_SECONDS = 0.1
 
 # Exit code of the function child when setting up the sandbox failed; the
 # reason travels over the setup descriptor, so the code is never trusted alone.
@@ -507,6 +511,90 @@ def _read_all(fd):
         data += chunk
 
 
+def _work_dir_exceeds_quota(spec):
+    """Count entries and bytes without following links; stop at the quota.
+
+    Directory descriptors keep renames and symlink swaps from redirecting the
+    scan outside the work directory. Disappearing entries are normal during a
+    run; other scan failures must stop it rather than disable enforcement.
+    """
+    limits = spec.get("disk_limits")
+    if limits is None:
+        return False
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    stack = []
+
+    def push(fd):
+        try:
+            entries = os.scandir(fd)
+        except BaseException:
+            os.close(fd)
+            raise
+        stack.append((fd, entries))
+
+    push(os.open(spec["work_dir"], flags))
+    total_bytes = 0
+    total_files = 0
+    try:
+        while stack:
+            directory, entries = stack[-1]
+            entry = next(entries, None)
+            if entry is None:
+                entries.close()
+                os.close(directory)
+                stack.pop()
+                continue
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            total_files += 1
+            # Count sparse files by apparent size and preallocated files by
+            # allocation, including filesystem block rounding and metadata.
+            total_bytes += max(info.st_size, info.st_blocks * 512)
+            if total_bytes > limits["bytes"] or total_files > limits["files"]:
+                return True
+            if stat.S_ISDIR(info.st_mode):
+                try:
+                    child = os.open(entry.name, flags, dir_fd=directory)
+                except (FileNotFoundError, NotADirectoryError):
+                    continue
+                push(child)
+        # Unlinked open files have no directory entry. Measure before cleanup
+        # closes the run's descriptors and releases their storage.
+        pending = _children_of(os.getpid())
+        seen = set()
+        while pending:
+            pid = pending.pop()
+            pending.extend(_children_of(pid))
+            try:
+                descriptors = os.listdir(f"/proc/{pid}/fd")
+            except FileNotFoundError:
+                continue
+            for descriptor in descriptors:
+                try:
+                    info = os.stat(f"/proc/{pid}/fd/{descriptor}")
+                except FileNotFoundError:
+                    continue  # Closed or exited during the scan.
+                identity = (info.st_dev, info.st_ino)
+                if (
+                    info.st_nlink != 0
+                    or not stat.S_ISREG(info.st_mode)
+                    or identity in seen
+                ):
+                    continue
+                seen.add(identity)
+                total_files += 1
+                total_bytes += max(info.st_size, info.st_blocks * 512)
+                if total_bytes > limits["bytes"] or total_files > limits["files"]:
+                    return True
+        return False
+    finally:
+        for directory, entries in reversed(stack):
+            entries.close()
+            os.close(directory)
+
+
 def supervise(spec, status_fd):
     libc().prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
     # Dying with the host is better than outliving it; SIGTERM still cleans up.
@@ -532,6 +620,8 @@ def supervise(spec, status_fd):
     stopped = False
     exit_code = None
     exit_signal = None
+    disk_exceeded = False
+    monitor_error = ""
     try:
         setup_error = _read_all(setup_r)
         if setup_error:
@@ -540,15 +630,24 @@ def supervise(spec, status_fd):
             return
         _report(status_fd, {"started": child})
         signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
+        next_disk_poll = 0
         try:
             while True:
-                pid, status = os.waitpid(-1, 0)
+                pid, status = os.waitpid(-1, os.WNOHANG)
                 if pid == child:
                     if os.WIFSIGNALED(status):
                         exit_signal = os.WTERMSIG(status)
                     else:
                         exit_code = os.WEXITSTATUS(status)
                     break
+                if time.monotonic() >= next_disk_poll:
+                    disk_exceeded = _work_dir_exceeds_quota(spec)
+                    if disk_exceeded:
+                        stopped = True
+                        break
+                    next_disk_poll = time.monotonic() + DISK_POLL_SECONDS
+                if pid == 0:
+                    time.sleep(DISK_POLL_SECONDS)
         except ChildProcessError:
             pass
         # EOF can make the host ask to stop after the child has exited. Ignore
@@ -557,7 +656,16 @@ def supervise(spec, status_fd):
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
     except _Stop:
         stopped = True
+    except OSError as exc:
+        monitor_error = str(exc)
+        stopped = True
     _reap_all()
+    # Catch fast runs and EOF-triggered stop requests between polling ticks.
+    if not disk_exceeded and not monitor_error:
+        try:
+            disk_exceeded = _work_dir_exceeds_quota(spec)
+        except OSError as exc:
+            monitor_error = str(exc)
     usage = resource.getrusage(resource.RUSAGE_CHILDREN)
     _report(
         status_fd,
@@ -567,6 +675,8 @@ def supervise(spec, status_fd):
             "stopped": stopped,
             "peak_memory_kib": int(usage.ru_maxrss),
             "cpu_seconds": round(usage.ru_utime + usage.ru_stime, 3),
+            **({"disk_exceeded": True} if disk_exceeded else {}),
+            **({"monitor_error": monitor_error} if monitor_error else {}),
         },
     )
 
