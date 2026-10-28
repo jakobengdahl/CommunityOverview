@@ -104,7 +104,10 @@ class TestDocumentServiceUpload:
                 b"x" * (document_service.MAX_FILE_SIZE + 1), "../big\x85.txt"
             )
         )
-        with patch("builtins.open", side_effect=OSError("disk full")):
+        with patch(
+            "backend.ui.document_service.tempfile.NamedTemporaryFile",
+            side_effect=OSError("disk full"),
+        ):
             write_failed = asyncio.run(
                 document_service.save_upload(b"x", "dir/notes .txt")
             )
@@ -145,6 +148,49 @@ class TestDocumentServiceUpload:
         assert "test content" in result["text"].lower()
         assert os.listdir(document_service._upload_dir) == []
 
+    def test_same_millisecond_uploads_keep_separate_contents(
+        self, tmp_path, monkeypatch
+    ):
+        """Overlapping same-name uploads keep their contents and clean up independently."""
+        import asyncio
+
+        from backend.ui.document_service import DocumentService
+
+        monkeypatch.setattr("time.time", lambda: 1793139048.239)
+        save_upload = DocumentService.save_upload
+        saved_paths = []
+
+        async def upload_together():
+            both_saved = asyncio.Event()
+
+            async def save_before_extracting(service, file_content, filename):
+                result = await save_upload(service, file_content, filename)
+                assert result["success"], result
+                saved_paths.append(result["file_path"])
+                if len(saved_paths) == 2:
+                    both_saved.set()
+                await asyncio.wait_for(both_saved.wait(), timeout=5)
+                return result
+
+            monkeypatch.setattr(DocumentService, "save_upload", save_before_extracting)
+            return await asyncio.gather(
+                DocumentService(upload_dir=str(tmp_path)).process_upload(
+                    b"First upload", "my notes.txt"
+                ),
+                DocumentService(upload_dir=str(tmp_path)).process_upload(
+                    b"Second upload", "my notes.txt"
+                ),
+            )
+
+        results = asyncio.run(upload_together())
+
+        for result, expected in zip(results, ("First upload", "Second upload")):
+            assert result["success"], result
+            assert result["text"] == expected
+            assert result["filename"] == "my notes.txt"
+        assert len(set(saved_paths)) == 2
+        assert list(tmp_path.iterdir()) == []
+
     def test_process_upload_removes_the_stored_file_when_extraction_fails(
         self, document_service
     ):
@@ -163,7 +209,7 @@ class TestDocumentServiceUpload:
     def test_process_upload_stores_under_the_sanitized_name_in_the_upload_dir(
         self, document_service
     ):
-        """The file is written inside _upload_dir under a timestamped, sanitized
+        """The file is written inside _upload_dir under a unique, sanitized
         basename, whatever path or characters the client sent."""
         import asyncio
         import re
@@ -185,14 +231,14 @@ class TestDocumentServiceUpload:
             assert result["success"], sent
             (stored,) = seen
             assert Path(stored).parent == Path(document_service._upload_dir), sent
-            assert re.fullmatch(r"\d+_[\w.\-]+", Path(stored).name), sent
+            assert re.fullmatch(r"upload_[\w.\-]+", Path(stored).name), sent
             assert os.listdir(document_service._upload_dir) == [], sent
 
     def test_process_upload_reports_the_uploaded_name_not_the_storage_name(
         self, document_service
     ):
         """The chat shows this name and sends it to the LLM, so it must not carry
-        the timestamp prefix or the character replacements of the storage name."""
+        the storage prefix or the character replacements of the storage name."""
         import asyncio
 
         result = asyncio.run(
@@ -257,14 +303,10 @@ class TestDocumentServiceFileSanitization:
         for char in '<>:"|?*':
             assert char not in result
 
-    def test_sanitize_filename_adds_timestamp(self, document_service):
-        """Should add timestamp for uniqueness."""
-        result1 = document_service._sanitize_filename("file.txt")
-        result2 = document_service._sanitize_filename("file.txt")
-        # Results might be different due to timestamp (or same if called fast)
-        # Both should start with digits
-        assert result1[0].isdigit()
-        assert result2[0].isdigit()
+    def test_sanitize_filename_preserves_extension(self, document_service):
+        """Storage names keep the extension used to select the text extractor."""
+        result = document_service._sanitize_filename("my notes.txt")
+        assert Path(result).suffix == ".txt"
 
 
 class TestDocumentServiceCleanup:
