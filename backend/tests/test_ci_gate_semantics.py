@@ -28,6 +28,8 @@ Two properties keep it from rotting into a green rubber stamp:
   split, so that is a live possibility rather than a hypothetical.
 """
 
+import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -559,3 +561,219 @@ class TestRequiredChecksInstallFromTheLockfile:
         # A list, not a dict: a SECOND install step added to a job that already
         # has a compliant one must fail here rather than overwrite it.
         assert installs == sorted(NODE_INSTALL_BODIES.items())
+
+
+class TestReleaseSbomEvidence:
+    @pytest.fixture
+    def sbom_run(self, workflow, tmp_path):
+        """Execute the workflow shell with a scanner double, without a registry."""
+        scanner = tmp_path / "syft"
+        scanner.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, pathlib, sys\n"
+            "with open('scan-calls.jsonl', 'a') as log:\n"
+            "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            "if os.environ.get('SCAN_MODE') == 'fail':\n"
+            "    sys.exit(1)\n"
+            "refs = [{'referenceType': 'purl', 'referenceLocator': 'pkg:' + kind + '/fixture@1.0.0'}\n"
+            "        for kind in ('pypi', 'npm') if os.environ.get('SCAN_MODE') != 'no-' + kind]\n"
+            "payload = json.dumps({'packages': [{'externalRefs': refs}]})\n"
+            "for argument in sys.argv[1:]:\n"
+            "    if argument.startswith(('spdx-json@', 'cyclonedx-json@')):\n"
+            "        if os.environ.get('SCAN_MODE') == 'missing':\n"
+            "            continue\n"
+            "        path = pathlib.Path(argument.split('=', 1)[1])\n"
+            "        path.write_text('' if os.environ.get('SCAN_MODE') == 'empty' "
+            "else payload)\n"
+        )
+        scanner.chmod(0o755)
+        env = {
+            **os.environ,
+            "SYFT_CMD": str(scanner),
+            "REGISTRY": "ghcr.io",
+            "CORE_IMAGE": "Example/CommunityOverview",
+            "GATEWAY_IMAGE": "Example/CommunityOverview-gateway",
+            "CORE_DIGEST": "sha256:" + "a" * 64,
+            "GATEWAY_DIGEST": "sha256:" + "b" * 64,
+            "GITHUB_SHA": "c" * 40,
+            "GITHUB_REF": "refs/tags/v1.2.3",
+            "GITHUB_RUN_ID": "123",
+            "GITHUB_RUN_ATTEMPT": "2",
+        }
+        step = next(
+            step
+            for step in workflow["jobs"]["build"]["steps"]
+            if step.get("name") == "Generate release SBOMs"
+        )
+
+        def run(**overrides):
+            return subprocess.run(
+                ["bash", "-c", step["run"]],
+                cwd=tmp_path,
+                env={**env, **overrides},
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+
+        return run, env
+
+    def test_reports_bind_both_images_to_the_commit_and_digests(
+        self, sbom_run, tmp_path
+    ):
+        """Both formats scan immutable references; retained metadata binds the run."""
+        run, env = sbom_run
+        proc = run()
+        assert proc.returncode == 0, proc.stderr
+        calls = [
+            json.loads(line)
+            for line in (tmp_path / "scan-calls.jsonl").read_text().splitlines()
+        ]
+        assert len(calls) == 2
+        metadata = json.loads((tmp_path / "release-evidence/release.json").read_text())
+        assert metadata == {
+            "commit_sha": env["GITHUB_SHA"],
+            "version": "sha-" + env["GITHUB_SHA"],
+            "ref": env["GITHUB_REF"],
+            "run_id": "123",
+            "run_attempt": "2",
+            "images": {
+                artifact: f"ghcr.io/{env[f'{artifact.upper()}_IMAGE'].lower()}"
+                f"@{env[f'{artifact.upper()}_DIGEST']}"
+                for artifact in ("core", "gateway")
+            },
+        }
+        for artifact, call in zip(("core", "gateway"), calls, strict=True):
+            reference = metadata["images"][artifact]
+            assert call[:2] == ["scan", f"registry:{reference}"]
+            assert call[call.index("--source-name") + 1] == reference
+            assert call[call.index("--source-version") + 1] == env["GITHUB_SHA"]
+            for format_name, suffix in (
+                ("spdx-json@2.3", "spdx"),
+                ("cyclonedx-json@1.6", "cyclonedx"),
+            ):
+                assert (
+                    f"{format_name}=release-evidence/{artifact}-sha-"
+                    f"{env['GITHUB_SHA']}.{suffix}.json"
+                ) in call
+        evidence = tmp_path / "release-evidence"
+        assert len(list(evidence.glob("*.json"))) == 5
+        checksums = subprocess.run(
+            ["sha256sum", "--check", "SHA256SUMS"],
+            cwd=evidence,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert checksums.returncode == 0, checksums.stderr
+
+    @pytest.mark.parametrize(
+        "mode", ["fail", "missing", "empty", "bad-digest", "no-pypi", "no-npm"]
+    )
+    def test_incomplete_evidence_cannot_succeed(self, sbom_run, tmp_path, mode):
+        """Scanner failures, absent output and missing digests stop publication evidence."""
+        run, _ = sbom_run
+        overrides = {"SCAN_MODE": mode}
+        if mode == "bad-digest":
+            overrides["CORE_DIGEST"] = ""
+        assert run(**overrides).returncode != 0
+        assert not (tmp_path / "release-evidence/release.json").exists()
+
+    def test_evidence_upload_is_required_before_infra_notification(self, workflow):
+        """No release path may bypass scanning or retaining the reports."""
+        build = workflow["jobs"]["build"]
+        steps = build["steps"]
+        generate = next(
+            step for step in steps if step.get("name") == "Generate release SBOMs"
+        )
+        retain = next(
+            step for step in steps if step.get("name") == "Retain release evidence"
+        )
+        assert not build.get("continue-on-error")
+        for step in (generate, retain):
+            assert "if" not in step
+            assert not step.get("continue-on-error")
+        assert steps.index(generate) < steps.index(retain)
+        assert retain["with"]["path"] == "release-evidence/"
+        assert retain["with"]["if-no-files-found"] == "error"
+        assert retain["with"]["retention-days"] == 90
+        assert workflow["jobs"]["notify-infra"]["needs"] == "build"
+        assert (
+            "needs.build.result == 'success'" in workflow["jobs"]["notify-infra"]["if"]
+        )
+
+    def test_frontend_metadata_includes_runtime_tree_without_dev_or_xr(self, tmp_path):
+        """Use real npm traversal on a fixture tree; no dependencies are installed."""
+        app = tmp_path / "app"
+        app.mkdir()
+
+        def package(directory, name, **fields):
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "package.json").write_text(
+                json.dumps({"name": name, "version": "1.0.0", **fields})
+            )
+
+        package(
+            app,
+            "fixture",
+            private=True,
+            workspaces=["frontend/*", "packages/*"],
+            devDependencies={"build-tool": "1.0.0"},
+        )
+        for workspace in ("web", "widget", "xr"):
+            package(
+                app / "frontend" / workspace,
+                f"@community-graph/{workspace}",
+                dependencies={
+                    "xr-only" if workspace == "xr" else "runtime": "1.0.0",
+                    "@community-graph/ui-graph-canvas": "1.0.0",
+                },
+            )
+        canvas = app / "packages/ui-graph-canvas"
+        package(canvas, "@community-graph/ui-graph-canvas")
+        package(
+            app / "node_modules/runtime", "runtime", dependencies={"nested": "1.0.0"}
+        )
+        package(app / "node_modules/runtime/node_modules/nested", "nested")
+        package(app / "node_modules/build-tool", "build-tool")
+        scope = app / "node_modules/@community-graph"
+        scope.mkdir()
+        for workspace in ("web", "widget", "xr"):
+            (scope / workspace).symlink_to(app / "frontend" / workspace)
+        (scope / "ui-graph-canvas").symlink_to(canvas)
+
+        dockerfile = (REPO_ROOT / "Dockerfile").read_text()
+        command = re.search(r"RUN npm ls .*?(?=\n\n)", dockerfile, re.S).group()
+        evidence = tmp_path / "frontend-dependencies"
+        command = (
+            command.removeprefix("RUN ")
+            .replace("/app", str(app))
+            .replace("/tmp/frontend-packages", str(tmp_path / "frontend-packages"))
+            .replace("/frontend-dependencies", str(evidence))
+        )
+        proc = subprocess.run(
+            ["sh", "-c", command],
+            cwd=app,
+            env={**os.environ, "npm_config_offline": "true"},
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert proc.returncode == 0, proc.stderr
+        names = {
+            json.loads(path.read_text())["name"]
+            for path in evidence.rglob("package.json")
+        }
+        assert {
+            "runtime",
+            "nested",
+            "@community-graph/web",
+            "@community-graph/widget",
+            "@community-graph/ui-graph-canvas",
+        } <= names
+        assert not names & {"build-tool", "xr-only", "@community-graph/xr"}
+        assert not list(evidence.rglob("package-lock.json"))
+        assert (
+            "COPY --from=builder /frontend-dependencies "
+            "/usr/share/communityoverview/frontend-dependencies"
+        ) in dockerfile
