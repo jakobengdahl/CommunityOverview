@@ -426,6 +426,29 @@ def test_probe_succeeds_only_for_a_normal_zero_exit(supervisor_report, case):
     )
 
 
+@pytest.mark.parametrize("stage", ["open", "read"])
+def test_disk_scan_deadline_escapes_process_enumeration(monkeypatch, tmp_path, stage):
+    """Deliver the alarm inside the OSError handler's protected operations."""
+    monkeypatch.setattr(sandbox.os, "listdir", lambda path: ["123"])
+
+    class StatFile(io.BytesIO):
+        def read(self):
+            sandbox._on_disk_scan_timeout(signal.SIGALRM, None)
+
+    def open_stat(path, mode):
+        if stage == "open":
+            sandbox._on_disk_scan_timeout(signal.SIGALRM, None)
+        return StatFile()
+
+    monkeypatch.setattr("builtins.open", open_stat)
+    spec = {"work_dir": str(tmp_path), "disk_limits": {"bytes": 1024, "files": 10}}
+    previous = signal.getsignal(signal.SIGALRM)
+    with pytest.raises(sandbox._DiskScanTimeout, match="quota scan timed out"):
+        sandbox._check_work_dir_quota(spec)
+    assert signal.getitimer(signal.ITIMER_REAL) == (0, 0)
+    assert signal.getsignal(signal.SIGALRM) == previous
+
+
 def test_children_of_parses_the_last_parenthesis_and_ignores_disappearing_pids(
     monkeypatch,
 ):

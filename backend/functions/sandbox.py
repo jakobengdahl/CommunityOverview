@@ -616,8 +616,12 @@ def _work_dir_exceeds_quota(spec):
             os.close(directory)
 
 
+class _DiskScanTimeout(Exception):
+    """Escape filesystem error handlers when the scan deadline expires."""
+
+
 def _on_disk_scan_timeout(signum, frame):
-    raise TimeoutError("Working-directory quota scan timed out.")
+    raise _DiskScanTimeout("Working-directory quota scan timed out.")
 
 
 def _check_work_dir_quota(spec):
@@ -695,7 +699,7 @@ def supervise(spec, status_fd):
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
     except _Stop:
         stopped = True
-    except OSError as exc:
+    except (OSError, _DiskScanTimeout) as exc:
         monitor_error = str(exc)
         stopped = True
     _reap_all()
@@ -703,7 +707,7 @@ def supervise(spec, status_fd):
     if not disk_exceeded and not monitor_error:
         try:
             disk_exceeded = _check_work_dir_quota(spec)
-        except OSError as exc:
+        except (OSError, _DiskScanTimeout) as exc:
             monitor_error = str(exc)
     usage = resource.getrusage(resource.RUSAGE_CHILDREN)
     _report(
