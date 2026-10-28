@@ -2068,6 +2068,31 @@ def _register_import_endpoints(
     service: GraphService,
     import_job_store: "ExecutionStore",
 ) -> None:
+    from backend.runtime.authorization import GRAPH_ACTION_READ
+
+    from . import access
+
+    def _authorize_import_job_read(target: str) -> None:
+        decision = access.evaluate_graph_access(
+            service.authorization_hook, action=GRAPH_ACTION_READ, target=target
+        )
+        if not decision.allowed:
+            _raise_for_access_denied(
+                access.build_access_denied_result(
+                    action=GRAPH_ACTION_READ, target=target, decision=decision
+                )
+            )
+        # Job metadata covers whole-graph imports and cannot be scope-filtered.
+        if decision.graph_access.enabled:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "success": False,
+                    "error_code": "import_requires_full_graph_access",
+                    "message": "Reading import jobs requires full graph access.",
+                },
+            )
+
     @router.post("/import")
     async def import_graph(
         request: Request, document: Dict[str, Any] = Body(...)
@@ -2200,9 +2225,11 @@ def _register_import_endpoints(
         return result
 
     @router.get("/import/{job_id}")
-    async def get_import_job(job_id: str) -> Dict[str, Any]:
+    async def get_import_job(request: Request, job_id: str) -> Dict[str, Any]:
         """Get the status of one import's background embedding job."""
-        job = service.get_import_job(import_job_store, job_id)
+        with use_request_authorization(headers=request.headers):
+            _authorize_import_job_read("get_import_job")
+            job = service.get_import_job(import_job_store, job_id)
         if job is None:
             raise HTTPException(
                 status_code=404, detail=f"Import job '{job_id}' not found"
@@ -2211,10 +2238,13 @@ def _register_import_endpoints(
 
     @router.get("/import")
     async def list_import_jobs(
+        request: Request,
         limit: int = Query(100, ge=1, le=500),
     ) -> List[Dict[str, Any]]:
         """List import jobs, newest first."""
-        return service.list_import_jobs(import_job_store, limit=limit)
+        with use_request_authorization(headers=request.headers):
+            _authorize_import_job_read("list_import_jobs")
+            return service.list_import_jobs(import_job_store, limit=limit)
 
 
 def _register_custom_interface_endpoints(
