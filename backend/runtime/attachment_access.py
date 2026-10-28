@@ -55,6 +55,6 @@ def attachment_tool_refusal(name: str, access: str, hook=None):
         hook if hook is not None else DefaultGraphAuthorizationHook(),
         action="mutate" if name in ATTACHMENT_WRITE_TOOLS else "read",
         target=name
-        if name in ATTACHMENT_WRITE_TOOLS
+        if name in ATTACHMENT_WRITE_TOOLS or name == "list_node_attachments"
         else "read_node_attachment_content",
     )

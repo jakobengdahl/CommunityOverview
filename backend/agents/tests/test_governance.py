@@ -691,6 +691,43 @@ def test_attachment_denying_hook_blocks_execution_and_proposals(name):
     assert store.list_proposals() == []
 
 
+@pytest.mark.parametrize(
+    "name,target",
+    [
+        ("list_node_attachments", "list_node_attachments"),
+        ("read_node_attachment", "read_node_attachment_content"),
+        ("search_node_attachments", "read_node_attachment_content"),
+        ("add_node_attachment", "add_node_attachment"),
+        ("delete_node_attachment", "delete_node_attachment"),
+    ],
+)
+def test_attachment_target_specific_hook_denial(name, target):
+    """Metadata listing and content reads have separate authorization targets."""
+    seen = []
+
+    def evaluate(context):
+        seen.append(context)
+        return GraphAuthorizationDecision(allowed=context.target != target)
+
+    raw = MagicMock()
+    store = InMemoryProposalStore()
+    gate = AutonomyGate(
+        autonomy_level=AutonomyLevel.ACT_AFTER_APPROVAL,
+        tool_allowlist=None,
+        mcp_loader=FakeLoader(),
+        proposal_store=store,
+        agent_id="a1",
+        attachment_access="read_write",
+        authorization_hook=SimpleNamespace(evaluate=evaluate),
+    )
+    result = gate.wrap(raw)("graph." + name, {})
+    assert result["error_code"] == "access_denied"
+    assert result["authorization"]["target"] == target
+    assert seen[0].action == ("read" if name in ATTACHMENT_READ_TOOLS else "mutate")
+    raw.assert_not_called()
+    assert store.list_proposals() == []
+
+
 @pytest.mark.parametrize("with_store", [False, True])
 def test_worker_checks_live_attachment_grants_with_or_without_proposal_store(
     with_store,
