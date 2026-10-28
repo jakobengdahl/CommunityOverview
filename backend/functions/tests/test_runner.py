@@ -774,13 +774,24 @@ def test_losing_the_runner_outranks_whatever_the_function_reported(storage):
         )
 
 
-def test_a_failed_disk_monitor_is_reported_to_the_caller_as_runner_lost(storage):
+@pytest.mark.parametrize("session_code", [None, "no_result", "timeout"])
+def test_a_failed_disk_monitor_fails_the_run_without_claiming_control_was_lost(
+    storage, session_code
+):
+    """A known scan failure overrides results and timeouts without runner_lost."""
     process_exit = exit_from_report(
         {"stopped": True, "monitor_error": "usage unavailable"},
         cpu_limit_seconds=5,
         wall_ms=100,
     )
     result = _result_for(
-        SessionOutcome(code="no_result"), process_exit, make_broker(storage)
+        SessionOutcome(code=session_code, output={"ok": True}),
+        process_exit,
+        make_broker(storage),
     )
-    assert (result.status, result.code) == ("failed", "runner_lost")
+    assert process_exit.outcome == "killed"
+    assert (result.status, result.code, result.output) == (
+        "failed",
+        "disk_check_failed",
+        None,
+    )

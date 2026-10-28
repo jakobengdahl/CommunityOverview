@@ -74,6 +74,7 @@ STATUS_FAILED = "failed"
 STATUS_TIMED_OUT = "timed_out"
 CODE_RUNNER_LOST = "runner_lost"
 CODE_DISK_EXCEEDED = "disk_exceeded"
+CODE_DISK_CHECK_FAILED = "disk_check_failed"
 
 # How long a function that sent its result may take to exit on its own, and how
 # long the supervisor gets to terminate everything before it counts as lost.
@@ -146,6 +147,7 @@ class RunExit:
     detail: str = ""
     cpu_limit_reached: bool = False
     disk_limit_reached: bool = False
+    disk_check_failed: bool = False
 
 
 def _controls_for(landlock_abi: int, seccomp: bool) -> Tuple[str, ...]:
@@ -221,8 +223,6 @@ def exit_from_report(
     exit_signal = final.get("signal")
     cpu_seconds = final.get("cpu_seconds") or 0
     outcome = "killed" if stopped else "exited"
-    if final.get("monitor_error"):
-        outcome = "runner_lost"
     return RunExit(
         outcome,
         exit_code=final.get("exit_code"),
@@ -231,6 +231,7 @@ def exit_from_report(
         wall_ms=wall_ms,
         detail=final.get("monitor_error", ""),
         disk_limit_reached=bool(final.get("disk_exceeded")),
+        disk_check_failed=bool(final.get("monitor_error")),
         # Threads that release the interpreter lock can use CPU time faster
         # than wall-clock time; the kernel's backstop then ends the run before
         # the host's timer does.
@@ -741,6 +742,13 @@ def _result_for(
             STATUS_FAILED,
             CODE_DISK_EXCEEDED,
             "The working-directory disk quota was exceeded.",
+            **common,
+        )
+    if process_exit.disk_check_failed:
+        return FunctionRunResult(
+            STATUS_FAILED,
+            CODE_DISK_CHECK_FAILED,
+            "The working-directory disk quota could not be checked.",
             **common,
         )
     if outcome.code == CODE_TIMEOUT:

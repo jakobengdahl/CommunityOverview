@@ -80,6 +80,82 @@ sys.stdin.read()
         child.communicate(timeout=5)
 
 
+@pytest.mark.parametrize("stage", ["directory", "descriptor"])
+@pytest.mark.parametrize(
+    "error, state",
+    [
+        (FileNotFoundError, "R"),
+        (ProcessLookupError, "R"),
+        (PermissionError, "R"),
+        (PermissionError, "Z"),
+    ],
+)
+def test_disk_scan_ignores_exit_races_but_fails_on_live_permission_errors(
+    monkeypatch, tmp_path, stage, error, state
+):
+    """Vanished or zombie tasks have no retained files; live denials fail shut."""
+    listdir, stat = os.listdir, os.stat
+    monkeypatch.setattr(
+        sandbox, "_children_of", lambda pid: [123] if pid != 123 else []
+    )
+
+    def descriptors(path):
+        if path == "/proc/123/fd":
+            if stage == "directory":
+                raise error("task exited")
+            return ["0"]
+        return listdir(path)
+
+    def descriptor_stat(path, *args, **kwargs):
+        if path == "/proc/123/fd/0":
+            raise error("task exited")
+        return stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(sandbox.os, "listdir", descriptors)
+    monkeypatch.setattr(sandbox.os, "stat", descriptor_stat)
+    monkeypatch.setattr(
+        "builtins.open", lambda path: io.StringIO(f"123 (a ) name) {state} 1 0")
+    )
+    spec = {"work_dir": str(tmp_path), "disk_limits": {"bytes": 8192, "files": 1}}
+    if error is PermissionError and state == "R":
+        with pytest.raises(PermissionError):
+            sandbox._work_dir_exceeds_quota(spec)
+    else:
+        assert sandbox._work_dir_exceeds_quota(spec) is False
+
+
+@pytest.mark.parametrize("error", [FileNotFoundError, ProcessLookupError])
+def test_process_exit_check_accepts_disappearing_proc_stat(monkeypatch, error):
+    """A task reaped before the permission-error check is no longer live."""
+
+    def missing(path):
+        raise error(path)
+
+    monkeypatch.setattr("builtins.open", missing)
+    assert sandbox._process_has_exited(123) is True
+
+
+@pytest.mark.parametrize("stop", [False, True])
+def test_disk_scan_disarms_its_deadline_on_completion_and_stop(monkeypatch, stop):
+    """The scan deadline must not fire during later cleanup or reporting."""
+    previous = signal.getsignal(signal.SIGALRM)
+
+    def scan(spec):
+        assert signal.getitimer(signal.ITIMER_REAL)[0] > 0
+        if stop:
+            raise sandbox._Stop()
+        return True
+
+    monkeypatch.setattr(sandbox, "_work_dir_exceeds_quota", scan)
+    if stop:
+        with pytest.raises(sandbox._Stop):
+            sandbox._check_work_dir_quota({})
+    else:
+        assert sandbox._check_work_dir_quota({}) is True
+    assert signal.getitimer(signal.ITIMER_REAL) == (0, 0)
+    assert signal.getsignal(signal.SIGALRM) == previous
+
+
 @pytest.mark.parametrize(
     "abi, filesystem, network, scope, work_rights",
     [
@@ -192,16 +268,37 @@ def child(spec, setup_w):
         os.kill(os.getpid(), signal.SIGUSR1)
     if case == "stop":
         os.kill(spec["supervisor_pid"], signal.SIGTERM)
-    if case in ("stop", "monitor_error"):
+    if case in ("stop", "monitor_error", "empty_monitor_error", "scan_timeout"):
         while True:
             signal.pause()
     os._exit(17)
 sandbox._child = child
 
-if case == "monitor_error":
+if case in ("monitor_error", "empty_monitor_error", "empty_final_monitor_error"):
     def unreadable(spec):
-        raise PermissionError("usage unavailable")
+        if case == "monitor_error":
+            raise PermissionError("usage unavailable")
+        if case == "empty_final_monitor_error" and sandbox._children_of(os.getpid()):
+            return False
+        raise OSError()
     sandbox._work_dir_exceeds_quota = unreadable
+
+if case in ("scan_timeout", "final_scan_timeout"):
+    after_cleanup = False
+    reap_all = sandbox._reap_all
+    def cleanup():
+        global after_cleanup
+        reap_all()
+        after_cleanup = True
+    sandbox._reap_all = cleanup
+    def stalled(spec):
+        if case == "scan_timeout" or after_cleanup:
+            # This scanner never completes; only the supervisor's deadline
+            # can interrupt it. No scheduler-dependent slow-tree workload.
+            signal.pause()
+            raise AssertionError("scan resumed without timing out")
+        return False
+    sandbox._work_dir_exceeds_quota = stalled
 
 # Force the host's EOF-triggered stop into the gap between reaping the function
 # and starting cleanup. The function's exit status must still be reported.
@@ -312,12 +409,58 @@ def test_supervisor_terminates_and_reaps_the_child_when_usage_cannot_be_checked(
         os.kill(child_pid, 0)
 
 
+@pytest.mark.parametrize("case", ["empty_monitor_error", "empty_final_monitor_error"])
+def test_empty_scan_error_still_fails_closed(supervisor_report, case):
+    report, child_pid = supervisor_report("supervise", case)
+    final = json.loads(report.splitlines()[-1])
+    assert final["monitor_error"] == "OSError"
+    assert final["stopped"] is (case == "empty_monitor_error")
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
+
+
+@pytest.mark.parametrize("case", ["scan_timeout", "final_scan_timeout"])
+def test_stalled_poll_and_final_scan_still_reap_and_report(supervisor_report, case):
+    """A scanner that never returns cannot suppress the supervisor's report."""
+    report, child_pid = supervisor_report("supervise", case)
+    messages = [json.loads(line) for line in report.splitlines()]
+    assert messages[0] == {"started": child_pid}
+    assert messages[1]["monitor_error"] == "Working-directory quota scan timed out."
+    assert messages[1]["stopped"] is (case == "scan_timeout")
+    assert messages[1]["exit_code"] == (None if case == "scan_timeout" else 17)
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
+
+
 @pytest.mark.parametrize("case", ["exit", "setup", "nonzero", "signal"])
 def test_probe_succeeds_only_for_a_normal_zero_exit(supervisor_report, case):
     report, _ = supervisor_report("probe", case)
     assert report == (
         b'{"probe_ok": true}\n' if case == "exit" else b'{"probe_ok": false}\n'
     )
+
+
+@pytest.mark.parametrize("stage", ["open", "read"])
+def test_disk_scan_deadline_escapes_process_enumeration(monkeypatch, tmp_path, stage):
+    """Deliver the alarm inside the OSError handler's protected operations."""
+    monkeypatch.setattr(sandbox.os, "listdir", lambda path: ["123"])
+
+    class StatFile(io.BytesIO):
+        def read(self):
+            sandbox._on_disk_scan_timeout(signal.SIGALRM, None)
+
+    def open_stat(path, mode):
+        if stage == "open":
+            sandbox._on_disk_scan_timeout(signal.SIGALRM, None)
+        return StatFile()
+
+    monkeypatch.setattr("builtins.open", open_stat)
+    spec = {"work_dir": str(tmp_path), "disk_limits": {"bytes": 1024, "files": 10}}
+    previous = signal.getsignal(signal.SIGALRM)
+    with pytest.raises(sandbox._DiskScanTimeout, match="quota scan timed out"):
+        sandbox._check_work_dir_quota(spec)
+    assert signal.getitimer(signal.ITIMER_REAL) == (0, 0)
+    assert signal.getsignal(signal.SIGALRM) == previous
 
 
 def test_children_of_parses_the_last_parenthesis_and_ignores_disappearing_pids(

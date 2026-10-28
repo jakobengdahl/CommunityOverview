@@ -113,8 +113,10 @@ and directories, excluding the root), sum the larger of apparent size and
 allocated bytes per entry, and never follow symbolic links. Exceeding either
 quota terminates the run and its descendants and returns `failed` with
 `disk_exceeded`, even if the function sent a result. A final scan catches usage
-left by runs that finish between polling ticks; scan failures stop the run
-with `runner_lost`. Scans also count unlinked regular files held open by the run
+left by runs that finish between polling ticks. Each scan has a one-second
+real-time deadline; scan failures or timeouts stop the run with
+`disk_check_failed`, reserving `runner_lost` for loss of supervisor control.
+Scans also count unlinked regular files held open by the run
 and its descendants, deduplicating descriptors by inode. The 16 MiB
 `RLIMIT_FSIZE` per-file limit remains in place.
 
