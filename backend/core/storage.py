@@ -4899,6 +4899,7 @@ class GraphStorage:
         event_context: Optional[EventContext] = None,
         *,
         expect_absent: bool = False,
+        node_visible: Optional[Callable[[Node], bool]] = None,
     ) -> Optional[str]:
         """
         Add a single edge between existing nodes.
@@ -4910,6 +4911,8 @@ class GraphStorage:
             event_context: Optional context for event tracking
             expect_absent: the create expects no edge with this id to exist
                 (§4.3); one that does raises EntityRevisionConflict.
+            node_visible: Predicate checked on resolved endpoints under the lock;
+                hidden endpoints return None, just like missing endpoints.
 
         Returns:
             Edge ID if successful, None if failed
@@ -4934,6 +4937,12 @@ class GraphStorage:
                     edge.target = name_to_id[edge.target]
                 else:
                     return None
+
+            if node_visible is not None and not all(
+                node_visible(self.nodes[node_id])
+                for node_id in (edge.source, edge.target)
+            ):
+                return None
 
             if edge.id in self.edges:
                 return None

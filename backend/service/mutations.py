@@ -607,7 +607,15 @@ def add_edge(
         )
 
     try:
-        edge_id = storage.add_edge(edge, event_context=event_context)
+        edge_id = storage.add_edge(
+            edge,
+            event_context=event_context,
+            node_visible=(
+                lambda node: access.is_node_visible(node, decision.graph_access)
+            )
+            if decision.graph_access.enabled
+            else None,
+        )
     except EntityRevisionConflict as e:
         return _create_conflict_result(e)
     except _WRITE_ERRORS as e:

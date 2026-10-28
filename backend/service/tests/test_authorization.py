@@ -580,6 +580,31 @@ class TestMutationScopeNarrowing:
         assert "not found" in blocked_source["message"]
         assert allowed["success"] is True
 
+    @pytest.mark.parametrize("endpoint", ["local-1", "alpha-1"])
+    def test_add_edge_rechecks_scope_at_storage_insertion(
+        self, tmp_path, monkeypatch, endpoint
+    ):
+        service = self._alpha_scoped_service(tmp_path)
+        storage = service.storage
+        original_add_edge = storage.add_edge
+        original_edges = set(storage.edges)
+
+        def move_endpoint_then_insert(edge, **kwargs):
+            # Interleave a scope change after service validation, before insertion.
+            storage.update_node(
+                endpoint, {"metadata": {"origin_graph_id": "graph-beta"}}
+            )
+            return original_add_edge(edge, **kwargs)
+
+        monkeypatch.setattr(storage, "add_edge", move_endpoint_then_insert)
+        result = service.add_edge("local-1", "alpha-1", type="RELATES_TO")
+
+        assert result == {
+            "success": False,
+            "message": "Could not add edge (source or target not found)",
+        }
+        assert set(storage.edges) == original_edges
+
     @pytest.mark.parametrize("end", ["source", "target"])
     @pytest.mark.parametrize("by_name", [False, True])
     @pytest.mark.parametrize("federated", [False, True])
