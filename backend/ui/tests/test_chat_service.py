@@ -2473,7 +2473,15 @@ class TestNonObjectToolInput:
 )
 @pytest.mark.parametrize(
     "mode",
-    ["assistant", "kiosk", "kiosk_granted", "kiosk_failed", "override", "deny_hook"],
+    [
+        "assistant",
+        "kiosk",
+        "kiosk_granted",
+        "kiosk_failed",
+        "kiosk_unresolved",
+        "override",
+        "deny_hook",
+    ],
 )
 def test_attachment_tools_require_caller_grant_and_hook(chat_service, name, mode):
     """Hidden tools stay blocked even when the model calls them anyway."""
@@ -2482,6 +2490,8 @@ def test_attachment_tools_require_caller_grant_and_hook(chat_service, name, mode
     from backend.runtime.authorization import GraphAuthorizationDecision
 
     service, llm = chat_service
+    if mode == "kiosk_unresolved":
+        service._assistant_attachment_access = "read_write"
     raw = MagicMock(return_value={"success": True})
     service._processor.tools_map[name] = raw
     service._processor.tool_definitions.append(
@@ -2502,7 +2512,9 @@ def test_attachment_tools_require_caller_grant_and_hook(chat_service, name, mode
     )
     with (
         patch.object(
-            service._graph_service, "search_graph", return_value={"nodes": [node]}
+            service._graph_service,
+            "search_graph",
+            return_value={"nodes": [] if mode == "kiosk_unresolved" else [node]},
         ),
         patch.object(
             service._graph_service, "get_node_details", return_value={"node": node}

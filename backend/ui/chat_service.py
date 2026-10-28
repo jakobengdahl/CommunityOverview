@@ -883,9 +883,9 @@ class ChatService:
             def attachment_access(tool_name):
                 if api_key is not None:
                     return "off"
-                if not collection_short_name or effective_prefix is None:
+                if not collection_short_name:
                     return self._assistant_attachment_access
-                if effective_prefix == "":
+                if effective_prefix is None or effective_prefix == "":
                     return "off"
                 # Grants are read afresh so another process can revoke them.
                 node_id = (self._collection_nodes.get(collection_short_name) or {}).get(
