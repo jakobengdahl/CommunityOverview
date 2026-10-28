@@ -7,6 +7,7 @@ Covers: SKILL.md parsing, allowed-tools handling, sanitization,
 """
 
 import contextlib
+import threading
 
 import pytest
 from unittest.mock import patch
@@ -1710,17 +1711,51 @@ class TestFetchTextRemainingGuards:
         )
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("safe", [True, False])
+    async def test_initial_address_check_runs_off_the_event_loop(self, safe):
+        """The initial guard runs off the loop and refuses before any request."""
+        loop_thread = threading.get_ident()
+        url = "https://api.github.com/start"
+        checked = []
+        handler, seen = _recording_handler([_ok("# once")])
+
+        def check_address(target):
+            assert threading.get_ident() != loop_thread
+            checked.append(target)
+            return safe
+
+        with (
+            _mock_http(handler),
+            patch.object(loader_module, "is_safe_url", check_address),
+        ):
+            if safe:
+                assert await self._loader()._fetch_text(url) == "# once"
+            else:
+                with pytest.raises(
+                    ValueError, match="URL resolves to a disallowed address"
+                ):
+                    await self._loader()._fetch_text(url)
+
+        assert checked == [url]
+        assert len(seen) == int(safe)
+
+    @pytest.mark.asyncio
     async def test_a_same_host_hop_is_still_address_checked(self):
-        """DNS rebinding: the name does not change, what it resolves to does."""
+        """Redirect checks run off the loop and refuse changed DNS answers."""
+        loop_thread = threading.get_ident()
         # one call for the initial URL, one for the hop: same name, new answer
         verdicts = iter([True, False])
         handler, seen = _recording_handler(
             [_redirect_to("https://api.github.com/second"), _ok()]
         )
 
+        def check_address(_url):
+            assert threading.get_ident() != loop_thread
+            return next(verdicts)
+
         with (
             _mock_http(handler),
-            patch.object(loader_module, "is_safe_url", lambda _url: next(verdicts)),
+            patch.object(loader_module, "is_safe_url", check_address),
         ):
             with pytest.raises(ValueError, match="disallowed address"):
                 await self._loader()._fetch_text("https://api.github.com/start")
@@ -1968,13 +2003,18 @@ class TestFetchTextRemainingGuards:
 
     @pytest.mark.asyncio
     async def test_a_cache_hit_is_still_address_checked(self):
-        """The guards sit above the cache lookup on purpose."""
+        """Cache hits recheck addresses off the loop and still refuse unsafe URLs."""
+        loop_thread = threading.get_ident()
         verdicts = iter([True, False])
         handler, seen = _recording_handler([_ok("# once")])
 
+        def check_address(_url):
+            assert threading.get_ident() != loop_thread
+            return next(verdicts)
+
         with (
             _mock_http(handler),
-            patch.object(loader_module, "is_safe_url", lambda _url: next(verdicts)),
+            patch.object(loader_module, "is_safe_url", check_address),
         ):
             loader = self._loader()
             await loader._fetch_text("https://api.github.com/start")
