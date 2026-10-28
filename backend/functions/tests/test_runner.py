@@ -24,10 +24,13 @@ from backend.functions.runner import (
     CONTROLS,
     LEVEL_DEGRADED,
     LEVEL_FULL,
+    MAX_DISK_BYTES,
+    MAX_DISK_FILES,
     HardenedSubprocessRunner,
     RunExit,
     RunSpec,
     _result_for,
+    exit_from_report,
     run_function,
     safe_relative_path,
 )
@@ -246,6 +249,50 @@ def test_the_run_directory_is_removed_after_the_run(runner, storage):
     assert not os.path.exists(result.output["cwd"])
 
 
+@pytest.mark.parametrize("finish", ["time.sleep(10)", "out['done'] = True"])
+@pytest.mark.parametrize(
+    "limits, writes",
+    [
+        (
+            {"max_disk_bytes": 12 * 1024},
+            "for name in ('a', 'b'):\n    with open(name, 'wb') as f:\n        f.write(b'x' * 8192)",
+        ),
+        (
+            {"max_disk_files": 10},
+            "for i in range(12):\n    open(str(i), 'w').close()",
+        ),
+    ],
+)
+def test_disk_quota_terminates_the_run_and_overrides_even_a_result(
+    storage, limits, writes, finish
+):
+    """Aggregate bytes and empty-file counts fail with the caller-visible code."""
+    runner = HardenedSubprocessRunner(**limits)
+    started = time.monotonic()
+    result = execute(runner, storage, handler(writes, finish))
+    assert (result.status, result.code) == ("failed", "disk_exceeded"), result
+    assert result.output is None
+    assert time.monotonic() - started < 10
+
+
+def test_nested_work_files_at_the_entry_quota_can_succeed(storage):
+    runner = HardenedSubprocessRunner(max_disk_bytes=1024 * 1024, max_disk_files=4)
+    result = execute(
+        runner,
+        storage,
+        handler("""
+        os.makedirs('a/b')
+        with open('a/b/one', 'w') as f:
+            f.write('hello')
+        open('a/two', 'w').close()
+        time.sleep(0.2)
+        out['done'] = True
+        """),
+    )
+    assert result.status == "succeeded", result
+    assert result.output == {"done": True}
+
+
 def test_functions_import_their_own_modules_and_not_the_applications(runner, storage):
     result = execute(
         runner,
@@ -264,6 +311,22 @@ def test_functions_import_their_own_modules_and_not_the_applications(runner, sto
 
 
 # --- spec validation ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", ["max_disk_bytes", "max_disk_files"])
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "100", None, float("nan")])
+def test_disk_quota_config_is_validated_when_the_runner_is_constructed(name, value):
+    with pytest.raises(ValueError, match=name):
+        HardenedSubprocessRunner(**{name: value})
+
+
+@pytest.mark.parametrize(
+    "name, maximum",
+    [("max_disk_bytes", MAX_DISK_BYTES), ("max_disk_files", MAX_DISK_FILES)],
+)
+def test_disk_quota_config_cannot_raise_the_contract_maximum(name, maximum):
+    with pytest.raises(ValueError, match=name):
+        HardenedSubprocessRunner(**{name: maximum + 1})
 
 
 @pytest.mark.parametrize(
@@ -688,3 +751,15 @@ def test_losing_the_runner_outranks_whatever_the_function_reported(storage):
             "runner_lost",
             None,
         )
+
+
+def test_a_failed_disk_monitor_is_reported_to_the_caller_as_runner_lost(storage):
+    process_exit = exit_from_report(
+        {"stopped": True, "monitor_error": "usage unavailable"},
+        cpu_limit_seconds=5,
+        wall_ms=100,
+    )
+    result = _result_for(
+        SessionOutcome(code="no_result"), process_exit, make_broker(storage)
+    )
+    assert (result.status, result.code) == ("failed", "runner_lost")

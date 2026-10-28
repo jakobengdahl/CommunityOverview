@@ -6,7 +6,7 @@
 implementation slices. Implemented so far, in `backend/functions/`: the broker
 and its protocol session (§6, §7, §9 attribution, the per-message and tool-call
 limits of §8), and the default hardened-subprocess runner of ADR 0012 with the
-Python helper library (§3.1, the time, memory and log limits of §8, §10). Not
+Python helper library (§3.1, the time, memory, disk and log limits of §8, §10). Not
 yet implemented: manifests, invocation and run records.
 **Scope:** Open-source core. This version covers manually invoked functions that
 read and write the graph through a broker. Every other trigger, tool and binding
@@ -405,6 +405,9 @@ system that started it.
 |---|---|---|
 | Wall-clock time | **120 seconds** | The runner terminates the process. The run ends `timed_out`. |
 | Memory | 256 MiB | Allocation beyond the limit fails, or the runner terminates the process. The run ends `failed` with `memory_exceeded`. |
+| Working-directory bytes | 256 MiB | The supervisor terminates the run when a scan detects excess usage. The run ends `failed` with `disk_exceeded`. |
+| Working-directory entries | 10,000 | As above, counting files, directories and other entries recursively, excluding the work directory itself. |
+| Size of one file | 16 MiB | `RLIMIT_FSIZE` refuses further growth; the function may handle the resulting error. |
 | Tool calls per run | 200 | Further calls return `limit_exceeded`. |
 | Size of one tool call or response | 1 MiB | The call is refused with `invalid_arguments`, or the response is replaced by a `tool_failed` error. |
 | Size of `result.output` | 256 KiB | The run ends `failed` with `output_too_large`. |
@@ -425,6 +428,20 @@ system that started it.
   `status: error` and code `memory_exceeded`, which the host records as
   `failed` with `memory_exceeded`. A process that exits without a result after
   reaching the limit is recorded the same way wherever the runner can tell.
+- Working-directory quotas default to the maximums above. The default runner
+  accepts lower instance values through `HardenedSubprocessRunner`'s
+  `max_disk_bytes` and `max_disk_files` constructor settings, validated at
+  startup as positive integers no greater than the contract maximums. These
+  are instance settings, not manifest `limits` fields.
+  Each scan sums the larger of apparent size and allocated bytes for each
+  entry, including directories, without following symbolic links. The
+  supervisor polls every 100 ms and checks again after termination; a detected
+  quota violation takes precedence over a function's result. If usage cannot
+  be checked, the run is terminated and fails with `runner_lost`.
+  Polling is best-effort: usage may overshoot between scans, and transient
+  files or unlinked files still held open may escape accounting. The 16 MiB
+  per-file limit remains in force. Operators should also cap the backing
+  container/host storage (see [Deployment Guide](DEPLOYMENT_GUIDE.md#user-function-temporary-storage)).
 - Termination is forced. The runner does not wait for the function to clean up,
   and writes the function made before it was terminated stay in the graph.
   Functions that make several writes should make them idempotent, so that a
@@ -521,8 +538,8 @@ Status meanings:
   the function is in progress, the runner's isolation level is below the
   instance minimum, or the chain-depth limit was reached.
 - `failed`: the function returned `status: error`, exited without a result,
-  broke the protocol, exceeded memory or produced output that is too large or
-  fails `output_schema`.
+  broke the protocol, exceeded memory or disk quotas, or produced output that
+  is too large or fails `output_schema`.
 - `timed_out`: the wall-clock limit was reached.
 - `cancelled`: an operator cancelled the run. Cancelling a running run
   terminates its process as in §8; writes already made stay.
@@ -547,6 +564,7 @@ Run-level error codes are a closed set:
 | `failed` | `no_result` | The process exited without sending `result`. |
 | `failed` | `protocol_error` | The function broke the protocol (§6.2). |
 | `failed` | `memory_exceeded` | The memory limit was reached (§8). |
+| `failed` | `disk_exceeded` | A scan detected excess working-directory bytes or entries (§8), regardless of any result the function sent. |
 | `failed` | `output_too_large` | `result.output` exceeded its limit (§8). |
 | `failed` | `invalid_output` | `result.output` failed `output_schema`. |
 | `timed_out` | `timeout` | The wall-clock limit was reached (§8). |

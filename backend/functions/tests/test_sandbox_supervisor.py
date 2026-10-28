@@ -13,6 +13,37 @@ import pytest
 from backend.functions import sandbox
 
 
+def test_disk_scan_counts_nested_entries_without_following_symlinks(tmp_path):
+    work = tmp_path / "work"
+    nested = work / "nested"
+    nested.mkdir(parents=True)
+    (nested / "file").touch()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "large").write_bytes(b"x" * 128 * 1024)
+    (work / "link").symlink_to(outside, target_is_directory=True)
+    spec = {"work_dir": str(work), "disk_limits": {"bytes": 64 * 1024, "files": 3}}
+    assert sandbox._work_dir_exceeds_quota(spec) is False
+    spec["disk_limits"]["files"] = 2
+    assert sandbox._work_dir_exceeds_quota(spec) is True
+
+
+@pytest.mark.parametrize("sparse", [False, True])
+def test_disk_scan_counts_both_allocated_and_apparent_bytes(tmp_path, sparse):
+    target = tmp_path / "file"
+    with target.open("wb") as stream:
+        if sparse:
+            stream.truncate(1024 * 1024)
+        else:
+            stream.write(b"x")
+    info = target.stat()
+    usage = max(info.st_size, info.st_blocks * 512)
+    spec = {"work_dir": str(tmp_path), "disk_limits": {"bytes": usage, "files": 1}}
+    assert sandbox._work_dir_exceeds_quota(spec) is False
+    spec["disk_limits"]["bytes"] -= 1
+    assert sandbox._work_dir_exceeds_quota(spec) is True
+
+
 @pytest.mark.parametrize(
     "abi, filesystem, network, scope, work_rights",
     [
@@ -125,10 +156,16 @@ def child(spec, setup_w):
         os.kill(os.getpid(), signal.SIGUSR1)
     if case == "stop":
         os.kill(spec["supervisor_pid"], signal.SIGTERM)
+    if case in ("stop", "monitor_error"):
         while True:
             signal.pause()
     os._exit(17)
 sandbox._child = child
+
+if case == "monitor_error":
+    def unreadable(spec):
+        raise PermissionError("usage unavailable")
+    sandbox._work_dir_exceeds_quota = unreadable
 
 # Force the host's EOF-triggered stop into the gap between reaping the function
 # and starting cleanup. The function's exit status must still be reported.
@@ -226,6 +263,17 @@ def test_stop_after_child_exit_does_not_lose_the_final_report(supervisor_report,
             "cpu_seconds": 3.58,
         },
     ]
+
+
+def test_supervisor_terminates_and_reaps_the_child_when_usage_cannot_be_checked(
+    supervisor_report,
+):
+    report, child_pid = supervisor_report("supervise", "monitor_error")
+    final = json.loads(report.splitlines()[-1])
+    assert final["stopped"] is True
+    assert final["monitor_error"] == "usage unavailable"
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
 
 
 @pytest.mark.parametrize("case", ["exit", "setup", "nonzero", "signal"])
