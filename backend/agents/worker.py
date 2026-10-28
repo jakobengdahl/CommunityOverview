@@ -525,22 +525,29 @@ class AgentWorker:
                 integration_ids=self.config.mcp_integration_ids
             )
 
-            # Pre-filter the definitions handed to the LLM to those the autonomy
-            # gate would actually let through, so a read-only or allowlist-
-            # restricted agent does not waste turns attempting tools it can never
-            # use. This is purely an efficiency reduction: the gate applied below
-            # remains the authoritative enforcement. Only pre-filter when the gate
-            # is active (a proposal store is wired), and reuse the gate's own
-            # autonomy level and allowlist so the two never diverge.
-            if self._proposal_store is not None:
-                from .governance import coerce_autonomy, filter_tool_definitions
+            from .governance import coerce_autonomy, filter_tool_definitions
+            from backend.runtime.attachment_access import agent_attachment_access
 
-                tool_definitions = filter_tool_definitions(
-                    tool_definitions,
-                    autonomy_level=coerce_autonomy(self.config.autonomy_level),
-                    tool_allowlist=self.config.tool_allowlist,
-                    mcp_loader=self.mcp_loader,
+            def resolve_attachment_access():
+                storage = self._graph_storage or getattr(
+                    self.graph_service, "_storage", None
                 )
+                node = storage.get_node(self.agent_id) if storage is not None else None
+                if node is None:
+                    return "none"
+                return agent_attachment_access(
+                    (node.metadata or {}).get("attachment_access", "none"),
+                    agent_id=self.agent_id,
+                )
+
+            tool_definitions = filter_tool_definitions(
+                tool_definitions,
+                autonomy_level=coerce_autonomy(self.config.autonomy_level),
+                tool_allowlist=self.config.tool_allowlist,
+                mcp_loader=self.mcp_loader,
+                attachment_access=resolve_attachment_access(),
+                proposal_store_available=self._proposal_store is not None,
+            )
 
             tool_names = [t["name"] for t in tool_definitions]
 
@@ -576,21 +583,24 @@ class AgentWorker:
                 graph_service=self.graph_service,
                 agent_id=self.agent_id,
             )
-            if self._proposal_store is not None:
-                from .governance import AutonomyGate, coerce_autonomy
+            from .governance import AutonomyGate
 
-                origin = event_payload.get("origin") or {}
-                gate = AutonomyGate(
-                    autonomy_level=coerce_autonomy(self.config.autonomy_level),
-                    tool_allowlist=self.config.tool_allowlist,
-                    mcp_loader=self.mcp_loader,
-                    proposal_store=self._proposal_store,
-                    agent_id=self.agent_id,
-                    agent_name=self.config.name,
-                    run_id=run_id,
-                    correlation_id=origin.get("event_correlation_id"),
-                )
-                tool_executor = gate.wrap(tool_executor)
+            origin = event_payload.get("origin") or {}
+            gate = AutonomyGate(
+                autonomy_level=coerce_autonomy(self.config.autonomy_level),
+                tool_allowlist=self.config.tool_allowlist,
+                mcp_loader=self.mcp_loader,
+                proposal_store=self._proposal_store,
+                agent_id=self.agent_id,
+                agent_name=self.config.name,
+                run_id=run_id,
+                correlation_id=origin.get("event_correlation_id"),
+                attachment_access_resolver=resolve_attachment_access,
+                authorization_hook=getattr(
+                    self.graph_service, "authorization_hook", None
+                ),
+            )
+            tool_executor = gate.wrap(tool_executor)
 
             execute_tool = tool_executor
 

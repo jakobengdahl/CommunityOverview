@@ -1752,3 +1752,49 @@ class TestStoreCallsRunOffTheEventLoop:
 
         self._run(storage, store, scenario)
         assert len(seen) == 1 and seen[0] != loop_thread
+
+
+@pytest.mark.parametrize("level", ["off", "read", "read_write"])
+@pytest.mark.parametrize("deny", [False, True])
+def test_mcp_attachment_registration_filters_map_and_mount(
+    service, monkeypatch, level, deny
+):
+    """Registration and execution share the grant and hook for all five tools."""
+    from unittest.mock import MagicMock, Mock
+    from backend.runtime.attachment_access import (
+        ATTACHMENT_TOOLS,
+        ATTACHMENT_READ_TOOLS,
+    )
+    from backend.service.mcp_tools import register_mcp_tools
+
+    functions = {}
+    calls = []
+    for name in ATTACHMENT_TOOLS:
+
+        def tool():
+            calls.append(True)
+            return {"success": True}
+
+        tool.__name__ = name
+        functions[name] = tool
+    monkeypatch.setattr(
+        "backend.service.mcp_tools.make_system_create_tools", lambda *a, **k: functions
+    )
+    hook = Mock()
+    hook.evaluate.return_value = GraphAuthorizationDecision(allowed=not deny)
+    monkeypatch.setattr(service, "_authorization_hook", hook)
+    registered = {}
+    mcp = Mock()
+    mcp.tool = MagicMock(return_value=lambda f: registered.setdefault(f.__name__, f))
+    tools = register_mcp_tools(mcp, service, attachment_access=level)
+    expected = (
+        set()
+        if level == "off"
+        else (ATTACHMENT_READ_TOOLS if level == "read" else ATTACHMENT_TOOLS)
+    )
+    assert ATTACHMENT_TOOLS.intersection(tools) == expected
+    assert ATTACHMENT_TOOLS.intersection(registered) == expected
+    for name in expected:
+        result = tools[name]()
+        assert result.get("error_code") == ("access_denied" if deny else None)
+    assert len(calls) == (0 if deny else len(expected))

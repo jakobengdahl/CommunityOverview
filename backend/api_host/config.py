@@ -174,6 +174,13 @@ class AppConfig:
         default_factory=lambda: os.getenv("ATTACHMENT_ALLOWED_TYPES")
     )
 
+    assistant_attachment_access: str = field(
+        default_factory=lambda: os.getenv("ASSISTANT_ATTACHMENT_ACCESS", "read")
+    )
+    mcp_attachment_tools: str = field(
+        default_factory=lambda: os.getenv("MCP_ATTACHMENT_TOOLS", "off")
+    )
+
     # Server configuration
     # Container default, matching the Dockerfile; HOST overrides it. The socket
     # is bound by the uvicorn CLI, not by this field.
@@ -250,6 +257,12 @@ class AppConfig:
 
     def __post_init__(self):
         """Resolve default static paths relative to this package."""
+        from backend.runtime.attachment_access import validate_attachment_setting
+
+        validate_attachment_setting(
+            self.assistant_attachment_access, "ASSISTANT_ATTACHMENT_ACCESS"
+        )
+        validate_attachment_setting(self.mcp_attachment_tools, "MCP_ATTACHMENT_TOOLS")
         if self.web_static_path is None:
             # Default to frontend/web/dist relative to project root
             project_root = Path(__file__).parent.parent.parent

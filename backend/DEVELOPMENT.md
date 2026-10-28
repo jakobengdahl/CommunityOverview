@@ -221,6 +221,8 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | `ATTACHMENT_MAX_FILES_PER_NODE` | `10` | Most files on one node; `0` or less fails at boot |
 | `ATTACHMENT_MAX_BYTES_PER_NODE` | `104857600` (100 MiB) | Most bytes on one node; `0` or less fails at boot |
 | `ATTACHMENT_ALLOWED_TYPES` | every detected type | Comma-separated MIME types narrowing the accepted set; a type the detector does not know, or a value naming no type at all, fails at boot |
+| `ASSISTANT_ATTACHMENT_ACCESS` | `read` | Attachment tool grant for interactive chat: `off`, `read`, `read_write`. Unknown values fail at boot; an API key override grants no attachment tools |
+| `MCP_ATTACHMENT_TOOLS` | `off` | Attachment tools registered in both MCP and `/execute_tool`: `off`, `read`, `read_write`. Unknown values fail at boot. Enabling requires active authentication with no `MCP_AUTH_ENABLED` bypass |
 | `HISTORY_MAX_EVENTS` | `100000` | Mutation-history records retained (file backend only — a non-file `GRAPH_BACKEND` keeps no history); `0` removes the count cap (age trimming, if configured, still applies) |
 | `HISTORY_MAX_AGE_DAYS` | *(unset)* | Drop history records older than this many days (file backend only); unset keeps them regardless of age |
 | `API_PREFIX` | `/api` | REST API URL prefix |
@@ -607,8 +609,23 @@ per-route checks).
   `README`), so `run.bat` is stored as `run.bat.txt`.
 - **Deleting a node** removes its files after the graph delete succeeds.
   Archiving keeps them. REPLACE import does not touch the store.
-- **No MCP tool** exists for attachments yet; the service functions take bytes
-  or an async iterator, so one can be added without going through HTTP.
+- **Tool permissions** follow [ADR 0010](../docs/adr/0010-attachment-content-access-for-agents-and-assistant.md).
+  `read` permits `list_node_attachments`, `read_node_attachment` and
+  `search_node_attachments`; `read_write` also permits `add_node_attachment`
+  and `delete_node_attachment`. Agent grants default to `none` independently
+  of the tool allowlist; see [Agent configuration](../docs/EVENT_SUBSCRIPTIONS.md#agent-governance-autonomy-levels-and-proposals).
+  Kiosks require a non-empty collection allowlist naming each attachment tool;
+  the assistant setting does not grant kiosks access. Unreadable collection
+  configuration denies attachment tools. Agent and kiosk grants are checked
+  again from storage before each attachment call, so revocation applies mid-run.
+  Every permitted attachment tool also checks the authorization hook: reads use
+  `read_node_attachment_content`, writes use their tool name. Service checks
+  still apply. `/ui/chat`, `/ui/chat/simple` and upload analysis bind the
+  request's authorization context, including its actor.
+- **Tool implementations** are separate from these permission gates. This
+  revision does not register attachment tools in chat or MCP; REST attachment
+  operations remain available under their existing service authorization.
+  The permission settings do not disable REST attachment routes.
 
 ### Generic search filters (`/api/search` and the `search_graph` MCP tool)
 

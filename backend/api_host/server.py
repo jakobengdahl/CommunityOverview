@@ -295,6 +295,10 @@ def create_app(
         Configured FastAPI application with REST API, MCP tools, and static file serving.
     """
     config = config if config is not None else AppConfig.from_env()
+    if config.mcp_attachment_tools != "off" and (
+        not compute_auth_active(config) or config.mcp_auth_enabled is False
+    ):
+        raise ValueError("MCP_ATTACHMENT_TOOLS requires authenticated MCP paths")
     extensions = _select_extensions(graph_storage, runtime_extensions)
     configure_root_logging(config.log_format)
     # Bind only for construction; do not change the process default. Background
@@ -445,7 +449,14 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
     app.include_router(rest_router, prefix=config.api_prefix)
 
     # Create UI Backend services (ChatService and DocumentService)
-    chat_service = ChatService(graph_service)
+    logger.info(
+        "Attachment tool access: assistant=%s, MCP=%s, Agents=none unless granted",
+        config.assistant_attachment_access,
+        config.mcp_attachment_tools,
+    )
+    chat_service = ChatService(
+        graph_service, assistant_attachment_access=config.assistant_attachment_access
+    )
     document_service = DocumentService()
 
     # Load skills for expert agents that have skills_urls configured.
@@ -536,6 +547,7 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         session_manager=session_manager,
         auto_add_registry=auto_add_registry,
         widget_dist_path=config.widget_static_path,
+        attachment_access=config.mcp_attachment_tools,
     )
 
     # Store MCP instance and tools map on app state

@@ -17,6 +17,7 @@ from backend.config.model_profiles import (
     ProfileResolution,
     resolve_profile_reference,
 )
+from backend.runtime.attachment_access import agent_attachment_access
 from backend.agents.run_history_retention import RetentionPolicy
 from backend.agents.secrets import (
     SECRET_REF_PREFIX,
@@ -299,6 +300,7 @@ class AgentConfig:
     mcp_integration_ids: List[str] = field(default_factory=list)
     prompts: AgentPrompts = field(default_factory=AgentPrompts)
     tool_allowlist: Optional[List[str]] = None
+    attachment_access: str = "none"
     # Governance: observe | assist | propose | act_after_approval. Unset falls
     # back to the governed default (act_after_approval) — mutating actions
     # require human approval.
@@ -339,6 +341,9 @@ class AgentConfig:
             mcp_integration_ids=metadata.get("mcp_integration_ids", []),
             prompts=AgentPrompts.from_dict(prompts_data),
             tool_allowlist=metadata.get("tool_allowlist"),
+            attachment_access=agent_attachment_access(
+                metadata.get("attachment_access", "none"), agent_id=node.id
+            ),
             autonomy_level=metadata.get("autonomy_level") or "act_after_approval",
             skills_urls=metadata.get("skills_urls", []),
             skill_node_ids=metadata.get("skill_node_ids", []),
@@ -356,6 +361,7 @@ class AgentConfig:
             "mcp_integration_ids": self.mcp_integration_ids,
             "prompts": {"task_prompt": self.prompts.task_prompt},
             "tool_allowlist": self.tool_allowlist,
+            "attachment_access": self.attachment_access,
             "autonomy_level": self.autonomy_level,
             "skills_urls": self.skills_urls,
             "skill_node_ids": self.skill_node_ids,
