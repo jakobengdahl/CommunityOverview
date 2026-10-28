@@ -441,8 +441,10 @@ system that started it.
   count unlinked regular files held open by the run and its descendants,
   deduplicating descriptors by inode. The
   supervisor polls every 100 ms and checks again after termination; a detected
-  quota violation takes precedence over a function's result. If usage cannot
-  be checked, the run is terminated and fails with `runner_lost`.
+  quota violation takes precedence over a function's result. Each scan has a
+  one-second deadline so it cannot indefinitely delay supervision or the final
+  report. If usage cannot be checked, including a scan timeout, the run is
+  terminated and fails with `disk_check_failed`.
   Polling is best-effort: usage may overshoot between scans, and transient
   files closed between scans may escape accounting. The 16 MiB
   per-file limit remains in force. Operators should also cap the backing
@@ -570,6 +572,7 @@ Run-level error codes are a closed set:
 | `failed` | `protocol_error` | The function broke the protocol (§6.2). |
 | `failed` | `memory_exceeded` | The memory limit was reached (§8). |
 | `failed` | `disk_exceeded` | A scan detected excess working-directory bytes or entries (§8), regardless of any result the function sent. |
+| `failed` | `disk_check_failed` | Working-directory usage could not be checked within the scan deadline (§8); the run was terminated. |
 | `failed` | `output_too_large` | `result.output` exceeded its limit (§8). |
 | `failed` | `invalid_output` | `result.output` failed `output_schema`. |
 | `timed_out` | `timeout` | The wall-clock limit was reached (§8). |
