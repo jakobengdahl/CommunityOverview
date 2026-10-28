@@ -65,12 +65,15 @@ MAX_TIMEOUT_SECONDS = 120
 MAX_MEMORY_MIB = 256
 MAX_LOG_BYTES = 256 * 1024
 FILE_SIZE_MIB = 16
+MAX_DISK_BYTES = 256 * 1024 * 1024
+MAX_DISK_FILES = 10_000
 
 # Run statuses and the run-level codes this module produces (§11).
 STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED = "failed"
 STATUS_TIMED_OUT = "timed_out"
 CODE_RUNNER_LOST = "runner_lost"
+CODE_DISK_EXCEEDED = "disk_exceeded"
 
 # How long a function that sent its result may take to exit on its own, and how
 # long the supervisor gets to terminate everything before it counts as lost.
@@ -142,6 +145,7 @@ class RunExit:
     log_truncated: bool = False
     detail: str = ""
     cpu_limit_reached: bool = False
+    disk_limit_reached: bool = False
 
 
 def _controls_for(landlock_abi: int, seccomp: bool) -> Tuple[str, ...]:
@@ -216,12 +220,17 @@ def exit_from_report(
     stopped = bool(final.get("stopped"))
     exit_signal = final.get("signal")
     cpu_seconds = final.get("cpu_seconds") or 0
+    outcome = "killed" if stopped else "exited"
+    if final.get("monitor_error"):
+        outcome = "runner_lost"
     return RunExit(
-        "killed" if stopped else "exited",
+        outcome,
         exit_code=final.get("exit_code"),
         signal=exit_signal,
         peak_memory_kib=final.get("peak_memory_kib"),
         wall_ms=wall_ms,
+        detail=final.get("monitor_error", ""),
+        disk_limit_reached=bool(final.get("disk_exceeded")),
         # Threads that release the interpreter lock can use CPU time faster
         # than wall-clock time; the kernel's backstop then ends the run before
         # the host's timer does.
@@ -362,7 +371,23 @@ class HardenedSubprocessRunner:
     exercise the degraded path; production uses everything the host offers.
     """
 
-    def __init__(self, *, use_landlock: bool = True, use_seccomp: bool = True):
+    def __init__(
+        self,
+        *,
+        use_landlock: bool = True,
+        use_seccomp: bool = True,
+        max_disk_bytes: int = MAX_DISK_BYTES,
+        max_disk_files: int = MAX_DISK_FILES,
+    ):
+        for name, value, maximum in (
+            ("max_disk_bytes", max_disk_bytes, MAX_DISK_BYTES),
+            ("max_disk_files", max_disk_files, MAX_DISK_FILES),
+        ):
+            if type(value) is not int or not 0 < value <= maximum:
+                raise ValueError(
+                    f"{name} must be an integer above 0 and at most {maximum}"
+                )
+        self._disk_limits = {"bytes": max_disk_bytes, "files": max_disk_files}
         self._use_landlock = use_landlock
         self._use_seccomp = use_seccomp
         self._python = os.path.realpath(sys.executable)
@@ -503,6 +528,7 @@ class HardenedSubprocessRunner:
                 "read_paths": list(self._runtime_paths) + [HELPER_LIBRARY_DIR, fn_dir],
                 "list_paths": sorted(self._list_paths),
                 "work_dir": work_dir,
+                "disk_limits": self._disk_limits,
                 "argv": argv,
             }
             return self._spawn_run(spec, sandbox_spec, run_root)
@@ -710,6 +736,13 @@ def _result_for(
         if process_exit.outcome == "failed_to_start":
             logger.warning("User function failed to start: %s", process_exit.detail)
         return FunctionRunResult(STATUS_FAILED, CODE_RUNNER_LOST, message, **common)
+    if process_exit.disk_limit_reached:
+        return FunctionRunResult(
+            STATUS_FAILED,
+            CODE_DISK_EXCEEDED,
+            "The working-directory disk quota was exceeded.",
+            **common,
+        )
     if outcome.code == CODE_TIMEOUT:
         return FunctionRunResult(
             STATUS_TIMED_OUT, CODE_TIMEOUT, outcome.error_message, **common
