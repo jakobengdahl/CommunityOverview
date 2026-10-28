@@ -7,13 +7,20 @@ factory. See docs/adr/0006-graph-import-replace-mode.md.
 import os
 import threading
 import time
+from unittest.mock import Mock
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from backend.agents.execution import InMemoryExecutionStore
+from backend.agents.execution import ExecutionJob, ExecutionKind, InMemoryExecutionStore
 from backend.core import GraphStorage, Node, NodeType
+from backend.runtime.authorization import (
+    GRAPH_ACTION_READ,
+    DefaultGraphAuthorizationHook,
+    GraphAccessNarrowing,
+    GraphAuthorizationDecision,
+)
 from backend.service import GraphService, create_rest_router
 
 
@@ -33,11 +40,16 @@ def import_job_store() -> InMemoryExecutionStore:
 
 
 @pytest.fixture
-def client(temp_dir, import_job_store: InMemoryExecutionStore) -> TestClient:
+def authorization_hook():
+    return Mock(wraps=DefaultGraphAuthorizationHook())
+
+
+@pytest.fixture
+def client(temp_dir, import_job_store, authorization_hook) -> TestClient:
     json_path = os.path.join(temp_dir, "test.json")
     storage = GraphStorage(json_path=json_path)
     storage.add_nodes([Node(id="old-1", type=NodeType.ACTOR, name="Pre-existing")], [])
-    service = GraphService(storage)
+    service = GraphService(storage, authorization_hook=authorization_hook)
     router = create_rest_router(service, import_job_store=import_job_store)
 
     app = FastAPI()
@@ -109,6 +121,118 @@ class TestImportEndpoint:
         assert response.status_code == 200
         jobs = response.json()
         assert any(job["id"] == job_id for job in jobs)
+
+
+class TestImportJobReadAuthorization:
+    @pytest.mark.parametrize(
+        "path, target",
+        [
+            ("/api/graph/import", "list_import_jobs"),
+            ("/api/graph/import/job-1", "get_import_job"),
+            ("/api/graph/import/does-not-exist", "get_import_job"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "allowed, narrowing, status",
+        [
+            (False, GraphAccessNarrowing(), 403),
+            (True, GraphAccessNarrowing(enabled=True), 409),
+            (
+                True,
+                GraphAccessNarrowing(
+                    enabled=True,
+                    allow_local_graph=False,
+                    include_graph_ids=("graph-a",),
+                ),
+                409,
+            ),
+        ],
+    )
+    def test_refused_read_checks_request_context_before_accessing_jobs(
+        self,
+        client,
+        import_job_store,
+        authorization_hook,
+        monkeypatch,
+        path,
+        target,
+        allowed,
+        narrowing,
+        status,
+    ):
+        """Denied or narrowed readers cannot access even the job store."""
+        authorization_hook.evaluate.return_value = GraphAuthorizationDecision(
+            allowed=allowed, graph_access=narrowing
+        )
+        for method in ("get", "list_jobs"):
+            monkeypatch.setattr(
+                import_job_store, method, Mock(side_effect=AssertionError("read jobs"))
+            )
+
+        response = client.get(
+            path,
+            headers={
+                "x-communityoverview-actor-id": "actor-7",
+                "x-communityoverview-workspace-id": "workspace-7",
+                "x-communityoverview-graph-id": "graph-a",
+            },
+        )
+
+        assert response.status_code == status
+        if status == 409:
+            assert (
+                response.json()["detail"]["error_code"]
+                == "import_requires_full_graph_access"
+            )
+        authorization_hook.evaluate.assert_called_once()
+        context = authorization_hook.evaluate.call_args.args[0]
+        assert (context.action, context.target) == (GRAPH_ACTION_READ, target)
+        assert context.actor["actor_id"] == "actor-7"
+        assert context.scope["workspace_id"] == "workspace-7"
+        assert context.graph_id == "graph-a"
+
+    @pytest.mark.parametrize("mode", ["permissive", "read-only"])
+    @pytest.mark.parametrize(
+        "path", ["/api/graph/import?limit=1", "/api/graph/import/job-1"]
+    )
+    def test_full_graph_read_preserves_job_metadata(
+        self, client, import_job_store, authorization_hook, monkeypatch, mode, path
+    ):
+        """Full read access suffices, including when mutations are forbidden."""
+        monkeypatch.setenv("COMMUNITYOVERVIEW_AUTHORIZATION_MODE", mode)
+        import_job_store.enqueue(
+            ExecutionJob(
+                id="job-1",
+                agent_id="import",
+                kind=ExecutionKind.IMPORT,
+                idempotency_key="job-1",
+                correlation_id="correlation-1",
+                payload={
+                    "backup_path": "/backups/graph.json",
+                    "mode": "merge",
+                    "phase": "merge",
+                    "plan_digest": "digest-1",
+                    "counts": {"added_nodes": 1},
+                },
+                result={"merge_status": "committed"},
+            )
+        )
+
+        response = client.get(path)
+
+        assert response.status_code == 200
+        body = response.json()
+        if isinstance(body, list):
+            assert len(body) == 1
+            body = body[0]
+        assert body["id"] == "job-1"
+        assert body["backup_path"] == "/backups/graph.json"
+        assert body["correlation_id"] == "correlation-1"
+        assert body["plan_digest"] == "digest-1"
+        assert body["counts"] == {"added_nodes": 1}
+        assert body["merge_status"] == "committed"
+        authorization_hook.evaluate.assert_called_once()
+        assert authorization_hook.evaluate.call_args.args[0].action == GRAPH_ACTION_READ
 
 
 class TestImportReturnsBeforeEmbeddingsComplete:
