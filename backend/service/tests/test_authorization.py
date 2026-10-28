@@ -580,6 +580,108 @@ class TestMutationScopeNarrowing:
         assert "not found" in blocked_source["message"]
         assert allowed["success"] is True
 
+    @pytest.mark.parametrize("endpoint", ["local-1", "alpha-1"])
+    def test_add_edge_rechecks_scope_at_storage_insertion(
+        self, tmp_path, monkeypatch, endpoint
+    ):
+        service = self._alpha_scoped_service(tmp_path)
+        storage = service.storage
+        original_add_edge = storage.add_edge
+        original_edges = set(storage.edges)
+
+        def move_endpoint_then_insert(edge, **kwargs):
+            # Interleave a scope change after service validation, before insertion.
+            storage.update_node(
+                endpoint, {"metadata": {"origin_graph_id": "graph-beta"}}
+            )
+            return original_add_edge(edge, **kwargs)
+
+        monkeypatch.setattr(storage, "add_edge", move_endpoint_then_insert)
+        result = service.add_edge("local-1", "alpha-1", type="RELATES_TO")
+
+        assert result == {
+            "success": False,
+            "message": "Could not add edge (source or target not found)",
+        }
+        assert set(storage.edges) == original_edges
+
+    @pytest.mark.parametrize("end", ["source", "target"])
+    @pytest.mark.parametrize("by_name", [False, True])
+    @pytest.mark.parametrize("federated", [False, True])
+    def test_add_nodes_hidden_and_missing_endpoints_get_the_same_refusal(
+        self, empty_storage, end, by_name, federated
+    ):
+        """Hidden endpoints never reveal their existence or leave partial writes."""
+        hidden_id = "federated::graph-beta::hidden" if federated else "hidden"
+        empty_storage.add_nodes(
+            [
+                Node(id="visible", name="Visible", type=NodeType.ACTOR),
+                Node(
+                    id=hidden_id,
+                    name="Hidden",
+                    type=NodeType.ACTOR,
+                    metadata={"origin_graph_id": "graph-beta"},
+                ),
+            ],
+            [],
+        )
+        service = GraphService(
+            empty_storage,
+            authorization_hook=FixedNarrowingHook(
+                allow_local_graph=True, include_graph_ids=("graph-alpha",)
+            ),
+        )
+        results = []
+        for endpoint in ("Hidden" if by_name else hidden_id, "missing"):
+            edge = {"source": "visible", "target": "visible", "type": "RELATES_TO"}
+            edge[end] = endpoint
+            results.append(
+                service.add_nodes(
+                    [{"id": "new", "name": "New", "type": "Actor"}], [edge]
+                )
+            )
+        assert results[0]["success"] is False
+        assert results[0]["message"] == results[1]["message"]
+        assert results[0]["added_node_ids"] == results[0]["added_edge_ids"] == []
+        assert empty_storage.get_node("new") is None
+        assert not empty_storage.edges
+
+    @pytest.mark.parametrize("by_name", [False, True])
+    def test_add_nodes_accepts_visible_and_same_call_endpoints(
+        self, empty_storage, by_name
+    ):
+        """Narrowing permits visible existing nodes and nodes created in this call."""
+        empty_storage.add_nodes(
+            [
+                Node(
+                    id="visible",
+                    name="Visible",
+                    type="Actor",
+                    metadata={"origin_graph_id": "graph-alpha"},
+                )
+            ],
+            [],
+        )
+        service = GraphService(
+            empty_storage,
+            authorization_hook=FixedNarrowingHook(
+                allow_local_graph=False, include_graph_ids=("graph-alpha",)
+            ),
+        )
+        result = service.add_nodes(
+            [{"id": "new", "name": "New", "type": "Actor"}],
+            [
+                {
+                    "source": "New" if by_name else "new",
+                    "target": "Visible" if by_name else "visible",
+                    "type": "RELATES_TO",
+                }
+            ],
+        )
+        assert result["success"] is True
+        edge = empty_storage.edges[result["added_edge_ids"][0]]
+        assert (edge.source, edge.target) == ("new", "visible")
+
     def test_standalone_default_hook_mutates_graph_tagged_entities(self, tmp_path):
         # With the default (permissive, narrowing-disabled) hook, a node/edge
         # touching an origin_graph_id-tagged node is freely mutable/deletable —

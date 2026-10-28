@@ -335,8 +335,9 @@ listed in §11.
 | `graph.add` | `graph:write` | `add_nodes` (nodes and edges) |
 | `graph.update_node` | `graph:write` | `update_node` |
 
-Arguments and results follow the mapped MCP tool, with these restrictions; a
-call that breaks one is refused with `invalid_arguments`:
+Arguments and results follow the mapped MCP tool, with these restrictions.
+Argument validation failures return `invalid_arguments`; endpoint resolution
+failures return `tool_failed`:
 
 - Each tool accepts only its documented arguments. Arguments that would change
   scope are rejected: a graph or session id, an event origin or correlation id
@@ -348,9 +349,11 @@ call that breaks one is refused with `invalid_arguments`:
   `adopted_from` and the related keys) are refused at the top level of a node
   or edge and inside its `metadata`, and `metadata` must be an object; node ids
   in the reserved `federated::` namespace are refused, whether created, updated
-  or used as an edge endpoint, and so is an edge endpoint given by a name that a
-  federated reference node carries, unless a node created in the same call
-  carries that name (the endpoint then resolves to the new node); and `graph.update_node` changes `metadata` only
+  or used as an edge endpoint. Endpoint names are resolved under the storage
+  lock; names resolving to federated reference nodes return `tool_failed` with
+  the same message as missing or hidden endpoints. A local endpoint resolved
+  by id or name, including a node created in the same call, is allowed; and
+  `graph.update_node` changes `metadata` only
   with `metadata_merge: true`, so keys the function does not name are kept.
 - Work per call is bounded: `limit` is an integer from 0 to 500 and `depth`
   from 0 to 3.
