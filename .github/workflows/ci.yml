@@ -827,6 +827,72 @@ jobs:
           # amd64 only — see the note on the core image build above.
           platforms: linux/amd64
 
+      - name: Set up Syft
+        id: syft
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          syft-version: v1.54.0
+
+      # Scan the actual published images, including installed Python packages
+      # and the core image's retained frontend production package metadata.
+      - name: Generate release SBOMs
+        env:
+          SYFT_CMD: ${{ steps.syft.outputs.cmd }}
+          CORE_DIGEST: ${{ steps.build-core.outputs.digest }}
+          GATEWAY_DIGEST: ${{ steps.build-gateway.outputs.digest }}
+          SYFT_CHECK_FOR_APP_UPDATE: 'false'
+        run: |
+          set -euo pipefail
+          mkdir -p release-evidence
+          core_image="${REGISTRY}/${CORE_IMAGE}"
+          gateway_image="${REGISTRY}/${GATEWAY_IMAGE}"
+          core_ref="${core_image,,}@${CORE_DIGEST}"
+          gateway_ref="${gateway_image,,}@${GATEWAY_DIGEST}"
+          for artifact in core gateway; do
+            if [ "$artifact" = core ]; then
+              image_ref="$core_ref"
+              digest="$CORE_DIGEST"
+            else
+              image_ref="$gateway_ref"
+              digest="$GATEWAY_DIGEST"
+            fi
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            prefix="release-evidence/${artifact}-sha-${GITHUB_SHA}"
+            "$SYFT_CMD" scan "registry:$image_ref" \
+              --platform linux/amd64 --parallelism 2 \
+              --source-name "$image_ref" --source-version "$GITHUB_SHA" \
+              -o "spdx-json@2.3=${prefix}.spdx.json" \
+              -o "cyclonedx-json@1.6=${prefix}.cyclonedx.json"
+            test -s "${prefix}.spdx.json"
+            test -s "${prefix}.cyclonedx.json"
+            # Fail if cataloging silently loses either shipped ecosystem.
+            for ecosystem in pypi $(if [ "$artifact" = core ]; then echo npm; fi); do
+              jq -e --arg prefix "pkg:${ecosystem}/" \
+                'any(.packages[].externalRefs[]?;
+                  .referenceType == "purl" and (.referenceLocator | startswith($prefix)))' \
+                "${prefix}.spdx.json" > /dev/null
+            done
+          done
+          jq -n \
+            --arg commit_sha "$GITHUB_SHA" --arg ref "$GITHUB_REF" \
+            --arg version "sha-$GITHUB_SHA" --arg run_id "$GITHUB_RUN_ID" \
+            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg core "$core_ref" --arg gateway "$gateway_ref" \
+            '{commit_sha: $commit_sha, ref: $ref, version: $version,
+              run_id: $run_id, run_attempt: $run_attempt,
+              images: {core: $core, gateway: $gateway}}' \
+            > release-evidence/release.json
+          (cd release-evidence && sha256sum *.json > SHA256SUMS)
+
+      - name: Retain release evidence
+        id: release-evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-evidence/
+          if-no-files-found: error
+          retention-days: 90
+
       # -------------------------------------------------------------------
       # Artifact metadata – written to the workflow summary so infra
       # engineers can inspect the release at a glance.
@@ -845,6 +911,7 @@ jobs:
           echo "| **core_digest** | \`${{ steps.build-core.outputs.digest }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| **gateway_image** | \`${{ env.REGISTRY }}/${{ env.GATEWAY_IMAGE }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| **gateway_digest** | \`${{ steps.build-gateway.outputs.digest }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **release_evidence** | ${{ steps.release-evidence.outputs.artifact-url }} |" >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
   # Notify Infra – optional repository_dispatch to the infra repo
