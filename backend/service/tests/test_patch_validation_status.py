@@ -78,13 +78,15 @@ def open_client(tmp_path, monkeypatch):
 
 @pytest.fixture
 def auth_client(tmp_path, monkeypatch):
-    return _make_app(
+    client = _make_app(
         tmp_path,
         monkeypatch,
         auth_enabled=True,
         auth_username=_AUTH[0],
         auth_password=_AUTH[1],
     )
+    client.headers["X-Requested-With"] = "api-client"
+    return client
 
 
 def _patch(client, kind, entity_id, updates, **kwargs):

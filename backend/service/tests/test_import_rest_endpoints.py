@@ -7,7 +7,7 @@ factory. See docs/adr/0006-graph-import-replace-mode.md.
 import os
 import threading
 import time
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -22,6 +22,7 @@ from backend.runtime.authorization import (
     GraphAuthorizationDecision,
 )
 from backend.service import GraphService, create_rest_router
+from backend.service import rest_api
 
 
 def _valid_document():
@@ -70,6 +71,58 @@ def _wait_for_terminal(client: TestClient, job_id: str, timeout: float = 5.0) ->
 
 
 class TestImportEndpoint:
+    def test_oversized_content_length_is_rejected_before_reading(
+        self, client, monkeypatch
+    ):
+        monkeypatch.setattr(rest_api, "_MAX_IMPORT_JSON_BYTES", 20)
+        with patch.object(
+            rest_api.Request,
+            "stream",
+            side_effect=AssertionError("body must not be read"),
+        ):
+            response = client.post(
+                "/api/graph/import", content=b"{}", headers={"Content-Length": "21"}
+            )
+        assert response.status_code == 413
+        assert client.get("/api/graph/nodes/old-1").status_code == 200
+
+    @pytest.mark.parametrize("content_length", [None, "invalid", "1"])
+    def test_oversized_stream_is_rejected_without_trusting_content_length(
+        self, client, monkeypatch, content_length
+    ):
+        monkeypatch.setattr(rest_api, "_MAX_IMPORT_JSON_BYTES", 20)
+        headers = {} if content_length is None else {"Content-Length": content_length}
+        response = client.post(
+            "/api/graph/import", content=iter([b"x" * 11, b"x" * 11]), headers=headers
+        )
+        assert response.status_code == 413
+        assert client.get("/api/graph/nodes/old-1").status_code == 200
+
+    @pytest.mark.parametrize("body", [b"not json", b"[]", b"null", b""])
+    def test_invalid_body_returns_422(self, client, body):
+        response = client.post(
+            "/api/graph/import",
+            content=body,
+            headers={"Content-Type": "application/json"},
+        )
+        assert response.status_code == 422
+        assert client.get("/api/graph/nodes/old-1").status_code == 200
+
+    def test_parse_errors_do_not_echo_the_upload(self, client):
+        response = client.post(
+            "/api/graph/import", content=b"caller-controlled-" * 1_000
+        )
+        assert response.status_code == 422
+        assert len(response.content) < 1_000
+        assert "caller-controlled-" not in response.text
+
+    def test_import_body_is_documented_in_openapi(self, client):
+        body = client.get("/openapi.json").json()["paths"]["/api/graph/import"]["post"][
+            "requestBody"
+        ]
+        assert body["required"] is True
+        assert body["content"]["application/json"]["schema"]["type"] == "object"
+
     def test_post_import_replaces_the_graph(self, client: TestClient):
         response = client.post("/api/graph/import", json=_valid_document())
 

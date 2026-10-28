@@ -25,6 +25,7 @@ from backend.runtime.authorization import (
     GraphAuthorizationContext,
     GraphAuthorizationDecision,
     get_current_request_authorization_inputs,
+    use_request_authorization,
 )
 from backend.runtime.request_context import ACTOR_ID_HEADER
 from backend.service import GraphService
@@ -234,25 +235,59 @@ def test_cached_collection_is_not_served_to_a_caller_who_cannot_read_it(
     assert _collection_chat("writer-only").status_code == 200
     assert "Collect actors." not in mock_llm.received_system_prompts[0]
 
+    assert _collection_chat("editor").status_code == 200
+    assert "Collect actors." in mock_llm.received_system_prompts[0]
 
-def test_upload_analysis_write_by_read_only_actor_is_denied(hooked_client):
+
+def test_upload_analysis_binds_each_actor_in_one_client(hooked_client):
     client, mock_llm, graph_service, hook = hooked_client
+
+    def _upload(actor_id):
+        return client.post(
+            "/ui/upload",
+            files={"file": ("doc.txt", io.BytesIO(_DOC), "text/plain")},
+            data={"analyze": "true"},
+            headers={ACTOR_ID_HEADER: actor_id},
+        )
+
+    editor_node = {**_NEW_NODE, "id": "editor-upload"}
+    mock_llm.mock_tool_calls = [
+        {"name": "add_nodes", "input": {"nodes": [editor_node], "edges": []}}
+    ]
+    assert _upload("editor").status_code == 200
+    assert hook.seen_actor_ids and set(hook.seen_actor_ids) == {"editor"}
+    assert (
+        graph_service.get_node_details(editor_node["id"])["node"]["id"]
+        == editor_node["id"]
+    )
+    hook.seen_actor_ids.clear()
+    mock_llm.reset()
     mock_llm.mock_tool_calls = [
         {"name": "add_nodes", "input": {"nodes": [_NEW_NODE], "edges": []}}
     ]
 
-    response = client.post(
-        "/ui/upload",
-        files={"file": ("doc.txt", io.BytesIO(_DOC), "text/plain")},
-        data={"analyze": "true"},
-        headers={ACTOR_ID_HEADER: "viewer"},
-    )
+    response = _upload("viewer")
 
     assert response.status_code == 200
     tool_result = response.json()["chat_response"]["toolResult"]
     assert tool_result["error_code"] == "access_denied"
-    assert "viewer" in hook.seen_actor_ids
+    assert hook.seen_actor_ids and set(hook.seen_actor_ids) == {"viewer"}
     assert graph_service.get_node_details(_NEW_NODE["id"]).get("success") is False
+
+
+def test_request_authorization_restores_inputs_after_success_and_exception():
+    """Request inputs are restored in the same context, including exceptional exits."""
+    assert get_current_request_authorization_inputs() == {}
+    with use_request_authorization(actor_id="editor"):
+        editor_inputs = get_current_request_authorization_inputs()
+        with use_request_authorization(actor_id="viewer"):
+            assert get_current_request_authorization_inputs()["actor_id"] == "viewer"
+        assert get_current_request_authorization_inputs() == editor_inputs
+        with pytest.raises(RuntimeError, match="request failed"):
+            with use_request_authorization(actor_id="outsider"):
+                raise RuntimeError("request failed")
+        assert get_current_request_authorization_inputs() == editor_inputs
+    assert get_current_request_authorization_inputs() == {}
 
 
 def test_propose_nodes_runs_with_the_callers_request_bound(hooked_client):

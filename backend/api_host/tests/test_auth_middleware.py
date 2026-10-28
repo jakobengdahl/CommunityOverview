@@ -7,12 +7,15 @@ import json
 import os
 import tempfile
 
+import pytest
 from unittest.mock import patch
 
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from backend.api_host.config import AppConfig
 from backend.api_host.server import create_app
+from backend.api_host.middleware import add_auth_middleware
 from backend.api_host.session_auth import SESSION_COOKIE_NAME
 
 
@@ -40,6 +43,57 @@ def _auth_header(username: str, password: str) -> dict:
     """Build a Basic Auth header dict."""
     creds = base64.b64encode(f"{username}:{password}".encode()).decode()
     return {"Authorization": f"Basic {creds}"}
+
+
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("POST", "/api/sessions/id/ops"),
+        ("PUT", "/api/import/archive"),
+        ("PATCH", "/api/nodes/id/attachments"),
+        ("DELETE", "/api/nodes/id/attachments"),
+    ],
+)
+@pytest.mark.parametrize(
+    "metadata,allowed",
+    [
+        ({}, False),
+        ({"Sec-Fetch-Site": "cross-site"}, False),
+        ({"Sec-Fetch-Site": "same-site"}, False),
+        ({"Sec-Fetch-Site": "same-origin"}, True),
+        ({"Sec-Fetch-Site": "none"}, True),
+        ({"X-Requested-With": "api-client"}, True),
+        ({"Sec-Fetch-Site": "cross-site", "X-Requested-With": "fetch"}, True),
+        ({"Sec-Fetch-Site": "cross-site", "X-Requested-With": " "}, False),
+    ],
+)
+def test_basic_auth_raw_writes_require_fetch_metadata_or_custom_header(
+    method, path, metadata, allowed
+):
+    """Unsafe Basic requests cannot reach raw-body handlers through a cross-site form."""
+    app = FastAPI()
+    writes = []
+
+    @app.api_route(path, methods=[method])
+    async def write(request: Request):
+        writes.append(await request.body())
+        return {"success": True}
+
+    add_auth_middleware(
+        app, AppConfig(auth_enabled=True, auth_username="admin", auth_password="secret")
+    )
+    response = TestClient(app).request(
+        method,
+        path,
+        content=b"untrusted body",
+        headers={
+            **_auth_header("admin", "secret"),
+            "Content-Type": "text/plain",
+            **metadata,
+        },
+    )
+    assert response.status_code == (200 if allowed else 403)
+    assert writes == ([b"untrusted body"] if allowed else [])
 
 
 class TestMcpBasicAuth:

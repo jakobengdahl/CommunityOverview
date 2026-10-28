@@ -325,6 +325,20 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
                 ok_pass = secrets.compare_digest(password, config.auth_password)
                 if not (ok_user and ok_pass):
                     raise ValueError("invalid basic credentials")
+                # Browsers may attach cached Basic credentials to cross-site
+                # forms. Require fetch metadata or a header forms cannot set.
+                if (
+                    request.method not in {"GET", "HEAD", "OPTIONS"}
+                    and request.headers.get("sec-fetch-site")
+                    not in {"same-origin", "none"}
+                    and not request.headers.get("x-requested-with", "").strip()
+                ):
+                    return JSONResponse(
+                        status_code=403,
+                        content={
+                            "detail": "Basic-auth writes require same-origin fetch metadata or X-Requested-With"
+                        },
+                    )
 
             else:
                 raise ValueError(f"unsupported scheme: {scheme}")

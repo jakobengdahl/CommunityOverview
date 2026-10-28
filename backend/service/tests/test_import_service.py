@@ -178,10 +178,12 @@ class TestImportRequiresFullGraphAccess:
 
 class TestImportReplaceFailure:
     def test_a_replace_failure_is_reported_and_keeps_the_backup_path(
-        self, empty_storage: GraphStorage, monkeypatch
+        self, empty_storage: GraphStorage, monkeypatch, caplog
     ):
-        def _boom(nodes, edges):
-            raise RuntimeError("disk full")
+        private_detail = "could not save /private/store/graph.json as database_role"
+
+        def _boom(nodes, edges, **kwargs):
+            raise RuntimeError(private_detail)
 
         monkeypatch.setattr(empty_storage, "replace_all_nodes_and_edges", _boom)
         store = InMemoryExecutionStore()
@@ -195,6 +197,12 @@ class TestImportReplaceFailure:
         assert result["graph_replaced"] is False
         assert result["backup_path"] is not None
         assert store.list_jobs() == []
+        assert private_detail not in json.dumps(result)
+        assert result["message"] == (
+            "Import failed while committing the new graph; the previous graph is unchanged."
+        )
+        assert private_detail in caplog.text
+        assert "RuntimeError" in caplog.text
 
 
 class TestEnqueueOrDrainStartFailureIsNotFatalToTheReplace:
