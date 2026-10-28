@@ -38,6 +38,8 @@ SECCOMP_MODE_FILTER = 2
 
 MIB = 1024 * 1024
 DISK_POLL_SECONDS = 0.1
+# Leave time for cleanup and the final report within the host's stop deadline.
+DISK_SCAN_TIMEOUT_SECONDS = 1.0
 
 # Exit code of the function child when setting up the sandbox failed; the
 # reason travels over the setup descriptor, so the code is never trusted alone.
@@ -511,6 +513,15 @@ def _read_all(fd):
         data += chunk
 
 
+def _process_has_exited(pid):
+    try:
+        with open(f"/proc/{pid}/stat") as handle:
+            fields = handle.read().rsplit(")", 1)[1].split()
+    except (FileNotFoundError, ProcessLookupError):
+        return True
+    return fields[0] in ("Z", "X")
+
+
 def _work_dir_exceeds_quota(spec):
     """Count entries and bytes without following links; stop at the quota.
 
@@ -569,13 +580,23 @@ def _work_dir_exceeds_quota(spec):
             pending.extend(_children_of(pid))
             try:
                 descriptors = os.listdir(f"/proc/{pid}/fd")
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 continue
+            except PermissionError:
+                # /proc can deny access during exit, after the task has lost
+                # its files. A live task's unreadable descriptors still fail shut.
+                if _process_has_exited(pid):
+                    continue
+                raise
             for descriptor in descriptors:
                 try:
                     info = os.stat(f"/proc/{pid}/fd/{descriptor}")
-                except FileNotFoundError:
+                except (FileNotFoundError, ProcessLookupError):
                     continue  # Closed or exited during the scan.
+                except PermissionError:
+                    if _process_has_exited(pid):
+                        break
+                    raise
                 identity = (info.st_dev, info.st_ino)
                 if (
                     info.st_nlink != 0
@@ -593,6 +614,24 @@ def _work_dir_exceeds_quota(spec):
         for directory, entries in reversed(stack):
             entries.close()
             os.close(directory)
+
+
+def _on_disk_scan_timeout(signum, frame):
+    raise TimeoutError("Working-directory quota scan timed out.")
+
+
+def _check_work_dir_quota(spec):
+    # The supervisor is single-threaded. A real-time alarm also interrupts a
+    # blocked filesystem call, so neither polling nor the final scan can hold
+    # up stop requests and reporting indefinitely.
+    previous = signal.getsignal(signal.SIGALRM)
+    try:
+        signal.signal(signal.SIGALRM, _on_disk_scan_timeout)
+        signal.setitimer(signal.ITIMER_REAL, DISK_SCAN_TIMEOUT_SECONDS)
+        return _work_dir_exceeds_quota(spec)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def supervise(spec, status_fd):
@@ -641,7 +680,7 @@ def supervise(spec, status_fd):
                         exit_code = os.WEXITSTATUS(status)
                     break
                 if time.monotonic() >= next_disk_poll:
-                    disk_exceeded = _work_dir_exceeds_quota(spec)
+                    disk_exceeded = _check_work_dir_quota(spec)
                     if disk_exceeded:
                         stopped = True
                         break
@@ -663,7 +702,7 @@ def supervise(spec, status_fd):
     # Catch fast runs and EOF-triggered stop requests between polling ticks.
     if not disk_exceeded and not monitor_error:
         try:
-            disk_exceeded = _work_dir_exceeds_quota(spec)
+            disk_exceeded = _check_work_dir_quota(spec)
         except OSError as exc:
             monitor_error = str(exc)
     usage = resource.getrusage(resource.RUSAGE_CHILDREN)
