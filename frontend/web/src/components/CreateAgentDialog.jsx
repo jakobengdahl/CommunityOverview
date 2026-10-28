@@ -344,8 +344,14 @@ export default function CreateAgentDialog({
 
   return (
     <div className="dialog-overlay" onClick={onClose}>
-      <div className="dialog-content subscription-dialog" onClick={(e) => e.stopPropagation()}>
-        <h2>{initialData ? t('agent_dialog.title_edit') : t('agent_dialog.title')}</h2>
+      <div
+        className="dialog-content subscription-dialog"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="create-agent-dialog-title"
+      >
+        <h2 id="create-agent-dialog-title">{initialData ? t('agent_dialog.title_edit') : t('agent_dialog.title')}</h2>
         <p className="dialog-description">{t('agent_dialog.description')}</p>
 
         <form onSubmit={handleSubmit}>

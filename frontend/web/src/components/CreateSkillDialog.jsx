@@ -79,8 +79,14 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
 
   return (
     <div className="dialog-overlay" onClick={onClose}>
-      <div className="dialog-content subscription-dialog" onClick={(e) => e.stopPropagation()}>
-        <h2>
+      <div
+        className="dialog-content subscription-dialog"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="create-skill-dialog-title"
+      >
+        <h2 id="create-skill-dialog-title">
           {isEditing
             ? t('skill_dialog.title_edit', { type: nodeType })
             : t('skill_dialog.title', { type: nodeType })}

@@ -260,8 +260,11 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
         className="dialog-content subscription-dialog"
         style={{ maxWidth: '680px' }}
         onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="create-collection-dialog-title"
       >
-        <h2>
+        <h2 id="create-collection-dialog-title">
           {initialData
             ? t('active_data_collection.title_edit')
             : t('active_data_collection.title_create')}
