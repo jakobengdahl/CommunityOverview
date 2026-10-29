@@ -1042,8 +1042,11 @@ function GraphCanvasInner({
   // is not treated as a switch (mount already fits via the ReactFlow fitView prop).
   const lastSessionKeyRef = useRef(sessionKey);
   const fitOnSessionKeyRef = useRef(sessionKey);
-  // clearGroupsFlag as the node-reconciliation effect last saw it. The flag
-  // stays raised for a while after a clear, so only its rise is the clear.
+  // The clear signal as the node-reconciliation effect last saw it. The host's
+  // canvasBaselineEpoch moves on every clear; clearGroupsFlag stays raised for
+  // a while after one (and through a second clear inside that window), so for a
+  // host that passes no epoch only the flag's rise counts as the clear.
+  const lastCanvasBaselineEpochRef = useRef(canvasBaselineEpoch);
   const lastClearGroupsFlagRef = useRef(false);
 
   // Undo/redo history for node-position moves (drag + organize). Restoring a
@@ -1617,8 +1620,12 @@ function GraphCanvasInner({
   useEffect(() => {
     const sessionChanged = lastSessionKeyRef.current !== sessionKey;
     lastSessionKeyRef.current = sessionKey;
-    const clearRaised = clearGroupsFlag && !lastClearGroupsFlagRef.current;
+    const clearRaised =
+      canvasBaselineEpoch === null
+        ? clearGroupsFlag && !lastClearGroupsFlagRef.current
+        : canvasBaselineEpoch !== lastCanvasBaselineEpochRef.current;
     lastClearGroupsFlagRef.current = clearGroupsFlag;
+    lastCanvasBaselineEpochRef.current = canvasBaselineEpoch;
     const focusChanged = lastFocusRootRef.current !== activeFocusRootId;
     const enteringFocus = focusChanged && activeFocusRootId !== null;
     const leavingFocus = focusChanged && activeFocusRootId === null;
@@ -1634,9 +1641,9 @@ function GraphCanvasInner({
     if (leavingFocus) preFocusRef.current = null;
     setNodes((nds) => {
       // A session switch drops the previous session's manual annotations too:
-      // clearVisualization raises clearGroupsFlag, and the new session's
-      // overlays arrive through the restore path. Only the run that sees the
-      // flag rise drops them: the flag stays raised for a while, and dropping on
+      // clearVisualization signals the clear, and the new session's overlays
+      // arrive through the restore path. Only the run that sees the clear
+      // drops them: clearGroupsFlag stays raised for a while, and dropping on
       // every run inside that window also removed the overlays the restore had
       // just added — the next autosave then sent a delete for each of them.
       // Outside a switch, keep the live ones — except while focused, where the
@@ -1707,6 +1714,7 @@ function GraphCanvasInner({
     unfocusedNodeCount,
     setNodes,
     clearGroupsFlag,
+    canvasBaselineEpoch,
     sessionKey,
     activeFocusRootId,
   ]);
