@@ -827,13 +827,19 @@ class FileGraphPersistenceBackend:
 
     def save_graph_data(self, data: Dict[str, Any]) -> None:
         with self._lock:
+            if not self._mirrored and self.json_path.exists():
+                self._load_locked()
             # A pending merge is judged against the graph it was written
             # against; replacing that graph first would make it unjudgeable.
             if self._staged_sessions:
-                if not self._mirrored and self.json_path.exists():
-                    self._load_locked()
                 if self._layers_loaded:
                     self._settle_merge_locked()
+            # Retire the OLD graph's journal before committing its replacement.
+            # A cleanup failure must leave the old graph durable, rather than
+            # raise after the new snapshot has already replaced it. Checkpoint
+            # first so even a partially truncated journal loses no old writes.
+            if self.journal_path.exists():
+                self._checkpoint_locked()
             metadata = dict(data.get("metadata") or {})
             # The file keeps its identity across whole-graph saves: the
             # journal is truncated in the same call, so the id only has to be
@@ -844,20 +850,11 @@ class FileGraphPersistenceBackend:
                 or _new_journal_id()
             )
             snapshot = {**data, "metadata": metadata}
+            self._write_snapshot(snapshot)
             self._nodes = {n["id"]: n for n in data.get("nodes", [])}
             self._edges = {e["id"]: e for e in data.get("edges", [])}
-            # The mirror takes the save's metadata now, as it takes its nodes,
-            # but a freshly minted id only once both writes have landed - see
-            # _checkpoint_locked for why.
-            self._metadata = {
-                k: v
-                for k, v in metadata.items()
-                if k != "journal_id" or v == self._metadata.get("journal_id")
-            }
-            self._mirrored = True
-            self._write_snapshot(snapshot)
-            self._truncate_journal()
             self._metadata = metadata
+            self._mirrored = True
 
     def default_graph_name(self) -> str:
         return self.json_path.stem
