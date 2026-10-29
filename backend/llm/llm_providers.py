@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 import json
 import os
+from backend.runtime.extensions import get_runtime_extensions, runtime_context
 
 
 class LLMProvider(ABC):
@@ -60,6 +61,7 @@ class ClaudeProvider(LLMProvider):
         max_tokens: int = 4096,
     ) -> LLMResponse:
         """Create completion using Claude API"""
+        get_runtime_extensions().require_admission(runtime_context("model_invocation"))
         response = self.client.messages.create(
             model=self.model,
             max_tokens=max_tokens,
@@ -125,6 +127,7 @@ class OpenAIProvider(LLMProvider):
         # Format tools for OpenAI (skip if tool calling is disabled for this endpoint)
         openai_tools = self.format_tool_definitions(tools) if self._tool_calling else []
 
+        get_runtime_extensions().require_admission(runtime_context("model_invocation"))
         response = self.client.chat.completions.create(
             model=self.model,
             max_tokens=max_tokens,
@@ -149,7 +152,9 @@ class OpenAIProvider(LLMProvider):
                         "type": "tool_use",
                         "id": tool_call.id,
                         "name": tool_call.function.name,
-                        "input": json.loads(tool_call.function.arguments),
+                        "input": self._parse_tool_arguments(
+                            tool_call.function.arguments
+                        ),
                     }
                 )
 
@@ -198,27 +203,28 @@ class OpenAIProvider(LLMProvider):
                 if isinstance(content, str):
                     openai_messages.append({"role": "user", "content": content})
                 elif isinstance(content, list):
-                    # Check if this is a tool_result message
-                    if content and content[0].get("type") == "tool_result":
-                        # Convert tool results to OpenAI format
-                        for item in content:
+                    # Tool messages must directly follow the assistant message
+                    # holding the tool_calls, so a user turn mixing tool_result
+                    # and text blocks emits all tool messages first, then the
+                    # text as one user message.
+                    text_parts = []
+                    for block in content:
+                        if not isinstance(block, dict):
+                            continue
+                        if block.get("type") == "tool_result":
                             openai_messages.append(
                                 {
                                     "role": "tool",
-                                    "tool_call_id": item.get("tool_use_id"),
-                                    "content": item.get("content", ""),
+                                    "tool_call_id": block.get("tool_use_id"),
+                                    "content": block.get("content", ""),
                                 }
                             )
-                    else:
-                        # Regular content blocks
-                        text_parts = []
-                        for block in content:
-                            if isinstance(block, dict) and block.get("type") == "text":
-                                text_parts.append(block.get("text", ""))
-                        if text_parts:
-                            openai_messages.append(
-                                {"role": "user", "content": "\n".join(text_parts)}
-                            )
+                        elif block.get("type") == "text":
+                            text_parts.append(block.get("text", ""))
+                    if text_parts:
+                        openai_messages.append(
+                            {"role": "user", "content": "\n".join(text_parts)}
+                        )
 
             elif role == "assistant":
                 # Handle assistant messages with tool calls
@@ -256,6 +262,17 @@ class OpenAIProvider(LLMProvider):
 
         return openai_messages
 
+    @staticmethod
+    def _parse_tool_arguments(arguments: Optional[str]) -> Any:
+        # Some OpenAI-compatible servers send "" or "null" for no-argument
+        # tools, and dispatch reads the input as a dict, so those become {}.
+        # Any other JSON is returned as parsed (dispatch reports a non-object as
+        # a tool error); malformed JSON still raises.
+        if arguments is None or not arguments.strip():
+            return {}
+        parsed = json.loads(arguments)
+        return {} if parsed is None else parsed
+
     def _map_finish_reason(self, finish_reason: str) -> str:
         """Map OpenAI finish_reason to Claude stop_reason"""
         mapping = {
@@ -265,6 +282,33 @@ class OpenAIProvider(LLMProvider):
             "content_filter": "end_turn",
         }
         return mapping.get(finish_reason, "end_turn")
+
+
+_JSON_TYPE_NAMES = {
+    list: "array",
+    str: "string",
+    bool: "boolean",
+    int: "number",
+    float: "number",
+    type(None): "null",
+}
+
+
+def tool_input_type_error(tool_name: Optional[str], tool_input: Any) -> Optional[str]:
+    """Return an error message when a tool call's input is not a JSON object.
+
+    A provider can hand back arguments that are valid JSON but not an object
+    ("[]", "5", "false"). Every dispatcher checks this before running a tool so
+    that call fails on its own with a clear message instead of crashing the turn
+    or running with coerced arguments; returns None for a dict input.
+    """
+    if isinstance(tool_input, dict):
+        return None
+    got = _JSON_TYPE_NAMES.get(type(tool_input), type(tool_input).__name__)
+    return (
+        f"Tool '{tool_name}' was not run: its arguments must be a JSON object, "
+        f"got {got}."
+    )
 
 
 def get_llm_availability() -> Dict[str, Any]:

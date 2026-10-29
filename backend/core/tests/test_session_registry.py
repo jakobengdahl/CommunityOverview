@@ -48,6 +48,10 @@ class TestSessionIdValidation:
     def test_empty_string_rejected(self):
         assert not SessionRegistry.is_valid_session_id("")
 
+    @pytest.mark.parametrize("session_id", ["1234-5678\n", "1234-5678-9012-3456\n"])
+    def test_trailing_newline_rejected(self, session_id):
+        assert not SessionRegistry.is_valid_session_id(session_id)
+
 
 class TestSessionLifecycle:
     """session creation and existence checks."""
@@ -299,3 +303,157 @@ class TestTriggerTokens:
         assert first != second
         assert reg.verify_trigger_token("1234-5678", first) is False
         assert reg.verify_trigger_token("1234-5678", second) is True
+
+
+class TestConsumerRefCount:
+    """``consumer_count`` / ``has_consumer`` track something actually draining.
+
+    An *entry* answers a different question: it is created by ``get_or_create``,
+    nothing removes it when a connection closes, and every push refreshes its
+    TTL, so it outlives its browser indefinitely. Delivery reporting rests on
+    this distinction, so it is pinned here rather than only at the MCP layer.
+    """
+
+    @staticmethod
+    async def _attach(reg, session_id, received):
+        """Start draining, and wait until THIS consumer has registered.
+
+        Waiting on ``has_consumer`` would return immediately when another
+        consumer is already attached, so the count is what has to move.
+        """
+        before = reg.consumer_count(session_id)
+        gen = reg.stream(session_id)
+
+        async def drain():
+            async for command in gen:
+                if command.get("type") != "ping":
+                    received.append(command)
+
+        task = asyncio.create_task(drain())
+        for _ in range(500):
+            if reg.consumer_count(session_id) > before:
+                break
+            await asyncio.sleep(0)
+        return gen, task
+
+    @staticmethod
+    async def _detach(gen, task):
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        await gen.aclose()
+
+    def test_no_consumer_before_anyone_streams(self):
+        reg = SessionRegistry()
+        reg.get_or_create("1234-5678")
+        assert reg.session_exists("1234-5678") is True
+        assert reg.has_consumer("1234-5678") is False
+        assert reg.consumer_count("1234-5678") == 0
+
+    def test_unknown_session_has_no_consumer(self):
+        assert SessionRegistry().has_consumer("1234-5678") is False
+        assert SessionRegistry().consumer_count("1234-5678") == 0
+
+    @pytest.mark.asyncio
+    async def test_streaming_registers_and_releases_the_consumer(self):
+        reg = SessionRegistry()
+        received = []
+        gen, task = await self._attach(reg, "1234-5678", received)
+        assert reg.has_consumer("1234-5678") is True
+
+        assert reg.push_command_sync("1234-5678", {"type": "tool_result"}) is True
+        for _ in range(500):
+            if received:
+                break
+            await asyncio.sleep(0)
+        assert len(received) == 1
+
+        await self._detach(gen, task)
+        # The entry survives, the consumer does not — the exact asymmetry that
+        # makes "an entry exists" useless as evidence of a reader.
+        assert reg.has_consumer("1234-5678") is False
+        assert reg.session_exists("1234-5678") is True
+
+    @pytest.mark.asyncio
+    async def test_two_consumers_are_ref_counted(self):
+        reg = SessionRegistry()
+        first_gen, first_task = await self._attach(reg, "1234-5678", [])
+        second_gen, second_task = await self._attach(reg, "1234-5678", [])
+        assert reg.consumer_count("1234-5678") == 2
+
+        await self._detach(first_gen, first_task)
+        assert reg.consumer_count("1234-5678") == 1
+        assert reg.has_consumer("1234-5678") is True, (
+            "releasing one of two consumers must not clear the other"
+        )
+
+        await self._detach(second_gen, second_task)
+        assert reg.has_consumer("1234-5678") is False
+        assert reg.consumer_count("1234-5678") == 0
+
+    @pytest.mark.asyncio
+    async def test_consumer_survives_ttl_eviction_of_its_entry(self):
+        """Eviction re-creates the entry; the attached consumer is still there.
+
+        The count is held outside the session entry precisely so this cannot
+        silently drop a live reader.
+        """
+        reg = SessionRegistry()
+        gen, task = await self._attach(reg, "1234-5678", [])
+        reg._sessions["1234-5678"]["last_seen"] = time.monotonic() - 100_000
+        assert reg.cleanup_stale() == 1
+        assert reg.session_exists("1234-5678") is False
+
+        assert reg.has_consumer("1234-5678") is True
+        await self._detach(gen, task)
+        assert reg.has_consumer("1234-5678") is False
+
+    @pytest.mark.asyncio
+    async def test_idle_keepalive_ping_keeps_the_consumer_counted(self, monkeypatch):
+        """An idle tab is still an attached tab.
+
+        With nothing pushed, ``stream()`` times out every 25 s and yields a ping.
+        That branch sits beside the ref-count, and releasing the count there
+        would make every push to a quiet but genuinely open canvas report
+        not delivered. The timeout is shortened so the branch runs here.
+        """
+        real_wait_for = asyncio.wait_for
+
+        async def fast_wait_for(awaitable, timeout):
+            return await real_wait_for(
+                awaitable, timeout=0.01 if timeout == 25.0 else timeout
+            )
+
+        monkeypatch.setattr(asyncio, "wait_for", fast_wait_for)
+
+        reg = SessionRegistry()
+        items = []
+        gen = reg.stream("1234-5678")
+
+        async def drain():
+            async for item in gen:
+                items.append(item)
+
+        def ping_count():
+            return items.count({"type": "ping"})
+
+        task = asyncio.create_task(drain())
+        for _ in range(200):
+            if ping_count() >= 2:
+                break
+            await asyncio.sleep(0.01)
+        assert ping_count() >= 2, "the keepalive branch never ran"
+        assert reg.consumer_count("1234-5678") == 1
+        assert reg.has_consumer("1234-5678") is True
+
+        assert reg.push_command_sync("1234-5678", {"type": "tool_result"}) is True
+        for _ in range(200):
+            if {"type": "tool_result"} in items:
+                break
+            await asyncio.sleep(0.01)
+        assert {"type": "tool_result"} in items
+
+        await self._detach(gen, task)
+        assert reg.consumer_count("1234-5678") == 0

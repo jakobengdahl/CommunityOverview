@@ -38,6 +38,16 @@ topology it holds in memory. The in-memory walk stays the reference - the
 answers are held identical by a differential test - and answers whenever the
 store is not current or cannot be reached.
 
+One optional seam runs across all of that. Each entity row can carry an
+OPAQUE SCOPE IDENTIFIER, and the tables carry a row-level security policy
+binding on it, so a deployment that keeps more than one graph's rows behind
+one connection can have the server - not only this code - refuse the rows
+that are not its own. It is off unless a host supplies a value: the column
+is then NULL on every row, which the policy admits, and the store behaves
+exactly as it did before the column existed. What the value MEANS is the
+host's business and never this module's; here it is a string to store,
+compare and pass through.
+
 Two payload restrictions come from JSONB and are shared with neither the
 file backend nor `graph.json`. A whole-graph save carrying one fails
 entirely; an entity write fails only the write that carries it - one
@@ -57,6 +67,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import threading
 import time
 import uuid
@@ -66,12 +77,18 @@ import psycopg
 from psycopg import sql
 from psycopg_pool import ConnectionPool
 
+from backend.core import layer_store
 from backend.core.storage_backends import (
     BackendCapabilities,
     EntityOperation,
+    EntityRevisionConflict,
     ExternalChange,
     ExternalChangeRefused,
+    NodeTypeChanged,
+    WriteRefusedByStore,
 )
+
+logger = logging.getLogger(__name__)
 
 # Every instance runs the same migration on boot, so they race. The lock is
 # taken for the duration of the migrating transaction and released with it -
@@ -79,6 +96,86 @@ from backend.core.storage_backends import (
 # not derived from anything; it only has to be one this application uses
 # nowhere else.
 MIGRATION_LOCK_KEY = 4_872_015_733_882_119_001
+
+# The optional scope seam, in three names. The column holds the host's
+# opaque identifier, the setting carries the current session's value to the
+# server, and the policy is what the server refuses with. Deliberately
+# generic: this module stores and compares the value and never asks what it
+# distinguishes, which is the property that keeps the seam usable by any host
+# and this backend free of anyone's domain model.
+#
+# `text`, not a narrower type, for the same reason. A host that uses a UUID
+# loses nothing by storing it as text - the comparison is equality either way
+# - while a `uuid` column would refuse every host whose identifiers are not
+# UUIDs, and a malformed session value would fail the cast rather than match
+# nothing.
+SCOPE_COLUMN = "scope_id"
+SCOPE_SETTING = "app.graph_scope"
+SCOPE_POLICY_SUFFIX = "_scope_policy"
+
+# The two tables the seam covers. `graph_metadata` is deliberately not one of
+# them: its primary key is a column that can only hold true, so it holds one
+# row for the whole store and has nowhere to put a second scope's row. A
+# deployment separating scopes therefore separates their metadata the way the
+# backend already separates whole graphs - a schema each - and this column is
+# the row-level layer underneath that, not a replacement for it.
+SCOPED_TABLES = ("graph_nodes", "graph_edges")
+
+# The layer store's tables (docs/SESSION_OVERLAY_CONTRACT.md §7), created
+# only by an instance constructed with `staged_sessions=True`. Each carries
+# the scope column from birth and, where a scope is configured, the same
+# policy as the graph tables, so a layer is as isolated as the rows it would
+# change.
+LAYER_TABLES = ("graph_staged_sessions", "graph_layer_entries", "graph_merge_records")
+
+_LAYER_TABLE_COLUMNS = {
+    "graph_staged_sessions": (
+        "session_id text PRIMARY KEY,"
+        " status text NOT NULL CHECK (status IN ('active', 'retired')),"
+        " scope_id text,"
+        " retired_at timestamptz"
+    ),
+    "graph_layer_entries": (
+        "session_id text NOT NULL,"
+        " kind text NOT NULL CHECK (kind IN ('node', 'edge')),"
+        " entity_id text NOT NULL,"
+        " doc jsonb NOT NULL,"
+        " scope_id text,"
+        " PRIMARY KEY (session_id, kind, entity_id)"
+    ),
+    "graph_merge_records": (
+        "merge_id text PRIMARY KEY,"
+        " session_id text NOT NULL,"
+        " doc jsonb NOT NULL,"
+        " scope_id text"
+    ),
+}
+
+# Merges of one merge id are serialised on this advisory lock (two-argument
+# form, keyed per merge id), so two instances retrying one merge cannot both
+# apply it: the second finds the first's record.
+MERGE_LOCK_KEY = 1_872_015_734
+
+# Stored inside graph_metadata.doc, and stripped back out on load. The visible
+# metadata keeps its file-backend shape, while the PostgreSQL schema still has
+# a single durable claim tying it to the graph identity that opened it.
+GRAPH_IDENTITY_KEY = "_postgres_graph_identity"
+
+# The graph-wide revision counter (docs/SESSION_OVERLAY_CONTRACT.md §4.2): one
+# sequence per schema, so every instance writing the store draws from it and
+# no two writes share a value. Only ever advanced - by nextval, and by a
+# whole-graph save raising it past what it wrote - never set lower.
+REVISION_SEQUENCE = "graph_revision_seq"
+
+# Each entity a write touches carries that write's token inside its doc, so
+# after a failure the writer can tell whether its own write committed
+# (§4.4). Server-internal: stripped from every entity a read returns.
+WRITE_TOKEN_KEY = "_write_token"
+
+# How long reading a failed write's evidence may wait for a connection. It
+# runs with the application's storage lock held, so a store that is down must
+# not hold it for the pool's whole default wait, twice.
+EVIDENCE_CONNECT_TIMEOUT_SECONDS = 5.0
 
 # Connections are the resource that scales with instance count, and the
 # server's ceiling is shared by every instance at once: stock PostgreSQL
@@ -197,6 +294,50 @@ def _channel_for(schema: str) -> str:
     return "co_graph_" + hashlib.sha256(schema.encode("utf-8")).hexdigest()[:32]
 
 
+def _without_token(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """An entity as a read returns it: the write token is the store's own."""
+    if WRITE_TOKEN_KEY in doc:
+        doc = dict(doc)
+        doc.pop(WRITE_TOKEN_KEY, None)
+    return doc
+
+
+def _stored_revision(doc: Dict[str, Any]) -> int:
+    value = doc.get("revision") if isinstance(doc, dict) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+class ScopeIsolationUnavailable(RuntimeError):
+    """A scope was configured and the store cannot keep rows apart by it.
+
+    Raised at boot rather than absorbed, because the alternative is worse
+    than not starting: a backend that was handed a scope and has no column to
+    put it in writes rows that carry no scope at all, and every other session
+    on that store can read them. A store that cannot be provisioned is an
+    operator's problem with a remedy; rows written unscoped are already
+    everyone's.
+    """
+
+
+class CrossScopeWriteRefused(WriteRefusedByStore):
+    """An entity write named an id that belongs to another scope.
+
+    `id` is the primary key of the table rather than of the table per scope,
+    so two scopes cannot both hold one id and a write that names another
+    scope's is not a write this instance may make. Raised rather than applied,
+    and rather than quietly skipped: applying it would destroy the other
+    scope's row - measured, with the row's content replaced and its scope
+    restamped - and skipping it would tell the caller a write happened that
+    did not. Where the policy is in force the server refuses the same write,
+    so this is the application layer agreeing with it rather than a second
+    rule.
+    """
+
+
+class GraphIdentityCollision(RuntimeError):
+    """A PostgreSQL schema is already claimed by another graph identity."""
+
+
 class PostgresGraphPersistenceBackend:
     """The graph in PostgreSQL: nodes, edges and metadata as JSONB rows.
 
@@ -208,6 +349,11 @@ class PostgresGraphPersistenceBackend:
     A `schema` other than the default keeps one database serving several
     independent graphs, which is also how the tests give each case a store of
     its own without a database each.
+
+    A `scope` tags every row this instance writes with the host's opaque
+    identifier and narrows every row it reads to that value or to no value at
+    all. Leave it None - the default, and what every deployment before this
+    argument existed runs - and nothing about the store changes.
     """
 
     def __init__(
@@ -217,12 +363,35 @@ class PostgresGraphPersistenceBackend:
         schema: str = "public",
         pool_size: int = DEFAULT_POOL_SIZE,
         graph_name: str = "graph",
+        scope: Optional[str] = None,
+        staged_sessions: bool = False,
     ):
         if pool_size < 1:
             raise ValueError("pool_size must be at least 1")
+        # An empty scope is not an unscoped one. A host that templated the
+        # value out of its environment sends "" where it meant to send an
+        # identifier, and reading that as "no isolation wanted" is how a
+        # deployment that asked to be separated silently is not.
+        if scope is not None and not scope.strip():
+            raise ValueError(
+                "scope must be a non-empty identifier, or None for a store "
+                "that keeps no scopes apart"
+            )
         self.conninfo = conninfo
         self.schema = schema
         self._graph_name = graph_name
+        self._scope = scope
+        # Opt-in. Without it the backend declares nothing new, creates no
+        # table, and issues exactly the statements it did before the layer
+        # store existed.
+        self._staged_sessions = staged_sessions
+        self._graph_identity_checked = False
+        # Settled by the migration, before any statement that would name the
+        # column is built. False means the store has no scope column - an
+        # older store, or one an operator provisioned without it - and every
+        # statement below is then the one this backend issued before the
+        # column existed.
+        self._scope_column = False
         # min_size 0: a backend that is constructed and never used holds no
         # connection. The contract creates backends freely, and so does an
         # instance that boots against a store it turns out not to read.
@@ -258,6 +427,19 @@ class PostgresGraphPersistenceBackend:
             sql.Identifier(self.schema), sql.Identifier(name)
         )
 
+    def _sequence_regclass(self) -> str:
+        """The revision sequence as a regclass literal, quoted as identifiers.
+
+        Passed as a parameter and cast, so the schema name reaches the server
+        as data; quoted, so a mixed-case schema or one containing a dot names
+        exactly this sequence rather than being folded or split.
+        """
+
+        def quote(name: str) -> str:
+            return '"' + name.replace('"', '""') + '"'
+
+        return f"{quote(self.schema)}.{quote(REVISION_SEQUENCE)}"
+
     def _create_missing(self, conn, table: str, columns: str) -> None:
         """Create one table, asking only when it is not already there.
 
@@ -267,11 +449,10 @@ class PostgresGraphPersistenceBackend:
 
         An exact match on the two catalog columns, not `to_regclass`: that
         function *parses* its argument as an SQL name, so it case-folds an
-        unquoted part and splits on a dot. It answers "missing" for a table
-        that exists under a mixed-case schema - dropping this guard for
-        exactly the least-privilege role it was written for - and raises
-        outright on a schema name containing a dot. The schema guard below
-        matches `pg_namespace.nspname` for the same reason.
+        unquoted part. It answers "missing" for a table that exists under a
+        mixed-case schema - dropping this guard for exactly the least-privilege
+        role it was written for. The schema guard below matches
+        `pg_namespace.nspname` for the same reason.
         """
         if conn.execute(
             "SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
@@ -351,6 +532,33 @@ class PostgresGraphPersistenceBackend:
                         "only_row boolean PRIMARY KEY DEFAULT true"
                         " CHECK (only_row), doc jsonb NOT NULL",
                     )
+                    # Same catalog guard as the tables: a role provisioned
+                    # with DML only finds the sequence an operator created
+                    # and is not asked for CREATE it does not hold.
+                    if not conn.execute(
+                        "SELECT 1 FROM pg_class c JOIN pg_namespace n"
+                        " ON n.oid = c.relnamespace"
+                        " WHERE n.nspname = %s AND c.relname = %s",
+                        (self.schema, REVISION_SEQUENCE),
+                    ).fetchone():
+                        try:
+                            conn.execute(
+                                sql.SQL("CREATE SEQUENCE IF NOT EXISTS {}").format(
+                                    self._table(REVISION_SEQUENCE)
+                                )
+                            )
+                        except psycopg.errors.InsufficientPrivilege as exc:
+                            # A store provisioned before entity revisions, for
+                            # a role that may not create: say what to add.
+                            raise RuntimeError(
+                                f"the revision sequence "
+                                f"{self.schema}.{REVISION_SEQUENCE} does not exist "
+                                f"and this role may not create it; provision it "
+                                f"and grant USAGE, SELECT, UPDATE on it - see "
+                                f"docs/PERSISTENCE_BACKENDS.md"
+                            ) from exc
+                    if self._staged_sessions:
+                        self._create_layer_tables(conn)
             # Outside the migration transaction, on purpose, and one
             # connection each. Every level of the traversal filters on
             # doc->>'source' and doc->>'target', which no index covers by
@@ -415,8 +623,8 @@ class PostgresGraphPersistenceBackend:
                             qualified = sql.Identifier(self.schema, name).as_string(
                                 conn
                             )
-                            print(
-                                f"Warning: {name} exists but is not valid - a "
+                            logger.warning(
+                                f"{name} exists but is not valid - a "
                                 f"concurrent build that failed, or one still "
                                 f"running. If no build is in progress, "
                                 f"REINDEX INDEX CONCURRENTLY {qualified} "
@@ -452,11 +660,111 @@ class PostgresGraphPersistenceBackend:
                     # fires when nothing is wrong - so the warning is for the
                     # case where the index really is missing.
                     if self._index_state(None, name) != "valid":
-                        print(
-                            f"Warning: could not create {name}; traversal will "
+                        logger.warning(
+                            f"could not create {name}; traversal will "
                             f"scan instead of seek: {exc}"
                         )
+            # Last, and outside the migrating transaction for the same reason
+            # the indexes are: it may legitimately fail, and a failure inside
+            # that transaction would take the tables down with it.
+            self._ensure_scope_isolation()
+            with self._pool.connection() as conn:
+                with conn.transaction():
+                    self._claim_or_check_graph_identity(conn)
             self._migrated = True
+
+    def _create_layer_tables(self, conn) -> None:
+        """The layer store's tables, behind the same catalog guard.
+
+        Inside the migrating transaction, so N instances booting together
+        create each one once. A role that may not create them gets an error
+        that says what to provision, rather than a boot that half-succeeds:
+        staged sessions were asked for, and a store that cannot hold them must
+        not start as if it could.
+        """
+        for table in LAYER_TABLES:
+            try:
+                self._create_missing(conn, table, _LAYER_TABLE_COLUMNS[table])
+            except psycopg.errors.InsufficientPrivilege as exc:
+                raise RuntimeError(
+                    f"staged sessions are enabled, and {self.schema}.{table} "
+                    f"does not exist and this role may not create it; "
+                    f"provision the layer tables and grant SELECT, INSERT, "
+                    f"UPDATE, DELETE on them - see docs/PERSISTENCE_BACKENDS.md"
+                ) from exc
+        # Added after the table first shipped: a store created before merge
+        # records were retained gets the column now, asked for only when the
+        # catalog lacks it, as the tables are.
+        if not conn.execute(
+            self._COLUMN_PRESENT, (self.schema, "graph_staged_sessions", "retired_at")
+        ).fetchone():
+            try:
+                conn.execute(
+                    sql.SQL(
+                        "ALTER TABLE {} ADD COLUMN IF NOT EXISTS retired_at timestamptz"
+                    ).format(self._table("graph_staged_sessions"))
+                )
+            except psycopg.errors.InsufficientPrivilege as exc:
+                raise RuntimeError(
+                    f"staged sessions are enabled, and "
+                    f"{self.schema}.graph_staged_sessions has no retired_at "
+                    f"column and this role may not add it; add it as "
+                    f"docs/PERSISTENCE_BACKENDS.md shows"
+                ) from exc
+
+    def _metadata_without_graph_identity(
+        self, metadata: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        metadata = dict(metadata)
+        metadata.pop(GRAPH_IDENTITY_KEY, None)
+        return metadata
+
+    def _claim_or_check_graph_identity(self, conn, *, force: bool = False) -> None:
+        if self._graph_identity_checked and not force:
+            return
+        row = conn.execute(
+            sql.SQL("SELECT doc FROM {} LIMIT 1").format(self._table("graph_metadata"))
+        ).fetchone()
+        if row is None:
+            return
+        metadata = dict(row[0] or {})
+        claimed = metadata.get(GRAPH_IDENTITY_KEY)
+        if claimed is None:
+            # Conditional, because the read above took no lock: another
+            # instance may have claimed since. Under READ COMMITTED an UPDATE
+            # that waited on its row lock re-checks the WHERE against the
+            # committed row, so the loser matches nothing and reads the
+            # winner's claim below rather than overwriting it. Under
+            # REPEATABLE READ it fails on serialization instead, which
+            # overwrites nothing either.
+            claimed = conn.execute(
+                sql.SQL(
+                    "UPDATE {} SET doc = doc || jsonb_build_object(%s::text, %s::text)"
+                    " WHERE doc ->> %s IS NULL RETURNING doc ->> %s"
+                ).format(self._table("graph_metadata")),
+                (
+                    GRAPH_IDENTITY_KEY,
+                    self._graph_name,
+                    GRAPH_IDENTITY_KEY,
+                    GRAPH_IDENTITY_KEY,
+                ),
+            ).fetchone()
+            if claimed is None:
+                claimed = conn.execute(
+                    sql.SQL("SELECT doc ->> %s FROM {} LIMIT 1").format(
+                        self._table("graph_metadata")
+                    ),
+                    (GRAPH_IDENTITY_KEY,),
+                ).fetchone()
+                if claimed is None:
+                    return
+            claimed = claimed[0]
+        if claimed != self._graph_name:
+            raise GraphIdentityCollision(
+                f"PostgreSQL schema {self.schema!r} is already claimed by "
+                f"graph {claimed!r}, not {self._graph_name!r}"
+            )
+        self._graph_identity_checked = True
 
     _INDEX_STATE = (
         "SELECT i.indisvalid FROM pg_class c"
@@ -495,6 +803,291 @@ class PostgresGraphPersistenceBackend:
             return "missing"
         return "valid" if row[0] else "invalid"
 
+    # -- the scope seam ------------------------------------------------------
+
+    _COLUMN_PRESENT = (
+        "SELECT 1 FROM pg_attribute a"
+        " JOIN pg_class c ON c.oid = a.attrelid"
+        " JOIN pg_namespace n ON n.oid = c.relnamespace"
+        " WHERE n.nspname = %s AND c.relname = %s AND a.attname = %s"
+        " AND a.attnum > 0 AND NOT a.attisdropped"
+    )
+
+    _POLICY_STATE = (
+        "SELECT c.relrowsecurity, c.relforcerowsecurity,"
+        " EXISTS (SELECT 1 FROM pg_policy p"
+        "         WHERE p.polrelid = c.oid AND p.polname = %s)"
+        " FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+        " WHERE n.nspname = %s AND c.relname = %s"
+    )
+
+    def _policy_name(self, table: str) -> str:
+        return f"{table}{SCOPE_POLICY_SUFFIX}"
+
+    def _column_present(self, conn, table: str) -> bool:
+        return (
+            conn.execute(
+                self._COLUMN_PRESENT, (self.schema, table, SCOPE_COLUMN)
+            ).fetchone()
+            is not None
+        )
+
+    def _policy_state(self, conn, table: str) -> Tuple[bool, bool, bool]:
+        """(rls enabled, rls forced, policy present) for `table` in this schema."""
+        row = conn.execute(
+            self._POLICY_STATE, (self._policy_name(table), self.schema, table)
+        ).fetchone()
+        if row is None:
+            return (False, False, False)
+        return (bool(row[0]), bool(row[1]), bool(row[2]))
+
+    def _try_provision_scope_isolation(self, table: str) -> None:
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                if not self._column_present(conn, table):
+                    conn.execute(
+                        sql.SQL(
+                            "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} text"
+                        ).format(self._table(table), sql.Identifier(SCOPE_COLUMN))
+                    )
+                enabled, forced, policy = self._policy_state(conn, table)
+                if self._scope is None:
+                    # The column, and nothing that would cost an unscoped
+                    # store its traversal plan.
+                    return
+                if not policy:
+                    # `FOR ALL`, so the same expression governs what a
+                    # session may read and what it may write: without a
+                    # WITH CHECK the server would refuse to hand a row
+                    # over and accept one written in its place.
+                    #
+                    # The NULL arm is what makes the seam optional. A
+                    # row that carries no scope is admitted whatever
+                    # the session is set to, which is every row of
+                    # every store that existed before this column did.
+                    # The other arm is unsatisfiable when the setting
+                    # is unset - `= NULL` is NULL, not true - so a
+                    # scoped row is invisible to a session that did not
+                    # say which scope it is, which is the direction
+                    # that has to fail closed.
+                    conn.execute(
+                        sql.SQL(
+                            "CREATE POLICY {} ON {} FOR ALL"
+                            " USING ({col} IS NULL"
+                            "        OR {col} = current_setting({setting}, true))"
+                        ).format(
+                            sql.Identifier(self._policy_name(table)),
+                            self._table(table),
+                            col=sql.Identifier(SCOPE_COLUMN),
+                            setting=sql.Literal(SCOPE_SETTING),
+                        )
+                    )
+                if not enabled:
+                    conn.execute(
+                        sql.SQL("ALTER TABLE {} ENABLE ROW LEVEL SECURITY").format(
+                            self._table(table)
+                        )
+                    )
+                if not forced:
+                    # Without FORCE the policy is decoration in the
+                    # commonest deployment there is: row-level security
+                    # does not apply to a table's OWNER, and the owner
+                    # is whoever ran the migration - this application.
+                    conn.execute(
+                        sql.SQL("ALTER TABLE {} FORCE ROW LEVEL SECURITY").format(
+                            self._table(table)
+                        )
+                    )
+
+    def _scope_isolation_state(self, table: str) -> Tuple[bool, bool]:
+        """(column missing, server policy incomplete) after provisioning tried."""
+        with self._pool.connection() as conn:
+            if not self._column_present(conn, table):
+                return (True, False)
+            if self._scope is None:
+                return (False, False)
+            enabled, forced, policy = self._policy_state(conn, table)
+            return (False, not (enabled and forced and policy))
+
+    def _ensure_scope_isolation(self) -> None:
+        """Provision the scope column and its policy, or establish we cannot.
+
+        Best-effort and outside the migrating transaction, like the traversal's
+        indexes and for the same reason: every statement here needs OWNERSHIP,
+        and the least-privilege role the migration's guards exist for holds DML
+        and no DDL. A store that cannot take the column still boots and still
+        answers - as exactly the store it was before this seam existed, since
+        no statement this backend issues names a column it has established is
+        not there.
+
+        One case does not degrade, and it is the whole point of the seam: a
+        scope was CONFIGURED and the column is missing. Writing rows that carry
+        no scope would hand them to every other session on that store, so this
+        raises instead - see ScopeIsolationUnavailable.
+
+        Order inside the transaction is load-bearing. The policy is created
+        BEFORE row-level security is switched on, because a table with RLS
+        enabled and no policy admits nothing at all: reversing the two and
+        failing in between would leave a store whose every row had vanished.
+        One transaction per table makes that unreachable rather than unlikely -
+        a failure rolls the whole step back and the catalog is re-read.
+
+        THE POLICY IS CREATED ONLY FOR A STORE THAT ASKED FOR ONE, and that is
+        a measurement rather than a preference. A policy applies to a query as
+        a security qual, and PostgreSQL will not let a qual that is not
+        leakproof be evaluated before one - so the traversal's index condition,
+        `doc->>'source' = ...`, stops being usable as one the moment a policy
+        applies to the reading role. `jsonb_object_field_text` is not marked
+        leakproof (`pg_proc.proleakproof` is false; `texteq`, which the primary
+        key uses, is true), so the expression indexes go unused and every level
+        of every walk reads the edge table instead - the 3.7 ms against 61 ms
+        this file measures elsewhere, in the wrong direction. Charging that to
+        a store that keeps no scopes apart would be charging it for a guarantee
+        it did not ask for and does not get; charging it to one that did is the
+        price of the second layer, and it is written down in
+        docs/PERSISTENCE_BACKENDS.md rather than discovered.
+
+        The COLUMN lands either way. It is inert without a policy - a nullable
+        text column nothing reads unless this instance names it - and having it
+        already there is what lets a host turn the seam on later without
+        rewriting a table full of rows.
+        """
+        # No isolation level is pinned here, where the save and the entity
+        # write both state theirs. Nothing in this step depends on one: the
+        # catalog re-read runs after every attempt, in a transaction of its
+        # own, so it sees what the DDL transaction left whatever level the
+        # role defaults to - confirmed against a role defaulting to REPEATABLE
+        # READ.
+        missing_column: List[str] = []
+        unprotected: List[str] = []
+        for table in SCOPED_TABLES:
+            try:
+                self._try_provision_scope_isolation(table)
+            except Exception:
+                # Swallowed on purpose: what matters is what the store ended up
+                # with, which the catalog answers below, not which statement
+                # could not be issued.
+                pass
+            column_missing, policy_incomplete = self._scope_isolation_state(table)
+            if column_missing:
+                missing_column.append(table)
+            if policy_incomplete:
+                unprotected.append(table)
+
+        self._scope_column = not missing_column
+        if self._staged_sessions:
+            layer_missing: List[str] = []
+            for table in LAYER_TABLES:
+                try:
+                    self._try_provision_scope_isolation(table)
+                except Exception:
+                    pass
+                column_missing, policy_incomplete = self._scope_isolation_state(table)
+                if column_missing:
+                    layer_missing.append(table)
+                if policy_incomplete:
+                    unprotected.append(table)
+            if layer_missing:
+                # New tables, so there is no older shape to stay compatible
+                # with: every layer statement names the column, scoped or not.
+                raise ScopeIsolationUnavailable(
+                    f"staged sessions are enabled, and {', '.join(layer_missing)} "
+                    f"in schema {self.schema!r} has no {SCOPE_COLUMN} column. "
+                    f"Provision the layer tables as docs/PERSISTENCE_BACKENDS.md "
+                    f"shows."
+                )
+        if self._scope is not None and missing_column:
+            raise ScopeIsolationUnavailable(
+                f"a scope was configured, and {', '.join(missing_column)} in "
+                f"schema {self.schema!r} has no {SCOPE_COLUMN} column to put it "
+                f"in. Rows written now would carry no scope and be readable by "
+                f"every other session on this store. Add the column and its "
+                f"policy - docs/PERSISTENCE_BACKENDS.md has the statements - or "
+                f"run this instance without a scope."
+            )
+        if self._scope is not None and unprotected:
+            # Only when a scope is configured: a store that keeps no scopes
+            # apart is not missing anything by not having the policy, and a
+            # warning that fires when nothing is wrong teaches an operator to
+            # ignore warnings.
+            logger.warning(
+                f"{', '.join(unprotected)} in schema {self.schema!r} "
+                f"carries the {SCOPE_COLUMN} column but not its row-level "
+                f"security policy, so the scope is enforced by this "
+                f"application alone and not by the server"
+            )
+
+    def _scope_clause(self) -> Tuple[sql.Composed, Tuple]:
+        """The visibility predicate and its parameter, or nothing at all.
+
+        The same expression the policy carries, issued by the application too.
+        Two layers rather than one, and deliberately not a duplicate that could
+        drift: where the server cannot enforce the policy - a role that owns
+        nothing, a store an operator provisioned without it - this is what
+        still holds, and where it can, the two agree so a row is never visible
+        to one and not the other.
+
+        An unscoped instance passes NULL, which reduces the predicate to
+        `scope_id IS NULL` - the same set the policy shows a session that never
+        said which scope it is.
+        """
+        if not self._scope_column:
+            return sql.SQL(""), ()
+        return (
+            sql.SQL("({col} IS NULL OR {col} = %s)").format(
+                col=sql.Identifier(SCOPE_COLUMN)
+            ),
+            (self._scope,),
+        )
+
+    def _where_scope(self) -> Tuple[sql.Composed, Tuple]:
+        """` WHERE <predicate>`, or nothing when the store has no column."""
+        clause, params = self._scope_clause()
+        if not params:
+            return sql.SQL(""), ()
+        return sql.SQL(" WHERE ") + clause, params
+
+    def _and_scope(self) -> Tuple[sql.Composed, Tuple]:
+        """` AND <predicate>`, for a statement that already has a WHERE."""
+        clause, params = self._scope_clause()
+        if not params:
+            return sql.SQL(""), ()
+        return sql.SQL(" AND ") + clause, params
+
+    def _insert_shape(self) -> Tuple[sql.Composed, sql.Composed]:
+        """The column list and the placeholders an insert carries.
+
+        Both halves from one place, so a statement cannot name three columns
+        and pass two values.
+        """
+        if not self._scope_column:
+            return sql.SQL("id, doc"), sql.SQL("%s, %s")
+        return (
+            sql.SQL("id, doc, ") + sql.Identifier(SCOPE_COLUMN),
+            sql.SQL("%s, %s, %s"),
+        )
+
+    def _insert_params(self, entity_id: str, payload: Dict[str, Any]) -> Tuple:
+        row = (entity_id, psycopg.types.json.Jsonb(payload))
+        return row + (self._scope,) if self._scope_column else row
+
+    def _bind_scope(self, conn) -> None:
+        """Carry this instance's scope into the transaction, for the policy.
+
+        `set_config(..., is_local => true)` rather than `SET LOCAL`: the value
+        is a parameter, so a host's identifier reaches the server as data and
+        not as SQL text, and transaction-local means the connection goes back
+        to the pool carrying nothing - the next transaction on it starts unset,
+        which is the safe direction to be wrong in.
+
+        Nothing is issued when no scope is configured. The setting is then
+        never set, `current_setting(..., true)` answers NULL, and the policy
+        admits exactly the rows that carry no scope.
+        """
+        if self._scope is None:
+            return
+        conn.execute("SELECT set_config(%s, %s, true)", (SCOPE_SETTING, self._scope))
+
     # -- snapshot contract ---------------------------------------------------
 
     def capabilities(self) -> BackendCapabilities:
@@ -503,6 +1096,8 @@ class PostgresGraphPersistenceBackend:
             transactions=True,
             change_notification=True,
             store_traversal=True,
+            revision_enforcement=True,
+            staged_sessions=self._staged_sessions,
         )
 
     # -- traversal contract --------------------------------------------------
@@ -538,14 +1133,23 @@ class PostgresGraphPersistenceBackend:
       SELECT CASE WHEN e.doc->>'source' = ANY(%(frontier)s)
                   THEN e.doc->>'target' ELSE e.doc->>'source' END AS id
     ) far
-    LEFT JOIN {nodes} fn ON fn.id = far.id
+    LEFT JOIN {nodes} fn ON fn.id = far.id {node_scope}
     WHERE (e.doc->>'source' = ANY(%(frontier)s)
            OR e.doc->>'target' = ANY(%(frontier)s))
       AND (%(archived_ok)s OR NOT COALESCE((e.doc->>'archived')::boolean, false))
       AND (%(any_type)s OR e.doc->>'type' = ANY(%(types)s))
       AND (%(archived_ok)s OR far.id = %(anchor)s OR fn.id IS NULL
            OR NOT COALESCE((fn.doc->>'archived')::boolean, false))
+      {edge_scope}
     """
+
+    # The node half of the predicate goes in the JOIN condition, not the WHERE.
+    # A node this instance may not see has to read as an endpoint that is not a
+    # node - traversed THROUGH, not returned, which is the dangling-endpoint
+    # rule the walk already has - and a WHERE clause naming `fn` would instead
+    # turn the outer join inner and drop the edge itself.
+    _LEVEL_NODE_SCOPE = "AND (fn.{col} IS NULL OR fn.{col} = %(scope)s)"
+    _LEVEL_EDGE_SCOPE = "AND (e.{col} IS NULL OR e.{col} = %(scope)s)"
 
     def traverse(
         self,
@@ -582,9 +1186,23 @@ class PostgresGraphPersistenceBackend:
         # nothing and the traversal returns the anchor alone. The protocol asks
         # for strings; this coerces an enum that arrives anyway, correctly.
         types = [getattr(t, "value", t) for t in (relationship_types or [])]
+        scoped = {
+            "node_scope": self._LEVEL_NODE_SCOPE,
+            "edge_scope": self._LEVEL_EDGE_SCOPE,
+        }
         query = sql.SQL(self._LEVEL).format(
-            edges=self._table("graph_edges"), nodes=self._table("graph_nodes")
+            edges=self._table("graph_edges"),
+            nodes=self._table("graph_nodes"),
+            **{
+                name: (
+                    sql.SQL(text).format(col=sql.Identifier(SCOPE_COLUMN))
+                    if self._scope_column
+                    else sql.SQL("")
+                )
+                for name, text in scoped.items()
+            },
         )
+        anchor_scope, anchor_params = self._and_scope()
         with self._pool.connection() as conn, conn.transaction():
             # One moment, like the load, and for the same reason. A traversal
             # is N+1 statements on one connection, and PostgreSQL's default
@@ -602,14 +1220,20 @@ class PostgresGraphPersistenceBackend:
             # like the load and the save: leaving it to the environment was the
             # asymmetry.
             conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            # After the isolation level, which must be the transaction's first
+            # statement, and before anything that reads a scoped table.
+            self._bind_scope(conn)
+            self._claim_or_check_graph_identity(conn)
             # The anchor has to exist, and an anchor that does not is not an
             # empty traversal but no traversal: the in-memory walk returns
-            # nothing at all rather than a lone anchor.
+            # nothing at all rather than a lone anchor. An anchor this instance
+            # may not see does not exist as far as it is concerned, which is
+            # the same answer for the same reason.
             present = conn.execute(
-                sql.SQL("SELECT 1 FROM {} WHERE id = %s").format(
-                    self._table("graph_nodes")
+                sql.SQL("SELECT 1 FROM {} WHERE id = %s{}").format(
+                    self._table("graph_nodes"), anchor_scope
                 ),
-                (anchor_id,),
+                (anchor_id, *anchor_params),
             ).fetchone()
             if not present:
                 return {"node_ids": [], "edge_ids": []}
@@ -630,6 +1254,7 @@ class PostgresGraphPersistenceBackend:
                         "archived_ok": bool(include_archived),
                         "any_type": not types,
                         "types": types,
+                        "scope": self._scope,
                     },
                     # Never prepared, and this is the one query in this backend
                     # that must not be. Its selectivity is the frontier's size:
@@ -660,11 +1285,13 @@ class PostgresGraphPersistenceBackend:
     def exists(self) -> bool:
         self._ensure_schema()
         with self._pool.connection() as conn:
-            row = conn.execute(
-                sql.SQL("SELECT 1 FROM {} LIMIT 1").format(
-                    self._table("graph_metadata")
-                )
-            ).fetchone()
+            with conn.transaction():
+                self._claim_or_check_graph_identity(conn)
+                row = conn.execute(
+                    sql.SQL("SELECT 1 FROM {} LIMIT 1").format(
+                        self._table("graph_metadata")
+                    )
+                ).fetchone()
         return row is not None
 
     def load_graph_data(self) -> Dict[str, Any]:
@@ -696,20 +1323,25 @@ class PostgresGraphPersistenceBackend:
             with conn.transaction():
                 # Must be the transaction's first statement.
                 conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                self._claim_or_check_graph_identity(conn)
+                self._bind_scope(conn)
+                where, scope_params = self._where_scope()
                 nodes = [
-                    row[0]
+                    _without_token(row[0])
                     for row in conn.execute(
-                        sql.SQL("SELECT doc FROM {} ORDER BY id").format(
-                            self._table("graph_nodes")
-                        )
+                        sql.SQL("SELECT doc FROM {}{} ORDER BY id").format(
+                            self._table("graph_nodes"), where
+                        ),
+                        scope_params or None,
                     )
                 ]
                 edges = [
-                    row[0]
+                    _without_token(row[0])
                     for row in conn.execute(
-                        sql.SQL("SELECT doc FROM {} ORDER BY id").format(
-                            self._table("graph_edges")
-                        )
+                        sql.SQL("SELECT doc FROM {}{} ORDER BY id").format(
+                            self._table("graph_edges"), where
+                        ),
+                        scope_params or None,
                     )
                 ]
                 row = conn.execute(
@@ -723,7 +1355,7 @@ class PostgresGraphPersistenceBackend:
         return {
             "nodes": nodes,
             "edges": edges,
-            "metadata": dict(row[0]) if row else {},
+            "metadata": self._metadata_without_graph_identity(row[0]) if row else {},
         }
 
     def save_graph_data(self, data: Dict[str, Any]) -> None:
@@ -737,7 +1369,8 @@ class PostgresGraphPersistenceBackend:
         self._ensure_schema()
         nodes = list(data.get("nodes") or [])
         edges = list(data.get("edges") or [])
-        metadata = dict(data.get("metadata") or {})
+        metadata = self._metadata_without_graph_identity(data.get("metadata") or {})
+        metadata[GRAPH_IDENTITY_KEY] = self._graph_name
         with self._pool.connection() as conn:
             with conn.transaction():
                 # Stated rather than inherited. The lock below only delivers
@@ -751,25 +1384,41 @@ class PostgresGraphPersistenceBackend:
                 # for the opposite reason, so leaving this one to the
                 # environment was an asymmetry, not a default.
                 conn.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
-                # Before the first statement takes its snapshot, so a writer
-                # that waited here re-reads the store the other one left.
+                self._bind_scope(conn)
+                # Before the first statement that READS the store takes its
+                # snapshot, so a writer that waited here re-reads what the
+                # other one left. The scope binding above takes no snapshot
+                # this depends on: under READ COMMITTED the DELETE below takes
+                # its own when it starts, which is after the lock.
                 conn.execute(
                     "SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
                     (SAVE_LOCK_KEY, self.schema),
                 )
+                self._claim_or_check_graph_identity(conn, force=True)
+                # Exactly the rows the load would have returned, which is what
+                # makes "replace the whole graph" mean the same thing here as
+                # it does everywhere else. Deleting less than that is the
+                # interesting failure: the load hands GraphStorage a row this
+                # statement then leaves behind, and the insert below dies on
+                # its primary key.
+                where, scope_params = self._where_scope()
                 for table in ("graph_nodes", "graph_edges"):
-                    conn.execute(sql.SQL("DELETE FROM {}").format(self._table(table)))
+                    conn.execute(
+                        sql.SQL("DELETE FROM {}{}").format(self._table(table), where),
+                        scope_params or None,
+                    )
+                columns, placeholders = self._insert_shape()
                 conn.cursor().executemany(
-                    sql.SQL("INSERT INTO {} (id, doc) VALUES (%s, %s)").format(
-                        self._table("graph_nodes")
+                    sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
+                        self._table("graph_nodes"), columns, placeholders
                     ),
-                    [(node["id"], psycopg.types.json.Jsonb(node)) for node in nodes],
+                    [self._insert_params(node["id"], node) for node in nodes],
                 )
                 conn.cursor().executemany(
-                    sql.SQL("INSERT INTO {} (id, doc) VALUES (%s, %s)").format(
-                        self._table("graph_edges")
+                    sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
+                        self._table("graph_edges"), columns, placeholders
                     ),
-                    [(edge["id"], psycopg.types.json.Jsonb(edge)) for edge in edges],
+                    [self._insert_params(edge["id"], edge) for edge in edges],
                 )
                 conn.execute(
                     sql.SQL(
@@ -778,6 +1427,25 @@ class PostgresGraphPersistenceBackend:
                     ).format(self._table("graph_metadata")),
                     (psycopg.types.json.Jsonb(metadata),),
                 )
+                # The save keeps the revisions it was handed (§4.2), so the
+                # counter is raised past them. Only raised: GREATEST against
+                # the sequence's own value, and safe to read-then-set because
+                # every entity write holds the save lock in SHARE mode and
+                # this transaction holds it exclusively - no nextval can run
+                # on this schema in between.
+                highest = max(
+                    [_stored_revision(doc) for doc in nodes]
+                    + [_stored_revision(doc) for doc in edges]
+                    + [0]
+                )
+                if highest > 0:
+                    conn.execute(
+                        sql.SQL(
+                            "SELECT setval(%s::regclass, GREATEST("
+                            "(SELECT last_value FROM {}), %s))"
+                        ).format(self._table(REVISION_SEQUENCE)),
+                        (self._sequence_regclass(), highest),
+                    )
                 # A whole-graph save replaced everything, including rows it
                 # never named. Naming what changed would mean diffing the
                 # store against itself, which is the case unknown() exists
@@ -814,8 +1482,8 @@ class PostgresGraphPersistenceBackend:
         # handlers, and an unrelated DROP's notices then print four times,
         # each labelled as coming from ANALYZE.
         def _report(diag: Any) -> None:
-            print(
-                f"Warning: ANALYZE after save: {diag.severity}: {diag.message_primary}"
+            logger.warning(
+                f"ANALYZE after save: {diag.severity}: {diag.message_primary}"
             )
 
         try:
@@ -827,8 +1495,8 @@ class PostgresGraphPersistenceBackend:
                 finally:
                     conn.remove_notice_handler(_report)
         except Exception as exc:
-            print(
-                f"Warning: could not ANALYZE after save; the traversal's "
+            logger.warning(
+                f"could not ANALYZE after save; the traversal's "
                 f"indexes may go unused: {exc}"
             )
 
@@ -846,19 +1514,23 @@ class PostgresGraphPersistenceBackend:
     # only pairs - and what happens then is written down at apply_batch.
     DEADLOCK_RETRIES = 3
 
-    def upsert_node(self, node: Dict[str, Any]) -> None:
-        self.apply_batch([EntityOperation.upsert_node(node)])
+    def upsert_node(self, node: Dict[str, Any]) -> Optional[int]:
+        return (self.apply_batch([EntityOperation.upsert_node(node)]) or [None])[0]
 
     def delete_node(self, node_id: str) -> None:
         self.apply_batch([EntityOperation.delete_node(node_id)])
 
-    def upsert_edge(self, edge: Dict[str, Any]) -> None:
-        self.apply_batch([EntityOperation.upsert_edge(edge)])
+    def upsert_edge(self, edge: Dict[str, Any]) -> Optional[int]:
+        return (self.apply_batch([EntityOperation.upsert_edge(edge)]) or [None])[0]
 
     def delete_edge(self, edge_id: str) -> None:
         self.apply_batch([EntityOperation.delete_edge(edge_id)])
 
-    def apply_batch(self, operations: Sequence[EntityOperation]) -> None:
+    def apply_batch(
+        self,
+        operations: Sequence[EntityOperation],
+        write_token: Optional[str] = None,
+    ) -> List[Optional[int]]:
         """Apply the operations in order, in one transaction.
 
         This is where the shared store starts paying: a renamed node costs
@@ -901,17 +1573,43 @@ class PostgresGraphPersistenceBackend:
         propagates and the next write is a whole-graph one. That is the
         behaviour this backend had before entity writes existed, so the
         worst case degrades rather than corrupts.
+
+        Every upsert takes the next value of the store's revision sequence in
+        the statement that writes it, and the revisions are returned in
+        operation order (None for a delete). An operation's expectation is a
+        condition of that same statement; one that does not hold raises
+        EntityRevisionConflict and the transaction rolls back, so nothing in
+        the batch lands and nothing is announced. `write_token` is stored in
+        every entity written - see `read_write_evidence`.
         """
         self._ensure_schema()
         for attempt in range(self.DEADLOCK_RETRIES + 1):
             try:
-                self._apply_batch_once(operations)
-                return
+                return self._apply_batch_once(operations, write_token)
             except psycopg.errors.DeadlockDetected:
                 if attempt == self.DEADLOCK_RETRIES:
                     raise
+            except (
+                psycopg.DataError,
+                psycopg.ProgrammingError,
+                UnicodeEncodeError,
+            ) as exc:
+                # No SQLSTATE means the driver refused a value before the
+                # statement left - a NUL in an id, which a text parameter
+                # cannot carry, or a lone surrogate, which UTF-8 cannot
+                # encode. Nothing was sent, so nothing landed; said so,
+                # or the caller would read the store back for a write that
+                # never reached it.
+                if getattr(exc, "sqlstate", None) is None:
+                    raise WriteRefusedByStore(
+                        f"the driver refused a value in the batch: {exc}"
+                    ) from exc
+                raise
+        raise AssertionError("unreachable")  # pragma: no cover
 
-    def _apply_batch_once(self, operations: Sequence[EntityOperation]) -> None:
+    def _apply_batch_once(
+        self, operations: Sequence[EntityOperation], write_token: Optional[str]
+    ) -> List[Optional[int]]:
         with self._pool.connection() as conn:
             with conn.transaction():
                 # Same reason as the save: last-writer-wins on a contended
@@ -919,34 +1617,1081 @@ class PostgresGraphPersistenceBackend:
                 # default the second writer would abort with a serialization
                 # failure instead of waiting and winning.
                 conn.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+                self._bind_scope(conn)
                 conn.execute(
                     "SELECT pg_advisory_xact_lock_shared(%s, hashtext(%s))",
                     (SAVE_LOCK_KEY, self.schema),
                 )
-                for operation in operations:
-                    self._apply_one(conn, operation)
+                self._claim_or_check_graph_identity(conn)
+                checks = [
+                    layer_store.MergeCheck.incident_edges(
+                        op.entity_id,
+                        [eid for eid, _ in op.incident_edge_revisions],
+                        revisions=dict(op.incident_edge_revisions),
+                    )
+                    for op in operations
+                    if op.incident_edge_revisions is not None
+                ]
+                try:
+                    self._verify_incident_edges(conn, checks)
+                except layer_store.MergeRaced as exc:
+                    # Refuse atomically without exposing stored incident edges.
+                    raise EntityRevisionConflict(
+                        "node", checks[0].entity_id, None, None
+                    ) from exc
+                self._hold_endpoints(conn, operations)
+                created_nodes = []
+                revisions = [
+                    self._apply_one(conn, operation, write_token, created_nodes)
+                    for operation in operations
+                ]
+                self._refuse_dangling_edges_on_create(conn, created_nodes, operations)
                 # Inside the transaction, so the announcement is atomic with
                 # what it announces: the server holds it until commit and
                 # discards it on rollback. A batch that deadlocks and retries
                 # therefore announces once, from the attempt that committed,
                 # and a batch that fails announces nothing at all.
                 self._announce(conn, operations)
+                return revisions
 
-    def _apply_one(self, conn, operation: EntityOperation) -> None:
+    def _refuse_dangling_edges_on_create(
+        self, conn, created_nodes, operations: Sequence[EntityOperation]
+    ) -> None:
+        """Prevent a newly created id inheriting edges from an earlier node.
+
+        Check after the named writes, while INSERT holds the new node row.
+        Edge upserts in this batch were judged against their endpoints; they
+        are not inherited edges. Deleted edges are already absent here.
+        Separate endpoint probes use the scoped expression indexes.
+        """
+        scope, scope_params = self._and_scope()
+        written_edges = list(
+            {
+                op.entity_id
+                for op in operations
+                if op.kind == "edge" and op.action == "upsert"
+            }
+        )
+        for operation in created_nodes:
+            for endpoint in ("source", "target"):
+                row = conn.execute(
+                    sql.SQL(
+                        "SELECT 1 FROM {} WHERE doc->>{} = %s{}"
+                        " AND NOT (id = ANY(%s::text[])) LIMIT 1"
+                    ).format(self._table("graph_edges"), sql.Literal(endpoint), scope),
+                    (operation.entity_id, *scope_params, written_edges),
+                ).fetchone()
+                if row is not None:
+                    conflict = EntityRevisionConflict(
+                        "node", operation.entity_id, None, None
+                    )
+                    conflict.args = (
+                        f"node {operation.entity_id!r}: dangling edges reference this id; "
+                        "reload the graph before retrying",
+                    )
+                    raise conflict
+
+    def _hold_endpoints(self, conn, operations: Sequence[EntityOperation]) -> None:
+        """Hold the endpoints the batch's edge upserts name, until commit.
+
+        So a node delete on another instance, which locks the row it removes,
+        is ordered against the edge write rather than interleaved with it
+        (§11.3). KEY SHARE, the weakest lock that does that: it conflicts
+        with a delete but not with an ordinary update of the node, so editing
+        a node never waits for someone drawing an edge to it. An endpoint the
+        batch upserts itself is skipped - its own upsert holds the row more
+        strongly. One single-row statement per endpoint, in sorted order, so
+        two batches over the same nodes take them in the same order, and
+        each is a primary-key lookup whatever the table's size.
+
+        Held, each endpoint's type is compared with the one the edge was
+        judged against (`endpoint_types`): a merge retypes a node in place
+        under FOR UPDATE, so an edge judged before it waits here and then
+        finds the new type, and is refused rather than landing a
+        relationship the new type does not allow.
+        Subtype-changing direct updates take the same FOR UPDATE lock before
+        checking incident edges. Compare subtypes as well, so an edge judged
+        before such an update cannot land after it.
+        """
+        upserted = {
+            op.entity_id
+            for op in operations
+            if op.kind == "node" and op.action == "upsert"
+        }
+        endpoints = sorted(
+            {
+                str(op.payload.get(end))
+                for op in operations
+                if op.kind == "edge" and op.action == "upsert" and op.payload
+                for end in ("source", "target")
+                if op.payload.get(end) is not None
+            }
+            - upserted
+        )
+        if not endpoints:
+            return
+        judged: Dict[str, str] = {}
+        subtypes = {}
+        for op in operations:
+            if op.kind == "edge" and op.action == "upsert":
+                judged.update(op.endpoint_types)
+                subtypes.update(op.endpoint_subtypes)
+        scope, scope_params = self._and_scope()
+        statement = sql.SQL(
+            "SELECT doc->>'type', doc->'subtypes' FROM {} WHERE id = %s{} FOR KEY SHARE"
+        ).format(self._table("graph_nodes"), scope)
+        for endpoint in endpoints:
+            row = conn.execute(statement, (endpoint, *scope_params)).fetchone()
+            # Gone counts too: the id could be created again with any type.
+            if endpoint in judged and (row is None or row[0] != judged[endpoint]):
+                raise NodeTypeChanged(endpoint, judged[endpoint])
+            if endpoint in subtypes and (
+                row is None or tuple(sorted(row[1] or [])) != subtypes[endpoint]
+            ):
+                raise EntityRevisionConflict("node", endpoint, None, None)
+
+    def _stored_revision_of(self, conn, table: str, entity_id: str) -> Optional[int]:
+        """The visible row's revision, or None when there is no such row."""
+        scope, scope_params = self._and_scope()
+        row = conn.execute(
+            sql.SQL(
+                "SELECT COALESCE((doc->>'revision')::bigint, 0) FROM {} WHERE id = %s{}"
+            ).format(self._table(table), scope),
+            (entity_id, *scope_params),
+        ).fetchone()
+        return None if row is None else int(row[0])
+
+    def _refuse(self, conn, table: str, operation: EntityOperation):
+        current = self._stored_revision_of(conn, table, operation.entity_id)
+        return EntityRevisionConflict(
+            operation.kind,
+            operation.entity_id,
+            None if operation.expect_absent else operation.expected_revision,
+            current,
+        )
+
+    def _apply_one(
+        self,
+        conn,
+        operation: EntityOperation,
+        write_token: Optional[str],
+        created_nodes=None,
+    ) -> Optional[int]:
         table = "graph_nodes" if operation.kind == "node" else "graph_edges"
         if operation.action == "delete":
-            conn.execute(
-                sql.SQL("DELETE FROM {} WHERE id = %s").format(self._table(table)),
-                (operation.entity_id,),
+            # The predicate is not redundant with the policy: where the server
+            # cannot enforce one, this is what stops an instance deleting a row
+            # that is not its to delete. The DELETE locks the row it removes,
+            # which is what orders a node delete against an edge create that
+            # holds the same row for share (§11.3).
+            scope, scope_params = self._and_scope()
+            if operation.expected_revision is None:
+                conn.execute(
+                    sql.SQL("DELETE FROM {} WHERE id = %s{}").format(
+                        self._table(table), scope
+                    ),
+                    (operation.entity_id, *scope_params),
+                )
+                return None
+            cursor = conn.execute(
+                sql.SQL(
+                    "DELETE FROM {} WHERE id = %s"
+                    " AND COALESCE((doc->>'revision')::bigint, 0) = %s{}"
+                ).format(self._table(table), scope),
+                (operation.entity_id, operation.expected_revision, *scope_params),
             )
-            return
-        conn.execute(
-            sql.SQL(
-                "INSERT INTO {} (id, doc) VALUES (%s, %s)"
-                " ON CONFLICT (id) DO UPDATE SET doc = EXCLUDED.doc"
-            ).format(self._table(table)),
-            (operation.entity_id, psycopg.types.json.Jsonb(operation.payload)),
+            if cursor.rowcount == 0:
+                raise self._refuse(conn, table, operation)
+            return None
+
+        # The stored doc is the payload with the store's own revision and
+        # this write's token laid over it: whatever revision the instance
+        # sent is not the one that lands.
+        doc_expr = sql.SQL(
+            "%s::jsonb || jsonb_build_object("
+            "'revision', nextval(%s::regclass), {token_key}, %s::text)"
+        ).format(token_key=sql.Literal(WRITE_TOKEN_KEY))
+        doc_params = (
+            psycopg.types.json.Jsonb(operation.payload),
+            self._sequence_regclass(),
+            write_token,
         )
+        scoped = self._scope_column
+        columns = (
+            sql.SQL("id, doc, ") + sql.Identifier(SCOPE_COLUMN)
+            if scoped
+            else sql.SQL("id, doc")
+        )
+        values = (
+            sql.SQL("%s, ") + doc_expr + sql.SQL(", %s")
+            if scoped
+            else sql.SQL("%s, ") + doc_expr
+        )
+        value_params = (operation.entity_id, *doc_params) + (
+            (self._scope,) if scoped else ()
+        )
+        returning = sql.SQL(" RETURNING (doc->>'revision')::bigint")
+
+        # xmax is zero for the inserted tuple, and nonzero for ON CONFLICT's
+        # updated tuple. Determine creation in the writing statement itself,
+        # rather than racing a preceding existence read.
+        track_create = (
+            operation.kind == "node"
+            and created_nodes is not None
+            and operation.expected_revision is None
+        )
+        if track_create:
+            returning += sql.SQL(", (xmax = 0)")
+
+        def revision(row):
+            if track_create and row[1]:
+                created_nodes.append(operation)
+            return int(row[0])
+
+        if operation.expect_absent:
+            row = conn.execute(
+                sql.SQL("INSERT INTO {} ({}) VALUES (").format(
+                    self._table(table), columns
+                )
+                + values
+                + sql.SQL(") ON CONFLICT (id) DO NOTHING")
+                + returning,
+                value_params,
+            ).fetchone()
+            if row is None:
+                conflict = self._refuse(conn, table, operation)
+                if conflict.current_revision is None:
+                    # Taken, but by a row this instance may not see.
+                    raise self._cross_scope(operation)
+                raise conflict
+            return revision(row)
+
+        if operation.expected_revision is not None:
+            scope, scope_params = self._and_scope()
+            assign = sql.SQL("doc = ") + doc_expr
+            assign_params: Tuple = doc_params
+            if scoped:
+                assign = assign + sql.SQL(", {} = %s").format(
+                    sql.Identifier(SCOPE_COLUMN)
+                )
+                assign_params = assign_params + (self._scope,)
+            row = conn.execute(
+                sql.SQL("UPDATE {} SET ").format(self._table(table))
+                + assign
+                + sql.SQL(
+                    " WHERE id = %s AND COALESCE((doc->>'revision')::bigint, 0) = %s"
+                )
+                + scope
+                + returning,
+                assign_params
+                + (operation.entity_id, operation.expected_revision)
+                + scope_params,
+            ).fetchone()
+            if row is None:
+                raise self._refuse(conn, table, operation)
+            return revision(row)
+
+        # A node's type changes in place only under an expectation (a merge's
+        # retype); a plain upsert that would change it was made over a type
+        # this instance has not seen replaced, and putting the old type back
+        # would strand the edges judged against the new one.
+        same_type = (
+            sql.SQL(" {bare}.doc->>'type' IS NOT DISTINCT FROM EXCLUDED.doc->>'type'")
+            if operation.kind == "node"
+            else sql.SQL(" TRUE")
+        ).format(bare=sql.Identifier(table))
+        if not scoped:
+            row = conn.execute(
+                sql.SQL("INSERT INTO {} ({}) VALUES (").format(
+                    self._table(table), columns
+                )
+                + values
+                + sql.SQL(") ON CONFLICT (id) DO UPDATE SET doc = EXCLUDED.doc WHERE")
+                + same_type
+                + returning,
+                value_params,
+            ).fetchone()
+            if row is None:
+                raise NodeTypeChanged(
+                    operation.entity_id, operation.payload.get("type")
+                )
+            return revision(row)
+        # The scope travels with the row. A row written before this instance
+        # had a scope carries none, and adopting it here is what stops the
+        # store drifting into two kinds of row that the whole-graph save would
+        # then have to reconcile.
+        #
+        # The predicate on the conflicting row is the same one every read
+        # carries, and it is what makes an upsert unable to reach a row that is
+        # not this instance's. `id` is the primary key of the TABLE rather than
+        # of the table per scope, so the conflicting row may belong to another
+        # scope - and without this the statement replaced its content and
+        # restamped its scope, which is a cross-scope write in the one path
+        # that had none. Measured before this predicate existed: the other
+        # scope's node was gone and its next load returned nothing.
+        #
+        # No row back is read rather than assumed away, because a DO UPDATE
+        # whose WHERE does not match is not an error - the statement affects
+        # no rows and raises nothing, which would tell the caller a write
+        # happened that did not.
+        row = conn.execute(
+            sql.SQL("INSERT INTO {} ({}) VALUES (").format(self._table(table), columns)
+            + values
+            + sql.SQL(
+                ") ON CONFLICT (id) DO UPDATE"
+                " SET doc = EXCLUDED.doc, {col} = EXCLUDED.{col}"
+                " WHERE ({bare}.{col} IS NULL OR {bare}.{col} = %s) AND"
+            ).format(col=sql.Identifier(SCOPE_COLUMN), bare=sql.Identifier(table))
+            + same_type
+            + returning,
+            value_params + (self._scope,),
+        ).fetchone()
+        if row is None:
+            scope, scope_params = self._and_scope()
+            stored = conn.execute(
+                sql.SQL("SELECT doc->>'type' FROM {} WHERE id = %s{}").format(
+                    self._table(table), scope
+                ),
+                (operation.entity_id, *scope_params),
+            ).fetchone()
+            if operation.kind == "node" and stored is not None:
+                raise NodeTypeChanged(
+                    operation.entity_id, operation.payload.get("type")
+                )
+            raise self._cross_scope(operation)
+        return revision(row)
+
+    def _cross_scope(self, operation: EntityOperation) -> "CrossScopeWriteRefused":
+        return CrossScopeWriteRefused(
+            f"{operation.kind} {operation.entity_id!r} in schema "
+            f"{self.schema!r} carries a scope this instance may not write. "
+            f"An id is unique across the whole table, so two scopes cannot "
+            f"both hold one - see docs/PERSISTENCE_BACKENDS.md, "
+            f"'Keeping scopes apart'."
+        )
+
+    def read_write_evidence(
+        self, keys: Sequence[Tuple[str, str]]
+    ) -> Dict[Tuple[str, str], Optional[Tuple[int, Optional[str]]]]:
+        """What a failed write can be judged on: each entity's stored revision
+        and the token of the write that last wrote it, or None when absent.
+
+        One snapshot for all of them, so a write that committed between two
+        tables' reads cannot look half landed.
+        """
+        self._ensure_schema()
+        found: Dict[Tuple[str, str], Optional[Tuple[int, Optional[str]]]] = {
+            (kind, entity_id): None for kind, entity_id in keys
+        }
+        with self._pool.connection(timeout=EVIDENCE_CONNECT_TIMEOUT_SECONDS) as conn:
+            with conn.transaction():
+                conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                self._bind_scope(conn)
+                scope, scope_params = self._and_scope()
+                for kind, table in (("node", "graph_nodes"), ("edge", "graph_edges")):
+                    ids = [entity_id for k, entity_id in keys if k == kind]
+                    if not ids:
+                        continue
+                    rows = conn.execute(
+                        sql.SQL(
+                            "SELECT id, COALESCE((doc->>'revision')::bigint, 0),"
+                            " doc->>{} FROM {} WHERE id = ANY(%s){}"
+                        ).format(
+                            sql.Literal(WRITE_TOKEN_KEY), self._table(table), scope
+                        ),
+                        (ids, *scope_params),
+                    ).fetchall()
+                    for entity_id, revision, token in rows:
+                        found[(kind, entity_id)] = (int(revision), token)
+        return found
+
+    # -- layer store (staged_sessions) ---------------------------------------
+    #
+    # docs/SESSION_OVERLAY_CONTRACT.md §7, in three tables of the graph's
+    # schema. Every operation is one READ COMMITTED transaction that binds
+    # the scope first and carries the scope predicate in every statement, as
+    # the graph's own do. Every operation that changes a layer locks the
+    # session's record row FOR UPDATE before anything else, so the
+    # operations on one session are serialised across instances - staging,
+    # discarding, merging and retiring cannot interleave, and a layer's cap
+    # is counted on a layer nobody else is changing.
+
+    def _require_staged_sessions(self) -> None:
+        if not self._staged_sessions:
+            raise RuntimeError(
+                "this backend was constructed without staged_sessions; it "
+                "holds no layers"
+            )
+        self._ensure_schema()
+
+    def holds_staged_sessions(self) -> bool:
+        """Whether this scope's store has any staged-session record.
+
+        Read-only, and safe on a backend constructed without staged_sessions:
+        it creates nothing, and a store that never had the tables answers
+        False. An instance must not run with staged sessions off over a store
+        that has them, or it would write those sessions as direct.
+        """
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                self._bind_scope(conn)
+                exists = conn.execute(
+                    "SELECT to_regclass(%s)",
+                    (
+                        sql.Identifier(self.schema, "graph_staged_sessions").as_string(
+                            conn
+                        ),
+                    ),
+                ).fetchone()[0]
+                if exists is None:
+                    return False
+                scope, params = self._layer_scope()
+                return bool(
+                    conn.execute(
+                        sql.SQL("SELECT EXISTS (SELECT 1 FROM {} WHERE true{})").format(
+                            self._table("graph_staged_sessions"), scope
+                        ),
+                        params,
+                    ).fetchone()[0]
+                )
+
+    def _layer_scope(self) -> Tuple[sql.Composed, Tuple]:
+        """` AND <predicate>` for a layer table: this instance's scope, exactly.
+
+        Stricter than the graph tables' predicate on purpose. There a row
+        carrying no scope is shared by every scope, because it predates the
+        column; a layer row has no such past. A session belongs to the one
+        scope that recorded it - NULL being one - and every entry and merge
+        record of it carries that same scope, so a scoped instance cannot
+        stage into an unscoped session (leaving entries its owner cannot see
+        and `retire` would not drop) or the other way round. The server's
+        policy stays the graph tables' own, the outer bound.
+        """
+        return (
+            sql.SQL(" AND {col} IS NOT DISTINCT FROM %s").format(
+                col=sql.Identifier(SCOPE_COLUMN)
+            ),
+            (self._scope,),
+        )
+
+    def _conflict_scope(self, table: str) -> Tuple[sql.Composed, Tuple]:
+        """` WHERE <predicate>` on the row an `ON CONFLICT DO UPDATE` meets.
+
+        The key is unique across scopes, so the conflicting row may be
+        another scope's; this keeps the update off it, and the missing
+        RETURNING row is how the caller learns that.
+        """
+        return (
+            sql.SQL(" WHERE {t}.{col} IS NOT DISTINCT FROM %s").format(
+                t=sql.Identifier(table), col=sql.Identifier(SCOPE_COLUMN)
+            ),
+            (self._scope,),
+        )
+
+    def _layer_transaction(self, conn) -> None:
+        conn.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        self._bind_scope(conn)
+
+    def _layer_cross_scope(self, what: str) -> "CrossScopeWriteRefused":
+        return CrossScopeWriteRefused(
+            f"{what} in schema {self.schema!r} belongs to a scope this "
+            f"instance may not write"
+        )
+
+    def _session_status(self, conn, session_id: str, lock: bool) -> str:
+        scope, params = self._layer_scope()
+        row = conn.execute(
+            sql.SQL("SELECT status FROM {} WHERE session_id = %s{}{}").format(
+                self._table("graph_staged_sessions"),
+                scope,
+                sql.SQL(" FOR UPDATE") if lock else sql.SQL(""),
+            ),
+            (session_id, *params),
+        ).fetchone()
+        return row[0] if row else layer_store.STATUS_NONE
+
+    def _lock_active_session(self, conn, session_id: str) -> None:
+        status = self._session_status(conn, session_id, lock=True)
+        if status != layer_store.STATUS_ACTIVE:
+            raise layer_store.StagedSessionNotActive(session_id, status)
+
+    def _layer_entries(self, conn, session_id: str, lock: bool) -> Dict:
+        scope, params = self._layer_scope()
+        rows = conn.execute(
+            sql.SQL(
+                "SELECT kind, entity_id, doc FROM {} WHERE session_id = %s{}"
+                " ORDER BY kind, entity_id{}"
+            ).format(
+                self._table("graph_layer_entries"),
+                scope,
+                sql.SQL(" FOR UPDATE") if lock else sql.SQL(""),
+            ),
+            (session_id, *params),
+        ).fetchall()
+        return {(kind, entity_id): doc for kind, entity_id, doc in rows}
+
+    def _delete_entries(self, conn, session_id: str, keys) -> List[Tuple[str, str]]:
+        scope, params = self._layer_scope()
+        removed = []
+        for kind, entity_id in keys:
+            row = conn.execute(
+                sql.SQL(
+                    "DELETE FROM {} WHERE session_id = %s AND kind = %s"
+                    " AND entity_id = %s{} RETURNING kind"
+                ).format(self._table("graph_layer_entries"), scope),
+                (session_id, kind, entity_id, *params),
+            ).fetchone()
+            if row is not None:
+                removed.append((kind, entity_id))
+        return removed
+
+    def _run_layer(self, work):
+        """Run `work(conn)` in one transaction, retrying a deadlock."""
+        self._require_staged_sessions()
+        for attempt in range(self.DEADLOCK_RETRIES + 1):
+            try:
+                with self._pool.connection() as conn:
+                    with conn.transaction():
+                        self._layer_transaction(conn)
+                        return work(conn)
+            except psycopg.errors.DeadlockDetected:
+                if attempt == self.DEADLOCK_RETRIES:
+                    raise
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    def load_layer(self, session_id: str) -> List[Dict[str, Any]]:
+        session_id = layer_store.check_session_id(session_id)
+        return self._run_layer(
+            lambda conn: list(self._layer_entries(conn, session_id, False).values())
+        )
+
+    def staged_status(self, session_id: str) -> str:
+        session_id = layer_store.check_session_id(session_id)
+        return self._run_layer(
+            lambda conn: self._session_status(conn, session_id, lock=False)
+        )
+
+    def layers_in_use(self) -> List[str]:
+        def work(conn):
+            scope, params = self._layer_scope()
+            where = sql.SQL(" WHERE true") + scope
+            rows = conn.execute(
+                sql.SQL("SELECT DISTINCT session_id FROM {}{} ORDER BY 1").format(
+                    self._table("graph_layer_entries"), where
+                ),
+                params or None,
+            ).fetchall()
+            return [row[0] for row in rows]
+
+        return self._run_layer(work)
+
+    def load_merge(self, merge_id: str) -> Optional[Dict[str, Any]]:
+        merge_id = layer_store.check_merge_id(merge_id)
+
+        def work(conn):
+            scope, params = self._layer_scope()
+            row = conn.execute(
+                sql.SQL("SELECT doc FROM {} WHERE merge_id = %s{}").format(
+                    self._table("graph_merge_records"), scope
+                ),
+                (merge_id, *params),
+            ).fetchone()
+            return row[0] if row else None
+
+        return self._run_layer(work)
+
+    def record_staged(self, session_id: str) -> None:
+        session_id = layer_store.check_session_id(session_id)
+
+        def work(conn):
+            inserted = conn.execute(
+                sql.SQL(
+                    "INSERT INTO {} (session_id, status, {}) VALUES (%s, %s, %s)"
+                    " ON CONFLICT (session_id) DO NOTHING RETURNING status"
+                ).format(
+                    self._table("graph_staged_sessions"), sql.Identifier(SCOPE_COLUMN)
+                ),
+                (session_id, layer_store.STATUS_ACTIVE, self._scope),
+            ).fetchone()
+            if inserted is not None:
+                return
+            status = self._session_status(conn, session_id, lock=False)
+            if status == layer_store.STATUS_RETIRED:
+                raise layer_store.StagedSessionRetired(session_id)
+            if status == layer_store.STATUS_NONE:
+                # Taken, by a record this instance may not see.
+                raise self._layer_cross_scope("session record")
+
+        self._run_layer(work)
+
+    def retire(self, session_id: str, *, require_empty: bool = False) -> None:
+        session_id = layer_store.check_session_id(session_id)
+
+        def work(conn):
+            if require_empty:
+                # The record row first, FOR UPDATE, as every layer write
+                # takes it: a stage on another instance has then either
+                # committed, and is counted here, or waits for this unit.
+                status = self._session_status(conn, session_id, lock=True)
+                if status == layer_store.STATUS_RETIRED:
+                    return
+                held = len(self._layer_entries(conn, session_id, False))
+                if held:
+                    raise layer_store.LayerNotEmpty(session_id, held)
+            scope_pred, pred_params = self._conflict_scope("graph_staged_sessions")
+            row = conn.execute(
+                sql.SQL(
+                    "INSERT INTO {} (session_id, status, {col}, retired_at)"
+                    " VALUES (%s, %s, %s, clock_timestamp())"
+                    " ON CONFLICT (session_id) DO UPDATE SET status = EXCLUDED.status,"
+                    " retired_at = COALESCE({t}.retired_at, EXCLUDED.retired_at)"
+                ).format(
+                    self._table("graph_staged_sessions"),
+                    col=sql.Identifier(SCOPE_COLUMN),
+                    t=sql.Identifier("graph_staged_sessions"),
+                )
+                + scope_pred
+                + sql.SQL(" RETURNING status"),
+                (session_id, layer_store.STATUS_RETIRED, self._scope) + pred_params,
+            ).fetchone()
+            if row is None:
+                raise self._layer_cross_scope("session record")
+            scope, params = self._layer_scope()
+            conn.execute(
+                sql.SQL("DELETE FROM {} WHERE session_id = %s{}").format(
+                    self._table("graph_layer_entries"), scope
+                ),
+                (session_id, *params),
+            )
+
+        self._run_layer(work)
+
+    def purge_merge_records(
+        self,
+        retention: Any,
+        *,
+        limit: Any,
+        now: Optional[Any] = None,
+    ) -> int:
+        retention, limit, now = layer_store.check_purge_request(retention, limit, now)
+
+        def work(conn):
+            scope, params = self._layer_scope()
+            # The database's clock, so instances whose clocks differ agree on
+            # which records the window has passed.
+            moment = conn.execute(
+                "SELECT COALESCE(%s::timestamptz, clock_timestamp())", (now,)
+            ).fetchone()[0]
+            # SKIP LOCKED: a row another instance's purge holds is its to
+            # change, so two purges at once neither wait on nor fail over
+            # each other, and a row is changed or deleted once.
+            conn.execute(
+                sql.SQL(
+                    "UPDATE {t} SET retired_at = %s WHERE session_id IN ("
+                    "SELECT session_id FROM {t} WHERE status = %s"
+                    " AND retired_at IS NULL{scope}"
+                    " ORDER BY session_id LIMIT %s FOR UPDATE SKIP LOCKED)"
+                ).format(t=self._table("graph_staged_sessions"), scope=scope),
+                (moment, layer_store.STATUS_RETIRED, *params, limit),
+            )
+            s_scope = sql.SQL(" AND s.{col} IS NOT DISTINCT FROM %s").format(
+                col=sql.Identifier(SCOPE_COLUMN)
+            )
+            m_scope = sql.SQL(" AND m.{col} IS NOT DISTINCT FROM %s").format(
+                col=sql.Identifier(SCOPE_COLUMN)
+            )
+            rows = conn.execute(
+                sql.SQL(
+                    "DELETE FROM {m} WHERE merge_id IN ("
+                    "SELECT m.merge_id FROM {m} m JOIN {s} s"
+                    " ON s.session_id = m.session_id"
+                    " WHERE s.status = %s AND s.retired_at < %s"
+                    " AND m.doc->>'status' = %s{s_scope}{m_scope}"
+                    " ORDER BY m.merge_id LIMIT %s FOR UPDATE OF m SKIP LOCKED)"
+                    " RETURNING merge_id, session_id"
+                ).format(
+                    m=self._table("graph_merge_records"),
+                    s=self._table("graph_staged_sessions"),
+                    s_scope=s_scope,
+                    m_scope=m_scope,
+                ),
+                (
+                    layer_store.STATUS_RETIRED,
+                    moment - retention,
+                    layer_store.MERGE_APPLIED,
+                    self._scope,
+                    self._scope,
+                    limit,
+                ),
+            ).fetchall()
+            return [(row[0], row[1]) for row in rows]
+
+        purged = self._run_layer(work)
+        # Logged once the unit has committed, so a rolled-back purge is
+        # never reported.
+        layer_store.log_purged_merge_records(purged)
+        return len(purged)
+
+    def stage(
+        self,
+        session_id: str,
+        entries: Sequence[Any],
+        removals: Sequence[Any] = (),
+        *,
+        max_entries: Optional[int] = None,
+        expected: Optional[Any] = None,
+        exact: bool = False,
+    ) -> None:
+        session_id = layer_store.check_session_id(session_id)
+        by_key, removed = layer_store.check_entries(entries, removals)
+        limit = layer_store.check_max_entries(max_entries)
+        expectations = layer_store.check_expected(expected)
+
+        def work(conn):
+            conflict_pred, pred_params = self._conflict_scope("graph_layer_entries")
+            # The session's record row, locked, orders this op against every
+            # other op on the session's layer, on any instance; the entries
+            # read after it are the ones this op replaces.
+            self._lock_active_session(conn, session_id)
+            if expectations or exact:
+                layer_store.verify_expected(
+                    session_id,
+                    self._layer_entries(conn, session_id, lock=False),
+                    expectations,
+                    bool(exact),
+                )
+            self._delete_entries(conn, session_id, removed)
+            for (kind, entity_id), doc in sorted(by_key.items()):
+                row = conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {} (session_id, kind, entity_id, doc, {col})"
+                        " VALUES (%s, %s, %s, %s, %s)"
+                        " ON CONFLICT (session_id, kind, entity_id)"
+                        " DO UPDATE SET doc = EXCLUDED.doc"
+                    ).format(
+                        self._table("graph_layer_entries"),
+                        col=sql.Identifier(SCOPE_COLUMN),
+                    )
+                    + conflict_pred
+                    + sql.SQL(" RETURNING kind"),
+                    (
+                        session_id,
+                        kind,
+                        entity_id,
+                        psycopg.types.json.Jsonb(doc),
+                        self._scope,
+                    )
+                    + pred_params,
+                ).fetchone()
+                if row is None:
+                    raise self._layer_cross_scope("layer entry")
+            if limit is not None:
+                scope, params = self._layer_scope()
+                held = conn.execute(
+                    sql.SQL("SELECT count(*) FROM {} WHERE session_id = %s{}").format(
+                        self._table("graph_layer_entries"), scope
+                    ),
+                    (session_id, *params),
+                ).fetchone()[0]
+                if held > limit:
+                    raise layer_store.LayerFull(session_id, limit, int(held))
+
+        self._run_layer(work)
+
+    def discard(
+        self,
+        session_id: str,
+        removals: Optional[Sequence[Any]] = None,
+        *,
+        expected: Optional[Any] = None,
+    ) -> List[Tuple[str, str]]:
+        session_id = layer_store.check_session_id(session_id)
+        keys = None if removals is None else layer_store.check_keys(removals)
+        expectations = layer_store.check_expected(expected)
+
+        def work(conn):
+            self._lock_active_session(conn, session_id)
+            if expectations:
+                layer_store.verify_expected(
+                    session_id,
+                    self._layer_entries(conn, session_id, lock=False),
+                    expectations,
+                )
+            if keys is not None:
+                return self._delete_entries(conn, session_id, keys)
+            scope, params = self._layer_scope()
+            rows = conn.execute(
+                sql.SQL(
+                    "DELETE FROM {} WHERE session_id = %s{} RETURNING kind, entity_id"
+                ).format(self._table("graph_layer_entries"), scope),
+                (session_id, *params),
+            ).fetchall()
+            return sorted((kind, entity_id) for kind, entity_id in rows)
+
+        return self._run_layer(work)
+
+    def drop_layer(self, session_id: str) -> None:
+        session_id = layer_store.check_session_id(session_id)
+
+        def work(conn):
+            self._session_status(conn, session_id, lock=True)
+            scope, params = self._layer_scope()
+            conn.execute(
+                sql.SQL("DELETE FROM {} WHERE session_id = %s{}").format(
+                    self._table("graph_layer_entries"), scope
+                ),
+                (session_id, *params),
+            )
+
+        self._run_layer(work)
+
+    def merge(
+        self,
+        session_id: str,
+        merge_id: str,
+        operations: Sequence[EntityOperation],
+        checks: Sequence[Any],
+        removals: Sequence[Any],
+        record: Any,
+    ) -> "layer_store.MergeResult":
+        """The merge unit of §7, as one transaction.
+
+        In order: the merge id's advisory lock, then its record (a recorded
+        id returns that record and does nothing else); the session's record,
+        locked; the layer's entries, locked, with the removals and
+        `entry_unchanged` checks verified on them; the nodes whose incident
+        edges are checked, locked FOR UPDATE - so an edge create elsewhere,
+        which holds its endpoints FOR KEY SHARE, is ordered against it - and
+        their incident edges compared; every other node a `node_exists` check
+        names, held FOR KEY SHARE; the graph operations through the same
+        statements as a direct write, each with its expectation, the store's
+        revision and a write token; `node_exists` on the result; the entries
+        removed; the record stored; the graph changes announced. A failed
+        check or expectation raises MergeRaced and the transaction rolls back
+        whole.
+
+        A connection lost at commit leaves the outcome open; the merge
+        record is its evidence (§4.4), so the caller asks `load_merge`.
+        """
+        session_id = layer_store.check_session_id(session_id)
+        merge_id = layer_store.check_merge_id(merge_id)
+        ops, verified, removed, caller_record = layer_store.check_merge_request(
+            operations, checks, removals, record
+        )
+        self._require_staged_sessions()
+        write_token = uuid.uuid4().hex
+        for attempt in range(self.DEADLOCK_RETRIES + 1):
+            try:
+                return self._merge_once(
+                    session_id,
+                    merge_id,
+                    ops,
+                    verified,
+                    removed,
+                    caller_record,
+                    write_token,
+                )
+            except psycopg.errors.DeadlockDetected:
+                if attempt == self.DEADLOCK_RETRIES:
+                    raise
+            except EntityRevisionConflict as exc:
+                raised = layer_store.MergeRaced(str(exc))
+                raise raised from exc
+            except psycopg.errors.UniqueViolation as exc:
+                # The merge id's record row exists under another scope: the
+                # select under the lock saw nothing, and the insert met it.
+                raise layer_store.MergeIdTaken(merge_id) from exc
+            except (
+                psycopg.DataError,
+                psycopg.ProgrammingError,
+                UnicodeEncodeError,
+            ) as exc:
+                if getattr(exc, "sqlstate", None) is None:
+                    raise WriteRefusedByStore(
+                        f"the driver refused a value in the merge: {exc}"
+                    ) from exc
+                raise
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    def _merge_once(
+        self,
+        session_id: str,
+        merge_id: str,
+        ops: List[EntityOperation],
+        checks: List[Any],
+        removed: List[Tuple[str, str]],
+        caller_record: Dict[str, Any],
+        write_token: str,
+    ) -> "layer_store.MergeResult":
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                self._layer_transaction(conn)
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
+                    (MERGE_LOCK_KEY, f"{self.schema}\x1f{merge_id}"),
+                )
+                # What a direct batch takes first, taken first here too: the
+                # save's shared lock, so a whole-graph save never runs inside
+                # a merge.
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock_shared(%s, hashtext(%s))",
+                    (SAVE_LOCK_KEY, self.schema),
+                )
+                scope, params = self._layer_scope()
+                existing = conn.execute(
+                    sql.SQL("SELECT doc FROM {} WHERE merge_id = %s{}").format(
+                        self._table("graph_merge_records"), scope
+                    ),
+                    (merge_id, *params),
+                ).fetchone()
+                if existing is not None:
+                    return layer_store.replay(existing[0], session_id, merge_id)
+                self._lock_active_session(conn, session_id)
+                entries = self._layer_entries(conn, session_id, lock=True)
+                for key in removed:
+                    if key not in entries:
+                        raise layer_store.MergeRaced(
+                            f"{key[0]} {key[1]!r} is no longer staged"
+                        )
+                # The session's record row, locked above, orders this read
+                # against every staging op, so no entry can appear after it.
+                layer_store.verify_layer_holds_only(entries, checks)
+                for check in checks:
+                    if check.check != "entry_unchanged":
+                        continue
+                    entry = entries.get((check.kind, check.entity_id))
+                    if entry is None or not layer_store.entry_matches(
+                        entry, check.session_seq
+                    ):
+                        raise layer_store.MergeRaced(
+                            f"the staged entry for {check.kind} "
+                            f"{check.entity_id!r} changed"
+                        )
+                self._claim_or_check_graph_identity(conn)
+                self._verify_incident_edges(conn, checks)
+                existing_nodes = sorted(
+                    {c.entity_id for c in checks if c.check == "node_exists"}
+                    - {c.entity_id for c in checks if c.check == "incident_edges"}
+                )
+                node_scope, node_params = self._and_scope()
+                for node_id in existing_nodes:
+                    conn.execute(
+                        sql.SQL(
+                            "SELECT 1 FROM {} WHERE id = %s{} FOR KEY SHARE"
+                        ).format(self._table("graph_nodes"), node_scope),
+                        (node_id, *node_params),
+                    )
+                self._hold_endpoints(conn, ops)
+                revisions = []
+                created_nodes = []
+                for operation in ops:
+                    if operation.action == "delete":
+                        # Locked and required, as layer_store's reference does:
+                        # a delete with nothing to delete was decided on a
+                        # graph that has changed since.
+                        table = (
+                            "graph_nodes" if operation.kind == "node" else "graph_edges"
+                        )
+                        if (
+                            conn.execute(
+                                sql.SQL(
+                                    "SELECT 1 FROM {} WHERE id = %s{} FOR UPDATE"
+                                ).format(self._table(table), node_scope),
+                                (operation.entity_id, *node_params),
+                            ).fetchone()
+                            is None
+                        ):
+                            raise layer_store.MergeRaced(
+                                f"{operation.kind} {operation.entity_id!r} is "
+                                f"already absent"
+                            )
+                    revisions.append(
+                        self._apply_one(conn, operation, write_token, created_nodes)
+                    )
+                self._refuse_dangling_edges_on_create(conn, created_nodes, ops)
+                for node_id in sorted(
+                    {c.entity_id for c in checks if c.check == "node_exists"}
+                ):
+                    if (
+                        conn.execute(
+                            sql.SQL("SELECT 1 FROM {} WHERE id = %s{}").format(
+                                self._table("graph_nodes"), node_scope
+                            ),
+                            (node_id, *node_params),
+                        ).fetchone()
+                        is None
+                    ):
+                        raise layer_store.MergeRaced(f"node {node_id!r} does not exist")
+                self._delete_entries(conn, session_id, removed)
+                stored = layer_store.build_record(
+                    caller_record,
+                    merge_id=merge_id,
+                    session_id=session_id,
+                    status=layer_store.MERGE_APPLIED,
+                    applied=layer_store.applied_items(ops, revisions),
+                )
+                conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {} (merge_id, session_id, doc, {})"
+                        " VALUES (%s, %s, %s, %s)"
+                    ).format(
+                        self._table("graph_merge_records"),
+                        sql.Identifier(SCOPE_COLUMN),
+                    ),
+                    (
+                        merge_id,
+                        session_id,
+                        psycopg.types.json.Jsonb(stored),
+                        self._scope,
+                    ),
+                )
+                if ops:
+                    self._announce(conn, ops)
+                return layer_store.MergeResult(record=stored)
+
+    def _verify_incident_edges(self, conn, checks: Sequence[Any]) -> None:
+        """Lock each checked node FOR UPDATE, then compare its incident edges.
+
+        The node row lock is what a direct edge create's FOR KEY SHARE on its
+        endpoints conflicts with, so no edge to the node can be created by
+        anyone between this read and the commit.
+        """
+        incident = sorted(
+            (c for c in checks if c.check == "incident_edges"),
+            key=lambda c: c.entity_id,
+        )
+        node_scope, node_params = self._and_scope()
+        edge_scope, edge_params = self._and_scope()
+        for check in incident:
+            conn.execute(
+                sql.SQL("SELECT 1 FROM {} WHERE id = %s{} FOR UPDATE").format(
+                    self._table("graph_nodes"), node_scope
+                ),
+                (check.entity_id, *node_params),
+            )
+        for check in incident:
+            rows = conn.execute(
+                sql.SQL(
+                    "SELECT id, COALESCE((doc->>'revision')::bigint, 0) FROM {}"
+                    " WHERE (doc->>'source' = %s OR doc->>'target' = %s){}"
+                ).format(self._table("graph_edges"), edge_scope),
+                (check.entity_id, check.entity_id, *edge_params),
+            ).fetchall()
+            # Compared as sorted in Python: the server's collation need not
+            # order ids the way the check was built.
+            if sorted(row[0] for row in rows) != list(check.edge_ids):
+                raise layer_store.MergeRaced(
+                    f"node {check.entity_id!r} has incident edges the merge "
+                    f"did not list"
+                )
+            # An edge write holds its endpoints FOR KEY SHARE, which the lock
+            # above excludes, so these revisions hold until the commit.
+            stored = {row[0]: int(row[1]) for row in rows}
+            for edge_id, revision in check.edge_revisions:
+                if stored.get(edge_id) != revision:
+                    raise layer_store.MergeRaced(
+                        f"edge {edge_id!r} to node {check.entity_id!r} changed"
+                    )
 
     # -- change notification -------------------------------------------------
 
@@ -1038,6 +2783,9 @@ class PostgresGraphPersistenceBackend:
                     else "change notification was not stopped cleanly"
                 )
             self._ensure_schema()
+            with self._pool.connection() as conn:
+                with conn.transaction():
+                    self._claim_or_check_graph_identity(conn)
             self._listener = listener
             self._listen_stop.clear()
             self._listen_error = None
@@ -1107,8 +2855,8 @@ class PostgresGraphPersistenceBackend:
                 # reading that as "nothing is running" cleared the handle on
                 # the one thread guaranteed to still be alive.
                 if mine:
-                    print(
-                        f"Warning: the listener thread for {self._channel} "
+                    logger.warning(
+                        f"the listener thread for {self._channel} "
                         f"did not stop within {_LISTEN_STOP_TIMEOUT}s; "
                         f"notification cannot be started again on this "
                         f"backend"
@@ -1152,9 +2900,8 @@ class PostgresGraphPersistenceBackend:
                     self._listen_error = exc
                     ready.set()
                     return
-                print(
-                    f"Warning: reconnecting to {self._channel} after "
-                    f"{type(exc).__name__}: {exc}"
+                logger.warning(
+                    f"reconnecting to {self._channel} after {type(exc).__name__}: {exc}"
                 )
                 self._listen_stop.wait(delay)
                 delay = min(delay * 2, NOTIFY_RECONNECT_MAX_SECONDS)
@@ -1178,8 +2925,8 @@ class PostgresGraphPersistenceBackend:
                 self._read_until_stopped(conn)
             except Exception as exc:
                 if not self._listen_stop.is_set():
-                    print(
-                        f"Warning: lost the listening connection on "
+                    logger.warning(
+                        f"lost the listening connection on "
                         f"{self._channel}: {type(exc).__name__}: {exc}"
                     )
             finally:
@@ -1289,16 +3036,26 @@ class PostgresGraphPersistenceBackend:
         agrees.
         """
         found: Dict[str, Dict[str, Any]] = {"node": {}, "edge": {}}
-        with self._pool.connection() as conn:
+        # The scope predicate below is built from what the migration found, and
+        # this method does not migrate - it does not need to, because the only
+        # caller is the listening thread and that thread exists only once
+        # `start_change_notification` has run, which does. Stated because it is
+        # the one read path here whose correctness rests on an ordering rather
+        # than on its own first line.
+        scope, scope_params = self._and_scope()
+        with self._pool.connection() as conn, conn.transaction():
+            # In a transaction of its own, because the scope is bound to one
+            # and this read is otherwise the only path here that has none.
+            self._bind_scope(conn)
             for kind, table in (("node", "graph_nodes"), ("edge", "graph_edges")):
                 ids = [entity_id for k, entity_id in pairs if k == kind]
                 if not ids:
                     continue
                 rows = conn.execute(
-                    sql.SQL("SELECT id, doc FROM {} WHERE id = ANY(%s)").format(
-                        self._table(table)
+                    sql.SQL("SELECT id, doc FROM {} WHERE id = ANY(%s){}").format(
+                        self._table(table), scope
                     ),
-                    (ids,),
+                    (ids, *scope_params),
                 ).fetchall()
                 found[kind] = {row[0]: row[1] for row in rows}
 
@@ -1311,7 +3068,9 @@ class PostgresGraphPersistenceBackend:
                 )
             else:
                 operations.append(
-                    EntityOperation(kind, "upsert", entity_id, dict(doc))  # type: ignore[arg-type]
+                    EntityOperation(
+                        kind, "upsert", entity_id, dict(_without_token(doc))
+                    )  # type: ignore[arg-type]
                 )
         return operations
 
@@ -1341,11 +3100,10 @@ class PostgresGraphPersistenceBackend:
             # is not. Either the application called us back into itself, or
             # this backend grew a path that reports inline. Loud, because the
             # refresh did not happen and the instance is now behind.
-            print(f"Warning: change notification refused: {exc}")
+            logger.warning(f"change notification refused: {exc}")
         except Exception as exc:
-            print(
-                f"Warning: applying an external change failed: "
-                f"{type(exc).__name__}: {exc}"
+            logger.warning(
+                f"applying an external change failed: {type(exc).__name__}: {exc}"
             )
 
     def checkpoint(self) -> None:
@@ -1381,10 +3139,18 @@ class PostgresGraphPersistenceBackend:
 
 __all__ = [
     "PostgresGraphPersistenceBackend",
+    # The two a host must be able to catch, so they belong in a curated list
+    # as much as the tuning constants do.
+    "CrossScopeWriteRefused",
+    "ScopeIsolationUnavailable",
     "SAVE_LOCK_KEY",
     "DEFAULT_POOL_SIZE",
     "MIGRATION_LOCK_KEY",
     "NOTIFY_PAYLOAD_LIMIT",
     "NOTIFY_POLL_SECONDS",
     "NOTIFY_RECONNECT_MAX_SECONDS",
+    "SCOPE_COLUMN",
+    "SCOPE_POLICY_SUFFIX",
+    "SCOPE_SETTING",
+    "SCOPED_TABLES",
 ]

@@ -39,7 +39,6 @@ function resetStore() {
     selectedNodeId: null,
     detailNode: null,
     editingNode: null,
-    contextMenu: null,
     modelProfiles: [],
     stats: { federation: { max_selectable_depth: 1 } },
     sessionEpoch: 0,

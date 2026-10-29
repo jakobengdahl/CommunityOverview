@@ -17,6 +17,7 @@ from .worker import AgentWorker, ProcessingResult
 from .mcp_loader import MCPLoader
 from .scheduler import AgentScheduler
 from .run_history import AgentRunRecorder, STATUS_TO_STATE
+from .run_history_retention import RetentionSweeper
 from .execution import (
     ExecutionKind,
     ExecutionStore,
@@ -99,6 +100,10 @@ class AgentRegistry:
             else:
                 proposal_store = InMemoryProposalStore()
         self._proposal_store = proposal_store
+        self._retention = settings.run_history_retention
+        self._retention_sweeper = RetentionSweeper(
+            execution_store, self._retention, proposal_store=proposal_store
+        )
         self._governance = GovernanceManager(
             proposal_store, executor_factory=self._build_apply_executor
         )
@@ -175,6 +180,10 @@ class AgentRegistry:
 
         Loads agent configurations and starts workers for enabled agents.
         """
+        # Retention applies to history already at rest, so it runs even when
+        # the agent runtime itself is disabled. A no-op when unconfigured.
+        self._retention_sweeper.start()
+
         if not self.settings.enabled:
             logger.info("Agent system is disabled, skipping startup")
             return
@@ -205,6 +214,7 @@ class AgentRegistry:
         logger.info("Stopping agent registry...")
 
         self._scheduler.stop()
+        self._retention_sweeper.stop()
 
         with self._lock:
             for agent_id, worker in list(self._workers.items()):
@@ -307,8 +317,7 @@ class AgentRegistry:
                 logger.warning(f"No worker found for agent {agent_id}")
                 return False
 
-            worker.enqueue(event_payload)
-            return True
+            return worker.enqueue(event_payload) is not False
 
     def enqueue_for_subscription(
         self,
@@ -338,7 +347,8 @@ class AgentRegistry:
                 )
                 return False
 
-            worker.enqueue(event_payload)
+            if worker.enqueue(event_payload) is False:
+                return False
             logger.debug(
                 f"Routed event to agent {agent_id} via subscription {subscription_id}"
             )
@@ -529,12 +539,26 @@ class AgentRegistry:
                 return []
             states = [state]
         return self._run_recorder.list_runs(
-            agent_id=agent_id, kind=kind_enum, states=states, limit=limit
+            agent_id=agent_id,
+            kind=kind_enum,
+            states=states,
+            limit=limit,
+            created_after=self._retention.read_cutoff(),
         )
 
     def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
-        """Return a single AgentRun by id, or None."""
-        return self._run_recorder.get_run(run_id)
+        """Return a single AgentRun by id, or None (also outside the read window)."""
+        return self._run_recorder.get_run(
+            run_id, created_after=self._retention.read_cutoff()
+        )
+
+    def get_run_retention_policy(self) -> Dict[str, Any]:
+        """The effective run-history retention policy and the last sweep's record."""
+        last = self._retention_sweeper.last_report
+        return {
+            **self._retention.to_dict(),
+            "last_sweep": last.to_dict() if last is not None else None,
+        }
 
     # ------------------------------------------------------------------
     # Governance: proposals
@@ -543,9 +567,21 @@ class AgentRegistry:
     def _build_apply_executor(self, agent_id: str):
         """Raw (ungated) tool executor used to apply an approved proposal."""
         self._ensure_initialized()
-        return self._mcp_loader.create_tool_executor(
+        raw = self._mcp_loader.create_tool_executor(
             graph_service=self._service, agent_id=agent_id
         )
+
+        def apply(tool, arguments):
+            worker = self._workers.get(agent_id)
+            if worker is None or not worker.config.enabled:
+                raise ValueError("Agent is unavailable or disabled")
+            if worker.get_status()["paused"]:
+                raise ValueError(
+                    "Agent is paused; retry with a new proposal after recovery"
+                )
+            return raw(tool, arguments)
+
+        return apply
 
     def list_proposals(
         self,
@@ -633,7 +669,8 @@ class AgentRegistry:
             return False
 
         payload = _build_payload(config, datetime.now(timezone.utc))
-        worker.enqueue(payload)
+        if worker.enqueue(payload) is False:
+            return False
         logger.info(
             "External trigger: enqueued scheduled_trigger for agent %s", agent_id
         )

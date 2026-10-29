@@ -24,6 +24,7 @@ clobber it; the caller should report a conflict instead.
 from __future__ import annotations
 
 import copy
+import re
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
@@ -31,6 +32,13 @@ from typing import Any, Dict, List, Optional
 
 DEFAULT_MAX_ACTIVITY_RECORDS = 500
 DEFAULT_ACTIVITY_MAX_AGE_DAYS = 7.0
+
+_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+# A timestamp of exactly this fixed-width, zero-padded shape sorts as a string
+# in the same order as the time it names.
+_PADDED_TIMESTAMP = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z"
+)
 
 # Ops the activity log tracks and can build an inverse for. Every other state
 # op (session_renamed, group_membership_changed, nodes_added/removed,
@@ -53,6 +61,12 @@ UNDOABLE_OPS = frozenset(
         "edge_intensity_set",
     }
 )
+
+
+# Ops recorded in the activity log with no inverse: what happened to the
+# session's staged changes (docs/SESSION_OVERLAY_CONTRACT.md §12). Never
+# offered for undo - a discard or a merge is not reversed by a session op.
+RECORDED_ONLY_OPS = frozenset({"graph_changes_discarded", "graph_changes_merged"})
 
 
 def _now_iso() -> str:
@@ -113,18 +127,25 @@ def prune_activity_log(
     kept = records
     if max_age_days is not None and max_age_days > 0:
         cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
-        kept = [r for r in kept if _within_age(r, cutoff)]
+        cutoff_text = cutoff.strftime(_TIMESTAMP_FORMAT)
+        kept = [r for r in kept if _within_age(r, cutoff, cutoff_text)]
     if max_records is not None and max_records > 0 and len(kept) > max_records:
         kept = kept[-max_records:]
     return kept
 
 
-def _within_age(record: Dict[str, Any], cutoff: datetime) -> bool:
+def _within_age(record: Dict[str, Any], cutoff: datetime, cutoff_text: str) -> bool:
     raw = record.get("occurred_at")
     if not isinstance(raw, str):
         return True
+    # Runs over every record on every append, and strptime dominated the cost
+    # at the 500-record cap. A padded timestamp sorting strictly after the
+    # cutoff's whole second is either newer than the cutoff or out of range
+    # for strptime, and both are kept, so only the rest need parsing.
+    if raw > cutoff_text and _PADDED_TIMESTAMP.fullmatch(raw):
+        return True
     try:
-        ts = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        ts = datetime.strptime(raw, _TIMESTAMP_FORMAT).replace(tzinfo=timezone.utc)
     except ValueError:
         return True
     return ts >= cutoff

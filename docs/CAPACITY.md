@@ -282,6 +282,73 @@ until this measurement found it. So a benchmark that stopped at the third call
 would report the same figure today and catch nothing tomorrow; this one would
 show the cliff.
 
+## Write latency with entity revisions
+
+Entity revisions (`SESSION_OVERLAY_CONTRACT.md` §4) change what a write costs
+its caller on PostgreSQL: the store now assigns the revision and checks the
+expectation in the statement that writes, so every write waits for the
+commit, where before it returned once queued. On the file backend a write
+without an expectation is unchanged by design. `--writes` measures both,
+against this build and — with `--code-root` pointed at a checkout of the
+parent commit — against the build before it, with the same harness:
+
+```bash
+CO_TEST_POSTGRES_DSN=... python3 scripts/measure_capacity.py --postgres --writes
+CO_TEST_POSTGRES_DSN=... python3 scripts/measure_capacity.py --postgres --writes \
+    --code-root /path/to/checkout-of-the-parent-commit
+```
+
+Each figure is the caller's wall clock around one public `GraphStorage` call,
+on a 5,000-node graph: 200 single `update_node` calls, 10 `add_nodes` of 100
+new nodes and 5 of 1,000, then 200 rare-term searches and 200 depth-1 hub
+traversals, idle and again while a second thread calls `update_node` in a
+loop.
+
+**These are local-container figures**: the hardware above, PostgreSQL 16 on
+the same host, so a statement's round trip is a loopback one. Against a
+managed PostgreSQL in the same region every statement also pays a network
+round trip, and the synchronous write pays it once per statement it issues;
+that measurement has not been taken yet, and the table below should not be
+read as its result.
+
+| backend | operation | before p50 ms | before p95 ms | after p50 ms | after p95 ms |
+|---|---|---:|---:|---:|---:|
+| file | update_node | 0.90 | 3.75 | 1.33 | 5.02 |
+| file | add_nodes 100 | 21.7 | 30.4 | 30.7 | 50.2 |
+| file | add_nodes 1000 | 188.7 | 281.3 | 204.1 | 350.7 |
+| file | search, idle | 3.64 | 3.97 | 3.95 | 4.60 |
+| file | search, under writes | 3.74 | 4.47 | 4.06 | 4.44 |
+| file | traverse d1, idle | 0.23 | 0.36 | 0.26 | 0.45 |
+| file | traverse d1, under writes | 0.49 | 0.95 | 0.32 | 0.66 |
+| postgres | update_node | 0.62 | 1.31 | 4.59 | 6.51 |
+| postgres | add_nodes 100 | 11.9 | 19.6 | 74.5 | 201.7 |
+| postgres | add_nodes 1000 | 76.9 | 88.5 | 717.9 | 750.4 |
+| postgres | search, idle | 3.88 | 4.59 | 4.12 | 4.90 |
+| postgres | search, under writes | 13.3 | 20.9 | 4.62 | 5.44 |
+| postgres | traverse d1, idle | 3.31 | 5.00 | 4.78 | 7.97 |
+| postgres | traverse d1, under writes | 0.48 | 1.22 | 0.54 | 0.91 |
+
+How to read it:
+
+- **The PostgreSQL write rows are the change.** A single `update_node` now
+  costs its caller the commit — about 4 ms more here. `add_nodes` grows with
+  the number of entities, because each is one statement: 1,000 nodes went
+  from 77 ms (queued) to 718 ms (committed). The "before" figure was never
+  the cost of the write, only of queueing it; the write itself ran
+  afterwards on the background worker, and what changed is who waits for it.
+- **The file rows are run-to-run noise**, as intended: no file write without
+  an expectation waits for the disk. Once per 100,000 revisions handed out, a
+  write raises the revision reservation, which is a whole-graph checkpoint (see
+  `PERSISTENCE_BACKENDS.md`, *Entity revisions*); at the 1,000 block first
+  tried, every 1,000-node `add_nodes` paid for one and took 438 ms.
+- **The "under writes" rows do not compare across builds.** Reads take no
+  storage lock, so what a concurrent writer costs them is interpreter time,
+  and the writer's pace is not fixed: before, it queued 135 PostgreSQL
+  updates during the read loop; after, waiting for each commit, it made 3.
+  The traversal falls back to the in-memory walk while a write is pending,
+  which is why its "under writes" figure is lower than its idle one on
+  PostgreSQL in both builds.
+
 ## What this does not measure, and why
 
 **Semantic search.** The base install carries no ML stack by deliberate policy
@@ -366,3 +433,26 @@ node change" and an edge report dropped on its own would otherwise go
 unnoticed. It does not reach the *ordering* invariant between the two, because
 `add_nodes` emits nodes and edges as two separate announcements;
 `test_persistence_contract_postgres.py` holds that.
+
+### What this means for a server holding several graphs
+
+The four criteria above, and the connection-budget arithmetic in
+`PERSISTENCE_BACKENDS.md` (*Sizing it: what an instance costs*), are both
+stated for one graph per process, which is the only shape a core process has
+([ADR 0009](adr/0009-dual-mode-graph-storage-seam.md), Option A: one graph per
+core process). `PostgresGraphPersistenceBackend` builds its own connection
+pool, and opens its own LISTEN connection when notification starts, with
+nothing shared across two of them, so `instance_count × (pool_size + 1)`
+against a stock server's 97 available connections is exactly right for one
+graph's replicas.
+
+A hosted layer that serves several graphs runs a core process per graph, each
+on its own schema (`GRAPH_POSTGRES_SCHEMA`: "one database can hold several
+graphs, one per schema"), so the connection cost multiplies by the number of
+graphs sharing the server: `instance_count × (pool_size + 1) × graph_count`,
+with `instance_count` the replicas of each graph. At `DEFAULT_POOL_SIZE = 4`,
+four graphs run as five replicas each already take `(4 + 1) × 5 × 4 = 100`
+connections, the entire stock ceiling before the three superuser-reserved
+connections. The full arithmetic and worked table live in
+`PERSISTENCE_BACKENDS.md`, kept there as the one copy so there is only one to
+keep true; nothing here repeats them.

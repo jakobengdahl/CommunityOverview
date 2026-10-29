@@ -6,10 +6,12 @@ import pytest
 import base64
 from fastapi.testclient import TestClient
 from backend.api_host import create_app, AppConfig
+from backend.api_host.middleware import compute_auth_active
+from backend.api_host.session_auth import credentials_valid
 
 
 @pytest.fixture
-def auth_enabled_app(temp_graph_file, temp_static_dirs) -> TestClient:
+def auth_enabled_app(temp_graph_file, temp_static_dirs, tmp_path) -> TestClient:
     """TestClient with Basic auth enabled."""
     web_path, widget_path = temp_static_dirs
     config = AppConfig(
@@ -19,13 +21,14 @@ def auth_enabled_app(temp_graph_file, temp_static_dirs) -> TestClient:
         auth_enabled=True,
         auth_username="admin",
         auth_password="secretpassword",
+        sessions_dir=str(tmp_path / "auth-enabled-sessions"),
     )
     app = create_app(config)
     return TestClient(app)
 
 
 @pytest.fixture
-def bearer_auth_app(temp_graph_file, temp_static_dirs) -> TestClient:
+def bearer_auth_app(temp_graph_file, temp_static_dirs, tmp_path) -> TestClient:
     """TestClient with bearer-only auth enabled (no password)."""
     web_path, widget_path = temp_static_dirs
     config = AppConfig(
@@ -34,6 +37,7 @@ def bearer_auth_app(temp_graph_file, temp_static_dirs) -> TestClient:
         widget_static_path=widget_path,
         auth_enabled=True,
         auth_bearer_token="test-bearer-token-123",
+        sessions_dir=str(tmp_path / "bearer-auth-sessions"),
     )
     app = create_app(config)
     return TestClient(app)
@@ -42,6 +46,22 @@ def bearer_auth_app(temp_graph_file, temp_static_dirs) -> TestClient:
 # ---------------------------------------------------------------------------
 # Basic auth
 # ---------------------------------------------------------------------------
+
+
+def test_auth_username_has_no_implicit_default(monkeypatch):
+    """AUTH_USERNAME must be configured explicitly for Basic auth."""
+    monkeypatch.delenv("AUTH_USERNAME", raising=False)
+    assert AppConfig().auth_username is None
+
+
+def test_password_without_username_fails_closed():
+    """Password-only Basic auth activates the guard but accepts no default user."""
+    config = AppConfig(
+        auth_enabled=True,
+        auth_password="secretpassword",
+    )
+    assert compute_auth_active(config)
+    assert not credentials_valid(config, "admin", "secretpassword")
 
 
 def test_auth_required(auth_enabled_app):
@@ -60,7 +80,10 @@ def test_auth_required(auth_enabled_app):
 def test_auth_success(auth_enabled_app):
     """Successful authentication with valid Basic credentials."""
     credentials = base64.b64encode(b"admin:secretpassword").decode("utf-8")
-    headers = {"Authorization": f"Basic {credentials}"}
+    headers = {
+        "Authorization": f"Basic {credentials}",
+        "X-Requested-With": "api-client",
+    }
 
     response = auth_enabled_app.post(
         "/api/search", json={"query": "test"}, headers=headers
@@ -133,7 +156,10 @@ def test_auth_not_required_on_startup_diagnostics(auth_enabled_app):
 
 def test_bearer_auth_success(bearer_auth_app):
     """Valid bearer token grants access."""
-    headers = {"Authorization": "Bearer test-bearer-token-123"}
+    headers = {
+        "Authorization": "Bearer test-bearer-token-123",
+        "Sec-Fetch-Site": "cross-site",
+    }
     response = bearer_auth_app.post(
         "/api/search", json={"query": "test"}, headers=headers
     )

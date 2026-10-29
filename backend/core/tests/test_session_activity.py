@@ -6,6 +6,7 @@ actor scoping, retention (max records / max age) and persistence.
 
 from datetime import datetime, timedelta, timezone
 
+from backend.core import session_activity
 from backend.core.session_activity import (
     build_activity_record,
     current_snapshot_for,
@@ -31,7 +32,7 @@ def _record(**overrides):
         session_id="1234-5678",
         seq=1,
         correlation_id=None,
-        affected={"kind": "annotation", "id": "note-1", "fields": ["text"]},
+        affected={"kind": "annotation", "id": "note-1"},
         before={"id": "note-1", "text": "old"},
         after={"id": "note-1", "text": "new"},
         inverse_op={
@@ -73,6 +74,77 @@ class TestPruneActivityLog:
         records = [_record(seq=i) for i in range(600)]
         kept = prune_activity_log(records, max_records=None, max_age_days=None)
         assert kept == records
+
+    def test_age_filter_matches_parsing_every_timestamp(self, monkeypatch):
+        """The string-compare shortcut keeps exactly what parsing keeps,
+        including a timestamp inside the cutoff's own second, an unpadded one
+        that sorts after the cutoff but is older, and an out-of-range one."""
+        now = datetime(2026, 10, 20, 12, 0, 0, 500000, tzinfo=timezone.utc)
+
+        class _FixedNow(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now
+
+        monkeypatch.setattr(session_activity, "datetime", _FixedNow)
+        cutoff = now - timedelta(days=7)
+        stamps = [
+            "2026-10-13T12:00:00Z",  # same second as the cutoff, 0.5 s older
+            "2026-10-13T12:00:01Z",
+            "2026-9-30T00:00:00Z",  # unpadded: sorts after the cutoff, is older
+            "2026-10-01T00:00:00Z",
+            "2026-13-01T00:00:00Z",  # out of range: unparseable, kept
+            "2026-10-20T11:00:00Z",
+            "not-a-timestamp",
+        ]
+        records = [_record(seq=i) for i in range(len(stamps))]
+        for record, stamp in zip(records, stamps):
+            record["occurred_at"] = stamp
+
+        def parsed_within_age(stamp):
+            try:
+                ts = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")
+            except ValueError:
+                return True
+            return ts.replace(tzinfo=timezone.utc) >= cutoff
+
+        kept = prune_activity_log(records, max_records=None, max_age_days=7)
+        assert [r["seq"] for r in kept] == [
+            r["seq"] for r in records if parsed_within_age(r["occurred_at"])
+        ]
+        assert [r["seq"] for r in kept] == [1, 4, 5, 6]
+
+    def _frozen(self, monkeypatch, now):
+        class _FixedNow(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now
+
+        monkeypatch.setattr(session_activity, "datetime", _FixedNow)
+
+    def test_a_record_exactly_at_a_whole_second_cutoff_is_kept(self, monkeypatch):
+        self._frozen(monkeypatch, datetime(2026, 10, 20, 12, 0, 0, tzinfo=timezone.utc))
+        records = [_record(seq=0), _record(seq=1)]
+        records[0]["occurred_at"] = "2026-10-13T12:00:00Z"  # == cutoff
+        records[1]["occurred_at"] = "2026-10-13T11:59:59Z"
+        kept = prune_activity_log(records, max_records=None, max_age_days=7)
+        assert [r["seq"] for r in kept] == [0]
+
+    def test_a_lowercase_older_timestamp_is_parsed_not_shortcut(self, monkeypatch):
+        """strptime accepts a lowercase ``t``/``z``, and ``t`` sorts after
+        ``T``: an older lowercase timestamp on the cutoff's own day must
+        still be parsed and pruned."""
+        self._frozen(monkeypatch, datetime(2026, 10, 20, 12, 0, 0, tzinfo=timezone.utc))
+        records = [_record(seq=0)]
+        records[0]["occurred_at"] = "2026-10-13t00:00:00z"
+        assert prune_activity_log(records, max_records=None, max_age_days=7) == []
+
+    def test_age_filter_runs_before_the_record_cap(self):
+        """An expired record in the tail must not take a slot from the cap."""
+        records = [_record(seq=i) for i in range(4)]
+        records[-1]["occurred_at"] = "2000-01-01T00:00:00Z"
+        kept = prune_activity_log(records, max_records=3, max_age_days=7)
+        assert [r["seq"] for r in kept] == [0, 1, 2]
 
 
 class TestFindLatestUndoable:
@@ -135,12 +207,67 @@ class TestSessionStoreActivityIntegration:
         record = session.activity_log[0]
         assert record["op"] == "annotation_created"
         assert record["actor"] == "actor-1"
+        assert record["affected"] == {"kind": "annotation", "id": "note-1"}
         assert record["before"] is None
         assert record["after"]["id"] == "note-1"
         assert record["inverse_op"] == {
             "op": "annotation_deleted",
             "annotation_id": "note-1",
         }
+
+    def test_annotation_updated_activity_record_omits_unused_affected_fields(self):
+        store = _store()
+        session = store.create()
+        store.apply_state_op(
+            session,
+            {
+                "op": "annotation_created",
+                "annotation": {"id": "note-1", "type": "note", "text": "old"},
+                "client_id": "actor-1",
+            },
+        )
+        applied = store.apply_state_op(
+            session,
+            {
+                "op": "annotation_updated",
+                "annotation": {"id": "note-1", "type": "note", "text": "new"},
+                "client_id": "actor-1",
+            },
+        )
+        assert applied is not None
+        record = session.activity_log[-1]
+        assert record["op"] == "annotation_updated"
+        assert record["affected"] == {"kind": "annotation", "id": "note-1"}
+        assert record["before"]["text"] == "old"
+        assert record["after"]["text"] == "new"
+
+    def test_annotation_created_upsert_activity_record_omits_unused_affected_fields(
+        self,
+    ):
+        store = _store()
+        session = store.create()
+        store.apply_state_op(
+            session,
+            {
+                "op": "annotation_created",
+                "annotation": {"id": "note-1", "type": "note", "text": "old"},
+                "client_id": "actor-1",
+            },
+        )
+        applied = store.apply_state_op(
+            session,
+            {
+                "op": "annotation_created",
+                "annotation": {"id": "note-1", "type": "note", "text": "new"},
+                "client_id": "actor-1",
+            },
+        )
+        assert applied is not None
+        record = session.activity_log[-1]
+        assert record["op"] == "annotation_created"
+        assert record["affected"] == {"kind": "annotation", "id": "note-1"}
+        assert record["before"]["text"] == "old"
+        assert record["after"]["text"] == "new"
 
     def test_no_actor_no_activity_record(self):
         store = _store()
@@ -234,7 +361,9 @@ class TestSessionStoreActivityIntegration:
         )
         delete_record = session.activity_log[-1]
         assert delete_record["op"] == "annotation_deleted"
+        assert delete_record["affected"] == {"kind": "annotation", "id": "note-1"}
         assert delete_record["before"]["text"] == "hi"
+        assert delete_record["after"] is None
         assert delete_record["inverse_op"]["op"] == "annotation_created"
         assert delete_record["inverse_op"]["annotation"]["text"] == "hi"
 

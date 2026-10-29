@@ -11,7 +11,7 @@ from backend.api_host.config import AppConfig
 from backend.api_host.server import create_app
 
 
-def _make_auth_enabled_app() -> TestClient:
+def _make_auth_enabled_app(tmp_path) -> TestClient:
     """Mirror test_auth_middleware.py's _make_config — a fresh graph file per app."""
     fd, graph_path = tempfile.mkstemp(suffix=".json")
     with os.fdopen(fd, "w") as f:
@@ -25,6 +25,7 @@ def _make_auth_enabled_app() -> TestClient:
         auth_username="admin",
         auth_password="secret",
         mcp_basic_auth=False,
+        sessions_dir=str(tmp_path / "auth-enabled-sessions"),
     )
     return TestClient(create_app(config))
 
@@ -101,8 +102,8 @@ class TestHealthzSecrets:
 
 
 class TestAuthBypass:
-    def test_new_endpoints_exempt_when_auth_enabled(self):
-        client = _make_auth_enabled_app()
+    def test_new_endpoints_exempt_when_auth_enabled(self, tmp_path):
+        client = _make_auth_enabled_app(tmp_path)
 
         for path in [
             "/readyz",

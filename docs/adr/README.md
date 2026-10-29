@@ -21,3 +21,12 @@ ADRs carry only the technical decision.
 | [0002](0002-env-backed-secret-provider.md) | Environment-backed default secret provider | Accepted |
 | [0003](0003-webxr-immersive-graph-client-spike.md) | WebXR immersive graph client (Quest) — spike | Proposed |
 | [0004](0004-webxr-spike-findings-and-phase-2-recommendation.md) | WebXR spike findings and Phase 2 recommendation | Accepted |
+| [0005](0005-sessions-may-stage-graph-changes.md) | Sessions may stage graph changes | Accepted |
+| [0006](0006-graph-import-replace-mode.md) | Graph import: REPLACE mode over the ExecutionStore seam | Accepted |
+| [0007](0007-vector-aware-export-archive.md) | Vector-aware export/import archive | Accepted |
+| [0008](0008-node-attachment-storage.md) | Node attachment storage layer and metadata index | Accepted |
+| [0009](0009-dual-mode-graph-storage-seam.md) | Dual-mode graph storage: ratify the seam, keep one graph per runtime | Accepted |
+| [0010](0010-attachment-content-access-for-agents-and-assistant.md) | Agent and assistant access to node attachment content | Proposed |
+| [0011](0011-sandboxed-user-functions.md) | Sandboxed user-defined functions: first contract | Proposed |
+| [0012](0012-user-function-isolation.md) | User-function isolation: a hardened-subprocess default runner | Proposed |
+| [0013](0013-graph-import-merge-mode.md) | Graph import: MERGE mode beside REPLACE | Accepted |

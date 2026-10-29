@@ -6,6 +6,11 @@ proposal store, and the approve/reject/apply manager, plus worker wiring.
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
+from backend.runtime.attachment_access import ATTACHMENT_TOOLS, ATTACHMENT_READ_TOOLS
+from backend.runtime.authorization import GraphAuthorizationDecision
+
 from backend.agents.config import AgentConfig, AgentPrompts, AgentsSettings
 from backend.agents.governance import (
     AutonomyGate,
@@ -18,6 +23,7 @@ from backend.agents.governance import (
     coerce_autonomy,
     filter_tool_definitions,
 )
+from backend.agents.tests._sql_recording import RecordingConn, only_statement
 from backend.agents.worker import AgentWorker, EventItem
 
 
@@ -124,6 +130,45 @@ class TestStores:
             assert got.input_args == {"nodes": [1]}
         finally:
             reopened.close()
+
+    def test_sqlite_list_proposals_matches_quote_bearing_agent_id_literally(
+        self, tmp_path
+    ):
+        store = SqliteProposalStore(tmp_path / "gov.db")
+        try:
+            hostile = "a1' OR '1'='1"
+            target = store.create(
+                Proposal(hostile, "graph.add_nodes", {}, AutonomyLevel.PROPOSE)
+            )
+            store.create(Proposal("a1", "graph.add_nodes", {}, AutonomyLevel.PROPOSE))
+            assert [p.id for p in store.list_proposals(agent_id=hostile)] == [target.id]
+            assert store.list_proposals(agent_id="x' OR '1'='1") == []
+        finally:
+            store.close()
+
+    def test_sqlite_list_proposals_binds_every_filter_value(self, tmp_path):
+        # The f-string SQL carries "nosec B608": this pins that only fixed
+        # column clauses and "?" reach the text, and every caller value is a
+        # bound param.
+        store = SqliteProposalStore(tmp_path / "gov.db")
+        try:
+            hostile = "a1' OR '1'='1"
+            recorder = RecordingConn(store._conn)
+            store._conn = recorder
+            store.list_proposals(
+                agent_id=hostile,
+                statuses=[ProposalStatus.PENDING, ProposalStatus.APPLY_FAILED],
+                limit=7331,
+            )
+            sql, params = only_statement(recorder, "SELECT * FROM proposals")
+            assert params == [hostile, "pending", "apply_failed", 7331]
+            assert sql.count("?") == len(params)
+            assert "'" not in sql
+            assert "7331" not in sql
+            for value in ("pending", "apply_failed"):
+                assert value not in sql
+        finally:
+            store.close()
 
 
 # -- gate -------------------------------------------------------------------
@@ -456,3 +501,257 @@ class TestWorkerPreFiltersDefinitions:
         assert "error" in result
         raw.assert_not_called()
         assert store.list_proposals() == []
+
+
+def test_approved_chain_keeps_server_causation_across_sqlite_restart(tmp_path):
+    from backend.core.events.causation import (
+        MAX_AGENT_CAUSATION_DEPTH,
+        agent_mutation_context,
+        current_agent_mutation_context,
+    )
+    from backend.service.access import build_event_context
+
+    db = tmp_path / "chain.db"
+    store = SqliteProposalStore(db)
+    observed = []
+    for depth in range(MAX_AGENT_CAUSATION_DEPTH):
+        agent_id = f"agent-{depth % 2}"
+        gate = AutonomyGate(
+            autonomy_level=AutonomyLevel.ACT_AFTER_APPROVAL,
+            tool_allowlist=None,
+            mcp_loader=FakeLoader(),
+            proposal_store=store,
+            agent_id=agent_id,
+        )
+        with agent_mutation_context(
+            agent_id,
+            {
+                "event_id": "seed",
+                "origin": {
+                    "event_causation_depth": depth,
+                    "event_correlation_id": "chain",
+                },
+            },
+        ):
+            result = gate.wrap(MagicMock())(
+                "graph.update_node",
+                {
+                    "event_causation_depth": 0,
+                    "event_origin": "spoofed",
+                },
+            )
+        store.close()
+        store = SqliteProposalStore(db)
+
+        def execute(tool, arguments):
+            context = build_event_context(target="update_node", event_origin="spoofed")
+            observed.append(context)
+            return {"success": True}
+
+        manager = GovernanceManager(store, executor_factory=lambda _: execute)
+        assert manager.approve(result["proposal_id"])["status"] == "applied"
+        assert current_agent_mutation_context() is None
+    assert [ctx.event_causation_depth for ctx in observed] == list(range(1, 9))
+    assert {ctx.event_correlation_id for ctx in observed} == {"chain"}
+    # Corrupt/exhausted persisted proposals also fail closed before any write.
+    p = store.create(
+        Proposal(
+            "agent-0",
+            "graph.update_node",
+            {},
+            AutonomyLevel.ACT_AFTER_APPROVAL,
+            causation_depth=MAX_AGENT_CAUSATION_DEPTH + 1,
+        )
+    )
+    assert manager.approve(p.id)["status"] == "apply_failed"
+    assert len(observed) == MAX_AGENT_CAUSATION_DEPTH
+    store.close()
+
+
+def test_approval_checks_live_agent_pause_before_writing():
+    from backend.agents.registry import AgentRegistry
+
+    registry = AgentRegistry.__new__(AgentRegistry)
+    registry._ensure_initialized = MagicMock()
+    registry._mcp_loader = MagicMock()
+    registry._service = MagicMock()
+    worker = AgentWorker(
+        AgentConfig(agent_id="a", name="A", enabled=True), AgentsSettings(), None
+    )
+    registry._workers = {"a": worker}
+    worker._pause_reason = "temporarily throttled"
+    store = InMemoryProposalStore()
+    proposal = store.create(
+        Proposal("a", "graph.update_node", {}, AutonomyLevel.ACT_AFTER_APPROVAL)
+    )
+    manager = GovernanceManager(store, executor_factory=registry._build_apply_executor)
+    result = manager.approve(proposal.id)
+    assert result["status"] == "apply_failed"
+    assert "paused" in result["apply_error"]
+    registry._mcp_loader.create_tool_executor.return_value.assert_not_called()
+
+
+def test_causation_schema_migrates_existing_v2_proposals(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "legacy.db"
+    store = SqliteProposalStore(db)
+    p = store.create(
+        Proposal("a", "graph.update_node", {}, AutonomyLevel.ACT_AFTER_APPROVAL)
+    )
+    store.close()
+    with sqlite3.connect(db) as conn:
+        conn.execute("ALTER TABLE proposals DROP COLUMN causation_depth")
+        conn.execute("PRAGMA user_version=2")
+    migrated = SqliteProposalStore(db)
+    assert migrated.get(p.id).causation_depth == 1
+    migrated.close()
+
+
+@pytest.mark.parametrize("name", sorted(ATTACHMENT_TOOLS))
+@pytest.mark.parametrize("allowlist", [None, [], "named"])
+def test_attachment_grant_defaults_to_deny_even_with_allowlist(name, allowlist):
+    """An empty allowlist, or naming a tool, never grants attachment access."""
+    name = "GRAPH__" + name
+    allowlist = [name] if allowlist == "named" else allowlist
+    loader = SimpleNamespace(get_tool=lambda _: None)
+    raw = MagicMock()
+    gate = AutonomyGate(
+        autonomy_level=AutonomyLevel.ACT_AFTER_APPROVAL,
+        tool_allowlist=allowlist,
+        mcp_loader=loader,
+        proposal_store=InMemoryProposalStore(),
+        agent_id="a1",
+    )
+    assert gate.wrap(raw)(name, {})["error_code"] == "access_denied"
+    assert (
+        filter_tool_definitions(
+            [{"name": name}],
+            autonomy_level=AutonomyLevel.ACT_AFTER_APPROVAL,
+            tool_allowlist=allowlist,
+            mcp_loader=loader,
+        )
+        == []
+    )
+    raw.assert_not_called()
+
+
+@pytest.mark.parametrize("level", list(AutonomyLevel))
+@pytest.mark.parametrize("access", ["read", "read_write"])
+@pytest.mark.parametrize("name", sorted(ATTACHMENT_TOOLS))
+def test_attachment_grants_compose_with_autonomy(level, access, name):
+    raw = MagicMock(return_value={"ok": True})
+    store = InMemoryProposalStore()
+    gate = AutonomyGate(
+        autonomy_level=level,
+        tool_allowlist=[],
+        mcp_loader=FakeLoader(),
+        proposal_store=store,
+        agent_id="a1",
+        attachment_access=access,
+    )
+    tool = "graph." + name
+    result = gate.wrap(raw)(tool, {})
+    allowed = name in ATTACHMENT_READ_TOOLS or (
+        access == "read_write" and not level.is_read_only
+    )
+    shown = filter_tool_definitions(
+        [{"name": tool}],
+        autonomy_level=level,
+        tool_allowlist=[],
+        mcp_loader=FakeLoader(),
+        attachment_access=access,
+    )
+    assert bool(shown) == allowed
+    if name in ATTACHMENT_READ_TOOLS:
+        assert result == {"ok": True}
+        raw.assert_called_once()
+    else:
+        raw.assert_not_called()
+        assert result.get("status") == ("proposed" if allowed else None)
+        assert len(store.list_proposals()) == int(allowed)
+
+
+@pytest.mark.parametrize("name", sorted(ATTACHMENT_TOOLS))
+def test_attachment_denying_hook_blocks_execution_and_proposals(name):
+    raw = MagicMock()
+    store = InMemoryProposalStore()
+    hook = SimpleNamespace(evaluate=lambda _: GraphAuthorizationDecision(allowed=False))
+    gate = AutonomyGate(
+        autonomy_level=AutonomyLevel.ACT_AFTER_APPROVAL,
+        tool_allowlist=None,
+        mcp_loader=FakeLoader(),
+        proposal_store=store,
+        agent_id="a1",
+        attachment_access="read_write",
+        authorization_hook=hook,
+    )
+    assert gate.wrap(raw)("graph." + name, {})["error_code"] == "access_denied"
+    raw.assert_not_called()
+    assert store.list_proposals() == []
+
+
+@pytest.mark.parametrize(
+    "name,target",
+    [
+        ("list_node_attachments", "list_node_attachments"),
+        ("read_node_attachment", "read_node_attachment_content"),
+        ("search_node_attachments", "read_node_attachment_content"),
+        ("add_node_attachment", "add_node_attachment"),
+        ("delete_node_attachment", "delete_node_attachment"),
+    ],
+)
+def test_attachment_target_specific_hook_denial(name, target):
+    """Metadata listing and content reads have separate authorization targets."""
+    seen = []
+
+    def evaluate(context):
+        seen.append(context)
+        return GraphAuthorizationDecision(allowed=context.target != target)
+
+    raw = MagicMock()
+    store = InMemoryProposalStore()
+    gate = AutonomyGate(
+        autonomy_level=AutonomyLevel.ACT_AFTER_APPROVAL,
+        tool_allowlist=None,
+        mcp_loader=FakeLoader(),
+        proposal_store=store,
+        agent_id="a1",
+        attachment_access="read_write",
+        authorization_hook=SimpleNamespace(evaluate=evaluate),
+    )
+    result = gate.wrap(raw)("graph." + name, {})
+    assert result["error_code"] == "access_denied"
+    assert result["authorization"]["target"] == target
+    assert seen[0].action == ("read" if name in ATTACHMENT_READ_TOOLS else "mutate")
+    raw.assert_not_called()
+    assert store.list_proposals() == []
+
+
+@pytest.mark.parametrize("with_store", [False, True])
+def test_worker_checks_live_attachment_grants_with_or_without_proposal_store(
+    with_store,
+):
+    helper = TestWorkerPreFiltersDefinitions()
+    worker, raw = helper._worker(
+        InMemoryProposalStore() if with_store else None, "act_after_approval"
+    )
+    node = SimpleNamespace(metadata={"attachment_access": "read_write"})
+    worker._graph_storage = SimpleNamespace(get_node=lambda _: node)
+    defs = [{"name": "graph." + name} for name in sorted(ATTACHMENT_TOOLS)]
+    worker.mcp_loader.get_tool_definitions.return_value = defs
+    captured = helper._run_and_capture(worker)
+    shown = {d["name"] for d in captured["tools"]}
+    assert len(shown) == (5 if with_store else 3)
+    if not with_store:
+        assert (
+            captured["executor"]("graph.add_node_attachment", {})["error_code"]
+            == "access_denied"
+        )
+    node.metadata["attachment_access"] = "none"
+    assert (
+        captured["executor"]("graph.read_node_attachment", {})["error_code"]
+        == "access_denied"
+    )
+    assert helper._run_and_capture(worker)["tools"] == []
+    raw.assert_not_called()

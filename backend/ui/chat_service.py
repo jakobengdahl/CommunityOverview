@@ -18,8 +18,11 @@ import json
 import re
 from datetime import datetime, timezone
 
+from backend.core.storage_search import MATCH_MODE_SUBSTRING
 from backend.ui.chat_logic import ChatProcessor
 from backend.service import GraphService
+from backend.service.system_nodes import SYSTEM_CREATE_MODELS, make_system_create_tools
+from backend.runtime.attachment_access import validate_attachment_setting
 
 logger = logging.getLogger(__name__)
 
@@ -41,20 +44,27 @@ class ChatService:
     All graph operations go through GraphService.
     """
 
-    def __init__(self, graph_service: GraphService):
+    def __init__(
+        self, graph_service: GraphService, *, assistant_attachment_access: str = "read"
+    ):
         """
         Initialize ChatService with a GraphService instance.
 
         Args:
             graph_service: The GraphService instance to use for all graph operations
         """
+        self._assistant_attachment_access = validate_attachment_setting(
+            assistant_attachment_access, "ASSISTANT_ATTACHMENT_ACCESS"
+        )
         self._graph_service = graph_service
 
         # Build tools map that routes to GraphService methods
         self._tools_map = self._build_tools_map()
 
         # Create the underlying ChatProcessor with our tools map
-        self._processor = ChatProcessor(self._tools_map)
+        self._processor = ChatProcessor(
+            self._tools_map, authorization_hook=graph_service.authorization_hook
+        )
         self._current_federation_depth: Optional[int] = None
         # Cache for resolved AKC configs — avoids repeated 500-node scans within a session.
         # Keyed by short_name; value is (prefix, perms, collect_responses) from
@@ -84,6 +94,7 @@ class ChatService:
             Dict mapping tool names to callable methods
         """
         return {
+            **make_system_create_tools(self._graph_service),
             "search_graph": self._search_graph_tool,
             "get_node_details": self._graph_service.get_node_details,
             "get_related_nodes": self._graph_service.get_related_nodes,
@@ -115,6 +126,8 @@ class ChatService:
         action: Optional[str] = None,
         federation_depth: Optional[int] = None,
         include_archived: bool = False,
+        match_mode: str = MATCH_MODE_SUBSTRING,
+        semantic: bool = False,
     ) -> Dict[str, Any]:
         effective_depth = (
             federation_depth
@@ -128,6 +141,8 @@ class ChatService:
             action=action,
             federation_depth=effective_depth,
             include_archived=include_archived,
+            match_mode=match_mode,
+            semantic=semantic,
         )
 
     # ------------------------------------------------------------------
@@ -269,17 +284,40 @@ class ChatService:
           - (None, None, True) when short_name is not found — no enforcement applied.
             Not cached so a collection created after first miss is picked up immediately.
           - ("", {}, True) on exception — fail-closed; enforced tools installed, all
-            writes denied. Not cached so transient errors are retried on the next message.
+            node writes denied. Not cached so transient errors are retried on the next
+            message.
+          - ("", {}, False) when the caller may not read collections — fail-closed as
+            above, and no save_collection_response tool, so the assistant cannot
+            write at all. Not cached.
 
         permissions_dict maps node_type → {"create": bool, "update": bool, "delete": bool}.
-        Successful lookups are cached on this instance to avoid repeated 500-node scans.
+        Successful lookups are cached on this instance to avoid repeated 500-node scans;
+        a cached entry is served only to a caller who may read the collection node.
         """
-        if short_name in self._collection_cache:
-            return self._collection_cache[short_name]
         try:
+            cached = self._collection_cache.get(short_name)
+            if cached is not None:
+                # The cache is shared by every caller: serve it only to a caller
+                # who may read the collection node, else resolve again as them.
+                node_id = self._collection_nodes.get(short_name, {}).get("id")
+                if node_id and (
+                    self._graph_service.get_node_details(node_id).get("success")
+                    is not False
+                ):
+                    return cached
             result = self._graph_service.search_graph(
                 query="", node_types=["ActiveKnowledgeCollection"], limit=500
             )
+            if result.get("success") is False:
+                # The caller may not read collections: fail closed with no
+                # writes at all rather than treating it as "not found", which
+                # would drop the collection's write restrictions.
+                logger.warning(
+                    "AKC short_name %r could not be resolved: %s",
+                    short_name,
+                    result.get("error_code") or result.get("error"),
+                )
+                return ("", {}, False)
             nodes = result.get("nodes", [])
             found = False
             for node in nodes:
@@ -540,7 +578,17 @@ class ChatService:
                 "error": "Archiving is not permitted in collection mode.",
             }
 
+        def _system_create_blocked(*args, **kwargs):
+            # Collection visitors must not bypass the node-type wrappers or
+            # save responses against a different collection. The bound
+            # save_collection_response tool remains available below.
+            return {
+                "success": False,
+                "error": "System-node creation is not permitted in collection mode.",
+            }
+
         return {
+            **{name: _system_create_blocked for name in SYSTEM_CREATE_MODELS},
             "add_nodes": add_nodes_enforced,
             "update_node": update_node_enforced,
             "delete_nodes": delete_nodes_enforced,
@@ -725,6 +773,7 @@ class ChatService:
         collection_short_name: Optional[str] = None,
         visible_node_ids: Optional[List[str]] = None,
         selected_node_ids: Optional[List[str]] = None,
+        llm_provider: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         Process a chat message and return the response.
@@ -754,6 +803,10 @@ class ChatService:
                 canvas. Injected as situational context so the AI can distinguish
                 between an empty canvas and a populated one.
             selected_node_ids: IDs of nodes the user has selected in the canvas.
+            llm_provider: Optional ready-made LLMProvider used verbatim instead of
+                resolving one from env/model profiles. Passed through to
+                ChatProcessor.process_message for the evaluation harness
+                (backend/evaluation); see that parameter's docstring there.
 
         Returns:
             Dict with:
@@ -815,15 +868,46 @@ class ChatService:
             # Only applied within an active collection session; None means
             # unrestricted, matching the AIAgent model. Read from the identity
             # cache populated by _resolve_collection above.
-            # Note: on the fail-closed path (resolution error → prefix == ""), the
-            # node metadata could not be read, so the allowlist is unavailable and
-            # stays None here. Fail-closed still blocks all writes via the enforced
-            # tool wrappers; it does not additionally restrict read/action tools.
+            # Note: on the fail-closed path (prefix == "") the allowlist is
+            # whatever _resolve_collection last recorded for this short name, or
+            # None. An allowlist only narrows tools. The enforced wrappers block
+            # every node write on that path; save_collection_response is still
+            # installed when the sentinel reports collect_responses (the
+            # exception path), and its write goes through the authorization hook.
             tool_allowlist = None
             if collection_short_name and effective_prefix is not None:
                 tool_allowlist = (
                     self._collection_nodes.get(collection_short_name) or {}
                 ).get("tool_allowlist")
+
+            def attachment_access(tool_name):
+                if api_key is not None:
+                    return "off"
+                if not collection_short_name:
+                    return self._assistant_attachment_access
+                if effective_prefix is None or effective_prefix == "":
+                    return "off"
+                # Grants are read afresh so another process can revoke them.
+                node_id = (self._collection_nodes.get(collection_short_name) or {}).get(
+                    "id"
+                )
+                if not node_id or node_id.startswith("federated::"):
+                    return "off"
+                try:
+                    result = self._graph_service.get_node_details(node_id)
+                    node = result.get("node") or {}
+                    names = self._normalize_tool_allowlist(
+                        (node.get("metadata") or {}).get("tool_allowlist")
+                    )
+                    return (
+                        "read_write"
+                        if result.get("success") is not False
+                        and names
+                        and tool_name in names
+                        else "off"
+                    )
+                except Exception:
+                    return "off"
 
             # skills_context is passed separately as skills_override so it lands
             # AFTER the base system prompt (recency precedence for behavioral overrides).
@@ -839,6 +923,8 @@ class ChatService:
                 tools_override=tools_override,
                 visualization_context=visualization_context,
                 tool_allowlist=tool_allowlist,
+                llm_provider=llm_provider,
+                attachment_access=attachment_access,
             )
         finally:
             self._current_federation_depth = None
@@ -1033,6 +1119,14 @@ Respond with ONLY a JSON array of extracted entities, no other text. Example for
                 similar_results = self._graph_service.find_similar_nodes_batch(
                     names=names, node_type=node_type, threshold=0.7, limit=3
                 )
+                if similar_results.get("success") is False:
+                    # A denied duplicate check is reported, never read as
+                    # "nothing similar exists".
+                    return {
+                        **similar_results,
+                        "proposed_nodes": [],
+                        "similar_existing": {},
+                    }
             else:
                 similar_results = {"results": {}}
 

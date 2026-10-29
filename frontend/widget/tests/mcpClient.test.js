@@ -101,7 +101,6 @@ describe('mcpClient', () => {
       expect(mockCallTool).toHaveBeenCalledWith('search_graph', {
         query: 'test query',
         node_types: undefined,
-        communities: undefined,
         limit: 50,
       });
     });
@@ -109,17 +108,21 @@ describe('mcpClient', () => {
     it('passes custom options', async () => {
       await searchGraph('test', {
         nodeTypes: ['Actor', 'Initiative'],
-        communities: ['eSam'],
         limit: 100,
       });
 
       expect(mockCallTool).toHaveBeenCalledWith('search_graph', {
         query: 'test',
         node_types: ['Actor', 'Initiative'],
-        communities: ['eSam'],
         limit: 100,
       });
     });
+  });
+
+  it('does not forward a communities option, which search_graph does not accept', async () => {
+    await searchGraph('test', { communities: ['eSam'] });
+
+    expect(Object.keys(mockCallTool.mock.calls[0][1])).not.toContain('communities');
   });
 
   describe('getNodeDetails', () => {
@@ -290,20 +293,10 @@ describe('mcpClient', () => {
       expect(mockCallTool).toHaveBeenCalledWith('get_graph_stats', expect.any(Object));
     });
 
-    it('passes communities filter', async () => {
-      await getGraphStats(['eSam', 'Myndigheter']);
-
-      expect(mockCallTool).toHaveBeenCalledWith('get_graph_stats', {
-        communities: ['eSam', 'Myndigheter'],
-      });
-    });
-
-    it('defaults communities to null', async () => {
+    it('sends no arguments, since the tool takes none', async () => {
       await getGraphStats();
 
-      expect(mockCallTool).toHaveBeenCalledWith('get_graph_stats', {
-        communities: null,
-      });
+      expect(mockCallTool.mock.calls[0][1]).toStrictEqual({});
     });
   });
 });

@@ -1,13 +1,13 @@
 # Manual Testing Checklist
 
-This checklist is used for manual verification before `dev` is merged to `preview`.
-It is updated when PRs that require manual verification land on `dev`.
+This checklist is used for manual verification before `main` is merged to `preview`.
+It is updated when PRs that require manual verification land on `main`.
 
 ---
 
 ## How to use this list
 
-1. Work through the relevant sections after a batch of features has been merged to `dev`
+1. Work through the relevant sections after a batch of features has been merged to `main`
 2. Check off and sign with a date in a copy — do not leave checkmarks in this file
 3. If a test fails: open an issue and block the merge until it is resolved
 
@@ -33,7 +33,7 @@ It is updated when PRs that require manual verification land on `dev`.
 - [ ] Create an `EventSubscription` with URL `http://127.0.0.1:8000/health`
 - [ ] Trigger a mutation → verify that the delivery is logged as `DROPPED` (not attempted)
 - [ ] Also test with `http://169.254.169.254/` (AWS metadata endpoint)
-- [ ] **Known limitation:** DNS rebinding attacks (TOCTOU) require infra-level egress filtering for full mitigation
+- [ ] DNS rebinding: the delivery connects only to the address it has just checked, so a name that resolves publicly at the check and internally at connect is refused (covered by `backend/core/events/tests/test_pinned_transport.py`)
 
 ### Authentication on execute_tool (PR #39)
 **Purpose:** Verify that `/execute_tool` requires auth for write operations.
@@ -62,6 +62,6 @@ It is updated when PRs that require manual verification land on `dev`.
 
 ## Add new sections here
 
-When a PR that requires manual testing is merged to `dev`, add a section with:
+When a PR that requires manual testing is merged to `main`, add a section with:
 - PR number and a one-line description
 - Checklist with concrete steps and expected outcomes

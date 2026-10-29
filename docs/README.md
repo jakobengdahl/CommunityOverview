@@ -11,8 +11,9 @@ with one status so a reader (human or agent session) knows how to trust it:
   context; the system has since moved on. Do not treat as current-state.
 
 For the working structural backlog (desired changes to the repo itself, not a
-description of the system) see [`../STRUCTURE_REVIEW.md`](../STRUCTURE_REVIEW.md)
-and [`../SMALL_FIXES.md`](../SMALL_FIXES.md).
+description of the system) see [`../STRUCTURE_REVIEW.md`](../STRUCTURE_REVIEW.md).
+Open small fixes live in the planning graph; [`../SMALL_FIXES.md`](../SMALL_FIXES.md)
+is a historical archive.
 
 ---
 
@@ -23,20 +24,25 @@ and [`../SMALL_FIXES.md`](../SMALL_FIXES.md).
 | [USER_GUIDE.md](USER_GUIDE.md) | End-user walkthrough of every user-facing feature |
 | [PROFILES.md](PROFILES.md) | Configuration profiles: node types, presentation, env |
 | [ICONS.md](ICONS.md) | Icon-name reference for node-type definitions |
+| [I18N.md](I18N.md) | UI translation fallbacks, adding a language, the English-only lock |
 | [DATA_MANAGEMENT.md](DATA_MANAGEMENT.md) | How graph data files are stored and loaded |
 | [PERSISTENCE_BACKENDS.md](PERSISTENCE_BACKENDS.md) | The storage seam: what a persistence backend implements, and how mutations reach it |
 | [EVENT_SUBSCRIPTIONS.md](EVENT_SUBSCRIPTIONS.md) | Webhook / graph-mutation event system |
+| [RUNTIME_EXTENSION_HOOKS.md](RUNTIME_EXTENSION_HOOKS.md) | Mutation policy, execution admission, runtime observation and external delivery contracts |
 | [AGENT_SCHEDULING.md](AGENT_SCHEDULING.md) | Time-based agent schedule triggers |
+| [USER_FUNCTION_CONTRACT.md](USER_FUNCTION_CONTRACT.md) | Sandboxed user-defined functions: manifest, broker protocol, grants, limits, run records (draft contract) |
 | [FEDERATED_GRAPH_DESIGN.md](FEDERATED_GRAPH_DESIGN.md) | Federation design and its implementation status |
 | [MULTI_USER_SESSIONS_DESIGN.md](MULTI_USER_SESSIONS_DESIGN.md) | Shared-session design and implementation record (implemented) |
+| [SESSION_OVERLAY_CONTRACT.md](SESSION_OVERLAY_CONTRACT.md) | Staged editing in a session: entity revisions, the layer, composed reads, merge (draft contract) |
 | [CAPACITY.md](CAPACITY.md) | What one instance holds and costs, measured — plus the multi-instance acceptance criteria |
 | [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) | Provider-agnostic guide for deploying the app |
 | [DEPLOYMENT_CONTRACT.md](DEPLOYMENT_CONTRACT.md) | App-repo ↔ infra-repo artifact contract |
 | [DEPLOYMENT_AND_CONCURRENCY_ANALYSIS.md](DEPLOYMENT_AND_CONCURRENCY_ANALYSIS.md) | GraphStorage thread/process-safety design |
 | [mcp-oauth-gateway.md](mcp-oauth-gateway.md) | The OAuth 2.1 gateway service that fronts the MCP endpoint |
 | [SSPCloud-setup.md](SSPCloud-setup.md) | Getting started on SSPCloud with the stat-metadata profile |
-| [MANUAL_TESTING.md](MANUAL_TESTING.md) | Manual verification checklist before `dev` → `preview` |
-| [TEST_PLAN.md](TEST_PLAN.md) | Manual test plan for features on `dev` not yet in `preview` |
+| [SKILL_EVALUATION.md](SKILL_EVALUATION.md) | Measuring the AI assistant's skill loading, instruction following and tool execution across providers |
+| [MANUAL_TESTING.md](MANUAL_TESTING.md) | Manual verification checklist before `main` → `preview` |
+| [TEST_PLAN.md](TEST_PLAN.md) | Manual test plan for features on `main` not yet in `preview` |
 
 ## Design (target state)
 

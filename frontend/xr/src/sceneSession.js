@@ -2,10 +2,10 @@
 //
 // This is the whole point of ADR 0003's "reuse the protocol, re-implement only
 // the renderer" claim: `SessionSyncClient` is imported from the 2D web client
-// *unchanged* — same SSE subscription, same op vocabulary, same presence and
-// claim handling — and its handlers are wired to a plain scene reduction
-// instead of to a React Flow store. Nothing about the protocol layer knows
-// which renderer is downstream.
+// with the same SSE subscription, op vocabulary, presence and claim handling,
+// and its handlers are wired to a plain scene reduction instead of to a React
+// Flow store. Nothing about the protocol layer knows which renderer is
+// downstream.
 //
 // The cross-workspace import is deliberate and temporary: lifting
 // `sessionSyncClient.js` (and the session helpers in `api.js`) into a shared
@@ -19,6 +19,7 @@
 import { SessionSyncClient } from '../../web/src/services/sessionSyncClient.js';
 import {
   EMPTY_SCENE,
+  applyOp,
   applyOps,
   hydrateNodes,
   pendingNodeIds,
@@ -126,7 +127,31 @@ export class SceneSession {
 
   close() {
     this._closed = true;
+    this._client.setLocalSelection?.([]);
     this._client.close();
+  }
+
+  setLocalSelection(nodeId) {
+    if (!nodeId) {
+      this._client.setLocalSelection?.([]);
+      return;
+    }
+    if (!this._scene.nodes[nodeId]) return;
+    this._client.setLocalSelection?.([nodeId]);
+  }
+
+  moveNode(nodeId, position, { sync = true } = {}) {
+    if (!this._scene.nodes[nodeId]) return false;
+    if (!Number.isFinite(position?.x) || !Number.isFinite(position?.y)) return false;
+    const op = { op: 'node_moved', node_id: nodeId, position };
+    const next = applyOp(this._scene, op);
+    const changed = next !== this._scene;
+    if (changed) this._update(next);
+    if (sync) {
+      this._client.foldOpIntoBaseline?.(op);
+      this._client.sendOps?.([op]);
+    }
+    return changed || sync;
   }
 
   _emit() {

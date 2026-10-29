@@ -176,10 +176,22 @@ is required.
 | `renew_lease(job_id, worker_id, now, lease_seconds)` | Extend a lease held by `worker_id`; `False` otherwise. |
 | `complete(job_id, result, now)` | → `SUCCEEDED`; no-op if already terminal. |
 | `fail(job_id, error, now)` | Retry with backoff or dead-letter; no-op if already terminal. |
-| `cancel(job_id, now)` | → `CANCELLED` if non-terminal; `True`/`False`. |
+| `cancel(job_id, result, now)` | → `CANCELLED` if non-terminal; `True`/`False`. `result` is stored like `complete`'s, for a caller that can explain the cancellation. |
 | `recover_stale(now)` | Reset expired-lease `RUNNING` jobs to `PENDING`; return them. |
 | `get(job_id)` | Fetch by id, or `None`. |
-| `list_jobs(states, agent_id, kind, limit)` | Inspection surface, newest-first; the basis for durable run history. |
+| `list_jobs(states, agent_id, kind, limit, created_after)` | Inspection surface, newest-first; the basis for durable run history. `created_after` keeps jobs created strictly after it. |
+| `list_terminal_older_than(cutoff, redacted)` | Terminal jobs whose `finished_at` (else `updated_at`) is before `cutoff`, oldest first; optionally only redacted / unredacted ones. |
+| `list_running_older_than(cutoff)` | `RUNNING` jobs whose `updated_at` is before `cutoff`, oldest first. |
+| `abandon(job_ids, cutoff, now)` | Dead-letter each job still `RUNNING` and last updated before `cutoff`, with a fixed reason and its last update as `finished_at` (§8a); returns the count. |
+| `redact(job_ids, now)` | Strip each terminal, unredacted job's content (§8a) and stamp `redacted_at`; returns the count. |
+| `purge(job_ids)` | Delete each terminal job; returns the count. |
+| `erase_actor(actor_id, replacement_token)` | Replace matching structured actor attribution in payload/result and origin, across all states; return changed-record count. Preserve queue identity, timestamps and state. Operator maintenance requires stopped writers; see [User Guide](USER_GUIDE.md#52-recent-activity-audit-log). |
+
+**Adapter migration — actor attribution maintenance:** execution adapters now
+implement `erase_actor(actor_id, replacement_token) -> int`; proposal adapters
+provide the same method for `decided_by`. Both reference memory and SQLite
+adapters implement it. Inputs are validated without echoing their values, and
+repeating an erasure changes zero records.
 
 All `now` parameters default to the current UTC time; passing an explicit value
 keeps adapter behaviour deterministic under test.
@@ -208,6 +220,108 @@ Hosted adapters implement the same methods with their own persistence and are
 held to the same contract. Wiring the scheduler/worker to run live agent work
 through a store (rather than the current in-memory queue) is a separate,
 later slice.
+
+## 8a. Retention, redaction and purge
+
+Terminal jobs can be aged out. The store operations are
+`list_terminal_older_than`, `redact`, `purge`, `list_running_older_than` and
+`abandon` (§8); every adapter implements them and the shared contract tests
+exercise them.
+
+- **Only terminal jobs.** `redact` and `purge` skip `PENDING` and `RUNNING` jobs
+  (and unknown ids) without error. A job's age is measured from `finished_at`,
+  falling back to `updated_at`.
+- **Abandoning orphaned runs.** A job left `RUNNING` by a crashed process is
+  never finalized by anyone, so on its own it would keep its content forever.
+  `abandon` moves a job that is still `RUNNING` and was last updated before a
+  cutoff to `DEAD_LETTER` with the fixed, content-free reason
+  `abandoned: still running past the retention window`. Its `finished_at` is
+  set to its last update, so it ages from when it was last seen alive and the
+  same sweep can redact and purge it. A `RUNNING` job updated at or after the
+  cutoff, and every `PENDING` job, is left alone; the guard is re-checked at
+  write time, so a run finalized since it was listed is not touched. A late
+  `complete` or `fail` for an abandoned job is a no-op (terminal states are
+  sticky).
+- **Redaction** (`models.redact_job`, shared by all adapters) keeps `state`,
+  every timestamp, `id`, `agent_id`, `kind`, `idempotency_key`,
+  `correlation_id`, `attempts` and `dead_letter_reason`. It reduces
+  `payload.event` to `{event_type, entity: {kind, id, type}}` (dropping the
+  entity data and the event's actor attribution), drops every other payload key
+  except `agent_name`, and keeps those identifiers only as short strings or
+  integers. In `result` it nulls `summary` and every non-boolean, non-numeric
+  value. It nulls `last_error`, `session_id` and `origin`, and stamps
+  `redacted_at`. Redacting an already redacted job is a no-op.
+- **Purge drops idempotency memory.** A purged job's `idempotency_key` is
+  forgotten: a later `enqueue` with that key creates a new job (§5 holds only
+  while the job exists). Retention therefore must not be shorter than the window
+  in which a producer may re-deliver the same occurrence; the floor below keeps
+  it to at least a week.
+
+The durable SQLite adapter adds `redacted_at` in schema version 2, an additive,
+forward-only migration of a version-1 file, run once inside a write transaction
+even when several processes open the file together. It enables
+`secure_delete`, so freed pages are overwritten, and after a redact or purge
+that changed rows it checkpoints the WAL so the removed content does not linger
+in the `-wal` file. The checkpoint is best effort: a concurrent reader holding
+an older snapshot delays it until a later checkpoint.
+Copies taken before a sweep (backups, disk snapshots) are outside its reach.
+
+### Run-history retention policy
+
+Durable AgentRun history applies these operations through
+`backend/agents/run_history_retention.py`, configured by environment:
+
+| Variable | Effect |
+|---|---|
+| `AGENTS_RUN_HISTORY_RETENTION_DAYS` | Purge terminal runs older than this, after first abandoning runs still `RUNNING` whose last update is older than this. Minimum 7 days; a smaller value is raised to 7. |
+| `AGENTS_RUN_HISTORY_REDACT_AFTER_DAYS` | Redact terminal runs older than this. Clamped to the retention, so redaction precedes or coincides with purge. |
+| `AGENTS_RUN_HISTORY_EXPORT_MAX_DAYS` | How far back `GET /agents/runs` reads (by `created_at`). Clamped to, and defaulting to, the retention. |
+| `AGENTS_RUN_HISTORY_SWEEP_INTERVAL_HOURS` | Hours between sweeps (default 24). |
+
+With none set, history is kept forever and nothing is abandoned, redacted or
+purged. The sweep's guarantees:
+
+- A run still `RUNNING` and last updated within the effective retention is
+  never touched; a `RUNNING` run older than it is abandoned and then redacted
+  (when redaction is configured) and purged in the same sweep. A queued run is
+  never touched. With only `AGENTS_RUN_HISTORY_REDACT_AFTER_DAYS` set, nothing
+  is abandoned, so an orphaned `RUNNING` run keeps its content and stays
+  readable; set a retention to age such runs out.
+- Nothing is purged younger than the effective retention, which is never below
+  the floor; redaction precedes or coincides with purge.
+- A second sweep at the same instant changes nothing.
+
+A value that is not an integer from 1 to 36500 (1 to 87600 for the interval)
+fails startup; leave a window unset rather than very large to keep history
+forever. The sweep runs when the agent registry starts (also when agents are disabled, since it governs data
+already at rest) and then every interval; a failing sweep is logged and never
+stops the runtime. `python -m backend.agents.run_history_retention [--dry-run]`
+runs one sweep against `AGENTS_RUN_HISTORY_DB` by hand. Each sweep logs one
+audit record (logger `backend.agents.run_history_retention.audit`) holding only
+the policy, the cutoffs and the abandoned/redacted/purged counts — no run ids
+or content. A `--dry-run` reports the same counts without changing anything;
+its redacted and purged counts include the runs it would abandon.
+`GET /agents/runs/retention-policy` returns the effective policy and the last
+sweep's record.
+
+The same sweep applies these windows to agent governance proposals (the
+`AGENTS_GOVERNANCE_DB` store, or the in-memory one). Only decided proposals
+(approved, rejected, applied or apply-failed) are touched, aged by when they
+were decided: older than the redact window, their `input_args`, `apply_result`
+and `apply_error` are stripped (agent, tool, status, decider and timestamps
+stay); older than the retention, they are purged. A pending proposal is never
+redacted or purged, whatever its age. The floor, clamps and idempotence above
+hold for proposals too, and the audit record adds `proposals_redacted` and
+`proposals_purged` counts. Each store is swept as its own phase: a failing store is logged and flagged
+in the audit record (`run_history_failed` for the run-history store,
+`proposals_failed` for the proposal store) without undoing, hiding or
+preventing the other phase. The CLI sweeps `AGENTS_GOVERNANCE_DB` as well when
+it is set, needs at least one of the two databases, and exits 1 when either
+part failed. With `--dry-run` it opens both databases read-only, so it neither
+switches a file's journal mode nor creates or migrates a schema; a database
+the current version has not yet migrated therefore cannot be previewed and is
+reported as a failed phase. Opening a WAL database read-only may leave empty
+`-wal`/`-shm` sidecar files, so run it as the database's owner.
 
 ## 9. Public/private boundary
 

@@ -7,6 +7,7 @@ Defines settings for agents, MCP integrations, and global agent system configura
 import os
 import json
 import logging
+import tempfile
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, TYPE_CHECKING
 from enum import Enum
@@ -16,6 +17,8 @@ from backend.config.model_profiles import (
     ProfileResolution,
     resolve_profile_reference,
 )
+from backend.runtime.attachment_access import agent_attachment_access
+from backend.agents.run_history_retention import RetentionPolicy
 from backend.agents.secrets import (
     SECRET_REF_PREFIX,
     is_secret_ref,
@@ -153,6 +156,49 @@ class AgentSchedule:
 #: pass through unredacted.
 REDACTED_ENV_VALUE = "***"
 
+AGENTS_WORKSPACE_ENV_VAR = "AGENTS_WORKSPACE_DIR"
+
+
+def agent_workspace_dir() -> str:
+    """Root directory the agent's filesystem tools are confined to.
+
+    The built-in FS executor and the filesystem MCP server must be handed the
+    same root or they operate on different trees, so it is decided here only.
+
+    The default is a private per-user directory rather than a fixed path in the
+    shared system temp directory: a predictable path there can be pre-created by
+    any other local user - as a directory they own, or as a symlink - and
+    whoever wins that race chooses where the agent reads and writes. Set
+    AGENTS_WORKSPACE_DIR to place the workspace somewhere explicit; a location
+    other local users can write to re-opens that race, which is why the FS
+    executor additionally refuses a root it does not own (see
+    MCPLoader._execute_fs_tool).
+
+    The return value is always absolute. `expanduser` yields no usable home
+    under a uid with neither HOME nor a passwd entry - a hardened container run
+    as an arbitrary uid - where it returns the literal "~"; joining onto that
+    would hand back a cwd-relative path and scatter the workspace wherever the
+    process happens to be. Such a deployment falls back to a per-uid directory
+    under the system temp dir, computed rather than written as a literal.
+    """
+    configured = os.environ.get(AGENTS_WORKSPACE_ENV_VAR)
+    if configured:
+        return os.path.abspath(os.path.expanduser(configured))
+
+    home = os.path.expanduser("~")
+    if os.path.isabs(home) and home != os.sep:
+        return os.path.join(home, ".communityoverview", "agent-workspace")
+
+    return os.path.join(
+        tempfile.gettempdir(), f"communityoverview-agent-workspace-{_euid_tag()}"
+    )
+
+
+def _euid_tag() -> str:
+    """A per-user component for the no-home fallback path."""
+    getuid = getattr(os, "geteuid", None)
+    return str(getuid()) if getuid is not None else "nouid"
+
 
 class MCPTransport(str, Enum):
     """Transport type for MCP server connections."""
@@ -209,8 +255,9 @@ class MCPIntegration:
             "name": self.name,
             "description": self.description,
             "transport": self.transport.value,
-            "url": self.url,
-            "command": self.command,
+            # Connection details are operator-supplied and can carry credentials,
+            # internal hosts or service-account paths. HTTP clients need neither
+            # `url` nor `command`; the loader reads these attributes directly.
             # Redact literal env values so an inline secret is never serialized;
             # secret://<name> references name a secret rather than holding its
             # value, so they are safe to expose.
@@ -250,6 +297,7 @@ class AgentConfig:
     mcp_integration_ids: List[str] = field(default_factory=list)
     prompts: AgentPrompts = field(default_factory=AgentPrompts)
     tool_allowlist: Optional[List[str]] = None
+    attachment_access: str = "none"
     # Governance: observe | assist | propose | act_after_approval. Unset falls
     # back to the governed default (act_after_approval) — mutating actions
     # require human approval.
@@ -290,6 +338,9 @@ class AgentConfig:
             mcp_integration_ids=metadata.get("mcp_integration_ids", []),
             prompts=AgentPrompts.from_dict(prompts_data),
             tool_allowlist=metadata.get("tool_allowlist"),
+            attachment_access=agent_attachment_access(
+                metadata.get("attachment_access", "none"), agent_id=node.id
+            ),
             autonomy_level=metadata.get("autonomy_level") or "act_after_approval",
             skills_urls=metadata.get("skills_urls", []),
             skill_node_ids=metadata.get("skill_node_ids", []),
@@ -307,6 +358,7 @@ class AgentConfig:
             "mcp_integration_ids": self.mcp_integration_ids,
             "prompts": {"task_prompt": self.prompts.task_prompt},
             "tool_allowlist": self.tool_allowlist,
+            "attachment_access": self.attachment_access,
             "autonomy_level": self.autonomy_level,
             "skills_urls": self.skills_urls,
             "skill_node_ids": self.skill_node_ids,
@@ -340,6 +392,9 @@ class AgentsSettings:
     # writes to. When unset, run history is kept in a volatile in-memory store
     # (lost on restart) so standalone/dev runs need no file.
     run_history_db: Optional[str] = None
+    # Retention for run history (see run_history_retention.py). The default
+    # keeps history forever and never sweeps.
+    run_history_retention: RetentionPolicy = field(default_factory=RetentionPolicy)
     # Durable agent proposals (governance): path to the SQLite file the proposal
     # store writes to. When unset, proposals live in a volatile in-memory store.
     governance_db: Optional[str] = None
@@ -371,6 +426,10 @@ class AgentsSettings:
             AGENTS_EVENT_TIMEOUT: Event processing timeout in seconds (default: 60)
             AGENTS_RUN_HISTORY_DB: Path to the SQLite file for durable AgentRun
                 history (optional; in-memory/volatile when unset)
+            AGENTS_RUN_HISTORY_RETENTION_DAYS, AGENTS_RUN_HISTORY_REDACT_AFTER_DAYS,
+            AGENTS_RUN_HISTORY_EXPORT_MAX_DAYS, AGENTS_RUN_HISTORY_SWEEP_INTERVAL_HOURS:
+                Run-history retention (optional; history is kept forever when
+                unset). An invalid value raises ValueError.
             AGENTS_GOVERNANCE_DB: Path to the SQLite file for durable agent
                 proposals (optional; in-memory/volatile when unset)
         """
@@ -410,7 +469,7 @@ class AgentsSettings:
                     )
                     mcp_integrations.append(integration)
             except (json.JSONDecodeError, KeyError) as e:
-                print(f"Warning: Failed to parse MCP_INTEGRATIONS: {e}")
+                logger.warning(f"Failed to parse MCP_INTEGRATIONS: {e}")
 
         # Add default integrations if none configured
         if not mcp_integrations:
@@ -423,7 +482,7 @@ class AgentsSettings:
 
             model_profiles = config_loader.get_model_profiles()
         except Exception as exc:
-            print(f"Warning: Failed to load model profiles for agents: {exc}")
+            logger.warning(f"Failed to load model profiles for agents: {exc}")
             model_profiles = []
 
         return cls(
@@ -438,6 +497,7 @@ class AgentsSettings:
             event_timeout=float(os.environ.get("AGENTS_EVENT_TIMEOUT", "60")),
             model_profiles=model_profiles,
             run_history_db=os.environ.get("AGENTS_RUN_HISTORY_DB") or None,
+            run_history_retention=RetentionPolicy.from_env(),
             governance_db=os.environ.get("AGENTS_GOVERNANCE_DB") or None,
         )
 
@@ -486,7 +546,7 @@ class AgentsSettings:
                     "npx",
                     "-y",
                     "@anthropic/filesystem-mcp",
-                    "/tmp/agent-workspace",
+                    agent_workspace_dir(),
                 ],
                 enabled=True,
             )

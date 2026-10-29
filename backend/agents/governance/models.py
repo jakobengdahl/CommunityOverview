@@ -93,6 +93,11 @@ class Proposal:
     created_at: datetime = field(default_factory=utcnow)
     updated_at: datetime = field(default_factory=utcnow)
     decided_at: Optional[datetime] = None
+    # The session the action was made in (docs/SESSION_OVERLAY_CONTRACT.md
+    # §9.1): approving it acts in that same session, so an action made in a
+    # staged session stages, never skipping the layer.
+    session_id: Optional[str] = None
+    causation_depth: int = 1
 
     def __post_init__(self) -> None:
         if not isinstance(self.autonomy_level, AutonomyLevel):
@@ -127,6 +132,8 @@ class Proposal:
             "created_at": _iso(self.created_at),
             "updated_at": _iso(self.updated_at),
             "decided_at": _iso(self.decided_at),
+            "session_id": self.session_id,
+            "causation_depth": self.causation_depth,
         }
 
     @classmethod
@@ -148,6 +155,8 @@ class Proposal:
         prop.created_at = _parse(data.get("created_at")) or prop.created_at
         prop.updated_at = _parse(data.get("updated_at")) or prop.updated_at
         prop.decided_at = _parse(data.get("decided_at"))
+        prop.session_id = data.get("session_id")
+        prop.causation_depth = data.get("causation_depth", 1)
         return prop
 
 

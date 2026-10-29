@@ -1,5 +1,10 @@
 import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
-import { GraphCanvas, CANVAS_ANNOTATION_TYPES } from '@community-graph/ui-graph-canvas';
+import {
+  GraphCanvas,
+  CANVAS_ANNOTATION_TYPES,
+  isSafeReferenceUrl,
+  trimReferenceTarget,
+} from '@community-graph/ui-graph-canvas';
 import '@community-graph/ui-graph-canvas/styles';
 import useGraphStore from './store/graphStore';
 import { useI18n } from './i18n';
@@ -11,33 +16,60 @@ import ActivityDrawer from './components/ActivityDrawer';
 import NodeHistoryPanel from './components/NodeHistoryPanel';
 import AppDialogs from './components/AppDialogs';
 import ConfirmDialog from './components/ConfirmDialog';
+import AppInstallPrompt from './components/AppInstallPrompt';
 import * as api from './services/api';
+import { teleportToSourceGraph } from './utils/teleport';
 import * as sessionStore from './services/sessionStore';
 import {
   annotationsToGroups,
   annotationsToOverlays,
   annotationDocumentToLegacyMetadata,
   legacyMetadataToAnnotationDocument,
-  savedViewMetadataToCanvasMetadata,
 } from './utils/sessionAnnotations';
 import { serverStateToMirror, useSharedSession } from './hooks/useSharedSession';
 import { DEFAULT_REQUEST_TIMEOUT_MS as SYNC_REQUEST_TIMEOUT_MS } from './services/sessionSyncClient';
 import { useSyncConnection } from './hooks/useSyncConnection';
+import { useStagedSession } from './hooks/useStagedSession';
+import WriteModeBar from './components/WriteModeBar';
+import NewSessionDialog from './components/NewSessionDialog';
+import StagedReviewDialog from './components/StagedReviewDialog';
 import { useToolResultCommands } from './hooks/useToolResultCommands';
+import { useViewportSummon } from './hooks/useViewportSummon';
+import SummonNotice from './components/SummonNotice';
 import { useViewportMode } from './hooks/useViewportMode';
 import { useFullscreenCanvas } from './hooks/useFullscreenCanvas';
 import FullscreenExitButton from './components/FullscreenExitButton';
 import { decideClearAction } from './utils/clearBoard';
 import { dropIntoFreshSession, receiveRemoteSessionDeleted } from './utils/sessionLifecycle';
-import { applyEdgeUpdate, confirmNodeDelete } from './utils/sessionScopedGraphEdits';
+import {
+  agentCreateToCanvas,
+  agentUpdateEntries,
+  applyEdgeUpdate,
+  captureCanvasScope,
+  confirmNodeDelete,
+  connectNodes,
+  createDialogNode,
+  createdNodesToCanvas,
+  deleteEdgeEverywhere,
+  expandNode,
+  loadSavedViewNode,
+  openAgentEditor,
+  persistNewNodes,
+  persistNodeUpdates,
+  setEdgeType,
+} from './utils/sessionScopedGraphEdits';
+import { loadUrlSavedView } from './utils/urlSavedView';
 import { createAnnotationChangeScheduler } from './utils/annotationChangeScheduler';
 import { createSelfEchoDedup } from './utils/selfEchoDedup';
 import { applyIngestedImageOptimistically } from './utils/imageIngestApply';
 import { shouldPersistSnapshot } from './utils/sessionSnapshotGuard';
+import { refusalText } from './utils/stagedReview';
 import './App.css';
 
-// Ceiling on how long resyncFromServer's api.getSession() call may stay
-// in flight before its reentrancy guard self-heals. api.js's fetch carries
+// Ceiling on how long one resyncFromServer call may stay in flight before its
+// reentrancy guard self-heals. The call spans up to RESYNC_MAX_FETCHES
+// api.getSession() requests plus the replay's node fetches, and the timer
+// covers all of them together, not each request. api.js's fetch carries
 // no timeout (unlike SessionSyncClient's own outbound ops POST, which bounds
 // itself against exactly this: "SSE deployments commonly sit behind Cloud
 // Run / an ingress that can hold a half-open request open indefinitely" —
@@ -46,6 +78,9 @@ import './App.css';
 // that same request's own timeout value (imported, not duplicated — a
 // hardcoded copy could silently drift out of sync, review round 6).
 const RESYNC_GUARD_TIMEOUT_MS = SYNC_REQUEST_TIMEOUT_MS;
+// How many times one resync may fetch the session while the op stream keeps
+// running ahead of each payload (see resyncFromServer).
+const RESYNC_MAX_FETCHES = 3;
 
 const _urlParams = new URLSearchParams(window.location.search);
 const _collectShortName = _urlParams.get('collect');
@@ -101,11 +136,14 @@ function App() {
     removeNode,
     removeEdge,
     updateEdgeData,
+    setNodes,
+    setEdges,
     presentation,
     setConfig,
     focusNodeId,
     clearFocusNode,
     setFocusNodeId,
+    setGuideSearchInput,
     pendingGroups,
     setPendingGroups,
     pendingAnnotations,
@@ -137,9 +175,22 @@ function App() {
 
   const urlGuideStartedRef = useRef(false);
   const urlViewLoadedRef = useRef(false);
+  // The in-flight ?session= bootstrap load, so a ?view= in the same URL can wait
+  // for it and be applied on top.
+  const urlSessionBootstrapRef = useRef(null);
+  const canvasEditEpochRef = useRef(0);
+  const urlFocusNodeLoadedRef = useRef(false);
+  // The saved-view load clears the canvas after its own await, so focusing a
+  // ?node= before it settles can have the node wiped out from under the focus.
+  // Starts settled when there is no ?view= to wait for, which is also why this
+  // is derived at mount rather than set from inside the view effect.
+  const [urlViewSettled, setUrlViewSettled] = useState(
+    () => !new URLSearchParams(window.location.search).get('view')
+  );
   const latestViewport = useRef(null);
   const dialogOpenRef = useRef(false);
   const appRef = useRef(null);
+  const canvasContainerRef = useRef(null);
   // Image annotation ids this browser has already rendered optimistically
   // (handleImageIngest below); see createSelfEchoDedup for why the confirming
   // SSE echo of the same op must be swallowed, not reapplied.
@@ -147,6 +198,7 @@ function App() {
   const { enterFullscreenCanvas, exitFullscreenCanvas, fullscreenCanvasActive } =
     useFullscreenCanvas(appRef);
   const [notification, setNotification] = useState(null);
+  const [isOffline, setIsOffline] = useState(() => window.navigator?.onLine === false);
   const [saveViewDialog, setSaveViewDialog] = useState(null);
   const [showSubscriptionDialog, setShowSubscriptionDialog] = useState(false);
   const [editingSubscriptionData, setEditingSubscriptionData] = useState(null);
@@ -171,12 +223,31 @@ function App() {
   // The visualization session ID doubles as the working-session identity.
   // It is state (not a constant) so the user can switch sessions; the SSE
   // stream and state uploads reconnect automatically when it changes.
-  const [sessionId, setSessionId] = useState(() => {
+  const [sessionId, setSessionIdState] = useState(() => {
     const urlSession = _urlParams.get('session');
-    return sessionStore.isValidSessionId(urlSession)
+    const initial = sessionStore.isValidSessionId(urlSession)
       ? urlSession
       : api.generateVisualizationSessionId();
+    api.setActiveSessionForRequests(initial);
+    // A linked session may be staged: hold graph writes until its load says.
+    // So may the starting one, until the capabilities say whether the app
+    // starts in a server-created session of the installation's default mode.
+    api.setSessionModeUnknown(initial);
+    return initial;
   });
+  // Written together with the state, not from an effect: a switch bumps the
+  // session epoch before React re-renders, and the ?view= load must not see the
+  // previous id in that gap.
+  const sessionIdRef = useRef(sessionId);
+  const setSessionId = useCallback((id) => {
+    sessionIdRef.current = id;
+    // Before any request is made from the new session: graph requests carry a
+    // session's header only while it is the active one and known staged.
+    api.setActiveSessionForRequests(id);
+    setSessionIdState(id);
+  }, []);
+  // The session the page was opened into, for the ?view= load to compare against.
+  const urlSessionIdRef = useRef(sessionId);
   const [drawerOpen, setDrawerOpen] = useState(false);
   // Independent viewport signals (WAVE 0 mobile-shell enabler) — isMobile is a
   // width breakpoint, isCoarsePointer is an input-type signal; neither implies
@@ -242,6 +313,68 @@ function App() {
     setRemoteLeases,
     opStreamReady,
   } = useSyncConnection(sessionId);
+  // The active session's write mode and staged changes
+  // (docs/SESSION_OVERLAY_CONTRACT.md §17).
+  const {
+    writeMode: sessionWriteMode,
+    items: stagedItems,
+    pendingCount: stagedPendingCount,
+    diffError: stagedDiffError,
+    stagedStates,
+    adoptWriteMode,
+    adoptSessionPayload,
+    markModeUnknown,
+    forgetSession: forgetStagedSession,
+    refreshDiff: refreshStagedDiff,
+    handleSessionOp: handleStagedSessionOp,
+  } = useStagedSession(sessionId);
+  // api.js's own messages (held writes, a changed session) in the UI language.
+  useEffect(() => {
+    api.setMessageTranslator(t);
+  }, [t]);
+  const sessionWriteModeRef = useRef(sessionWriteMode);
+  sessionWriteModeRef.current = sessionWriteMode;
+  const setStoreWriteMode = useGraphStore((state) => state.setSessionWriteMode);
+  useEffect(() => {
+    setStoreWriteMode(sessionWriteMode);
+  }, [sessionWriteMode, setStoreWriteMode]);
+  const [stagedAvailable, setStagedAvailable] = useState(false);
+  const stagedAvailableRef = useRef(false);
+  stagedAvailableRef.current = stagedAvailable;
+  // The browser-made id the app opened in without a ?session= link, until
+  // the capabilities settle how it starts (settleStartingSession).
+  const startingSessionRef = useRef(null);
+  const settleStartingSessionRef = useRef(null);
+  // While the start is settled its mode bar is not shown: graph writes are
+  // held meanwhile, and its Retry would settle the start before the
+  // capabilities say how it starts. An installation without staging sees no
+  // bar at all, as before.
+  const [settlingStartId, setSettlingStartId] = useState(() =>
+    sessionStore.isValidSessionId(_urlParams.get('session')) ? null : sessionIdRef.current
+  );
+  const [defaultWriteMode, setDefaultWriteMode] = useState('direct');
+  const defaultWriteModeRef = useRef('direct');
+  defaultWriteModeRef.current = defaultWriteMode;
+  const [newSessionDialogOpen, setNewSessionDialogOpen] = useState(false);
+  const [stagedReviewOpen, setStagedReviewOpen] = useState(false);
+  const [switchToStagedConfirm, setSwitchToStagedConfirm] = useState(false);
+  // Sessions this tab is deleting, so its own delete notice is told apart from
+  // one another tab of the same browser (same client id) caused.
+  const locallyDeletingRef = useRef(new Set());
+  // A deleted direct id can be opened again (a link recreates it): once this
+  // tab switches to it, a later delete of it is someone else's again.
+  // Not while its delete is still in flight, or the delete's own notice would
+  // read as someone else's and the session be left twice.
+  const deletesInFlightRef = useRef(new Set());
+  const previousSessionIdRef = useRef(sessionId);
+  useEffect(() => {
+    if (previousSessionIdRef.current === sessionId) return;
+    previousSessionIdRef.current = sessionId;
+    if (!deletesInFlightRef.current.has(sessionId)) locallyDeletingRef.current.delete(sessionId);
+  }, [sessionId]);
+  // Sessions this tab is deleting that the server's notice says were staged,
+  // even if this tab had not learnt it: they are replaced by staged ones.
+  const deletedStagedRef = useRef(new Set());
   const applyServerSessionRef = useRef(null);
   // Guards resyncFromServer against overlapping reconnects (review round 2):
   // a flaky connection can drop and reconnect more than once before a slow
@@ -252,7 +385,12 @@ function App() {
   // no timeout, unlike SessionSyncClient's own outbound ops POST, so a hung
   // GET must not wedge reconnect recovery forever) recognise it is no longer
   // the current owner and not stomp on a newer resync that started meanwhile.
-  const resyncInFlightRef = useRef(false);
+  // Holds `{ client }`, the sync client the in-flight resync was started
+  // for (null when idle), not a bare boolean or a session id: a slow resync
+  // for the session being left must not swallow the first resync of the
+  // session just switched to, and switching away and back builds a new
+  // client for the same id whose first resync must not be swallowed either.
+  const resyncInFlightRef = useRef(null);
   const resyncGuardTokenRef = useRef(0);
   // Ops the sync client has told us (via onDropped) were terminally rejected
   // by the server — 400/413/404/410, never retryable — since the current
@@ -264,9 +402,13 @@ function App() {
   // the sync baseline as if it had synced successfully, and gets replayed
   // onto the canvas — silently undoing the very rejection the "change not
   // saved" notice just reported. The reentrancy guard suppresses onDropped's
-  // *own* resync call while one is already in flight, so the in-flight call
-  // is the only thing that will ever act on this — it reads and clears this
-  // set for itself right before finalising which ops to fold/replay.
+  // *own* resync call while one is already in flight for the same sync
+  // client and its guard timer has not fired, so that in-flight call is the
+  // only thing that will ever act on this — it reads and clears this set for
+  // itself right before finalising which ops to fold/replay. A resync for a
+  // newer client, or one started after the guard timer fired, is not
+  // suppressed: it supersedes the older call by token, which stops at its
+  // next checkpoint, so whichever call reads this set next is the newer one.
   const recentlyDroppedOpsRef = useRef(new Set());
   // MCP tool-result push application (external AI agent commands → canvas) and
   // the legacy SSE push stream. The op-stream `command` events are wired below
@@ -318,14 +460,62 @@ function App() {
     [setRemoteAnnotationOps]
   );
 
+  // When each edge was last removed by a remote op (a running count), so a
+  // composed re-read still in flight does not put back an edge removed after
+  // it started.
+  // inFlight counts the re-reads started at each seq (several can share one).
+  const edgeRemovalSeqRef = useRef({ seq: 0, removed: new Map(), inFlight: new Map() });
   const applyRemoteOp = useCallback(
     async (op) => {
       const store = useGraphStore.getState();
+      if (
+        (op?.op === 'edges_added' || op?.op === 'edges_updated') &&
+        api.isActiveSessionPossiblyStaged()
+      ) {
+        // In a staged session the edge an op carries is staged content, and
+        // the stream reaches anyone holding the session id: read it from the
+        // composed view instead, which asks the authorization hook
+        // (docs/SESSION_OVERLAY_CONTRACT.md §15).
+        const sessionAtStart = syncRef.current?.sessionId;
+        const removalsAtStart = edgeRemovalSeqRef.current.seq;
+        const inFlight = edgeRemovalSeqRef.current.inFlight;
+        inFlight.set(removalsAtStart, (inFlight.get(removalsAtStart) || 0) + 1);
+        const onCanvas = new Set(store.nodes.map((n) => n.id));
+        const wanted = (op.edges || []).filter(
+          (e) => e && e.id && onCanvas.has(e.source) && onCanvas.has(e.target)
+        );
+        const sources = [...new Set(wanted.map((e) => e.source))];
+        let reads;
+        try {
+          reads = await Promise.all(sources.map((id) => api.getNodeDetails(id).catch(() => null)));
+        } finally {
+          const left = inFlight.get(removalsAtStart) - 1;
+          if (left > 0) inFlight.set(removalsAtStart, left);
+          else inFlight.delete(removalsAtStart);
+        }
+        if (syncRef.current?.sessionId !== sessionAtStart) return false; // switched away while fetching
+        const listed = new Map(reads.flatMap((r) => r?.edges || []).map((e) => [e.id, e]));
+        const have = new Set(useGraphStore.getState().edges.map((e) => e.id));
+        const fresh = wanted.map((e) => listed.get(e.id)).filter(Boolean);
+        fresh.filter((e) => have.has(e.id)).forEach((e) => updateEdgeData(e.id, e));
+        // Only an add adds, and not an edge a later op removed while this
+        // read was in flight (the sync baseline already has that removal).
+        const added =
+          op.op === 'edges_added'
+            ? fresh.filter(
+                (e) =>
+                  !have.has(e.id) &&
+                  !((edgeRemovalSeqRef.current.removed.get(e.id) ?? -1) > removalsAtStart)
+              )
+            : [];
+        if (added.length) addNodesToVisualization([], added);
+        return fresh.length > 0;
+      }
       switch (op?.op) {
         case 'nodes_added': {
           const have = new Set(store.nodes.map((n) => n.id));
           const missing = (op.node_ids || []).filter((id) => !have.has(id));
-          if (!missing.length) break;
+          if (!missing.length) return false;
           // The only case here with an internal await, so the only one where
           // the active session can change out from under it (a session
           // switch mid-fetch, review round 5): capture which session this op
@@ -347,7 +537,7 @@ function App() {
               }
             })
           );
-          if (syncRef.current?.sessionId !== sessionAtStart) break; // switched away while fetching
+          if (syncRef.current?.sessionId !== sessionAtStart) return false; // switched away while fetching
           // Seed positions from the sync baseline: the originator emits nodes_added
           // then node_moved as separate ops, so by the time this async resolve
           // finishes the follow-up position is already folded into the baseline.
@@ -360,84 +550,132 @@ function App() {
               return pos ? { ...n, _savedPosition: pos } : n;
             });
             addNodesToVisualization(positioned, addEdges);
+            return true;
           }
-          break;
+          return false;
         }
-        case 'nodes_removed':
+        case 'nodes_removed': {
+          const removeIds = op.node_ids || [];
+          const existing = new Set(store.nodes.map((n) => n.id));
           (op.node_ids || []).forEach((id) => removeNode(id));
-          break;
-        case 'nodes_hidden':
-          setHiddenNodeIds(
-            Array.from(new Set([...(store.hiddenNodeIds || []), ...(op.node_ids || [])]))
-          );
-          break;
+          return removeIds.some((id) => existing.has(id));
+        }
+        case 'nodes_hidden': {
+          const current = store.hiddenNodeIds || [];
+          const currentSet = new Set(current);
+          const additions = (op.node_ids || []).filter((id) => !currentSet.has(id));
+          if (!additions.length) return false;
+          setHiddenNodeIds(Array.from(new Set([...current, ...additions])));
+          return true;
+        }
         case 'nodes_shown': {
           const drop = new Set(op.node_ids || []);
+          if (!(store.hiddenNodeIds || []).some((id) => drop.has(id))) return false;
           setHiddenNodeIds((store.hiddenNodeIds || []).filter((id) => !drop.has(id)));
-          break;
+          return true;
         }
         case 'edges_added': {
           // A collaborator drew an edge between nodes already present here. Its
           // endpoints are in the graph, so render it directly; addNodesToVisualization
           // dedupes by edge id, so a redraw after a later re-hydration is harmless.
           const list = (op.edges || []).filter((e) => e && e.id);
-          if (list.length) addNodesToVisualization([], list);
-          break;
+          const haveEdges = new Set(store.edges.map((e) => e.id));
+          const missingEdges = list.filter((e) => !haveEdges.has(e.id));
+          if (missingEdges.length) {
+            addNodesToVisualization([], missingEdges);
+            return true;
+          }
+          return false;
         }
-        case 'edges_removed':
-          // A collaborator deleted an edge. Remove it directly; if it isn't
-          // present here (this host never had those endpoints) removeEdge is a
-          // harmless no-op.
-          (op.edge_ids || []).forEach((id) => removeEdge(id));
-          break;
-        case 'edges_updated':
+        case 'edges_removed': {
+          const removeIds = op.edge_ids || [];
+          const removals = edgeRemovalSeqRef.current;
+          removeIds.forEach((id) => {
+            removals.seq += 1;
+            removals.removed.set(id, removals.seq);
+          });
+          if (removals.removed.size > 1000) {
+            // Forget only removals no re-read still in flight could compare
+            // against.
+            const oldest = Math.min(removals.seq, ...removals.inFlight.keys());
+            for (const [id, seq] of removals.removed) {
+              if (seq <= oldest) removals.removed.delete(id);
+            }
+          }
+          const existing = new Set(store.edges.map((e) => e.id));
+          removeIds.forEach((id) => removeEdge(id));
+          return removeIds.some((id) => existing.has(id));
+        }
+        case 'edges_updated': {
           // A collaborator changed an edge's attributes (e.g. its relationship
           // type). Merge them in place; if the edge isn't present here,
           // updateEdgeData is a harmless no-op and a later hydration recovers
           // the current value from the graph.
+          const existing = new Set(store.edges.map((e) => e.id));
+          let applied = false;
           (op.edges || []).forEach((e) => {
-            if (e && e.id) updateEdgeData(e.id, e);
+            if (e && e.id) {
+              if (existing.has(e.id)) applied = true;
+              updateEdgeData(e.id, e);
+            }
           });
-          break;
-        case 'edges_hidden':
-          setHiddenEdgeIds(
-            Array.from(new Set([...(store.hiddenEdgeIds || []), ...(op.edge_ids || [])]))
-          );
-          break;
+          return applied;
+        }
+        case 'edges_hidden': {
+          const current = store.hiddenEdgeIds || [];
+          const currentSet = new Set(current);
+          const additions = (op.edge_ids || []).filter((id) => !currentSet.has(id));
+          if (!additions.length) return false;
+          setHiddenEdgeIds(Array.from(new Set([...current, ...additions])));
+          return true;
+        }
         case 'edges_shown': {
           const drop = new Set(op.edge_ids || []);
+          if (!(store.hiddenEdgeIds || []).some((id) => drop.has(id))) return false;
           setHiddenEdgeIds((store.hiddenEdgeIds || []).filter((id) => !drop.has(id)));
-          break;
+          return true;
         }
-        case 'nodes_dimmed':
-          setDimmedNodeIds(
-            Array.from(new Set([...(store.dimmedNodeIds || []), ...(op.node_ids || [])]))
-          );
-          break;
+        case 'nodes_dimmed': {
+          const current = store.dimmedNodeIds || [];
+          const currentSet = new Set(current);
+          const additions = (op.node_ids || []).filter((id) => !currentSet.has(id));
+          if (!additions.length) return false;
+          setDimmedNodeIds(Array.from(new Set([...current, ...additions])));
+          return true;
+        }
         case 'nodes_undimmed': {
           const drop = new Set(op.node_ids || []);
+          if (!(store.dimmedNodeIds || []).some((id) => drop.has(id))) return false;
           setDimmedNodeIds((store.dimmedNodeIds || []).filter((id) => !drop.has(id)));
-          break;
+          return true;
         }
-        case 'edges_dimmed':
-          setDimmedEdgeIds(
-            Array.from(new Set([...(store.dimmedEdgeIds || []), ...(op.edge_ids || [])]))
-          );
-          break;
+        case 'edges_dimmed': {
+          const current = store.dimmedEdgeIds || [];
+          const currentSet = new Set(current);
+          const additions = (op.edge_ids || []).filter((id) => !currentSet.has(id));
+          if (!additions.length) return false;
+          setDimmedEdgeIds(Array.from(new Set([...current, ...additions])));
+          return true;
+        }
         case 'edges_undimmed': {
           const drop = new Set(op.edge_ids || []);
+          if (!(store.dimmedEdgeIds || []).some((id) => drop.has(id))) return false;
           setDimmedEdgeIds((store.dimmedEdgeIds || []).filter((id) => !drop.has(id)));
-          break;
+          return true;
         }
         case 'edge_intensity_set':
-          if (typeof op.value === 'number') setEdgeIntensity(op.value);
-          break;
+          if (typeof op.value !== 'number') return false;
+          if (store.edgeIntensity === op.value) return false;
+          setEdgeIntensity(op.value);
+          return true;
         case 'node_moved':
           // Merge, don't replace: a burst of moves in one tick must not lose all
           // but the last node's position.
-          if (op.node_id && op.position)
+          if (op.node_id && op.position) {
             setRemotePositions((prev) => ({ ...(prev || {}), [op.node_id]: op.position }));
-          break;
+            return true;
+          }
+          return false;
         case 'layout_applied':
           if (op.positions) {
             // An MCP agent's arrange carries an animation hint (contract §9–§10):
@@ -455,8 +693,9 @@ function App() {
             } else {
               setRemotePositions((prev) => ({ ...(prev || {}), ...op.positions }));
             }
+            return Object.keys(op.positions).length > 0;
           }
-          break;
+          return false;
         case 'annotation_created':
         case 'annotation_updated': {
           const ann = op.annotation;
@@ -495,20 +734,23 @@ function App() {
           return applyAnnotationUpsertToCanvas(ann);
         }
         case 'annotation_deleted':
-          if (op.annotation_id)
+          if (op.annotation_id) {
             setRemoteAnnotationOps((prev) => [
               ...(prev || []),
               { action: 'delete', id: op.annotation_id },
             ]);
-          break;
+            return true;
+          }
+          return false;
         case 'group_membership_changed':
+          if (!op.group_id) return false;
           setRemoteAnnotationOps((prev) => [
             ...(prev || []),
             { action: 'membership', groupId: op.group_id, members: op.member_node_ids || [] },
           ]);
-          break;
+          return true;
         default:
-          break; // session_renamed handled by its own event
+          return false; // session_renamed handled by its own event
       }
     },
     [
@@ -554,11 +796,29 @@ function App() {
       // concurrent one loses nothing a later op/resync wouldn't also catch —
       // including onDropped's own resync call, whose "converge back to
       // server truth" goal an already-in-flight resync accomplishes anyway.
-      if (resyncInFlightRef.current) return 0;
-      resyncInFlightRef.current = true;
-      // A token, not just the boolean: if the guard timer below fires (its
-      // request never settles) while a *later* resync has since legitimately
-      // taken over, this call's eventual finally must not clear a flag it no
+      //
+      // Only a resync for the *same* sync client is skipped. One for the
+      // current client's session supersedes an in-flight one started for a
+      // client that has since been replaced (a session switch, including away
+      // and back to the same id): taking the token below makes the old call
+      // stop at its next checkpoint. A resync naming a session the current
+      // client is not on never supersedes, or it would cancel the current
+      // session's resync and then bail at its own switched-away check,
+      // leaving nothing to reload.
+      //
+      // Every switched-away check below compares the client instance, not the
+      // session id: switching away and back builds a new client for the same
+      // id, and this call's payload and captured ops belong to the old one.
+      // That is also why a call naming a session the current client is not on
+      // stops here: from then on `client` is the only identity it checks.
+      const client = syncRef.current;
+      if (!client || client.sessionId !== targetId) return 0;
+      const inFlight = resyncInFlightRef.current;
+      if (inFlight !== null && inFlight.client === client) return 0;
+      resyncInFlightRef.current = { client };
+      // A token, not just the marker: if the guard timer below fires (its
+      // request never settles), or a resync for a newer client supersedes
+      // this one, this call's eventual finally must not clear a marker it no
       // longer owns (review round 3). Every checkpoint below that could run
       // after an arbitrarily long await (the reload, and each recovered
       // nodes_added's node fetch inside the replay loop) re-checks this same
@@ -580,7 +840,7 @@ function App() {
       // run letting a redundant resync start): they stop this call from
       // acting on stale state instead of preventing the timer from firing.
       const guardTimer = setTimeout(() => {
-        if (resyncGuardTokenRef.current === myToken) resyncInFlightRef.current = false;
+        if (resyncGuardTokenRef.current === myToken) resyncInFlightRef.current = null;
       }, RESYNC_GUARD_TIMEOUT_MS);
       try {
         // Selection claims are excluded from every capture below:
@@ -590,7 +850,7 @@ function App() {
         // case for it (a no-op) — counting it would misreport a reconnect
         // with zero real edits as a recovery (review round 1).
         const capturePendingOps = () =>
-          (syncRef.current?.sessionId === targetId ? syncRef.current.getPendingOps() : []).filter(
+          (syncRef.current === client ? client.getPendingOps() : []).filter(
             (op) => op?.op !== 'selection_claimed' && op?.op !== 'selection_released'
           );
         // Read whatever is already queued *before* the network round-trip
@@ -604,21 +864,33 @@ function App() {
         // before starting the request is still the only way to see an op
         // that flushes and gets fully confirmed *during* that request).
         const pendingOpsBefore = capturePendingOps();
+        // Stream ops keep arriving while the GET is in flight, and each one
+        // is applied to the canvas and advances the client's appliedSeq (so
+        // does this client's own echo, which is not re-applied). A
+        // payload whose seq is below that predates them, and the wholesale
+        // reload below would wipe them for good (the stream never resends
+        // them), so fetch again instead. Bounded: under a steady op stream
+        // the last payload is applied anyway rather than never converging.
         let payload;
-        try {
-          payload = await api.getSession(targetId, { resolve: true });
-        } catch {
-          return 0;
+        for (let attempt = 1; ; attempt += 1) {
+          try {
+            payload = await api.getSession(targetId, { resolve: true });
+          } catch {
+            return 0;
+          }
+          adoptSessionPayload(targetId, payload);
+          // Also bail if the guard timeout already fired and a newer resync
+          // now owns it (review round 4): the token check above only stops
+          // *this* stale call from clearing a flag it no longer owns — without
+          // this check here too, a call that finally resolves after its own
+          // timeout would still go on to apply its now-outdated payload/replay
+          // over whatever the newer resync already established, silently
+          // reintroducing the very data loss this PR fixes.
+          if (resyncGuardTokenRef.current !== myToken) return 0;
+          if (syncRef.current !== client) return 0; // switched away
+          const behindStream = typeof payload?.seq === 'number' && payload.seq < client.appliedSeq;
+          if (!behindStream || attempt >= RESYNC_MAX_FETCHES) break;
         }
-        // Also bail if the guard timeout already fired and a newer resync
-        // now owns it (review round 4): the token check above only stops
-        // *this* stale call from clearing a flag it no longer owns — without
-        // this check here too, a call that finally resolves after its own
-        // timeout would still go on to apply its now-outdated payload/replay
-        // over whatever the newer resync already established, silently
-        // reintroducing the very data loss this PR fixes.
-        if (resyncGuardTokenRef.current !== myToken) return 0;
-        if (!syncRef.current || syncRef.current.sessionId !== targetId) return 0; // switched away
         // Capture again, right before the destructive reload below: an op
         // enqueued *during* the getSession request above is not reflected in
         // `payload` either, and without this second read it would be
@@ -645,7 +917,7 @@ function App() {
         recentlyDroppedOpsRef.current.clear();
         applyServerSessionRef.current?.(payload);
         const resolvedIds = (payload?.resolved?.nodes || []).map((n) => n.id);
-        syncRef.current.setBaseline(serverStateToMirror(payload?.state, resolvedIds));
+        client.setBaseline(serverStateToMirror(payload?.state, resolvedIds));
         // A full reload re-hydrates every annotation from server truth, so any
         // image-ingest race this browser was still waiting to resolve (see
         // createSelfEchoDedup) is moot — drop it rather than let it linger and
@@ -681,7 +953,7 @@ function App() {
         // under a shared, non-personal client id specifically so its own
         // echo is *not* filtered there.
         for (const op of pendingOps) {
-          syncRef.current.foldOpIntoBaseline(op);
+          client.foldOpIntoBaseline(op);
         }
         // Sequential, not Promise.all: ops must replay in their original order
         // (e.g. nodes_added before a node_moved for the same id), not race.
@@ -699,9 +971,8 @@ function App() {
         let appliedCount = 0;
         for (const op of pendingOps) {
           if (resyncGuardTokenRef.current !== myToken) return 0;
-          if (!syncRef.current || syncRef.current.sessionId !== targetId) break;
-          await applyRemoteOp(op);
-          appliedCount += 1;
+          if (syncRef.current !== client) break;
+          if (await applyRemoteOp(op)) appliedCount += 1;
         }
         // Not pendingOps.length unconditionally (review round 7): a session
         // switch mid-replay (the break above) can stop this short of the
@@ -711,10 +982,83 @@ function App() {
         return appliedCount;
       } finally {
         clearTimeout(guardTimer);
-        if (resyncGuardTokenRef.current === myToken) resyncInFlightRef.current = false;
+        if (resyncGuardTokenRef.current === myToken) resyncInFlightRef.current = null;
       }
     },
-    [syncRef, applyRemoteOp]
+    [syncRef, applyRemoteOp, adoptSessionPayload]
+  );
+
+  // Re-read, in the session's composed view, the canvas entities a staged
+  // change touched (docs/SESSION_OVERLAY_CONTRACT.md §15). Only the keys of the
+  // op are used: its content reaches anyone holding the session id, while a
+  // composed read asks the authorization hook. A node the composed view no
+  // longer holds is taken off the canvas when `removeMissing` is set (after a
+  // merge or discard: a discarded create, a merged delete); after a staging
+  // op that is left to the session ops that remove it, as in direct mode.
+  // Deliberately not a full reload: canvas additions not yet flushed to the
+  // session would be lost with it.
+  const refreshStagedEntities = useCallback(
+    async (op, { removeMissing = false } = {}) => {
+      const sessionAtStart = syncRef.current?.sessionId;
+      const keys = [
+        ...(op.entries || []).map((e) => [e?.kind, e?.entity_id]),
+        ...(op.removals || []).map((r) => (Array.isArray(r) ? r : [r?.kind, r?.entity_id])),
+      ];
+      const store = useGraphStore.getState();
+      const onCanvas = new Set(store.nodes.map((n) => n.id));
+      const nodeIds = new Set();
+      const namedEdges = new Set();
+      for (const [kind, id] of keys) {
+        if (kind === 'node' && onCanvas.has(id)) nodeIds.add(id);
+        if (kind === 'edge') {
+          namedEdges.add(id);
+          const edge = store.edges.find((e) => e.id === id);
+          if (edge && onCanvas.has(edge.source)) nodeIds.add(edge.source);
+        }
+      }
+      const missing = [];
+      const fetched = await Promise.all(
+        [...nodeIds].map((id) =>
+          api.getNodeDetails(id).catch((error) => {
+            if (error?.status === 404) missing.push(id);
+            return null;
+          })
+        )
+      );
+      if (syncRef.current?.sessionId !== sessionAtStart) return; // switched away while fetching
+      if (removeMissing) missing.forEach((id) => removeNode(id));
+      const current = useGraphStore.getState();
+      const present = new Set(current.nodes.map((n) => n.id));
+      const nodeUpdates = new Map();
+      const listed = new Map();
+      fetched.forEach((r) => {
+        if (!r?.node) return;
+        nodeUpdates.set(r.node.id, r.node);
+        (r.edges || []).forEach((e) => listed.set(e.id, e));
+      });
+      if (!nodeUpdates.size) return;
+      const nodes = current.nodes.map((n) =>
+        nodeUpdates.has(n.id) ? { ...n, ...nodeUpdates.get(n.id) } : n
+      );
+      // An edge the op names that its re-read endpoint no longer lists is gone
+      // from the session's view (a staged delete). Other edges stay: a node
+      // read leaves out archived edges the canvas may still be showing.
+      const edges = current.edges
+        .filter(
+          (e) =>
+            listed.has(e.id) ||
+            !namedEdges.has(e.id) ||
+            !(nodeUpdates.has(e.source) || nodeUpdates.has(e.target))
+        )
+        .map((e) => (listed.has(e.id) ? { ...e, ...listed.get(e.id) } : e));
+      const known = new Set(edges.map((e) => e.id));
+      listed.forEach((e, id) => {
+        if (!known.has(id) && present.has(e.source) && present.has(e.target)) edges.push(e);
+      });
+      setNodes(nodes);
+      setEdges(edges);
+    },
+    [syncRef, setNodes, setEdges, removeNode]
   );
 
   // Callbacks waiting for the next canvas snapshot (positions/groups arrive
@@ -762,6 +1106,9 @@ function App() {
       connectDialogOpen ||
       renameDialog ||
       deleteSessionDialog ||
+      newSessionDialogOpen ||
+      stagedReviewOpen ||
+      switchToStagedConfirm ||
       clearConfirm ||
       (akcShortName && akcConfig && !akcIntroShown)
     );
@@ -783,6 +1130,9 @@ function App() {
     connectDialogOpen,
     renameDialog,
     deleteSessionDialog,
+    newSessionDialogOpen,
+    stagedReviewOpen,
+    switchToStagedConfirm,
     clearConfirm,
     akcShortName,
     akcConfig,
@@ -849,17 +1199,62 @@ function App() {
   useEffect(() => {
     reflectSessionUrl(sessionId);
     const urlSession = _urlParams.get('session');
+    if (!sessionStore.isValidSessionId(urlSession)) {
+      startingSessionRef.current = sessionId;
+      markModeUnknown(sessionId);
+    }
+    const scope = captureCanvasScope();
+    let expired = false;
+    let timer;
+    let settleBootstrapWait;
     if (sessionStore.isValidSessionId(urlSession)) {
+      markModeUnknown(urlSession);
       sessionStore.touchSession(urlSession);
       // This id came in via a ?session= deep link, so a 404 means the linked
       // session is gone/expired (not a brand-new local one) — surface it rather
       // than silently opening an empty canvas (contract §5.3).
-      loadSessionFromServer(urlSession, {
+      const load = loadSessionFromServer(urlSession, {
         eagerConnect: true,
+        isStale: () => expired || scope.canvasReplaced(),
         onMissing: () => showNotification('info', t('sessions.link_not_found')),
+        // Settled direct after the wait: connect its stream anyway, as the
+        // load would have, so its ready handler reads the mode again should
+        // someone else materialise it and switch it to staged meanwhile.
+        onStaleMissing: () => {
+          if (sessionIdRef.current !== urlSession) return;
+          // A client an edit already connected keeps its baseline.
+          if (syncRef.current?.sessionId === urlSession) {
+            ensureSyncConnected(urlSession);
+            return;
+          }
+          // Seq 0, as the in-time 404 does: any later seq is someone else's
+          // write this empty load never saw, and is loaded on ready.
+          ensureSyncConnected(urlSession)?.setBaseline({}, { seq: 0 });
+        },
       });
+      // Bound the wait even if fetch never settles. Invalidate the load itself
+      // too, so a late reply cannot undo the view/focus that proceeds afterward.
+      urlSessionBootstrapRef.current = Promise.race([
+        load,
+        new Promise((resolve) => {
+          settleBootstrapWait = resolve;
+          timer = setTimeout(() => {
+            expired = true;
+            resolve();
+          }, SYNC_REQUEST_TIMEOUT_MS);
+        }),
+      ])
+        .catch(() => {}) // The loader logs errors; URL view/focus may still proceed.
+        .finally(() => clearTimeout(timer));
     }
     setSessionsVersion((v) => v + 1);
+    return () => {
+      expired = true;
+      clearTimeout(timer);
+      // StrictMode may already have a saved-view effect awaiting this promise.
+      // Release that waiter when retiring this bootstrap, even if fetch hangs.
+      settleBootstrapWait?.();
+    };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Refresh recent-session names from the server whenever the drawer opens
@@ -913,10 +1308,17 @@ function App() {
         setStats(statsData);
         setLlmAvailable(capabilitiesData.llm_available ?? false);
         setModelProfilesCapability(capabilitiesData.model_profiles);
+        setStagedAvailable(capabilitiesData.staged_sessions === true);
+        api.setStagingAvailable(capabilitiesData.staged_sessions === true);
+        setDefaultWriteMode(
+          capabilitiesData.session_write_mode_default === 'staged' ? 'staged' : 'direct'
+        );
+        settleStartingSessionRef.current?.(capabilitiesData);
       } catch (error) {
         console.error('Error loading configuration:', error);
         api.getGraphStats().then(setStats).catch(console.error);
         setLlmAvailable(false);
+        settleStartingSessionRef.current?.(null);
       }
     };
     loadConfig();
@@ -950,19 +1352,29 @@ function App() {
     urlViewLoadedRef.current = true;
     (async () => {
       try {
-        const result = await api.getSavedView(urlViewName);
-        if (!result?.success || !result.nodes?.length) return;
-        const positioned = result.nodes.map((n) =>
-          result.positions?.[n.id] ? { ...n, _savedPosition: result.positions[n.id] } : n
-        );
-        clearVisualization();
-        addNodesToVisualization(positioned, result.edges || []);
-        if (result.hidden_node_ids?.length) setHiddenNodeIds(result.hidden_node_ids);
-        if (result.groups?.length)
-          setPendingGroups({ groups: result.groups, parentIds: result.parentIds || {} });
-        if (result.annotations?.length) setPendingAnnotations(result.annotations);
+        await loadUrlSavedView({
+          name: urlViewName,
+          sessionBootstrap: urlSessionBootstrapRef.current,
+          sessionId: urlSessionIdRef.current,
+          getCurrentSessionId: () => sessionIdRef.current,
+          getSavedView: api.getSavedView,
+          getCanvasEditEpoch: () => canvasEditEpochRef.current,
+          applyView: (result) => {
+            const positioned = result.nodes.map((n) =>
+              result.positions?.[n.id] ? { ...n, _savedPosition: result.positions[n.id] } : n
+            );
+            clearVisualization();
+            addNodesToVisualization(positioned, result.edges || []);
+            if (result.hidden_node_ids?.length) setHiddenNodeIds(result.hidden_node_ids);
+            if (result.groups?.length)
+              setPendingGroups({ groups: result.groups, parentIds: result.parentIds || {} });
+            if (result.annotations?.length) setPendingAnnotations(result.annotations);
+          },
+        });
       } catch (err) {
         console.error('[App] Failed to load view from URL:', err);
+      } finally {
+        setUrlViewSettled(true);
       }
     })();
   }, [
@@ -977,6 +1389,81 @@ function App() {
   const showNotification = useCallback((type, message) => {
     setNotification({ type, message });
     setTimeout(() => setNotification(null), 3000);
+  }, []);
+
+  // "Bring everyone here": the canvas camera request, the summoned-viewer
+  // notice with its Return point, and the summon action itself.
+  const {
+    viewportRequest,
+    summonNotice,
+    receiveSummon,
+    returnFromSummon,
+    dismissSummonNotice,
+    summonEveryone,
+  } = useViewportSummon({
+    sessionId,
+    latestViewport,
+    canvasRef: canvasContainerRef,
+    showNotification,
+    t,
+  });
+
+  // Arrive from a teleport: ?node=<id> focuses that node, and ?from_graph
+  // names where the visitor came from. This is the receiving half of the
+  // navigation contract whose outbound half handleTeleportToSourceGraph
+  // builds — the parameter names live in backend/federation/teleport.py, so a
+  // route this app hands out is one it can also consume.
+  useEffect(() => {
+    // Waits for ?view= to settle: a saved-view load clears the canvas after its
+    // own await, and a gui_url may legitimately carry both parameters.
+    if (!stats || !urlViewSettled || urlFocusNodeLoadedRef.current) return;
+    const params = new URLSearchParams(window.location.search);
+    const focusId = params.get('node');
+    if (!focusId) return;
+    urlFocusNodeLoadedRef.current = true;
+    const searchContext = params.get('q');
+    const fromGraph = params.get('from_graph');
+    (async () => {
+      try {
+        const result = await api.getNodeDetails(focusId);
+        if (!result?.success || !result.node) {
+          showNotification('info', t('federation.teleport_focus_not_found'));
+          return;
+        }
+        addNodesToVisualization([result.node], result.edges || []);
+        setFocusNodeId(result.node.id);
+        // Carry the sender's search text into the search box so the visitor
+        // lands on the node without losing what they were looking for.
+        if (searchContext) {
+          setGuideSearchInput({ text: searchContext, animated: false });
+        }
+        if (fromGraph) {
+          showNotification('info', t('federation.teleport_returned_from', { graph: fromGraph }));
+        }
+      } catch (err) {
+        console.error('[App] Failed to focus node from URL:', err);
+        showNotification('info', t('federation.teleport_focus_not_found'));
+      }
+    })();
+  }, [
+    stats,
+    urlViewSettled,
+    addNodesToVisualization,
+    setFocusNodeId,
+    setGuideSearchInput,
+    showNotification,
+    t,
+  ]);
+
+  useEffect(() => {
+    const syncOfflineState = () => setIsOffline(window.navigator?.onLine === false);
+    window.addEventListener('online', syncOfflineState);
+    window.addEventListener('offline', syncOfflineState);
+    syncOfflineState();
+    return () => {
+      window.removeEventListener('online', syncOfflineState);
+      window.removeEventListener('offline', syncOfflineState);
+    };
   }, []);
 
   // Callback: Selection changed in GraphCanvas
@@ -1027,60 +1514,15 @@ function App() {
     async (nodeId, nodeData) => {
       // If it's a SavedView, load it directly
       if (nodeData.type === 'SavedView' || nodeData.nodeType === 'SavedView') {
-        try {
-          const nodeIds = nodeData.metadata?.node_ids || [];
-          const positions = nodeData.metadata?.positions || {};
-          const savedEdges = nodeData.metadata?.edges || [];
-          const savedViewAnnotations = savedViewMetadataToCanvasMetadata(nodeData.metadata || {});
-          if (nodeIds.length > 0) {
-            clearVisualization();
-            const details = await Promise.all(
-              nodeIds.map((id) => api.getNodeDetails(id).catch(() => null))
-            );
-            const loadedNodes = details
-              .filter((d) => d?.success)
-              .map((d) => {
-                const n = d.node;
-                if (positions[n.id]) {
-                  return { ...n, _savedPosition: positions[n.id] };
-                }
-                return n;
-              });
-            if (loadedNodes.length > 0) {
-              let edgesToLoad = savedEdges.length > 0 ? savedEdges : [];
-              if (edgesToLoad.length === 0) {
-                const loadedIds = new Set(loadedNodes.map((n) => n.id));
-                const savedEdgeIds = new Set(nodeData.metadata?.edge_ids || []);
-                for (const d of details) {
-                  if (d?.edges) {
-                    const relevant = d.edges.filter(
-                      (e) =>
-                        loadedIds.has(e.source) &&
-                        loadedIds.has(e.target) &&
-                        (savedEdgeIds.size === 0 || savedEdgeIds.has(e.id))
-                    );
-                    edgesToLoad.push(...relevant);
-                  }
-                }
-              }
-              const edgeMap = new Map(edgesToLoad.map((e) => [e.id, e]));
-              addNodesToVisualization(loadedNodes, Array.from(edgeMap.values()));
-              if (savedViewAnnotations.groups.length > 0) {
-                setPendingGroups({
-                  groups: savedViewAnnotations.groups,
-                  parentIds: savedViewAnnotations.parentIds,
-                });
-              }
-              if (savedViewAnnotations.annotations.length > 0) {
-                setPendingAnnotations(savedViewAnnotations.annotations);
-              }
-            }
-          }
-          showNotification('info', `Loaded saved view: ${nodeData.name || nodeData.label}`);
-        } catch (err) {
-          console.error('Error loading saved view:', err);
-          showNotification('error', 'Could not load saved view');
-        }
+        await loadSavedViewNode({
+          nodeData,
+          getNodeDetails: api.getNodeDetails,
+          clearVisualization,
+          addNodesToVisualization,
+          setPendingGroups,
+          setPendingAnnotations,
+          showNotification,
+        });
         return;
       }
 
@@ -1097,6 +1539,21 @@ function App() {
     ]
   );
 
+  // Callback: leave for the graph that owns this node. The status-to-outcome
+  // mapping lives in utils/teleport.js so the canvas context menu and the
+  // search result list answer the four defined behaviours identically.
+  const handleTeleportToSourceGraph = useCallback(
+    (nodeId, _nodeData, { searchQuery = '' } = {}) =>
+      teleportToSourceGraph({
+        nodeId,
+        sessionId,
+        searchQuery,
+        t,
+        showNotification,
+      }),
+    [sessionId, showNotification, t]
+  );
+
   // Callback: open the node detail dialog directly on its change-history tab
   const handleViewNodeHistory = useCallback(
     (nodeId, nodeData) => {
@@ -1107,50 +1564,29 @@ function App() {
 
   // Callback: Expand node to show related nodes
   const handleExpand = useCallback(
-    async (nodeId, nodeData) => {
-      try {
-        const result = await api.getRelatedNodes(nodeId, { depth: 1 });
-        if (result.nodes && result.nodes.length > 0) {
-          const existingIds = new Set(nodes.map((n) => n.id));
-          const newCount = result.nodes.filter((n) => !existingIds.has(n.id)).length;
-          addNodesToVisualization(result.nodes, result.edges || []);
-          if (newCount > 0) {
-            showNotification('success', `Added ${newCount} new node${newCount !== 1 ? 's' : ''}`);
-          } else {
-            showNotification('info', 'All related nodes already in view');
-          }
-        } else {
-          showNotification('info', 'No related nodes found');
-        }
-      } catch (error) {
-        console.error('Error expanding node:', error);
-        showNotification('error', 'Could not expand node');
-      }
-    },
-    [nodes, addNodesToVisualization, showNotification]
+    (nodeId) =>
+      expandNode({
+        nodeId,
+        getRelatedNodes: api.getRelatedNodes,
+        addNodesToVisualization,
+        showNotification,
+      }),
+    [addNodesToVisualization, showNotification]
   );
 
   // Callback: Edit node
   const handleEdit = useCallback(
     async (nodeId, nodeData) => {
       if (nodeData.type === 'Agent') {
-        try {
-          let subscriptionNode = null;
-          const subId = nodeData.metadata?.subscription_id;
-
-          if (subId) {
-            const result = await api.getNodeDetails(subId);
-            if (result.success) {
-              subscriptionNode = result.node;
-            }
-          }
-
-          setEditingAgentData({ agent: nodeData, subscription: subscriptionNode });
-          setShowAgentDialog(true);
-        } catch (error) {
-          console.error('Error preparing agent editor:', error);
-          showNotification('error', 'Could not load agent details');
-        }
+        await openAgentEditor({
+          agent: nodeData,
+          getNodeDetails: api.getNodeDetails,
+          openEditor: (data) => {
+            setEditingAgentData(data);
+            setShowAgentDialog(true);
+          },
+          showNotification,
+        });
       } else if (nodeData.type === 'EventSubscription') {
         setEditingSubscriptionData(nodeData);
         setShowSubscriptionDialog(true);
@@ -1232,23 +1668,14 @@ function App() {
 
   // Callback: Delete edge (from backend and visualization)
   const handleDeleteEdge = useCallback(
-    async (edgeId) => {
-      try {
-        const result = await api.deleteEdge(edgeId);
-        if (!result?.success) {
-          throw new Error('Could not delete edge');
-        }
-        removeEdge(edgeId);
-        // Fan the deletion out to collaborators. Both endpoints already exist on
-        // their canvases, so nothing else prompts them to drop the edge (no node
-        // was removed); without this the edge lingers on their canvas until reload.
-        syncRef.current?.sendEdgesRemoved([edgeId]);
-        showNotification('success', 'Edge deleted');
-      } catch (error) {
-        console.error('Error deleting edge:', error);
-        showNotification('error', 'Could not delete edge');
-      }
-    },
+    (edgeId) =>
+      deleteEdgeEverywhere({
+        edgeId,
+        deleteEdge: api.deleteEdge,
+        removeEdge,
+        syncRef,
+        showNotification,
+      }),
     [removeEdge, showNotification, syncRef]
   );
 
@@ -1271,60 +1698,42 @@ function App() {
         editingEdge,
         updates,
         updateEdge: api.updateEdge,
-        nodes,
-        edges,
-        updateVisualization,
+        updateEdgeData,
         syncRef,
         setEditingEdge,
         showNotification,
       });
     },
-    [editingEdge, setEditingEdge, nodes, edges, updateVisualization, showNotification, syncRef]
+    [editingEdge, setEditingEdge, updateEdgeData, showNotification, syncRef]
   );
 
   // Callback: Change an edge's relationship type from the context menu.
   // Persists to the backend and updates the single edge in place so groups and
   // node positions are preserved.
   const handleSetEdgeType = useCallback(
-    async (edgeId, type) => {
-      try {
-        await api.updateEdge(edgeId, { type: type || null });
-        const nextType = type || 'RELATES_TO';
-        updateEdgeData(edgeId, { type: nextType });
-        // Fan the type change out to collaborators: both endpoints already exist
-        // on their canvases, so nothing else prompts them to re-render the edge;
-        // without this they keep showing the old type until reload.
-        syncRef.current?.sendEdgesUpdated([{ id: edgeId, type: nextType }]);
-        showNotification('success', 'Connection type updated');
-      } catch (error) {
-        console.error('Error updating edge type:', error);
-        showNotification('error', 'Could not update connection');
-      }
-    },
+    (edgeId, type) =>
+      setEdgeType({
+        edgeId,
+        type,
+        updateEdge: api.updateEdge,
+        updateEdgeData,
+        syncRef,
+        showNotification,
+      }),
     [updateEdgeData, showNotification, syncRef]
   );
 
   // Callback: Connect nodes (from drag-connect in canvas)
   const handleConnect = useCallback(
-    async (params) => {
-      try {
-        const result = await api.addEdge(params.source, params.target);
-        if (result.success && result.edge) {
-          addNodesToVisualization([], [result.edge]);
-          // Fan the new edge out to collaborators. Both endpoints already exist
-          // on their canvases, so nothing else prompts them to re-hydrate it
-          // (no node was added); without this the edge renders only locally.
-          syncRef.current?.sendEdgesAdded([result.edge]);
-        } else {
-          // The edge is only drawn once persisted, so a non-success response must
-          // surface an error rather than silently leaving nothing on the canvas.
-          showNotification('error', 'Could not create connection');
-        }
-      } catch (error) {
-        console.error('Error creating edge:', error);
-        showNotification('error', 'Could not create connection');
-      }
-    },
+    (params) =>
+      connectNodes({
+        source: params.source,
+        target: params.target,
+        addEdge: api.addEdge,
+        addNodesToVisualization,
+        syncRef,
+        showNotification,
+      }),
     [addNodesToVisualization, showNotification, syncRef]
   );
 
@@ -1625,6 +2034,7 @@ function App() {
     });
   }
   const publishAnnotationChange = useCallback((kind) => {
+    canvasEditEpochRef.current += 1;
     annotationSchedulerRef.current.schedule(kind);
   }, []);
 
@@ -1645,6 +2055,7 @@ function App() {
   // annotation geometry publishes immediately at this release-time call.
   const handleNodePositionChange = useCallback(
     (_nodeId, _position, nodeType) => {
+      canvasEditEpochRef.current += 1;
       if (nodeType && CANVAS_ANNOTATION_TYPES.has(nodeType)) {
         publishAnnotationChange('geometry');
         return;
@@ -1765,19 +2176,23 @@ function App() {
     async (data) => {
       try {
         if (data.id && data.updates) {
-          await api.updateNode(data.id, data.updates);
-          const newNodes = nodes.map((n) => (n.id === data.id ? { ...n, ...data.updates } : n));
-          updateVisualization(newNodes, edges);
-          setEditingSubscriptionData(null);
+          await persistNodeUpdates({
+            entries: [{ id: data.id, updates: data.updates }],
+            updateNode: api.updateNode,
+            updateVisualization,
+            onApplied: () => setEditingSubscriptionData(null),
+          });
           showNotification(
             'success',
             t('notifications.subscription_updated', { name: data.updates.name })
           );
         } else {
-          const result = await api.addNodes([data], []);
-          if (result.added_node_ids?.length > 0) {
-            addNodesToVisualization([{ ...data, id: result.added_node_ids[0] }], []);
-          }
+          await persistNewNodes({
+            nodes: [data],
+            addNodes: api.addNodes,
+            addNodesToVisualization,
+            toCanvas: (result) => createdNodesToCanvas([data], result),
+          });
           showNotification('success', t('notifications.subscription_created', { name: data.name }));
         }
       } catch (error) {
@@ -1790,7 +2205,7 @@ function App() {
         );
       }
     },
-    [addNodesToVisualization, nodes, edges, updateVisualization, showNotification, t]
+    [addNodesToVisualization, updateVisualization, showNotification, t]
   );
 
   // Save agent nodes (create or update)
@@ -1799,45 +2214,23 @@ function App() {
       try {
         if (data.agentId) {
           // UPDATE
-          const { agentId, agentUpdates, subscriptionId, subscriptionUpdates } = data;
-
-          await api.updateNode(agentId, agentUpdates);
-          if (subscriptionId && subscriptionUpdates) {
-            await api.updateNode(subscriptionId, subscriptionUpdates);
-          }
-
-          const newNodes = nodes.map((n) => {
-            if (n.id === agentId) return { ...n, ...agentUpdates };
-            if (n.id === subscriptionId) return { ...n, ...subscriptionUpdates };
-            return n;
+          await persistNodeUpdates({
+            entries: agentUpdateEntries(data),
+            updateNode: api.updateNode,
+            updateVisualization,
           });
-          updateVisualization(newNodes, edges);
 
           showNotification('success', 'Agent updated');
         } else {
           // CREATE
           const { nodes: agentNodes, edges: agentEdges } = data;
-          const result = await api.addNodes(agentNodes, agentEdges);
-          console.log('Agent created:', result);
-
-          if (result.added_node_ids && result.added_node_ids.length > 0) {
-            const nodesWithIds = agentNodes.map((node, index) => ({
-              ...node,
-              id: result.added_node_ids[index] || node.id,
-            }));
-            const edgesWithIds = agentEdges.map((edge, index) => ({
-              ...edge,
-              id: result.added_edge_ids?.[index] || edge.id,
-              source:
-                result.added_node_ids[agentNodes.findIndex((n) => n.type === 'Agent')] ||
-                edge.source,
-              target:
-                result.added_node_ids[
-                  agentNodes.findIndex((n) => n.type === 'EventSubscription')
-                ] || edge.target,
-            }));
-            addNodesToVisualization(nodesWithIds, edgesWithIds);
-          }
+          await persistNewNodes({
+            nodes: agentNodes,
+            edges: agentEdges,
+            addNodes: api.addNodes,
+            addNodesToVisualization,
+            toCanvas: (result) => agentCreateToCanvas(agentNodes, agentEdges, result),
+          });
 
           const agentNode = agentNodes.find((n) => n.type === 'Agent');
           showNotification('success', `Agent "${agentNode?.name || 'Agent'}" created`);
@@ -1847,7 +2240,7 @@ function App() {
         showNotification('error', 'Could not save agent');
       }
     },
-    [nodes, edges, addNodesToVisualization, updateVisualization, showNotification]
+    [addNodesToVisualization, updateVisualization, showNotification]
   );
 
   // Callback: Create node from toolbar
@@ -1863,26 +2256,37 @@ function App() {
     [schema]
   );
 
-  // Handle created node from CreateNodeDialog
-  const handleNodeCreated = useCallback(
+  // Touch has no drag-to-canvas step to choose a position, so a node
+  // created via a toolbar tap is centered in the viewport directly
+  // (reusing the existing focus/center-camera primitive) instead of
+  // landing wherever the layout defaults new nodes to. Desktop's
+  // click-to-create and drag-to-canvas paths are unchanged.
+  //
+  // Deferred like FloatingSearch's identical newly-added-node case
+  // (FloatingSearch.jsx): the canvas's own node state only picks up
+  // addNodesToVisualization's update on a later render, so focusing
+  // synchronously would target a node the canvas doesn't know about yet.
+  const focusCreatedNode = useCallback(
     (createdNode) => {
-      addNodesToVisualization([createdNode], []);
-      showNotification('success', `${createdNode.type} "${createdNode.name}" created`);
-      // Touch has no drag-to-canvas step to choose a position, so a node
-      // created via a toolbar tap is centered in the viewport directly
-      // (reusing the existing focus/center-camera primitive) instead of
-      // landing wherever the layout defaults new nodes to. Desktop's
-      // click-to-create and drag-to-canvas paths are unchanged.
-      //
-      // Deferred like FloatingSearch's identical newly-added-node case
-      // (FloatingSearch.jsx): the canvas's own node state only picks up
-      // addNodesToVisualization's update on a later render, so focusing
-      // synchronously would target a node the canvas doesn't know about yet.
       if (isCoarsePointer) {
         setTimeout(() => setFocusNodeId(createdNode.id), 100);
       }
     },
-    [addNodesToVisualization, showNotification, isCoarsePointer, setFocusNodeId]
+    [isCoarsePointer, setFocusNodeId]
+  );
+
+  // Create a node from CreateNodeDialog. API errors propagate so the dialog
+  // can show them.
+  const handleNodeCreated = useCallback(
+    (node) =>
+      createDialogNode({
+        node,
+        addNodes: api.addNodes,
+        addNodesToVisualization,
+        showNotification,
+        onDrawn: focusCreatedNode,
+      }),
+    [addNodesToVisualization, showNotification, focusCreatedNode]
   );
 
   // Callback: Save a skill node (create or update)
@@ -1891,16 +2295,19 @@ function App() {
       try {
         if ('id' in skillData) {
           const { id, updates } = skillData;
-          await api.updateNode(id, updates);
-          const newNodes = nodes.map((n) => (n.id === id ? { ...n, ...updates } : n));
-          updateVisualization(newNodes, edges);
+          await persistNodeUpdates({
+            entries: [{ id, updates }],
+            updateNode: api.updateNode,
+            updateVisualization,
+          });
           showNotification('success', 'Skill updated');
         } else {
-          const result = await api.addNodes([skillData], []);
-          if (result.added_node_ids?.length > 0) {
-            const nodeWithId = { ...skillData, id: result.added_node_ids[0] };
-            addNodesToVisualization([nodeWithId], []);
-          }
+          await persistNewNodes({
+            nodes: [skillData],
+            addNodes: api.addNodes,
+            addNodesToVisualization,
+            toCanvas: (result) => createdNodesToCanvas([skillData], result),
+          });
           showNotification('success', `${skillData.type} "${skillData.name}" created`);
         }
       } catch (error) {
@@ -1908,7 +2315,7 @@ function App() {
         showNotification('error', 'Could not save skill');
       }
     },
-    [nodes, edges, updateVisualization, addNodesToVisualization, showNotification]
+    [updateVisualization, addNodesToVisualization, showNotification]
   );
 
   const handleCreateAKC = useCallback(() => {
@@ -1921,16 +2328,19 @@ function App() {
       try {
         if (nodeData.id) {
           const { id, ...updates } = nodeData;
-          await api.updateNode(id, updates);
-          const newNodes = nodes.map((n) => (n.id === id ? { ...n, ...updates } : n));
-          updateVisualization(newNodes, edges);
+          await persistNodeUpdates({
+            entries: [{ id, updates }],
+            updateNode: api.updateNode,
+            updateVisualization,
+          });
           showNotification('success', 'Knowledge collection updated');
         } else {
-          const result = await api.addNodes([nodeData], []);
-          if (result.added_node_ids && result.added_node_ids.length > 0) {
-            const withId = { ...nodeData, id: result.added_node_ids[0] };
-            addNodesToVisualization([withId], []);
-          }
+          await persistNewNodes({
+            nodes: [nodeData],
+            addNodes: api.addNodes,
+            addNodesToVisualization,
+            toCanvas: (result) => createdNodesToCanvas([nodeData], result),
+          });
           showNotification('success', `Collection "${nodeData.name}" created`);
         }
       } catch (error) {
@@ -1938,7 +2348,7 @@ function App() {
         showNotification('error', 'Could not save knowledge collection');
       }
     },
-    [nodes, edges, addNodesToVisualization, updateVisualization, showNotification]
+    [addNodesToVisualization, updateVisualization, showNotification]
   );
 
   // Callback: Context menu action triggered from schema-defined callback items
@@ -1989,9 +2399,195 @@ function App() {
     ensureSyncConnected,
     syncRef,
     resetSessionScopedState: resetSessionScopedUi,
+    onSessionPayload: adoptSessionPayload,
   });
   // Expose the latest applyServerSession to resyncFromServer (defined earlier).
   applyServerSessionRef.current = applyServerSession;
+
+  // Leave a session that was deleted (by this user or another) for a new one
+  // (design D11). A staged session is replaced by a staged one, created on the
+  // server before anything is done in it, so a user who was staging keeps
+  // staging (docs/SESSION_OVERLAY_CONTRACT.md §13, I2). Until the replacement
+  // exists the deleted id stays active, and the server refuses anything still
+  // naming it, rather than letting a write land in the graph meanwhile.
+  const leaveDeletedSession = useCallback(
+    async (deletedId, wasStaged) => {
+      if (!wasStaged) {
+        if (stagedAvailableRef.current && defaultWriteModeRef.current === 'staged') {
+          // The installation's default governs the new session: created on
+          // the server (the hook asked), with nothing written from the deleted
+          // id meanwhile. Refused or unreachable: today's browser session.
+          markModeUnknown(deletedId);
+          clearVisualization();
+          resetSessionScopedUi();
+          try {
+            const created = await api.createSession(null);
+            if (!created?.id) throw new Error('no session created');
+            await loadSessionFromServer(created.id, { eagerConnect: true });
+            setSessionId(created.id);
+            reflectSessionUrl(created.id);
+            sessionStore.touchSession(created.id);
+            forgetStagedSession(deletedId);
+            return true;
+          } catch (error) {
+            console.error('Error creating the new session:', error);
+          }
+        }
+        forgetStagedSession(deletedId);
+        dropIntoFreshSession({
+          freshId: api.generateVisualizationSessionId(),
+          clearVisualization,
+          resetSessionScopedState: resetSessionScopedUi,
+          setSessionId,
+          reflectSessionUrl,
+        });
+        return true;
+      }
+      clearVisualization();
+      resetSessionScopedUi();
+      try {
+        const created = await api.createSession(null, { writeMode: 'staged' });
+        if (created?.write_mode !== 'staged' || !created?.id) {
+          throw new Error('replacement session is not staged');
+        }
+        adoptWriteMode(created.id, 'staged');
+        await loadSessionFromServer(created.id, { eagerConnect: true });
+        setSessionId(created.id);
+        reflectSessionUrl(created.id);
+        sessionStore.touchSession(created.id);
+        forgetStagedSession(deletedId);
+        return true;
+      } catch (error) {
+        console.error('Error creating the staged replacement session:', error);
+        forgetStagedSession(deletedId);
+        dropIntoFreshSession({
+          freshId: api.generateVisualizationSessionId(),
+          clearVisualization,
+          resetSessionScopedState: resetSessionScopedUi,
+          setSessionId,
+          reflectSessionUrl,
+        });
+        showNotification('error', t('staged.replacement_failed'));
+        return false;
+      }
+    },
+    [
+      forgetStagedSession,
+      adoptWriteMode,
+      markModeUnknown,
+      clearVisualization,
+      resetSessionScopedUi,
+      loadSessionFromServer,
+      setSessionId,
+      showNotification,
+      t,
+    ]
+  );
+
+  // A session id the server refuses as retired (a deleted staged session's,
+  // §5.3) answers its load like one it never held, so it opens as a
+  // browser-only direct session that can never save: its stream and its
+  // rename are refused. On the first such refusal, leave it as a deleted
+  // staged session is left, with a notice. Not while this tab is deleting it:
+  // that path leaves it.
+  const retiredLeftRef = useRef(new Set());
+  // Left again only after a stream has opened since: where something else
+  // answers every stream with 404 (a proxy that does not route them), each
+  // replacement would be refused too, and leaving must not repeat for ever.
+  const retiredLeaveArmedRef = useRef(true);
+  const leaveRetiredSession = useCallback(
+    (id, cause) => {
+      if (!id || sessionIdRef.current !== id) return;
+      if (retiredLeftRef.current.has(id) || locallyDeletingRef.current.has(id)) return;
+      if (!retiredLeaveArmedRef.current) {
+        // Not left, but its writes are refused rather than sent unbound, and
+        // the user is told, or edits would silently go nowhere.
+        adoptWriteMode(id, 'staged');
+        console.error(`Session ${cause} refused again; not leaving a second time:`, id);
+        showNotification('error', t('sessions.writes_refused_unreachable'));
+        return;
+      }
+      retiredLeaveArmedRef.current = false;
+      retiredLeftRef.current.add(id);
+      // Refuse writes naming it until the replacement exists.
+      adoptWriteMode(id, 'staged');
+      sessionStore.removeSession(id);
+      setSessionsVersion((v) => v + 1);
+      showNotification('info', t('sessions.link_retired'));
+      leaveDeletedSession(id, true).then((left) => {
+        // No replacement on the server, so no stream to re-arm it: a later
+        // refusal leaves again.
+        if (!left) retiredLeaveArmedRef.current = true;
+        setSessionsVersion((v) => v + 1);
+      });
+    },
+    [adoptWriteMode, leaveDeletedSession, showNotification, t]
+  );
+
+  // How the app starts without a ?session= link, once the capabilities are
+  // known (or failed): where the installation stages by default, in a session
+  // created on the server, so that default (and the hook) decide its mode;
+  // otherwise, or if that is refused or unreachable, in the browser-made id
+  // it opened with, which materialises direct on first save, as before. Until
+  // then the starting id holds graph writes, so nothing is written from a
+  // session about to be left, and nothing shows a staged one as direct.
+  const settleStartingSession = useCallback(
+    async (capabilities) => {
+      const startId = startingSessionRef.current;
+      if (!startId) return;
+      startingSessionRef.current = null;
+      const settleDirect = () => adoptSessionPayload(startId, null);
+      const stagesByDefault =
+        capabilities?.staged_sessions === true &&
+        capabilities?.session_write_mode_default === 'staged';
+      // A link that fills the canvas (?view=, ?node=) loads into the session
+      // it was opened in, rather than racing the create; a collection kiosk
+      // (?collect=, ?akc=) keeps writing its responses as before.
+      const linkedStart = ['view', 'node', 'collect', 'akc'].some((key) => _urlParams.get(key));
+      if (!stagesByDefault || linkedStart) {
+        settleDirect();
+        return;
+      }
+      let created;
+      try {
+        created = await api.createSession(null);
+      } catch (error) {
+        console.error('Error creating the starting session:', error);
+        settleDirect();
+        return;
+      }
+      // Only a start the user has not moved on from is replaced: a switch, or
+      // a canvas already in use, keeps the session the user is working in.
+      const untouched =
+        sessionIdRef.current === startId && useGraphStore.getState().nodes.length === 0;
+      if (!created?.id || !untouched) {
+        // Unused: nothing was written in it.
+        if (created?.id) {
+          api
+            .deleteServerSession(created.id, api.getClientId())
+            .catch((error) => console.error('Error deleting the unused starting session:', error));
+        }
+        settleDirect();
+        return;
+      }
+      adoptSessionPayload(created.id, created);
+      // New and empty, like the untouched canvas: entered at once, with no
+      // load to wait on that a switch by the user could overtake. Its stream
+      // connects now, so the first staged change shows as it happens.
+      setSessionId(created.id);
+      reflectSessionUrl(created.id);
+      sessionStore.touchSession(created.id);
+      setSessionsVersion((v) => v + 1);
+      ensureSyncConnected(created.id)?.setBaseline(
+        {},
+        { seq: typeof created.seq === 'number' ? created.seq : 0 }
+      );
+      settleDirect();
+    },
+    [adoptSessionPayload, ensureSyncConnected, setSessionId]
+  );
+  settleStartingSessionRef.current = (capabilities) =>
+    settleStartingSession(capabilities).finally(() => setSettlingStartId(null));
 
   // Keep the sync client's handlers pointed at the latest closures. A remote op
   // or resync triggers a debounced authoritative apply; a remote delete of the
@@ -1999,19 +2595,50 @@ function App() {
   // a remote rename refreshes the recents name.
   useEffect(() => {
     syncHandlersRef.current = {
-      onReady: () => {},
+      // The stream's first snapshot: the server holds this session now. A
+      // session this tab never read from the server (browser-only until now)
+      // may have been switched to staged by someone else meanwhile, and that
+      // op is not replayed to a first connect: read its mode.
+      onReady: () => {
+        retiredLeaveArmedRef.current = true;
+        const readyId = syncRef.current?.sessionId;
+        api.setSessionOnServer(readyId);
+        if (!readyId || !stagedAvailableRef.current) return;
+        // Staged changes made before the stream existed are not replayed.
+        refreshStagedDiff();
+        api.getSession(readyId).then(
+          (payload) => {
+            if (sessionIdRef.current === readyId) adoptSessionPayload(readyId, payload);
+          },
+          () => {}
+        );
+      },
       // Report recovery status back to the user (task fbd32fc9): a resync
       // that had to replay locally-queued ops means real, user-visible
       // content survived a dropped connection — worth a confirmation rather
       // than a silent reconciliation.
-      onResync: async () => {
-        const recovered = await resyncFromServer(sessionId);
+      onResync: async (resyncSessionId = sessionId) => {
+        // Staged-change ops missed while disconnected are not replayed to the
+        // canvas; the diff is read again instead.
+        refreshStagedDiff();
+        const recovered = await resyncFromServer(resyncSessionId);
         if (recovered > 0) {
           showNotification('info', t('sessions.reconnect_recovered', { count: recovered }));
         }
       },
-      onRemoteOps: (ops) => {
-        (ops || []).forEach((op) => applyRemoteOp(op));
+      onRemoteOps: (ops, meta = {}) => {
+        if (meta.sessionId && meta.sessionId !== sessionId) return;
+        (ops || []).forEach((op) => {
+          if (!handleStagedSessionOp(op)) {
+            applyRemoteOp(op);
+          } else if (op.op === 'graph_change_staged') {
+            refreshStagedEntities(op);
+          } else if (op.op === 'graph_changes_merged' || op.op === 'graph_changes_discarded') {
+            // Merged entities now read from the graph; discarded ones are
+            // back to what the graph holds, or gone.
+            refreshStagedEntities(op, { removeMissing: true });
+          }
+        });
       },
       // This client's own annotation write just got acked with a fresh
       // server version/field_versions (dec-annotation-field-patches-and-
@@ -2035,9 +2662,44 @@ function App() {
         sessionStore.renameSession(sessionId, name);
         setSessionsVersion((v) => v + 1);
       },
-      onSessionDeleted: (deletedBy) => {
+      onSessionDeleted: (deletedBy, deletedWriteMode) => {
+        // Either side knowing the session was staged is enough: the notice
+        // can come without its mode (a drained stream), and staged is final.
+        // A mode not yet known counts as staged: leaving it for a direct
+        // session could be the silent switch §13 rules out.
+        const wasStaged =
+          deletedWriteMode === 'staged' ||
+          sessionWriteMode === 'staged' ||
+          (!deletedWriteMode && sessionWriteMode === 'unknown');
+        if (wasStaged) {
+          // Handled by the local delete path only in the tab that deleted it:
+          // the client id is shared by every tab of this browser.
+          if (locallyDeletingRef.current.has(sessionId)) {
+            deletedStagedRef.current.add(sessionId);
+            return;
+          }
+          // Refuse writes naming the deleted id until the replacement exists,
+          // even if this client had not learnt it was staged.
+          adoptWriteMode(sessionId, 'staged');
+          sessionStore.removeSession(sessionId);
+          setSessionsVersion((v) => v + 1);
+          showNotification('info', t('staged.session_deleted_remote'));
+          leaveDeletedSession(sessionId, true).then(() => setSessionsVersion((v) => v + 1));
+          return;
+        }
+        // Per tab, not per client id (shared by every tab of this browser).
+        if (locallyDeletingRef.current.has(sessionId)) return;
+        if (stagedAvailableRef.current && defaultWriteModeRef.current === 'staged') {
+          // The new session is created as the installation's default says.
+          sessionStore.removeSession(sessionId);
+          setSessionsVersion((v) => v + 1);
+          showNotification('info', t('sessions.session_deleted_remote'));
+          leaveDeletedSession(sessionId, false).then(() => setSessionsVersion((v) => v + 1));
+          return;
+        }
+        forgetStagedSession(sessionId);
         const dropped = receiveRemoteSessionDeleted({
-          deletedBy,
+          deletedBy: null,
           clientId: api.getClientId(),
           sessionId,
           generateSessionId: api.generateVisualizationSessionId,
@@ -2051,6 +2713,8 @@ function App() {
         setSessionsVersion((v) => v + 1);
         showNotification('info', t('sessions.session_deleted_remote'));
       },
+      onViewportSummoned: receiveSummon,
+      onStreamRefused: () => leaveRetiredSession(syncRef.current?.sessionId, 'stream'),
       onCommand: (command) => {
         if (command?.type === 'tool_result' && command.result) {
           applyToolResultCommand(command.result, command.command_id);
@@ -2099,6 +2763,14 @@ function App() {
     };
   }, [
     sessionId,
+    sessionWriteMode,
+    leaveDeletedSession,
+    leaveRetiredSession,
+    adoptWriteMode,
+    forgetStagedSession,
+    handleStagedSessionOp,
+    refreshStagedEntities,
+    refreshStagedDiff,
     resyncFromServer,
     applyRemoteOp,
     applyAnnotationUpsertToCanvas,
@@ -2108,6 +2780,7 @@ function App() {
     t,
     applyToolResultCommand,
     applyPulseCommand,
+    receiveSummon,
     syncHandlersRef,
     setRoster,
     setRemoteSelections,
@@ -2118,10 +2791,10 @@ function App() {
   // round-trip), then swap the session ID (reconnects the SSE stream, reflects
   // the URL) and load the target's canvas from the server.
   const switchToSession = useCallback(
-    (targetId, { register = true, eagerConnect = false } = {}) => {
+    (targetId, { register = true, eagerConnect = false, onMissing } = {}) => {
       requestSessionSnapshot(async () => {
         try {
-          await loadSessionFromServer(targetId, { eagerConnect });
+          await loadSessionFromServer(targetId, { eagerConnect, onMissing });
           setSessionId(targetId);
           reflectSessionUrl(targetId);
           if (register) sessionStore.touchSession(targetId);
@@ -2135,9 +2808,13 @@ function App() {
   );
 
   const handleNewSession = useCallback(() => {
+    if (stagedAvailable) {
+      setNewSessionDialogOpen(true);
+      return;
+    }
     switchToSession(api.generateVisualizationSessionId(), { register: false });
     showNotification('info', t('sessions.new_session_started'));
-  }, [switchToSession, showNotification, t]);
+  }, [stagedAvailable, switchToSession, showNotification, t]);
 
   const handleSelectSession = useCallback(
     (targetId) => {
@@ -2220,65 +2897,373 @@ function App() {
     [sessionId, switchToSession, showNotification, t]
   );
 
+  // ── Reference tiles (docs/ANNOTATION_CONTRACT.md "Reference tiles") ──────
+  // What the canvas can decide for itself (no target; a url target whose
+  // scheme it refuses to link) it already has. This answers the one thing
+  // only the host knows, and answers `undefined` — "no opinion" — for
+  // everything it does not actually know, because greying out a live tile is
+  // as wrong as leaving a dead one looking live.
+  const isReferenceTargetAvailable = useCallback((targetKind, target) => {
+    // A session id that cannot be a session id is unreachable with certainty.
+    // A well-formed one that is not in this browser's local session list is
+    // NOT: that list is what this browser has visited, not what exists on the
+    // server, so a colleague's shared session would be marked broken on the
+    // strength of never having been opened here.
+    if (targetKind === 'session') {
+      return sessionStore.isValidSessionId(target) ? undefined : false;
+    }
+    // `url` is the canvas's own scheme check, and a `resource` target needs a
+    // graph lookup this cannot do synchronously during render — it is resolved
+    // when the reference is actually opened (handleReferenceOpen below).
+    return undefined;
+  }, []);
+
+  const handleReferenceOpen = useCallback(
+    async ({ targetKind, target }) => {
+      if (targetKind === 'session') {
+        if (!sessionStore.isValidSessionId(target)) {
+          showNotification('error', t('sessions.invalid_session_id'));
+          return;
+        }
+        if (target === sessionId) {
+          showNotification('info', t('context_menu.reference_already_here'));
+          return;
+        }
+        // Eager connect for the same reason handleConnectSession above does
+        // it: this is a join by id, not a session this browser created.
+        //
+        // `onMissing` for the same reason the ?session= deep-link path passes
+        // it (contract §5.3): a 404 does not throw — the hook clears the
+        // canvas and seeds a new session under that id — so without this,
+        // following a tile to a session that has since been deleted would move
+        // the user off their board onto a blank canvas with no explanation.
+        // A reference tile is the same kind of deep link.
+        switchToSession(target, {
+          eagerConnect: true,
+          onMissing: () => showNotification('info', t('sessions.link_not_found')),
+        });
+        return;
+      }
+      if (targetKind === 'url') {
+        // Re-checked here even though the canvas refuses to render an unsafe
+        // target as openable and the server refuses to store one. This is the
+        // call that actually hands a string to the browser, and a guard at the
+        // point of use costs one function call; the alternative is trusting
+        // every layer upstream of it to have stayed correct.
+        //
+        // Trimmed with the gate's OWN set before both the check and the open,
+        // so the string validated is the string handed to the browser.
+        // `isSafeReferenceUrl` trims internally, so passing it a raw value
+        // made it approve one string while `window.open` received another —
+        // and U+0085 survives `String.prototype.trim()`, so a stored target
+        // the shared fixture lists as valid resolved against the app's own
+        // origin instead of the author's page.
+        const safeTarget = trimReferenceTarget(target);
+        if (!isSafeReferenceUrl(safeTarget)) {
+          showNotification('error', t('context_menu.reference_unsafe_target'));
+          return;
+        }
+        // `noopener,noreferrer`: the opened page must not get a handle on this
+        // window (reverse tabnabbing) and should not be told where it came
+        // from.
+        window.open(safeTarget, '_blank', 'noopener,noreferrer');
+        return;
+      }
+      if (targetKind === 'resource') {
+        // Bring the node into the view and focus it. The existence check is
+        // here rather than in the resolver above because it needs the server:
+        // a resource reference therefore reports a missing target when it is
+        // followed, not before.
+        try {
+          const details = await api.getNodeDetails(target);
+          if (!details?.node) {
+            showNotification('error', t('context_menu.reference_broken_target'));
+            return;
+          }
+          await addNodesToVisualization([details.node], []);
+          setFocusNodeId(target);
+        } catch {
+          showNotification('error', t('context_menu.reference_broken_target'));
+        }
+      }
+    },
+    [sessionId, switchToSession, showNotification, t, addNodesToVisualization, setFocusNodeId]
+  );
+
   const handleRenameSession = useCallback(
     (name) => {
       if (!renameDialog) return;
-      sessionStore.renameSession(renameDialog.id, name);
-      api.renameServerSession(renameDialog.id, name).catch(() => {});
+      const { id } = renameDialog;
+      sessionStore.renameSession(id, name);
+      api.renameServerSession(id, name).catch((error) => {
+        // A rename creates a session the server does not hold: its own 404
+        // means the id is retired (a proxy's 404 is not that, as for the
+        // stream).
+        if (error?.status === 404 && error.data?.detail === 'session not found') {
+          leaveRetiredSession(id, 'rename');
+        }
+      });
       setSessionsVersion((v) => v + 1);
       setRenameDialog(null);
     },
-    [renameDialog]
+    [renameDialog, leaveRetiredSession]
   );
 
   // Open the delete confirmation, first checking the roster so the dialog can
   // warn when other users are connected (design 3.6). The roster is populated
   // only once clients subscribe via the realtime stream (step 7), so in step 4
   // it is typically empty and the warning stays dormant.
-  const handleRequestDeleteSession = useCallback(async (targetId) => {
-    let connectedOthers = 0;
-    try {
-      const payload = await api.getSession(targetId);
-      const roster = payload?.roster || [];
-      connectedOthers = roster.filter((m) => m.client_id !== api.getClientId()).length;
-    } catch {
-      // Session may not exist server-side yet — nothing to warn about.
-    }
-    setDeleteSessionDialog({ id: targetId, connectedOthers });
-  }, []);
+  const handleRequestDeleteSession = useCallback(
+    async (targetId) => {
+      let connectedOthers = 0;
+      let staged = false;
+      try {
+        const payload = await api.getSession(targetId);
+        const roster = payload?.roster || [];
+        connectedOthers = roster.filter((m) => m.client_id !== api.getClientId()).length;
+        staged = payload?.write_mode === 'staged';
+        adoptSessionPayload(targetId, payload);
+      } catch {
+        // Session may not exist server-side yet — nothing to warn about.
+      }
+      // Deleting a staged session drops its unmerged changes with it (§13),
+      // and the dialog must say so whenever the delete will: the confirm
+      // discards exactly when this flag is set. No count: the diff counts
+      // only what this reader may see, and the whole layer goes.
+      if (targetId === sessionId && sessionWriteMode === 'staged') staged = true;
+      setDeleteSessionDialog({ id: targetId, connectedOthers, staged });
+    },
+    [adoptSessionPayload, sessionId, sessionWriteMode]
+  );
 
   const handleConfirmDeleteSession = useCallback(async () => {
     if (!deleteSessionDialog) return;
-    const { id } = deleteSessionDialog;
+    const { id, staged: wasStaged } = deleteSessionDialog;
     setDeleteSessionDialog(null);
+    // The deleted session's own mode: the user may switch sessions while the
+    // delete is in flight.
+    const modeAtConfirm = sessionIdRef.current === id ? sessionWriteModeRef.current : null;
+    const modeOfDeleted = () =>
+      sessionIdRef.current === id ? sessionWriteModeRef.current : modeAtConfirm;
+    locallyDeletingRef.current.add(id);
+    deletesInFlightRef.current.add(id);
+    // What an earlier delete of this id learnt does not decide this one: a
+    // direct id can be opened, and deleted, again.
+    deletedStagedRef.current.delete(id);
     try {
-      await api.deleteServerSession(id, api.getClientId());
-    } catch {
-      // Ignore — the session may only ever have existed locally.
+      let browserOnly = false;
+      try {
+        // The user confirmed a dialog that said a staged session's changes
+        // go with it.
+        const answer = await api.deleteServerSession(id, api.getClientId(), {
+          discardStaged: wasStaged,
+        });
+        // Switched to staged after the dialog opened, with the notice not here yet.
+        if (answer?.write_mode === 'staged') deletedStagedRef.current.add(id);
+      } catch (error) {
+        browserOnly = error?.status === 404;
+        let gone = browserOnly || deletedStagedRef.current.has(id);
+        if (!gone && (typeof error?.status !== 'number' || error.status >= 500)) {
+          // No answer, or a server error that may have come after the delete
+          // landed: ask whether the session is still there rather than report
+          // a failure that did not happen.
+          gone = await api.getSession(id).then(
+            () => false,
+            (e) => e?.status === 404
+          );
+        }
+        if (!gone) {
+          // A session that was not deleted keeps its work: never act as if it
+          // were gone.
+          locallyDeletingRef.current.delete(id);
+          showNotification('error', refusalText(t, error, 'staged.delete_failed'));
+          return;
+        }
+        // 404: the session only ever existed locally.
+      }
+      sessionStore.removeSession(id);
+      // The server's notice may say staged where this tab thought direct (it
+      // was switched meanwhile): then the replacement is staged too. So does a
+      // mode not known yet - unless the server never held the session, which
+      // makes it browser-only and direct (§5.1). The current mode, not the one
+      // this callback closed over: it may have changed during the delete.
+      const modeNow = modeOfDeleted();
+      const leftStaged =
+        wasStaged ||
+        deletedStagedRef.current.has(id) ||
+        modeNow === 'staged' ||
+        (modeNow === 'unknown' && !browserOnly);
+      if (sessionIdRef.current === id) {
+        // Deleting the active session: drop its content and switch into a fresh
+        // one (design 3.6); a staged one into a staged one (§13). Other
+        // connected clients are notified via the server's session_deleted
+        // broadcast.
+        showNotification(
+          'info',
+          t(leftStaged ? 'staged.session_deleted' : 'sessions.session_deleted')
+        );
+        await leaveDeletedSession(id, leftStaged);
+      } else if (leftStaged) {
+        forgetStagedSession(id);
+      }
+      setSessionsVersion((v) => v + 1);
+    } finally {
+      deletesInFlightRef.current.delete(id);
     }
-    sessionStore.removeSession(id);
-    if (id === sessionId) {
-      // Deleting the active session: drop its content and switch into a fresh
-      // one (design 3.6). Other connected clients are notified via the
-      // server's session_deleted broadcast (handled once realtime lands).
-      dropIntoFreshSession({
-        freshId: api.generateVisualizationSessionId(),
-        clearVisualization,
-        resetSessionScopedState: resetSessionScopedUi,
-        setSessionId,
-        reflectSessionUrl,
-      });
-      showNotification('info', t('sessions.session_deleted'));
-    }
-    setSessionsVersion((v) => v + 1);
   }, [
     deleteSessionDialog,
     sessionId,
-    clearVisualization,
-    resetSessionScopedUi,
+    leaveDeletedSession,
+    forgetStagedSession,
     showNotification,
     t,
   ]);
+
+  // Start a new session. Where the backend can stage, the user chooses how it
+  // writes; a staged session is created on the server first (§5.1).
+  const startNewSession = useCallback(
+    async (mode) => {
+      setNewSessionDialogOpen(false);
+      if (mode !== 'staged') {
+        switchToSession(api.generateVisualizationSessionId(), { register: false });
+        showNotification('info', t('sessions.new_session_started'));
+        return;
+      }
+      try {
+        const created = await api.createSession(null, { writeMode: 'staged' });
+        if (created?.write_mode !== 'staged' || !created?.id) {
+          throw new Error(t('staged.create_failed'));
+        }
+        api.setSessionOnServer(created.id);
+        adoptWriteMode(created.id, 'staged');
+        switchToSession(created.id, { eagerConnect: true });
+        showNotification('info', t('staged.new_session_started'));
+      } catch (error) {
+        showNotification('error', refusalText(t, error, 'staged.create_failed'));
+      }
+    },
+    [switchToSession, adoptWriteMode, showNotification, t]
+  );
+
+  // Switch the active session from direct to staged (§5.2): irreversible, so
+  // only after the user confirmed it. A session that so far exists only in
+  // this browser is created on the server first, as direct, then switched.
+  const confirmSwitchToStaged = useCallback(async () => {
+    setSwitchToStagedConfirm(false);
+    const targetId = sessionId;
+    const clientId = api.getClientId();
+    try {
+      let payload;
+      try {
+        payload = await api.setSessionWriteMode(targetId, 'staged', clientId);
+      } catch (error) {
+        if (error.status !== 404) throw error;
+        await api.renameServerSession(targetId, currentSessionName || null);
+        payload = await api.setSessionWriteMode(targetId, 'staged', clientId);
+      }
+      if (payload?.write_mode !== 'staged') throw new Error(t('staged.switch_failed'));
+      adoptWriteMode(targetId, 'staged');
+      // Only while it is still the session the user is in: the stream must
+      // never be bound to one the user has left (its notices act on the
+      // active session).
+      if (sessionIdRef.current === targetId) ensureSyncConnected(targetId);
+      showNotification('info', t('staged.switched'));
+    } catch (error) {
+      if (typeof error?.status !== 'number' || error.status >= 500) {
+        // The switch may have landed with its answer lost: read what the
+        // server holds, so a staged session never goes on looking direct.
+        const now = await api.getSession(targetId).catch(() => null);
+        if (now) adoptSessionPayload(targetId, now);
+        if (now?.write_mode === 'staged') {
+          if (sessionIdRef.current === targetId) ensureSyncConnected(targetId);
+          showNotification('info', t('staged.switched'));
+          return;
+        }
+        if (!now) {
+          // Neither answered: the session may be staged now. Hold its graph
+          // writes until its mode is read again (the bar offers Retry).
+          markModeUnknown(targetId);
+        }
+      }
+      showNotification('error', refusalText(t, error, 'staged.switch_failed'));
+    }
+  }, [
+    sessionId,
+    currentSessionName,
+    adoptWriteMode,
+    adoptSessionPayload,
+    markModeUnknown,
+    ensureSyncConnected,
+    showNotification,
+    t,
+  ]);
+
+  // After a merge or discard from the review: re-read what it touched (its op
+  // does the same when it arrives; this covers a stream that is down), and put
+  // nodes merged as new on the canvas.
+  const handleStagedLayerChanged = useCallback(
+    async (result) => {
+      refreshStagedDiff();
+      await refreshStagedEntities(
+        { removals: result?.removed_entries || [] },
+        { removeMissing: true }
+      );
+      const created = (result?.merged || [])
+        .map((item) => item?.new_entity_id)
+        .filter((id) => typeof id === 'string' && id);
+      if (!created.length) return;
+      const sessionAtStart = sessionId;
+      const found = await Promise.all(
+        created.map((id) => api.getNodeDetails(id).catch(() => null))
+      );
+      if (syncRef.current?.sessionId !== sessionAtStart) return;
+      const nodes = found.map((r) => r?.node).filter(Boolean);
+      if (nodes.length) {
+        addNodesToVisualization(
+          nodes,
+          found.flatMap((r) => r?.edges || [])
+        );
+      }
+    },
+    [refreshStagedDiff, refreshStagedEntities, sessionId, syncRef, addNodesToVisualization]
+  );
+
+  const closeStagedReview = useCallback(() => setStagedReviewOpen(false), []);
+
+  // The diff's states; when the diff cannot be read, those the composed reads
+  // put on each entity (`staged_state`), so a staged entity stays marked.
+  const canvasStagedStates = useMemo(() => {
+    if (!stagedDiffError) return stagedStates;
+    const fromReads = (list) =>
+      Object.fromEntries(
+        (list || [])
+          .filter((e) => e?.staged_state && e.staged_state !== 'none')
+          .map((e) => [e.id, e.staged_state])
+      );
+    return {
+      nodes: { ...fromReads(nodes), ...stagedStates.nodes },
+      edges: { ...fromReads(edges), ...stagedStates.edges },
+    };
+  }, [nodes, edges, stagedStates, stagedDiffError]);
+
+  const stagedStateLabels = useMemo(
+    () => ({
+      created: t('staged.marker.created'),
+      updated: t('staged.marker.updated'),
+      orphaned: t('staged.marker.orphaned'),
+      deleted: t('staged.marker.deleted'),
+    }),
+    [t]
+  );
+
+  const stagedCanvasName = useCallback((kind, id) => {
+    const store = useGraphStore.getState();
+    if (kind === 'node') return store.nodes.find((n) => n.id === id)?.name || null;
+    const edge = store.edges.find((e) => e.id === id);
+    if (!edge) return null;
+    const name = (nid) => store.nodes.find((n) => n.id === nid)?.name || nid;
+    return `${name(edge.source)} → ${name(edge.target)}${edge.type ? ` (${edge.type})` : ''}`;
+  }, []);
 
   // Export full graph from backend API
   const handleExportGraph = useCallback(async () => {
@@ -2325,17 +3310,19 @@ function App() {
   const handleNodeUpdate = useCallback(
     async (nodeId, updates) => {
       try {
-        await api.updateNode(nodeId, updates);
-        const newNodes = nodes.map((n) => (n.id === nodeId ? { ...n, ...updates } : n));
-        updateVisualization(newNodes, edges);
-        closeEditingNode();
+        await persistNodeUpdates({
+          entries: [{ id: nodeId, updates }],
+          updateNode: api.updateNode,
+          updateVisualization,
+          onApplied: closeEditingNode,
+        });
         showNotification('success', 'Node updated');
       } catch (error) {
         console.error('Error updating node:', error);
         showNotification('error', 'Could not update node');
       }
     },
-    [nodes, edges, updateVisualization, closeEditingNode, showNotification]
+    [updateVisualization, closeEditingNode, showNotification]
   );
 
   // Modal dialog open/close (and edit-target) state, bundled for AppDialogs
@@ -2395,6 +3382,9 @@ function App() {
     connectDialogOpen ||
     renameDialog ||
     deleteSessionDialog ||
+    newSessionDialogOpen ||
+    stagedReviewOpen ||
+    switchToStagedConfirm ||
     clearConfirm ||
     createNodeType ||
     editingNode ||
@@ -2412,6 +3402,7 @@ function App() {
 
   const shellProps = {
     sessionId,
+    onTeleportToSourceGraph: handleTeleportToSourceGraph,
     sessions,
     currentSessionId: sessionId,
     onNewSession: handleNewSession,
@@ -2444,7 +3435,7 @@ function App() {
       ref={appRef}
       className={`app${drawerOpen ? ' session-drawer-open' : ''}${isMobile ? ' is-mobile' : ''}${isCoarsePointer ? ' is-touch' : ''}${fullscreenCanvasActive ? ' fullscreen-canvas-mode' : ''}`}
     >
-      <div className="app-canvas" id="guide-target-canvas">
+      <div className="app-canvas" id="guide-target-canvas" ref={canvasContainerRef}>
         <GraphCanvas
           nodes={nodes}
           edges={edges}
@@ -2479,6 +3470,8 @@ function App() {
           onCreateAgent={handleCreateAgent}
           onDropCreateNode={handleDropCreateNode}
           onImageIngest={handleImageIngest}
+          onReferenceOpen={handleReferenceOpen}
+          isReferenceTargetAvailable={isReferenceTargetAvailable}
           onShowOnly={handleShowOnly}
           onSelectionChange={handleSelectionChange}
           onNodeDoubleClick={handleNodeDoubleClick}
@@ -2535,6 +3528,8 @@ function App() {
           nodePreviewEnabled={nodePreviewEnabled}
           schema={schema}
           onContextMenuAction={handleContextMenuAction}
+          stagedStates={sessionWriteMode === 'staged' ? canvasStagedStates : null}
+          stagedStateLabels={stagedStateLabels}
           contextMenuLabels={{
             edit: t('context_menu.edit'),
             hide: t('context_menu.hide'),
@@ -2551,6 +3546,9 @@ function App() {
             organizeHorizontal: t('context_menu.organize_horizontal'),
             organizeVertical: t('context_menu.organize_vertical'),
             organizeTree: t('context_menu.organize_tree'),
+            organizeDateHorizontal: t('context_menu.organize_date_horizontal'),
+            organizeDateVertical: t('context_menu.organize_date_vertical'),
+            organizeDateUnavailable: t('context_menu.organize_date_unavailable'),
             organizeHint: t('context_menu.organize_hint'),
             align: t('context_menu.align'),
             alignLeft: t('context_menu.align_left'),
@@ -2638,10 +3636,29 @@ function App() {
             ariaKindShape: t('context_menu.aria_kind_shape'),
             ariaKindIcon: t('context_menu.aria_kind_icon'),
             ariaKindVoteDot: t('context_menu.aria_kind_vote_dot'),
+            ariaKindHeatmap: t('context_menu.aria_kind_heatmap'),
+            heatmapIntensity: t('context_menu.heatmap_intensity'),
             ariaKindImage: t('context_menu.aria_kind_image'),
             ariaKindArrow: t('context_menu.aria_kind_arrow'),
             ariaKindFreehand: t('context_menu.aria_kind_freehand'),
             ariaKindGroup: t('context_menu.aria_kind_group'),
+            ariaKindReference: t('context_menu.aria_kind_reference'),
+            ariaKindReferenceSession: t('context_menu.aria_kind_reference_session'),
+            ariaKindReferenceUrl: t('context_menu.aria_kind_reference_url'),
+            ariaKindReferenceResource: t('context_menu.aria_kind_reference_resource'),
+            ariaKindReferenceBroken: t('context_menu.aria_kind_reference_broken'),
+            referenceUntitled: t('context_menu.reference_untitled'),
+            referenceOpen: t('context_menu.reference_open'),
+            referenceRename: t('context_menu.reference_rename'),
+            referenceLabel: t('context_menu.reference_label'),
+            referenceTarget: t('context_menu.reference_target'),
+            referenceTargetSession: t('context_menu.reference_target_session'),
+            referenceTargetUrl: t('context_menu.reference_target_url'),
+            referenceTargetResource: t('context_menu.reference_target_resource'),
+            referenceTargetUnknown: t('context_menu.reference_target_unknown'),
+            referenceBrokenTarget: t('context_menu.reference_broken_target'),
+            referenceUnsafeTarget: t('context_menu.reference_unsafe_target'),
+            referencePasteCreated: t('context_menu.reference_paste_created'),
             annotationWidth: t('context_menu.annotation_width'),
             annotationHeight: t('context_menu.annotation_height'),
             annotationSize: t('context_menu.annotation_size'),
@@ -2653,7 +3670,10 @@ function App() {
             annotationAttachToCancel: t('context_menu.annotation_attach_to_cancel'),
             annotationMultiSelectMode: t('context_menu.annotation_multi_select_mode'),
             annotationOverlapPickerTitle: t('context_menu.annotation_overlap_picker_title'),
+            openInSourceGraph: t('context_menu.open_in_source_graph'),
+            openInSourceGraphTooltip: t('federation.teleport_action_tooltip'),
           }}
+          onTeleportToSourceGraph={handleTeleportToSourceGraph}
           annotationToolboxLabels={{
             toggleExpand: t('annotation_toolbox.toggle_expand'),
             toggleCollapse: t('annotation_toolbox.toggle_collapse'),
@@ -2672,6 +3692,7 @@ function App() {
             iconPickerOpen: t('annotation_toolbox.icon_picker_open'),
             iconPicker: t('annotation_toolbox.icon_picker'),
             voteDot: t('annotation_toolbox.vote_dot'),
+            heatmap: t('annotation_toolbox.heatmap'),
             image: t('annotation_toolbox.image'),
             freehand: t('annotation_toolbox.freehand'),
             noteHint: t('annotation_toolbox.note_hint'),
@@ -2685,10 +3706,13 @@ function App() {
             shapeProcessArrowHint: t('annotation_toolbox.shape_process_arrow_hint'),
             iconHint: t('annotation_toolbox.icon_hint'),
             voteDotHint: t('annotation_toolbox.vote_dot_hint'),
+            heatmapHint: t('annotation_toolbox.heatmap_hint'),
             imageHint: t('annotation_toolbox.image_hint'),
             freehandHint: t('annotation_toolbox.freehand_hint'),
             select: t('annotation_toolbox.select'),
             eraser: t('annotation_toolbox.eraser'),
+            freehandPickerOpen: t('annotation_toolbox.freehand_picker_open'),
+            freehandPicker: t('annotation_toolbox.freehand_picker'),
             voteDotPickerOpen: t('annotation_toolbox.vote_dot_picker_open'),
             voteDotPicker: t('annotation_toolbox.vote_dot_picker'),
             selectHint: t('annotation_toolbox.select_hint'),
@@ -2703,6 +3727,7 @@ function App() {
           onViewportChange={(vp) => {
             latestViewport.current = vp;
           }}
+          viewportRequest={viewportRequest}
         />
       </div>
 
@@ -2721,6 +3746,7 @@ function App() {
           roster={roster}
           currentClientId={api.getClientId()}
           onClear={() => requestClear('button')}
+          onSummonEveryone={summonEveryone}
           drawerOpen={drawerOpen}
           onToggleDrawer={() => setDrawerOpen((prev) => !prev)}
           onCloseDrawer={() => setDrawerOpen(false)}
@@ -2768,9 +3794,74 @@ function App() {
       <NodeHistoryPanel />
 
       {notification && (
-        <div className={`app-notification app-notification-${notification.type}`}>
+        <div
+          className={`app-notification app-notification-${notification.type}`}
+          role={notification.type === 'error' ? 'alert' : 'status'}
+          aria-live={notification.type === 'error' ? 'assertive' : 'polite'}
+        >
           <span>{notification.message}</span>
-          <button onClick={() => setNotification(null)}>×</button>
+          <button
+            onClick={() => setNotification(null)}
+            aria-label={t('common.close')}
+            title={t('common.close')}
+          >
+            ×
+          </button>
+        </div>
+      )}
+      {sessionId !== settlingStartId && (
+        <WriteModeBar
+          writeMode={sessionWriteMode}
+          stagedAvailable={stagedAvailable}
+          pendingCount={stagedPendingCount}
+          diffUnavailable={!!stagedDiffError}
+          onReview={() => setStagedReviewOpen(true)}
+          onSwitchToStaged={() => setSwitchToStagedConfirm(true)}
+          onRetryMode={() =>
+            // As a switch to this session: a load that answers after the user
+            // moved on then moves the user back, consistently, rather than
+            // leaving canvas, stream and requests on different sessions.
+            switchToSession(sessionId, { register: false, eagerConnect: true })
+          }
+        />
+      )}
+      {newSessionDialogOpen && (
+        <NewSessionDialog
+          defaultMode={defaultWriteMode}
+          onChoose={startNewSession}
+          onCancel={() => setNewSessionDialogOpen(false)}
+        />
+      )}
+      {switchToStagedConfirm && (
+        <ConfirmDialog
+          title={t('staged.switch_title')}
+          message={t('staged.switch_message')}
+          confirmText={t('staged.switch_confirm')}
+          cancelText={t('common.cancel')}
+          onConfirm={confirmSwitchToStaged}
+          onCancel={() => setSwitchToStagedConfirm(false)}
+        />
+      )}
+      {stagedReviewOpen && sessionWriteMode === 'staged' && (
+        <StagedReviewDialog
+          sessionId={sessionId}
+          items={stagedItems}
+          diffError={stagedDiffError}
+          onRefresh={refreshStagedDiff}
+          onMerged={handleStagedLayerChanged}
+          onDiscarded={handleStagedLayerChanged}
+          onClose={closeStagedReview}
+          canvasName={stagedCanvasName}
+        />
+      )}
+      <SummonNotice
+        notice={summonNotice}
+        onReturn={returnFromSummon}
+        onDismiss={dismissSummonNotice}
+      />
+      {isOffline && (
+        <div className="app-offline-banner" role="status">
+          {t('offline.read_only')}
         </div>
       )}
 
@@ -2805,6 +3896,7 @@ function App() {
       />
 
       <GuideOverlay />
+      <AppInstallPrompt />
     </div>
   );
 }

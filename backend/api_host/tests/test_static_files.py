@@ -91,6 +91,7 @@ class TestStaticFilesWithAdditionalContent:
                 graph_file=str(graph_file),
                 web_static_path=str(web_dir),
                 widget_static_path=str(widget_dir),
+                sessions_dir=str(Path(temp_dir) / "sessions"),
             )
 
             app = create_app(config)
@@ -156,6 +157,7 @@ class TestStaticFilesNotBuilt:
                 graph_file=str(graph_file),
                 web_static_path=str(Path(temp_dir) / "nonexistent_web"),
                 widget_static_path=str(Path(temp_dir) / "nonexistent_widget"),
+                sessions_dir=str(Path(temp_dir) / "sessions"),
             )
 
             app = create_app(config)
@@ -224,6 +226,7 @@ class TestStaticFilesWithRealPaths:
                 graph_file=graph_path,
                 web_static_path=str(base_dir / "apps" / "web" / "dist"),
                 widget_static_path=str(base_dir / "apps" / "widget" / "dist"),
+                sessions_dir=str(Path(graph_path).with_suffix(".sessions")),
             )
 
             app = create_app(config)

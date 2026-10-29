@@ -587,6 +587,98 @@ export function positionNewNodes(newNodes, existingNodes, edges = [], options = 
   return positionedNodes;
 }
 
+// Strict ISO-8601 date / date-time (`2026-10-21`, `2026-10-21T08:30`, with optional
+// seconds, fraction and zone). Anything looser is not treated as a date, so free
+// text and numeric ids are never mistaken for one.
+const ISO_DATE_RE =
+  /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
+
+/**
+ * Parse an ISO-8601 date or date-time string into epoch milliseconds, or null when
+ * the value is not a string, not ISO-8601, or not a real calendar date. A fractional
+ * second is kept below the millisecond (as a fraction of one), so values that differ
+ * only in microseconds — as backend timestamps do — still order correctly.
+ */
+export function parseIsoDate(value) {
+  if (typeof value !== 'string') return null;
+  const m = ISO_DATE_RE.exec(value.trim());
+  if (!m) return null;
+  const [year, month, day] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const hour = Number(m[4] || 0);
+  const minute = Number(m[5] || 0);
+  const second = Number(m[6] || 0);
+  if (hour > 23 || minute > 59 || second > 59) return null;
+  // setUTCFullYear keeps years 0000-0099 as written (Date.UTC maps them to 19xx).
+  const base = new Date(0);
+  base.setUTCFullYear(year, month - 1, day);
+  if (base.getUTCMonth() !== month - 1 || base.getUTCDate() !== day) return null;
+  base.setUTCHours(hour, minute, second, 0);
+  let ms = base.getTime();
+  const zone = m[8];
+  if (zone && zone !== 'Z') {
+    const sign = zone[0] === '-' ? -1 : 1;
+    const digits = zone.slice(1).replace(':', '');
+    const zh = Number(digits.slice(0, 2));
+    const zm = Number(digits.slice(2));
+    if (zh > 23 || zm > 59) return null;
+    ms -= sign * (zh * 60 + zm) * 60000;
+  }
+  // Zoneless values (date-only or date-time) are read on one clock — UTC — so a
+  // date-only value and a date-time on the same day compare consistently.
+  return ms + (m[7] ? Number(`0.${m[7]}`) * 1000 : 0);
+}
+
+// Node fields are read from the node's `data` (React Flow shape) or the node itself,
+// at the top level or one level down in `metadata`; a field key is `name` or
+// `metadata.name`.
+function dateFieldValue(node, field) {
+  const src = node?.data ?? node;
+  if (!src || !field) return undefined;
+  return field.startsWith('metadata.') ? src.metadata?.[field.slice(9)] : src[field];
+}
+
+/**
+ * Fields on which at least two of the given nodes carry a parseable ISO-8601 date.
+ * No field name is assumed: any string-valued property qualifies by its value alone.
+ * Returned in order of how many nodes carry a date there, then by name.
+ *
+ * @param {Array} nodes
+ * @returns {string[]}
+ */
+export function findDateFields(nodes) {
+  const counts = new Map();
+  for (const node of nodes || []) {
+    const src = node?.data ?? node;
+    if (!src || typeof src !== 'object') continue;
+    const keys = Object.keys(src).map((k) => [k, src[k]]);
+    if (src.metadata && typeof src.metadata === 'object') {
+      for (const [k, v] of Object.entries(src.metadata)) keys.push([`metadata.${k}`, v]);
+    }
+    for (const [key, value] of keys) {
+      if (parseIsoDate(value) !== null) counts.set(key, (counts.get(key) || 0) + 1);
+    }
+  }
+  return [...counts.entries()]
+    .filter(([, n]) => n >= 2)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([key]) => key);
+}
+
+/**
+ * Order nodes earliest-first by `field`. Ties break by name then id; nodes with a
+ * missing or unparseable date keep the same name/id order after all dated nodes.
+ */
+export function sortNodesByDate(nodes, field) {
+  const label = (n) => String(n?.data?.name ?? n?.data?.label ?? n?.name ?? '');
+  const keyed = nodes.map((n) => ({ n, t: parseIsoDate(dateFieldValue(n, field)) }));
+  keyed.sort((a, b) => {
+    if ((a.t === null) !== (b.t === null)) return a.t === null ? 1 : -1;
+    if (a.t !== b.t && a.t !== null) return a.t - b.t;
+    return label(a.n).localeCompare(label(b.n)) || String(a.n.id).localeCompare(String(b.n.id));
+  });
+  return keyed.map((k) => k.n);
+}
+
 /**
  * Re-arrange an already-placed set of nodes into a chosen structure, keeping the
  * result centred on the selection's current centroid so it stays where the user
@@ -603,12 +695,17 @@ export function positionNewNodes(newNodes, existingNodes, edges = [], options = 
  *                  dagre tree; otherwise it groups nodes by node type into one column
  *                  per type. Either way the grid spacing keeps nodes overlap-free.
  *
+ *   'dateHorizontal' / 'dateVertical' — a row / column ordered by the date in
+ *                  `options.dateField` (see findDateFields), earliest first; nodes
+ *                  without a parseable date follow the dated ones.
+ *
  * @param {Array} nodesToArrange - Nodes with current positions
  * @param {Array} edges - All edges (only those internal to the selection are used)
  * @param {string} mode - One of the modes above
+ * @param {{dateField?: string}} options - `dateField` for the date modes
  * @returns {Map<string, {x:number,y:number}>}
  */
-export function arrangeNodes(nodesToArrange, edges = [], mode = 'cluster') {
+export function arrangeNodes(nodesToArrange, edges = [], mode = 'cluster', options = {}) {
   const result = new Map();
   if (!Array.isArray(nodesToArrange) || nodesToArrange.length === 0) return result;
 
@@ -641,6 +738,13 @@ export function arrangeNodes(nodesToArrange, edges = [], mode = 'cluster') {
     positioned = nodesToArrange.map((n, i) => ({
       id: n.id,
       position: { x: 0, y: i * GRID_CELL_H },
+    }));
+  } else if (mode === 'dateHorizontal' || mode === 'dateVertical') {
+    const ordered = sortNodesByDate(nodesToArrange, options?.dateField);
+    const horizontal = mode === 'dateHorizontal';
+    positioned = ordered.map((n, i) => ({
+      id: n.id,
+      position: horizontal ? { x: i * GRID_CELL_W, y: 0 } : { x: 0, y: i * GRID_CELL_H },
     }));
   } else if (mode === 'tree') {
     positioned = treeLayout();

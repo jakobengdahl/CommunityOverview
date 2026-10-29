@@ -12,16 +12,15 @@
 // Deliberately pure and free of three.js and React, like `domeLayout.js`: it is
 // the part of the client worth unit-testing.
 //
-// Scope: nodes only. Edges and annotations are carried by the protocol but the
-// XR scaffold has no renderer for them yet (README "not yet wired"), so their
-// ops are ignored rather than reduced into state nothing reads.
-
 export const EMPTY_SCENE = Object.freeze({
   sessionId: null,
   name: null,
   // id -> { id, name, type, x, y, hydrated }
   nodes: Object.freeze({}),
+  // id -> { id, source, target, type }
+  edges: Object.freeze({}),
   hiddenNodeIds: Object.freeze([]),
+  hiddenEdgeIds: Object.freeze([]),
   // Presence members ({ client_id, display_name, color }) of the other clients.
   roster: Object.freeze([]),
   // element_id -> { clientId, color, displayName }, other clients' claims only.
@@ -34,6 +33,34 @@ function emptyNode(id) {
   // `node_moved` / `layout_applied` op the originator emits in the same batch.
   // Until then the node is known but not renderable (see `renderableNodes`).
   return { id, name: null, type: null, x: null, y: null, hydrated: false };
+}
+
+function nodeSummary(node) {
+  const metadata = node?.metadata && typeof node.metadata === 'object' ? node.metadata : {};
+  return node?.summary ?? node?.description ?? metadata.summary ?? metadata.description ?? null;
+}
+
+function nodeMetadata(node) {
+  return node?.metadata && typeof node.metadata === 'object' ? node.metadata : null;
+}
+
+function hydratedNode(id, node) {
+  return {
+    ...emptyNode(id),
+    name: node.name ?? null,
+    type: node.type ?? null,
+    summary: nodeSummary(node),
+    metadata: nodeMetadata(node),
+    hydrated: true,
+  };
+}
+
+function normalizeEdge(edge) {
+  if (!edge?.id || typeof edge.id !== 'string') return null;
+  const source = edge.source ?? edge.source_id;
+  const target = edge.target ?? edge.target_id;
+  if (typeof source !== 'string' || typeof target !== 'string') return null;
+  return { id: edge.id, source, target, type: edge.type ?? edge.relationship_type ?? null };
 }
 
 function coord(value) {
@@ -67,17 +94,22 @@ export function sceneFromSession(payload, { sessionId = null } = {}) {
   const nodes = {};
   for (const node of payload?.resolved?.nodes || []) {
     if (!node?.id) continue;
-    nodes[node.id] = withPosition(
-      { ...emptyNode(node.id), name: node.name ?? null, type: node.type ?? null, hydrated: true },
-      positions[node.id]
-    );
+    nodes[node.id] = withPosition(hydratedNode(node.id, node), positions[node.id]);
+  }
+  const edges = {};
+  const resolvedEdges = Array.isArray(payload?.resolved?.edges) ? payload.resolved.edges : [];
+  for (const edge of resolvedEdges) {
+    const normalized = normalizeEdge(edge);
+    if (normalized) edges[normalized.id] = normalized;
   }
   return {
     ...EMPTY_SCENE,
     sessionId: sessionId ?? payload?.id ?? null,
     name: payload?.name ?? null,
     nodes,
+    edges,
     hiddenNodeIds: addIds([], state.hidden_node_ids),
+    hiddenEdgeIds: addIds([], state.hidden_edge_ids),
   };
 }
 
@@ -100,12 +132,24 @@ export function applyOp(scene, op) {
       if (!drop.length) return scene;
       const nodes = { ...scene.nodes };
       for (const id of drop) delete nodes[id];
+      const dropNodeIds = new Set(drop);
+      const removedEdgeIds = [];
+      const edges = {};
+      for (const [id, edge] of Object.entries(scene.edges)) {
+        if (dropNodeIds.has(edge.source) || dropNodeIds.has(edge.target)) {
+          removedEdgeIds.push(id);
+        } else {
+          edges[id] = edge;
+        }
+      }
       return {
         ...scene,
         nodes,
+        edges,
         // A removed node must not keep a hide entry: re-adding the same node
         // later would otherwise resurrect it invisible.
         hiddenNodeIds: removeIds(scene.hiddenNodeIds, drop),
+        hiddenEdgeIds: removeIds(scene.hiddenEdgeIds, removedEdgeIds),
       };
     }
     case 'node_moved': {
@@ -136,11 +180,44 @@ export function applyOp(scene, op) {
       return { ...scene, hiddenNodeIds: addIds(scene.hiddenNodeIds, op.node_ids) };
     case 'nodes_shown':
       return { ...scene, hiddenNodeIds: removeIds(scene.hiddenNodeIds, op.node_ids) };
+    case 'edges_added': {
+      let changed = false;
+      const edges = { ...scene.edges };
+      for (const edge of op.edges || []) {
+        const normalized = normalizeEdge(edge);
+        if (!normalized) continue;
+        edges[normalized.id] = normalized;
+        changed = true;
+      }
+      return changed ? { ...scene, edges } : scene;
+    }
+    case 'edges_updated': {
+      let changed = false;
+      const edges = { ...scene.edges };
+      for (const edge of op.edges || []) {
+        const normalized = normalizeEdge(edge);
+        if (!normalized || !edges[normalized.id]) continue;
+        edges[normalized.id] = normalized;
+        changed = true;
+      }
+      return changed ? { ...scene, edges } : scene;
+    }
+    case 'edges_removed': {
+      const drop = (op.edge_ids || []).filter((id) => scene.edges[id]);
+      if (!drop.length) return scene;
+      const edges = { ...scene.edges };
+      for (const id of drop) delete edges[id];
+      return { ...scene, edges, hiddenEdgeIds: removeIds(scene.hiddenEdgeIds, drop) };
+    }
+    case 'edges_hidden':
+      return { ...scene, hiddenEdgeIds: addIds(scene.hiddenEdgeIds, op.edge_ids) };
+    case 'edges_shown':
+      return { ...scene, hiddenEdgeIds: removeIds(scene.hiddenEdgeIds, op.edge_ids) };
     case 'session_renamed':
       return { ...scene, name: op.name ?? null };
     default:
-      // Edge, annotation and group ops: carried by the protocol, not rendered
-      // by this client yet. Ignoring them keeps the scene to what is drawn.
+      // Annotation and group ops: carried by the protocol, not rendered by this
+      // client yet. Ignoring them keeps the scene to what is drawn.
       return scene;
   }
 }
@@ -165,6 +242,8 @@ export function hydrateNodes(scene, nodes) {
       ...current,
       name: node.name ?? current.name,
       type: node.type ?? current.type,
+      summary: nodeSummary(node) ?? current.summary ?? null,
+      metadata: nodeMetadata(node) ?? current.metadata ?? null,
       hydrated: true,
     };
     changed = true;
@@ -198,4 +277,29 @@ export function renderableNodes(scene) {
     .filter((n) => !hidden.has(n.id) && n.x !== null && n.y !== null)
     .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
     .map((n) => ({ ...n, claim: scene.claims[n.id] || null }));
+}
+
+/**
+ * Visible edges whose endpoints are both renderable. This intentionally derives
+ * from renderable nodes, so hidden or unpositioned nodes cannot leave orphaned
+ * lines floating in the dome.
+ */
+export function renderableEdges(scene) {
+  const nodeIds = new Set(renderableNodes(scene).map((n) => n.id));
+  const hidden = new Set(scene.hiddenEdgeIds);
+  return Object.values(scene.edges)
+    .filter((e) => !hidden.has(e.id) && nodeIds.has(e.source) && nodeIds.has(e.target))
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+export function nodeDetail(scene, nodeId) {
+  const node = scene?.nodes?.[nodeId] || null;
+  if (!node) return null;
+  return {
+    id: node.id,
+    name: node.name || node.id,
+    type: node.type || 'Unknown',
+    summary: node.summary || null,
+    hydrated: Boolean(node.hydrated),
+  };
 }

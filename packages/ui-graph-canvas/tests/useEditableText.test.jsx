@@ -37,6 +37,17 @@ describe('useEditableText', () => {
     expect(result.current.text).toBe('Hello');
   });
 
+  it('tracks data.text changes without the text-sync effect', () => {
+    const { result, rerender } = renderHook(({ data }) => useEditableText('n1', data), {
+      initialProps: { data: { text: 'Hello' } },
+      wrapper: makeWrapper({ notifyChange: vi.fn(), notifyRemoteLockedAttempt: vi.fn() }),
+    });
+
+    rerender({ data: { text: 'Updated' } });
+
+    expect(result.current.text).toBe('Updated');
+  });
+
   it('startEditing enters edit mode and stops the triggering event propagating', () => {
     const { result } = renderHook(() => useEditableText('n1', { text: 'Hello' }), {
       wrapper: makeWrapper({ notifyChange: vi.fn(), notifyRemoteLockedAttempt: vi.fn() }),

@@ -131,7 +131,19 @@ Each node type has the following fields:
 | `icon` | No | Bootstrap Icon name for the toolbar (e.g. `"DatabaseFill"`, `"PeopleFill"`). Omitted or unregistered names fall back to the built-in icon for known type names, otherwise to a neutral circle |
 | `static` | No | If `true`, nodes of this type cannot be created via the chat. Used for system types |
 | `ui_form` | No | Specialized creation dialog. `"skill"` opens the SKILL.md-compatible form |
+| `labels` | No | Localized display names for this node type, keyed by language code (e.g. `{"sv": "Aktör"}`). Its live effect is on **search**: every label value, in every language, is joined into the type's lexical search text, so a query like `aktör` matches nodes of that type — in local and in federated results alike (see `backend/DEVELOPMENT.md`). Removing a label narrows search silently. As a *display* name it is looked up by the active UI language — always `en` while the UI is locked to English (see above) — so an `en` entry does render as the type name in search results and the metamodel explorer, while entries for other languages stay dormant until language switching returns; whenever the active language has no entry the path falls back to the raw type name. No shipped profile declares an `en` label, so none shows a translated type name today. The metamodel explorer's `Label (sv)` column is separate: it always shows the `sv` entry whatever the UI language, and `—` when unset |
 | `context_menu` | No | Array of extra items for the right-click context menu (see below) |
+| `allows_attachments` | No | `true` marks this node type as accepting file attachments. Defaults to `false`. Returned by `get_schema` on every node type, so clients can read it unconditionally. Per [ADR 0008](adr/0008-node-attachment-storage.md) section 7 it gates uploads only — listing, downloading and deleting files already attached stay available, so turning it back off never strands them. Uploads to a type without it answer `422 attachments_not_allowed`; the endpoints are listed in `backend/DEVELOPMENT.md` (*Node attachments*) |
+
+**A malformed node type is dropped on its own.** These fields are validated
+per node type when the profile loads. A value of the wrong type for any of them
+— `"allows_attachments": "ture"`, a `null`, a list where a bool belongs — drops
+that one node type and logs a warning naming the type and the field; the
+profile's other node types and its relationship types still load, and the
+profile behaves as if the dropped type were not declared. Nothing else
+reports the dropped type, so check the startup log after editing. Boolean
+fields do accept the usual spellings (`true`, `"true"`, `"yes"`, `1`), so only
+genuinely unparseable values trip this.
 
 Every node — regardless of its type or its `fields` list — also carries a
 universal `aliases` field: a list of alternative names/synonyms. Aliases are
@@ -330,6 +342,16 @@ version: "1.0"
 
 Skills can also be loaded from external URLs via `skills_urls` on expert agent configs, or fetched from GitHub repos by pointing to the repo URL.
 
+`trusted_domains` is necessary but not sufficient. Every skill URL is also
+checked against the same SSRF address guard the webhook, image-ingest and
+agent-fetch paths use: a hostname that resolves to a private, loopback,
+link-local, CGNAT or reserved address is refused even when its domain is
+allowlisted, and there is no config override. A SKILL.md served from an
+internal host is therefore not a supported configuration. Redirects are not
+followed automatically — each hop must satisfy both `trusted_domains` and the
+address guard, so an allowlisted host cannot redirect a fetch off the
+allowlist or inward.
+
 **Shipped skills:**
 
 | Skill | Profile | Description |
@@ -450,10 +472,8 @@ seed that keeps it gives every instance seeded from it the same lineage. A test
 carries the key.
 
 Metadata keys on `Variable` are snake_case, matching the convention every other
-profile follows. Nine camelCase keys remain on `DataSet`, `DataStructure` and
-`StatisticalProgramme` from an earlier import; none has a declared counterpart,
-so they are undeclared and left for a hygiene pass that renames and declares
-them together. A `Variable` node's
+profile follows. Metadata keys on `DataSet`, `DataStructure` and
+`StatisticalProgramme` are snake_case and declared in the profile fields. A `Variable` node's
 semantic role is carried by its subtypes (`Identifier`, `Measure`, `Attribute`)
 and nowhere else — some nodes still hold a leftover `role` metadata key from an
 earlier import, which is deliberately left undeclared: declaring it would give
@@ -469,12 +489,19 @@ identity_status:                confirmed | not_confirmed | potential | unknown
 
 ## System Node Types
 
-Certain node types are always present regardless of profile:
+The loader injects these node types from code (`SYSTEM_NODE_TYPES` in `backend/config/config_loader.py`) on every load, regardless of profile:
 
-- **SavedView** — Saved graph view snapshots (auto-injected if missing)
-- **VisualizationView** — Legacy saved views (auto-injected if missing)
+- **SavedView** — Saved graph view snapshots
+- **VisualizationView** — Legacy saved views
+- **EventSubscription** — Webhook subscription for graph mutation events
+- **Agent** — AI agent configuration
+- **Skill** — Reusable AI skill definition
+- **ActiveKnowledgeCollection** — Structured data-gathering collection configuration
+- **CollectionResponse** — A single submission gathered by an ActiveKnowledgeCollection
 
-Other system types (Agent, EventSubscription) should be defined in each profile's schema config if needed.
+Do not declare these in a profile's `schema_config.json`: a profile's own declaration of a system type is removed at load time (with a warning) and replaced by the code-managed definition, so it has no effect.
+
+To omit a system type from a profile, list its name in `system.disabled_node_types`, for example `"system": {"disabled_node_types": ["Skill"]}`. Names not in the list above are logged as unrecognised and ignored.
 
 ## Toolbar Layout
 

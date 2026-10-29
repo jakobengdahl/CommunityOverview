@@ -69,7 +69,7 @@ jobs:
   #   name: Deploy to Fly.io
   #   runs-on: ubuntu-latest
   #   steps:
-  #     - uses: actions/checkout@v4
+  #     - uses: actions/checkout@v7
   #     - uses: superfly/flyctl-actions/setup-flyctl@master
   #     - run: flyctl deploy --remote-only
   #       env:
@@ -79,7 +79,7 @@ jobs:
   #   name: Deploy to Railway
   #   runs-on: ubuntu-latest
   #   steps:
-  #     - uses: actions/checkout@v4
+  #     - uses: actions/checkout@v7
   #     - run: npm install -g @railway/cli && railway up --detach
   #       env:
   #         RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}

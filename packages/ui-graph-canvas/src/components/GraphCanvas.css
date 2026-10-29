@@ -594,6 +594,29 @@ body.graph-suppress-selection * {
   white-space: nowrap;
 }
 
+@media (max-width: 768px) {
+  /* Host apps commonly reserve the phone-width left edge for navigation or
+     tools. Keep this package-level overlay in the canvas chrome column instead
+     of assuming anything about the host rail's width. */
+  .graph-marks-legend {
+    top: 58px;
+    right: 12px;
+    right: calc(12px + env(safe-area-inset-right));
+    left: auto;
+    max-width: min(220px, calc(100% - 24px));
+    align-items: flex-end;
+  }
+
+  .graph-marks-legend-entry {
+    max-width: 100%;
+  }
+
+  .graph-marks-legend-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
 /* Non-interactive badge shown while an MCP agent is animating a layout. */
 .graph-agent-arranging {
   position: absolute;

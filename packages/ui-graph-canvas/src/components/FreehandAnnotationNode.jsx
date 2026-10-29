@@ -9,12 +9,20 @@ import {
   hasPressureData,
   segmentsFromCurvePoints,
 } from '../utils/freehandPath';
-import { isRemoteLocked, isAnnotationDraggable, remoteEditBadge } from '../utils/annotations';
+import { isRemoteLocked, withAnnotationDraggability, remoteEditBadge } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
 import { NearbyObjectMenuSection, useAnnotationMenuKeyNav } from './ContextMenus';
 import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
 import { useAnnotationEditTrigger } from '../hooks/useAnnotationEditTrigger';
+import {
+  DEFAULT_FREEHAND_COLOR,
+  DEFAULT_FREEHAND_STROKE_WIDTH,
+  FREEHAND_COLORS,
+  FREEHAND_WIDTHS,
+  FREEHAND_SMOOTHING_LEVELS,
+  FREEHAND_OPACITY_LEVELS,
+} from '../utils/freehandOptions';
 import './FreehandAnnotationNode.css';
 
 /**
@@ -43,23 +51,11 @@ import './FreehandAnnotationNode.css';
 // rather than as mis-coloured. Kept in the swatch list too — a white stroke is
 // still wanted for a dark background — but it is no longer what you get by
 // drawing without choosing.
-export const DEFAULT_FREEHAND_COLOR = '#111827';
 const DEFAULT_COLOR = DEFAULT_FREEHAND_COLOR;
-const DEFAULT_STROKE_WIDTH = 2;
+const DEFAULT_STROKE_WIDTH = DEFAULT_FREEHAND_STROKE_WIDTH;
 const PAD = 8;
 
-const FREEHAND_COLORS = [
-  DEFAULT_COLOR,
-  '#e6edf3',
-  '#FDE047',
-  '#4ADE80',
-  '#60A5FA',
-  '#F472B6',
-  '#FB923C',
-];
-const FREEHAND_WIDTHS = [1.5, 2, 3, 5, 8];
-const FREEHAND_SMOOTHING_LEVELS = [0, 0.3, 0.6, 1];
-const FREEHAND_OPACITY_LEVELS = [0.3, 0.5, 0.75, 1];
+export { DEFAULT_FREEHAND_COLOR };
 
 // Stable empty-array reference for the no-points fallback below, so a
 // missing/invalid `data.points` doesn't itself defeat this component's
@@ -180,7 +176,7 @@ function FreehandAnnotationNode({ id, data, selected }) {
       nds.map((n) => {
         if (n.id !== id) return n;
         const nextData = { ...n.data, locked: false };
-        return { ...n, data: nextData, draggable: isAnnotationDraggable({ ...n, data: nextData }) };
+        return withAnnotationDraggability(n, nextData);
       })
     );
     setContextMenu(null);

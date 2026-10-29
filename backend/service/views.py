@@ -11,7 +11,7 @@ from backend.core import NodeType
 from backend.core.session_annotations import sanitize_saved_view_metadata
 from backend.runtime.authorization import GRAPH_ACTION_READ
 
-from . import access
+from . import access, graph_archive
 from .serializers import serialize_edges, serialize_node
 
 if TYPE_CHECKING:
@@ -359,6 +359,7 @@ def list_saved_views(
         )
         view_list.append(
             {
+                "id": view.id,
                 "name": view.name,
                 "description": view.description,
                 "summary": view.summary,
@@ -388,6 +389,12 @@ def export_graph(
 
     source_nodes = storage.get_all_nodes()
     source_edges = storage.get_all_edges()
+    # In a staged session the view leaves out layer entries the narrowing
+    # does not cover; the boundary counts them as omitted, as on the graph.
+    unnarrowed = getattr(storage, "unnarrowed", None)
+    counted = unnarrowed() if unnarrowed is not None else None
+    total_nodes = len(counted.get_all_nodes() if counted else source_nodes)
+    total_edges = len(counted.get_all_edges() if counted else source_edges)
     visible_nodes, visible_edges = access.filter_nodes_and_edges(
         nodes=source_nodes,
         edges=source_edges,
@@ -400,8 +407,8 @@ def export_graph(
         decision=decision,
         visible_nodes=visible_nodes,
         visible_edges=visible_edges,
-        total_nodes=len(source_nodes),
-        total_edges=len(source_edges),
+        total_nodes=total_nodes,
+        total_edges=total_edges,
     )
 
     return {
@@ -413,3 +420,40 @@ def export_graph(
         "total_edges": len(all_edges),
         "export_boundary": export_boundary,
     }
+
+
+def export_graph_archive(
+    storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
+) -> Dict[str, Any]:
+    """Build the ZIP archive for ``GET /export/archive``.
+
+    Calls ``export_graph`` directly for the document itself, rather than
+    re-evaluating access, so the plain export and the archive can never
+    disagree about what a narrowed caller may see. The embeddings included
+    are narrowed the same way: only vectors for node ids that made it into
+    that document's ``nodes`` list, never a wider set — an archive must not
+    leak a vector for a node the plain export would have excluded.
+
+    Returns ``{"success": True, "archive_bytes": bytes}`` on success, or the
+    same access-denied shape ``export_graph`` returns on denial (checked with
+    ``result.get("error_code") == "access_denied"``, exactly like every other
+    caller of this module).
+    """
+    document = export_graph(storage, hook)
+    if document.get("error_code") == "access_denied":
+        return document
+
+    exported_ids = {node["id"] for node in document["nodes"]}
+    embedding_vectors = {
+        node_id: vector
+        for node_id, vector in storage.vector_store.export_vectors().items()
+        if node_id in exported_ids
+    }
+
+    archive_bytes = graph_archive.build_archive_bytes(
+        document,
+        embedding_vectors=embedding_vectors,
+        embedding_model=storage.vector_store.model_name,
+    )
+    return {"success": True, "archive_bytes": archive_bytes}

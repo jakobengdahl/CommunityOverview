@@ -127,7 +127,7 @@ uses `parentId` internally.
 Two protocols, mirroring the existing `GraphPersistenceBackend` pattern:
 
 - `SessionPersistenceBackend` — `load(id)`, `save(session)`, `delete(id)`,
-  `list_meta()`. Core ships `FileSessionPersistenceBackend`: one JSON file per
+  `list_meta()`, `list_ids()`. Core ships `FileSessionPersistenceBackend`: one JSON file per
   session under `data/sessions/<id>.json` (atomic temp+rename, same locking style as
   `storage_backends.py`). Per-session files keep write amplification low under
   frequent op-driven saves. **No automatic retention/eviction in v1** (D13): sessions
@@ -274,7 +274,9 @@ transition and removed in the final step.
 
 - Body caps per op batch (`_DEFAULT_MAX_OP_BATCH_BYTES`, 256 KB → `413`), max ops
   per batch (`_DEFAULT_MAX_OPS_PER_BATCH`, 500), max annotations per session, max
-  ops/second per client (token bucket) with `429` + client backoff.
+  ops/second per client (token bucket) with `429` + client backoff. A batch
+  costing more than the bucket's full burst is refused as `413`, not `429`: no
+  backoff could ever admit it.
   - **Image/session/document budgets, coordinated with the flat cap
     (fixed).** The flat cap above and `image_ingest.py`'s image-specific
     budgets (2 MB/image, 20 MB/session, 25 MB/document) used to be two
@@ -631,6 +633,11 @@ steps 6–8.
 >   facts separately — `has_stored_state` and `connected_clients` — because the
 >   tools acting on stored state and the pushes aimed at a live canvas fail in
 >   opposite cases.
+>   *Superseded in part:* a registry entry turned out to outlive the browser that
+>   created it, and to be created with no browser at all, so the gate and the
+>   "registry only" resolution now use the registry's consumer count
+>   (`SessionRegistry.has_consumer`) instead of the entry — see "Why an entry in
+>   the push registry is not a consumer" in `backend/DEVELOPMENT.md`.
 > - **Legacy push channel kept (scope boundary).** The legacy
 >   `GET /sessions/{id}/stream` MCP-push channel stays: §3.8 keeps MCP command
 >   pushes, the browser opens it eagerly on load, and the op stream (which
@@ -654,8 +661,14 @@ steps 6–8.
 >   (`backend/core/tests/test_session_multiuser.py`) drives two clients through one
 >   session (presence, add/move fan-out, annotation create, claims, rename, delete
 >   broadcast, reconnect catch-up) in CI; a Playwright multi-context spec
->   (`frontend/web/tests/e2e/shared-session.spec.js`) exercises the same scenarios
->   through the real UI + SSE transport (run locally, outside the core pytest CI).
+>   (`frontend/web/tests/e2e/shared-session.spec.js`) exercises presence, add/move
+>   fan-out, annotation create, the delete warning, reconnect catch-up and a late
+>   join through the real UI + SSE transport (in the non-required `desktop-e2e` CI
+>   job, outside the required pytest path). A joining client's first stream
+>   event is a snapshot the client does not apply; the client compares its seq with the seq the initial session GET
+>   returned (0 when the GET found no session yet, since the stream creates it),
+>   and resyncs from the server when the snapshot is newer. Without
+>   that, ops that land between the load and the stream subscribe would be lost.
 
 ## 6. Decisions
 
@@ -665,6 +678,11 @@ steps 6–8.
 - **D2** Conflicts: server-ordered LWW per entity; no CRDT/OT (3.3).
 - **D3** Selection claims are advisory soft locks with 30 s TTL + disconnect release (3.5).
 - **D4** Session state stores node **references** + layout + annotations, never node copies; annotations are a unified typed list (3.1).
+  *Revised for staged mode by [ADR 0005](adr/0005-sessions-may-stage-graph-changes.md):
+  a session in staged mode owns node and edge changes that are not yet in the
+  graph. They live in a layer beside the graph, not in the session document, so
+  this rule still holds for the document itself. See
+  [`SESSION_OVERLAY_CONTRACT.md`](SESSION_OVERLAY_CONTRACT.md).*
 - **D5** Two seams for SaaS: `SessionPersistenceBackend` and `SessionEventBus`; core ships file + in-process implementations only (3.2).
 - **D6** localStorage keeps only the recents index; snapshots are server-side (3.6).
 - **D7** Core identity is anonymous guest identity; session ID is the capability (3.4).
@@ -903,11 +921,17 @@ core needs to change.
 
 | Downstream SaaS slice | Open-core seam it binds to | Core-shipped default | Where it is injected |
 |---|---|---|---|
-| Postgres-backed session store | `SessionPersistenceBackend` Protocol — `load` / `save` / `delete` / `list_meta` (`backend/core/session_store.py`) | `FileSessionPersistenceBackend` (one JSON file per session, atomic temp+rename) | `SessionStore(<backend>)` |
+| Postgres-backed session store | `SessionPersistenceBackend` Protocol — `load` / `save` / `delete` / `list_meta` / `list_ids` (`backend/core/session_store.py`) | `FileSessionPersistenceBackend` (one JSON file per session, atomic temp+rename) | `SessionStore(<backend>)` |
 | Durability / retention | same `SessionPersistenceBackend` seam; the core adds **no** auto-eviction (D13), so a durable backend owns its own retention policy | file persistence, kept until explicit delete | `SessionStore(<backend>)` |
 | Redis event bus (multi-instance fan-out) | `SessionEventBus` Protocol — `publish` / `subscribe` / `unsubscribe` (`backend/core/session_hub.py`) | `InProcessEventBus` (per-subscriber asyncio queues, slow-consumer drop→resync) | `SessionManager(store, event_bus=<bus>)` |
 | Identity / named-identity presence | request-actor pass-through (`service.get_request_actor_info(headers=...)`) feeding the per-client `{client_id, display_name, color}` presence registration (§3.4) | anonymous guest identity (`Guest-<n>`, server-assigned colour); session id is the capability (D7) | session CRUD/stream endpoints in `rest_api.py` |
 | Access control / session history | (a) session id as capability + optional HTTP Basic Auth + per-source lookup rate limit (§3.9); (b) the localStorage recents index as the *personal* history seam (§3.6) | no accounts, no ACLs, no server-stored cross-user history | endpoints honour an identity context **when present**, otherwise fall through to the capability model |
+
+**Adapter migration — actor attribution maintenance:** session persistence
+adapters now provide `list_ids() -> List[str]`, enumerating every persisted
+session without silently skipping unreadable documents. `SessionStore.erase_actor`
+uses it to scrub activity in cold and loaded sessions without modifying session
+state or sequence numbers. Existing CRUD signatures are unchanged.
 
 Contract obligations the core commits to, so hosted slices can depend on them:
 

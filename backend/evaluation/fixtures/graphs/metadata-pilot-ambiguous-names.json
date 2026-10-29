@@ -1,0 +1,38 @@
+{
+  "nodes": [
+    {
+      "id": "eval-initiative-metadata-register-phase-one",
+      "type": "Initiative",
+      "name": "Metadata Register",
+      "description": "Phase one of the metadata register work, now closed.",
+      "summary": "Metadata register, phase one",
+      "tags": [
+        "metadata",
+        "closed"
+      ]
+    },
+    {
+      "id": "eval-initiative-metadata-register-phase-two",
+      "type": "Initiative",
+      "name": "Metadata Register",
+      "description": "Phase two of the metadata register work, currently active.",
+      "summary": "Metadata register, phase two",
+      "tags": [
+        "metadata",
+        "active"
+      ]
+    },
+    {
+      "id": "eval-actor-statistics-office",
+      "type": "Actor",
+      "name": "National Statistics Office",
+      "description": "The national body responsible for producing official statistics.",
+      "summary": "National statistics producer",
+      "tags": [
+        "statistics",
+        "government"
+      ]
+    }
+  ],
+  "edges": []
+}

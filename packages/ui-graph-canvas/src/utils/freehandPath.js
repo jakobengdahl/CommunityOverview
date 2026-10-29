@@ -27,13 +27,22 @@
  *    higher smoothing means a visibly softer flowing line through the SAME
  *    anchors — not fewer of them.
  *
+ * Resampling alone cannot remove hand tremor, though: pointer samples arrive
+ * dense, so a spline through them still passes through every wobble. The
+ * curve stage therefore first relaxes the anchors toward their neighbours
+ * (RELAX_PASSES_AT_MAX_SMOOTHING repeated 1-2-1 averaging passes at
+ * smoothing=1, scaled linearly, none at 0; first and last point stay fixed),
+ * which is what makes 100% clearly smoother than 0%.
+ *
  * Net effect on already-saved strokes: a stroke saved at smoothing=0 renders
- * pixel-identically, at any length (both stages are no-ops beyond dedupe,
- * exactly as before). A stroke saved with smoothing>0 will now render
- * differently — with its original point detail intact and a genuinely
- * smoother curve through it — because that is precisely the bug this module
- * fixes; the old output for smoothing>0 was the coarsened, over-decimated
- * shape the owner reported, not a shape worth preserving.
+ * pixel-identically, at any length (every stage is a no-op beyond dedupe,
+ * exactly as before). A stroke saved with smoothing>0 renders differently
+ * from earlier builds — its wobble is now averaged out in proportion to the
+ * stored value, so e.g. the default 0.3 is visibly smoother than before.
+ * Strokes that carry pressure also change width: the pressure-to-width map was
+ * widened (see MIN/MAX_PRESSURE_WIDTH_FACTOR), so they render thinner at light
+ * and thicker at hard presses than before even at smoothing=0. Only the path
+ * geometry of a smoothing=0 stroke is untouched.
  *
  * Pure functions, no randomness or wall-clock reads, so the same input always
  * produces the same output.
@@ -57,6 +66,14 @@ const DECIMATION_EPSILON = 1.5;
 // curve stage is an exact no-op at smoothing=0). Chosen high enough to read
 // as a visibly soft, flowing line without ballooning point counts.
 const MAX_CURVE_SUBDIVISIONS = 6;
+
+// Number of 1-2-1 neighbour-averaging passes applied at smoothing=1 (scaled
+// linearly, rounded up, so any smoothing above 0 does at least one pass and
+// 0 does none). Each pass has a variance of 0.5 samples^2, so 24 passes blur
+// tremor over a window of roughly +/-3.5 samples: dense pointer samples lose
+// their jitter while the gesture's overall shape survives. Chosen by eye on
+// hand-drawn strokes; raising it flattens tight corners further.
+const RELAX_PASSES_AT_MAX_SMOOTHING = 24;
 
 // Matches FreehandAnnotationNode's own DEFAULT_STROKE_WIDTH; kept as a
 // separate constant here (rather than imported) so this module stays free of
@@ -178,8 +195,9 @@ function interpolatePoint(p0, p1, p2, p3, t) {
  * smoothing=0 (or fewer than 3 points) this is an identity — the exact
  * anchors come back unchanged, which is what keeps a smoothing=0 stroke's
  * rendered path byte-identical to before this module changed. Never removes
- * or reorders an anchor, only adds between them, so curve fitting never
- * fights with `reduceFreehandPoints`'s decimation.
+ * or reorders an anchor (relaxation moves interior ones toward their
+ * neighbours; the endpoints are fixed), so curve fitting never fights with
+ * `reduceFreehandPoints`'s decimation.
  *
  * Exported (rather than kept internal to `buildFreehandPath`/
  * `buildPressureSegments`) so a caller building BOTH a `d` string and
@@ -192,6 +210,35 @@ export function smoothAnchors(points, smoothing) {
   if (!Array.isArray(points)) return [];
   const level = clampSmoothing(smoothing);
   if (level <= 0 || points.length < 3) return points;
+  const anchors = relaxAnchors(points, level);
+  return curveThrough(anchors, level);
+}
+
+// Repeated 1-2-1 averaging of each interior point with its two neighbours.
+// First and last points never move, so the stroke still starts and ends where
+// the user put the pen. Pressure is a device reading and is carried over
+// untouched. Pure: returns a new array, never mutates the input.
+function relaxAnchors(points, level) {
+  const passes = Math.ceil(level * RELAX_PASSES_AT_MAX_SMOOTHING);
+  let current = points;
+  const last = points.length - 1;
+  for (let pass = 0; pass < passes; pass++) {
+    const next = new Array(points.length);
+    next[0] = current[0];
+    next[last] = current[last];
+    for (let i = 1; i < last; i++) {
+      next[i] = {
+        ...current[i],
+        x: current[i].x * 0.5 + (current[i - 1].x + current[i + 1].x) * 0.25,
+        y: current[i].y * 0.5 + (current[i - 1].y + current[i + 1].y) * 0.25,
+      };
+    }
+    current = next;
+  }
+  return current;
+}
+
+function curveThrough(points, level) {
   // Ceiling, not round: the module contract is "smoothing=0 is the only
   // identity case, anything above 0 fits a curve" — rounding down to 0
   // subdivisions for a small-but-nonzero level (below ~0.083) would silently
@@ -254,20 +301,26 @@ export function buildFreehandPath(points, smoothing = 0) {
   return { points: reduced, d: pointsToPathData(curved) };
 }
 
-// Stroke-width scaling range applied to a point's pressure (0-1): a light
-// touch draws thinner than baseWidth, a hard press draws thicker, but neither
-// end collapses to zero or balloons unreadably wide.
+// Stroke-width scaling applied to a point's pressure (0-1), as a multiple of
+// the stroke's base width. Piecewise linear through three anchors:
+//   pressure 0   -> MIN_PRESSURE_WIDTH_FACTOR (feather-light, still visible)
+//   pressure 0.5 -> 1 (exactly the base width)
+//   pressure 1   -> MAX_PRESSURE_WIDTH_FACTOR (hard press)
+// Pinning 0.5 to the base width matters for the fallback devices: a mouse
+// reports a constant pressure of 0.5 while its button is down, and a stroke
+// from one must keep drawing at the chosen width rather than being inflated.
 //
-// Widened from 0.4-1.6 (a 4x ratio) to 0.25-2.6 (a ~10x ratio) because the
-// original range was reported as barely visible in use: a stylus rarely
-// spans the full 0-1 pressure scale in one stroke, so a 4x range across the
-// FULL scale leaves maybe a 2x difference across the range a hand actually
-// applies — close enough to uniform that the feature looked broken. The
-// floor stays well clear of zero so a feather-light stroke is still a
-// visible line, and the ceiling is bounded so a hard press cannot swamp the
-// drawing.
-const MIN_PRESSURE_WIDTH_FACTOR = 0.25;
-const MAX_PRESSURE_WIDTH_FACTOR = 2.6;
+// The 0.15-3.5 span (about 23x thinnest to thickest, up from 0.25-2.6, ~10x)
+// was widened again after stylus testing found the difference too subtle: a
+// pen rarely spans the full 0-1 scale in one stroke, so the usable range is a
+// fraction of it. The factor floor keeps a light stroke a visible line, and
+// widthForPressure additionally never goes below MIN_PRESSURE_WIDTH_PX. That
+// pixel floor is set below the thinnest width every offered base width
+// (1.5-8) produces (1.5 * 0.15 = 0.225 px), so it never hides the thin end:
+// each offered width, including the default 2, spans about 23x.
+const MIN_PRESSURE_WIDTH_PX = 0.2;
+const MIN_PRESSURE_WIDTH_FACTOR = 0.15;
+const MAX_PRESSURE_WIDTH_FACTOR = 3.5;
 
 /**
  * Whether any point in the array carries a real pressure sample. Used to
@@ -284,8 +337,10 @@ function widthForPressure(pressure, baseWidth) {
   if (!Number.isFinite(pressure)) return baseWidth;
   const clamped = Math.min(1, Math.max(0, pressure));
   const factor =
-    MIN_PRESSURE_WIDTH_FACTOR + clamped * (MAX_PRESSURE_WIDTH_FACTOR - MIN_PRESSURE_WIDTH_FACTOR);
-  return Math.max(0.5, baseWidth * factor);
+    clamped <= 0.5
+      ? MIN_PRESSURE_WIDTH_FACTOR + (1 - MIN_PRESSURE_WIDTH_FACTOR) * (clamped / 0.5)
+      : 1 + (MAX_PRESSURE_WIDTH_FACTOR - 1) * ((clamped - 0.5) / 0.5);
+  return Math.max(MIN_PRESSURE_WIDTH_PX, baseWidth * factor);
 }
 
 /**

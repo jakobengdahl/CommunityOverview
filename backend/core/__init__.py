@@ -34,9 +34,13 @@ from .storage import GraphStorage, StaleUpdateError
 from .storage_backends import (
     BackendCapabilities,
     EntityOperation,
+    EntityRevisionConflict,
     FileGraphPersistenceBackend,
+    GraphWriteFailed,
+    GraphWriteOutcomeUnknown,
     GraphPersistenceBackend,
     IncrementalGraphPersistenceBackend,
+    NodeTypeChanged,
     capabilities_of,
 )
 from .history_store import (
@@ -91,6 +95,10 @@ __all__ = [
     "FileGraphPersistenceBackend",
     "BackendCapabilities",
     "EntityOperation",
+    "EntityRevisionConflict",
+    "NodeTypeChanged",
+    "GraphWriteFailed",
+    "GraphWriteOutcomeUnknown",
     "capabilities_of",
     "GraphHistoryStore",
     "event_to_history_record",

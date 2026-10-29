@@ -25,6 +25,10 @@ the single entry point used by the REST/SSE endpoints and by MCP pushes:
 * ``catch_up`` returns either the missed ops (from the store ring buffer) or a
   full-state snapshot when the ring cannot prove continuity.
 * a per-client token bucket bounds op throughput (429 on exhaustion).
+* ``summon_viewport`` broadcasts a ``viewport_summoned`` event asking every
+  connected client to frame a model-space region. Like claims it is ephemeral —
+  never persisted, sequenced or replayed — so it moves only the clients
+  connected when it is sent.
 """
 
 from __future__ import annotations
@@ -32,8 +36,9 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .image_ingest import (
     DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES,
@@ -51,12 +56,25 @@ from .session_hub import (
     Subscription,
 )
 from .session_store import (
+    SERVER_ONLY_OPS,
     STATE_OPS,
     OpError,
     Session,
+    SessionRetired,
     SessionStore,
     is_valid_session_id,
 )
+from .write_modes import (
+    WRITE_MODE_DIRECT,
+    WRITE_MODE_IRREVERSIBLE,
+    WRITE_MODE_STAGED,
+    WriteModeRefused,
+    WriteModes,
+    check_write_mode,
+)
+from . import layer_store
+
+logger = logging.getLogger(__name__)
 
 # AnnotationFieldConflict is raised by SessionStore.apply_state_op and
 # propagates through this module's write paths unchanged; callers import it
@@ -95,6 +113,12 @@ _DEFAULT_MAX_OP_BATCH_BYTES = 256 * 1024
 _DEFAULT_LOOKUP_BUCKET_CAPACITY = 60.0
 _DEFAULT_LOOKUP_REFILL_PER_SEC = 2.0
 
+# Human image ingest is keyed by request source, not by the browser-declared
+# op client id. Keep its default ceiling with the other source-keyed guard
+# instead of granting a second full high-frequency op lane.
+_DEFAULT_IMAGE_BUCKET_CAPACITY = _DEFAULT_LOOKUP_BUCKET_CAPACITY
+_DEFAULT_IMAGE_BUCKET_REFILL_PER_SEC = _DEFAULT_LOOKUP_REFILL_PER_SEC
+
 # Stable marker distinct from any real browser `graph_client_id`, used only for
 # the *broadcast* attribution of an undo's replayed inverse op — see
 # `_HUMAN_IMAGE_INGEST_CLIENT_ID` in rest_api.py for the identical trap this
@@ -109,10 +133,31 @@ _DEFAULT_LOOKUP_REFILL_PER_SEC = 2.0
 # genuinely changed server-side state and every *other* client sees it. A
 # distinct marker for this one attribution is required, not optional.
 _UNDO_REPLAY_CLIENT_ID = "undo-replay"
+_STREAM_WITHHELD = frozenset({"base", "staged_by"})
 
 
 class SessionNotFound(Exception):
     pass
+
+
+class SessionSeqConflict(Exception):
+    """``expected_session_seq`` on a graph write did not hold (§9.2:
+    ``session_seq_conflict``). Another participant staged in the session
+    since the caller read it."""
+
+    code = "session_seq_conflict"
+
+    def __init__(self, expected: int, actual: int) -> None:
+        self.expected = expected
+        self.actual = actual
+        super().__init__(
+            f"expected session sequence {expected}, but the session is at {actual}"
+        )
+
+
+# The client id a staged graph change is fanned out under. Distinct from any
+# browser's, so no participant drops it as the echo of its own op.
+GRAPH_STAGING_CLIENT_ID = "graph-staging"
 
 
 class RateLimited(Exception):
@@ -221,7 +266,7 @@ class LeaseConflict(Exception):
     ``undo_last_action`` (``/undo``), which replays a stored inverse op and
     is reachable from the browser only — no MCP tool calls it — and, since
     ``task-mcp-annotation-human-edit-guard``, every synchronous MCP write
-    method that can mutate an existing annotation: ``upsert_annotation``,
+    method whose op targets an annotation directly: ``upsert_annotation``,
     ``upsert_image_annotation``, ``update_annotation``, ``delete_annotation``
     and ``set_group_members`` (all keyed to the shared ``mcp-agent`` client
     id — see ``mcp_tools.py``). Each of those five checks
@@ -252,7 +297,11 @@ class LeaseConflict(Exception):
     (``layout_applied``/``nodes_added``/``session_renamed``, or no op at all)
     can mutate an annotation, so ``_claimed_annotation_target`` always
     reports no target for them — out of scope by construction, not merely
-    unaddressed.
+    unaddressed. ``remove_node_refs`` stays unguarded too, though its
+    ``nodes_removed`` op does prune the removed ids from group annotations'
+    ``member_node_ids``: that is a side effect of the node leaving the canvas,
+    not an edit of the group, and it is the same op the browser sends through
+    ``apply_ops`` without a lease check.
     """
 
     def __init__(self, annotation_id: str, held_by: str) -> None:
@@ -295,6 +344,10 @@ class _TokenBucket:
         self._sweep_interval = sweep_interval
         self._last_sweep: float = 0.0
 
+    @property
+    def capacity(self) -> float:
+        return self._capacity
+
     def consume(self, client_id: str, amount: float) -> bool:
         now = self._time()
         if now - self._last_sweep >= self._sweep_interval:
@@ -316,6 +369,73 @@ class _TokenBucket:
             del self._tokens[k]
             del self._last[k]
         self._last_sweep = now
+
+
+def _detached_snapshot(session: Session) -> Dict[str, Any]:
+    """``session.to_dict()`` detached from live session objects, for a worker.
+
+    Everything is deep-copied except the activity log, which gets one shallow
+    copy per record: a record's nested values are deep copies taken when it
+    was built and never edited afterwards, and only ``undo_last_action`` sets
+    its top-level ``undone`` flags. That keeps the copy at the default
+    500-record cap in microseconds rather than tens of milliseconds.
+    """
+    snapshot = copy.deepcopy({**session.to_dict(), "activity_log": []})
+    snapshot["activity_log"] = [dict(record) for record in session.activity_log]
+    return snapshot
+
+
+def _restore_deleted_ids(session: Session, saved: List[str]) -> None:
+    """Put back the store's "recently deleted" ids after a rollback: a
+    delete appends to them, an undone delete removes from them, and neither
+    is part of the persisted document the other rollback copies cover."""
+    session._deleted_annotation_ids.clear()
+    session._deleted_annotation_ids.extend(saved)
+
+
+_ABSENT = object()
+
+
+def _document_bytes(snapshot: Dict[str, Any], session: Session) -> int:
+    """``len(json.dumps(snapshot))`` for a ``_detached_snapshot`` of ``session``,
+    taken with no await in between.
+
+    Re-encoding the whole activity log on every batch was most of apply_ops'
+    event-loop time at the default 500-record cap. A record is never edited
+    after it is built except for its top-level ``undone``/``undone_at`` flags
+    (the same invariant ``_detached_snapshot`` relies on), so each record's
+    encoded length is cached against the record object and those two values.
+    The sum is exact, not an estimate: with the default separators a
+    non-empty list encodes as ``[`` + items joined by ``", "`` + ``]``.
+    """
+    log = session.activity_log
+    total = len(json.dumps({**snapshot, "activity_log": []}))
+    if not log:
+        session._activity_record_bytes = {}
+        return total
+    cached = session._activity_record_bytes
+    fresh: Dict[int, Any] = {}
+    total += 2 * (len(log) - 1)
+    for record in log:
+        # A missing key and None, or False and 0, encode differently: hence
+        # the sentinel and the identity check (undone_at is a str or None).
+        undone = record.get("undone", _ABSENT)
+        undone_at = record.get("undone_at", _ABSENT)
+        hit = cached.get(id(record))
+        if (
+            hit is not None
+            and hit[0] is record
+            and hit[1] is undone
+            and hit[2] == undone_at
+        ):
+            size = hit[3]
+        else:
+            size = len(json.dumps(record))
+        # Holding the record keeps its id from being reused while cached.
+        fresh[id(record)] = (record, undone, undone_at, size)
+        total += size
+    session._activity_record_bytes = fresh
+    return total
 
 
 def _claimed_annotation_target(op: Dict[str, Any], session: Session) -> Optional[str]:
@@ -490,8 +610,14 @@ class SessionManager:
         bucket_refill_per_sec: float = _DEFAULT_BUCKET_REFILL_PER_SEC,
         lookup_bucket_capacity: float = _DEFAULT_LOOKUP_BUCKET_CAPACITY,
         lookup_refill_per_sec: float = _DEFAULT_LOOKUP_REFILL_PER_SEC,
+        image_bucket_capacity: float = _DEFAULT_IMAGE_BUCKET_CAPACITY,
+        image_refill_per_sec: float = _DEFAULT_IMAGE_BUCKET_REFILL_PER_SEC,
+        write_modes: Optional[WriteModes] = None,
     ) -> None:
         self.store = store
+        # Every session is direct without one (docs/SESSION_OVERLAY_CONTRACT.md
+        # §5): nothing can be staged, nothing is ever retired.
+        self.write_modes = write_modes or WriteModes()
         self.bus = event_bus or InProcessEventBus()
         self.presence = presence or PresenceRegistry()
         self.claims = claims or ClaimMap()
@@ -503,14 +629,72 @@ class SessionManager:
         self._lookup_bucket = _TokenBucket(
             lookup_bucket_capacity, lookup_refill_per_sec
         )
-        # Separate keyspace, same sizing as the op bucket. The human image
+        # Separate keyspace with a source-keyed ceiling. The human image
         # ingest endpoint keys this on the request source rather than on a
         # client-declared id (see ``upsert_image_annotation``'s
         # ``rate_limit_key``); mixing source-derived keys into ``_bucket``
         # would let a client pick a ``client_id`` equal to a victim's source
-        # key and drain that victim's image budget through ``/ops``.
-        self._image_bucket = _TokenBucket(bucket_capacity, bucket_refill_per_sec)
+        # key and drain that victim's image budget through ``/ops``. It also
+        # must not be sized like the high-frequency op bucket by default, or
+        # image ingest becomes an additional full write lane for the same
+        # source-keyed actor.
+        self._image_bucket = _TokenBucket(image_bucket_capacity, image_refill_per_sec)
+        # Separate keyspace again, same sizing. Synchronous MCP write methods
+        # can attribute their broadcasts to one visible agent marker while
+        # passing a tool label so unrelated tools do not spend the same key.
+        # Callers that omit a label keep the historical client-id key.
+        # (``mcp_tools.py``). ``POST /api/sessions/{id}/ops`` takes an
+        # unauthenticated, caller-chosen ``client_id`` and consumes from
+        # ``_bucket`` under that exact string — so keeping the MCP marker in
+        # ``_bucket`` too would let any browser post ``client_id: "mcp-agent"``
+        # and drain the budget every MCP agent on this instance shares
+        # (smallfix-ops-client-id-can-collide-with-mcp-agent-marker). Routing
+        # every MCP-marker consume through this dedicated bucket instead makes
+        # it unreachable from ``/ops`` or any other browser-facing endpoint,
+        # regardless of what ``client_id`` a browser declares. Tool labels split
+        # this keyspace inside the MCP path without changing unlabelled callers.
+        self._mcp_bucket = _TokenBucket(bucket_capacity, bucket_refill_per_sec)
         self._locks: Dict[str, asyncio.Lock] = {}
+
+    @staticmethod
+    def _mcp_rate_limit_key(client_id: str, rate_limit_label: Optional[str]) -> str:
+        if rate_limit_label is None:
+            return client_id
+        if not isinstance(rate_limit_label, str) or not rate_limit_label:
+            raise OpError("'rate_limit_label' must be a non-empty string")
+        return f"{client_id}:{rate_limit_label}"
+
+    def _consume_mcp_budget(self, key: str, amount: float) -> None:
+        # A cost above the full bucket can never be admitted, however long the
+        # caller waits, so it is a request to change (too large), not a
+        # retryable rate limit.
+        if amount > self._mcp_bucket.capacity:
+            raise OpBatchTooLarge()
+        if not self._mcp_bucket.consume(key, amount):
+            raise RateLimited()
+
+    def consume_mcp_rate_budget(
+        self,
+        client_id: str,
+        amount: float,
+        *,
+        rate_limit_label: Optional[str] = None,
+    ) -> None:
+        """Charge ``amount`` tokens to ``_mcp_bucket`` ahead of a write.
+
+        For an MCP tool that must pay for work it does before the write itself —
+        ``add_nodes_to_session`` resolves every id first, so a call where none
+        resolves would otherwise be free. The key is the one the write would
+        charge, ``_mcp_rate_limit_key(client_id, rate_limit_label)``; pass
+        ``precharged=True`` to the write so it is not charged twice. Raises
+        ``RateLimited`` when the budget is spent, and ``OpBatchTooLarge``
+        without charging when ``amount`` exceeds the bucket's capacity.
+        """
+        if not isinstance(client_id, str) or not client_id:
+            raise OpError("'client_id' is required")
+        self._consume_mcp_budget(
+            self._mcp_rate_limit_key(client_id, rate_limit_label), amount
+        )
 
     def check_lookup_rate(self, client_key: str) -> None:
         """Throttle unauthenticated session-id lookups by source.
@@ -555,6 +739,15 @@ class SessionManager:
         """
         return self._max_ops
 
+    @property
+    def mcp_rate_budget_capacity(self) -> float:
+        """Full size of an MCP tool's rate budget: the most one call can cost.
+
+        A call costing more is refused as ``OpBatchTooLarge``, not
+        ``RateLimited``, since no amount of waiting would admit it.
+        """
+        return self._mcp_bucket.capacity
+
     def _lock(self, session_id: str) -> asyncio.Lock:
         lock = self._locks.get(session_id)
         if lock is None:
@@ -564,10 +757,26 @@ class SessionManager:
 
     # ---------------- session CRUD ----------------
 
-    def create_session(self, name: Optional[str] = None) -> Session:
+    def create_session(
+        self, name: Optional[str] = None, write_mode: Optional[str] = None
+    ) -> Session:
+        """Create a session in ``write_mode``, else in the graph default (§5.1).
+
+        A staged session's record is written before its document, so no
+        instance ever sees the document of a staged session as direct.
+        Raises WriteModeRefused for a mode this deployment cannot hold.
+        """
+        mode, source = self.write_modes.choose(write_mode)
         if self.store.session_count() >= self._max_sessions:
             raise SessionLimitReached()
-        return self.store.create(name)
+        return self.store.create(
+            name,
+            write_mode=mode,
+            write_mode_source=source,
+            on_allocate=(
+                self.write_modes.record_staged if mode == WRITE_MODE_STAGED else None
+            ),
+        )
 
     def get_or_create(self, session_id: str) -> Tuple[Session, bool]:
         session = self.store.get(session_id)
@@ -575,7 +784,275 @@ class SessionManager:
             return session, False
         if self.store.session_count() >= self._max_sessions:
             raise SessionLimitReached()
-        return self.store.get_or_create(session_id)
+        # Materialising a session the browser already holds is never a create
+        # request, so it is direct whatever the graph default (§5.1): a staged
+        # session is created explicitly, where the hook is asked.
+        try:
+            return self.store.get_or_create(
+                session_id,
+                write_mode_source=(
+                    "explicit"
+                    if self.write_modes.default_mode == WRITE_MODE_STAGED
+                    else "inherited"
+                ),
+            )
+        except SessionRetired:
+            raise SessionNotFound() from None
+
+    def write_mode_of(self, session: Session) -> Dict[str, str]:
+        """The write mode a response describing ``session`` reports (§5.1).
+
+        Read from the staged-session record, which decides; the source comes
+        from the document's mirror.
+        """
+        mode = self.write_modes.mode_of(session.id)
+        source = session.write_mode_source
+        if mode == WRITE_MODE_STAGED and session.write_mode != WRITE_MODE_STAGED:
+            source = "explicit"
+        return {"write_mode": mode, "write_mode_source": source}
+
+    def describe(self, session: Session) -> Dict[str, Any]:
+        """``session.to_dict()`` with the write mode the record decides."""
+        return {**session.to_dict(), **self.write_mode_of(session)}
+
+    # ---------------- write modes ----------------
+
+    async def set_write_mode(
+        self, session_id: str, write_mode: Any, client_id: Optional[str] = None
+    ) -> Session:
+        """Switch a session to ``write_mode`` (§5.2), under the session's lock."""
+        mode = check_write_mode(write_mode)
+        async with self._lock(session_id):
+            return self._set_write_mode(session_id, mode, client_id or "rest")
+
+    def set_write_mode_sync(
+        self,
+        session_id: str,
+        write_mode: Any,
+        client_id: Optional[str] = None,
+        *,
+        rate_limit_label: Optional[str] = None,
+    ) -> Session:
+        """``set_write_mode`` for a synchronous caller (the MCP tool path).
+
+        Like ``apply_layout``, it refuses with ``LayoutBusy`` while an
+        ``apply_ops`` batch holds the session's lock, so the op it emits is
+        never sequenced ahead of a batch that has not broadcast yet. Charges
+        one token to ``_mcp_bucket``, like every other synchronous MCP write.
+        """
+        mode = check_write_mode(write_mode)
+        self._consume_mcp_budget(
+            self._mcp_rate_limit_key(client_id or "rest", rate_limit_label), 1.0
+        )
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+        return self._set_write_mode(session_id, mode, client_id or "rest")
+
+    def _set_write_mode(
+        self, session_id: str, mode: Optional[str], client_id: str
+    ) -> Session:
+        if mode is None:
+            raise WriteModeRefused(
+                "invalid_write_mode", "write_mode must be one of direct, staged"
+            )
+        session = (
+            self.store.get(session_id) if is_valid_session_id(session_id) else None
+        )
+        status = self.write_modes.staged_status(session_id)
+        if session is None or status == layer_store.STATUS_RETIRED:
+            raise SessionNotFound()
+        if status == layer_store.STATUS_ACTIVE:
+            if mode == WRITE_MODE_DIRECT:
+                # Once one participant has merged, another switching to
+                # direct would land the first one's next write in the graph.
+                raise WriteModeRefused(
+                    WRITE_MODE_IRREVERSIBLE,
+                    "a staged session never becomes direct; start a new session "
+                    "to edit the graph directly",
+                )
+            return session
+        if mode == WRITE_MODE_DIRECT:
+            return session
+        # The record first: from that moment every instance stages this
+        # session's writes. The op only mirrors and fans it out.
+        self.write_modes.record_staged(session_id)
+        try:
+            self._apply_op_sync(
+                session,
+                session_id,
+                client_id,
+                {"op": "write_mode_changed", "write_mode": WRITE_MODE_STAGED},
+                record_activity=False,
+            )
+        except Exception:
+            logger.exception(
+                "session %s is staged, but its write_mode_changed op failed",
+                session_id,
+            )
+        return session
+
+    def _retire_for_delete(
+        self,
+        session_id: str,
+        discard_staged: bool,
+        authorize_staged: Optional[Callable[[], None]] = None,
+    ) -> str:
+        """Retire a staged session's record before its document goes (§13).
+
+        Returns the write mode the session had. A layer holding entries
+        without ``discard_staged`` raises ``LayerNotEmpty``, judged in the
+        unit that would retire, and nothing is deleted.
+        """
+        if self.write_modes.staged_status(session_id) != layer_store.STATUS_ACTIVE:
+            return WRITE_MODE_DIRECT
+        if authorize_staged is not None:
+            authorize_staged()
+        self.write_modes.retire(session_id, require_empty=not discard_staged)
+        return WRITE_MODE_STAGED
+
+    # ---------------- staged graph changes ----------------
+
+    def check_session_seq(
+        self, session_id: str, expected_session_seq: Optional[int]
+    ) -> int:
+        """The session's sequence number; ``SessionSeqConflict`` when
+        ``expected_session_seq`` is given and differs."""
+        session = (
+            self.store.get(session_id) if is_valid_session_id(session_id) else None
+        )
+        if session is None:
+            raise SessionNotFound()
+        if expected_session_seq is not None and expected_session_seq != session.seq:
+            raise SessionSeqConflict(expected_session_seq, session.seq)
+        return session.seq
+
+    def stage_graph_change(
+        self,
+        session_id: str,
+        *,
+        expected_session_seq: Optional[int],
+        commit: Callable[[int], Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Stage a graph change and fan it out as one session op (§9, §15).
+
+        ``commit(seq)`` writes the layer, stamping each entry with ``seq`` -
+        the sequence number the op takes - and returns the op's payload:
+        ``{"entries": [...], "removals": [...]}``. It is the commit point:
+        if it raises, nothing changed. After it, the op is applied, persisted
+        and broadcast; a failure to persist the session document is logged
+        and does not undo a change the layer already holds.
+
+        Synchronous like ``apply_layout``: refuses with ``LayoutBusy`` while
+        an ``apply_ops`` batch holds the session's lock.
+        """
+        if not is_valid_session_id(session_id):
+            raise SessionNotFound()
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+        session = self.store.get(session_id)
+        if session is None:
+            raise SessionNotFound()
+        if expected_session_seq is not None and expected_session_seq != session.seq:
+            raise SessionSeqConflict(expected_session_seq, session.seq)
+        payload = commit(session.seq + 1)
+        op = {
+            "op": "graph_change_staged",
+            # What changed, not the main-graph snapshot each entry keeps as
+            # its base nor the writer's resolved actor id: the stream reaches
+            # anyone holding the session id, and those are the diff's, read
+            # with authorization.
+            "entries": [
+                {k: v for k, v in entry.items() if k not in _STREAM_WITHHELD}
+                for entry in payload.get("entries", [])
+            ],
+            "removals": payload.get("removals", []),
+            "client_id": GRAPH_STAGING_CLIENT_ID,
+        }
+        applied = self.store.apply_state_op(session, op, record_activity=False)
+        try:
+            self.store.persist(session)
+        except Exception:
+            logger.exception(
+                "staged change in session %s landed; persisting its seq failed",
+                session_id,
+            )
+        self.bus.publish(
+            session_id,
+            {
+                "type": "op",
+                "client_id": GRAPH_STAGING_CLIENT_ID,
+                "op": applied,
+                "seq": applied["seq"],
+            },
+        )
+        return applied
+
+    def check_layer_op(self, session_id: str) -> None:
+        """Refuse a discard or merge up front, as a staging op is refused:
+        ``SessionNotFound`` without the session's document, ``LayoutBusy``
+        while an ``apply_ops`` batch holds its lock - so the op that follows
+        the layer change can always be applied."""
+        if not is_valid_session_id(session_id):
+            raise SessionNotFound()
+        if self.store.get(session_id) is None:
+            raise SessionNotFound()
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+
+    def announce_layer_change(
+        self, session_id: str, op: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Fan out a change the layer store has already made (§12, §15):
+        ``graph_changes_discarded`` or ``graph_changes_merged``, carrying keys
+        only. The layer change is the commit point; this follows it, and a
+        failure here is logged, never undoes it. Records a session activity
+        entry with no inverse. Returns the applied op, or None when there was
+        no document left to apply it to or the session lock was held."""
+        session = (
+            self.store.get(session_id) if is_valid_session_id(session_id) else None
+        )
+        if session is None:
+            logger.warning(
+                "layer of session %s changed; its document is gone, so no op fans out",
+                session_id,
+            )
+            return None
+        # Callers run check_layer_op first with no await in between, so the
+        # lock is free here. One that awaited in between could find an
+        # apply_ops batch holding it across its persist (the one holder that
+        # awaits under it) and interleave this op with that write. Withheld
+        # rather than raised: the layer change has already committed.
+        if self._lock(session_id).locked():
+            logger.warning(
+                "layer of session %s changed while its lock was held; no op fans out",
+                session_id,
+            )
+            return None
+        try:
+            applied = self.store.apply_state_op(
+                session,
+                {**op, "client_id": GRAPH_STAGING_CLIENT_ID},
+                record_activity=True,
+            )
+        except Exception:
+            logger.exception("layer of session %s changed; its op failed", session_id)
+            return None
+        try:
+            self.store.persist(session)
+        except Exception:
+            logger.exception(
+                "layer of session %s changed; persisting its seq failed", session_id
+            )
+        self.bus.publish(
+            session_id,
+            {
+                "type": "op",
+                "client_id": GRAPH_STAGING_CLIENT_ID,
+                "op": applied,
+                "seq": applied["seq"],
+            },
+        )
+        return applied
 
     def get_session(self, session_id: str) -> Optional[Session]:
         return self.store.get(session_id)
@@ -612,7 +1089,12 @@ class SessionManager:
         return self.store.get(session_id)
 
     async def delete_session(
-        self, session_id: str, deleted_by: Optional[str] = None
+        self,
+        session_id: str,
+        deleted_by: Optional[str] = None,
+        *,
+        discard_staged: bool = False,
+        authorize_staged: Optional[Callable[[], None]] = None,
     ) -> bool:
         # Same per-session lock apply_ops uses (R10): without it, an in-flight
         # apply_ops batch that already holds a `Session` reference can persist()
@@ -630,17 +1112,31 @@ class SessionManager:
         # session_id ever deleted); `max_sessions` already bounds how many
         # sessions can exist at once.
         async with self._lock(session_id):
-            existed = self.store.delete(session_id)
+            write_mode = self._retire_for_delete(
+                session_id, discard_staged, authorize_staged
+            )
+            existed = self.store.delete(session_id) or write_mode == WRITE_MODE_STAGED
         if existed:
             # Broadcast before tearing down so connected clients get the notice.
+            # It carries the write mode, so a client leaving a staged session
+            # creates its replacement staged too (§13).
             self.bus.publish(
                 session_id,
-                {"type": "session_deleted", "deleted_by": deleted_by},
+                {
+                    "type": "session_deleted",
+                    "deleted_by": deleted_by,
+                    "write_mode": write_mode,
+                },
             )
         return existed
 
     def rename_session_sync(
-        self, session_id: str, name: Optional[str], client_id: Optional[str] = None
+        self,
+        session_id: str,
+        name: Optional[str],
+        client_id: Optional[str] = None,
+        *,
+        rate_limit_label: Optional[str] = None,
     ) -> Session:
         """Rename a session **synchronously** (the MCP tool path).
 
@@ -656,12 +1152,22 @@ class SessionManager:
 
         ``get_or_create`` first (R7): a rename for an id that only exists in a
         browser URL/recents must materialise it rather than raise, matching the
-        async path and the REST ``PATCH``.
+        async path and the REST ``PATCH``. The rate check comes before it, so a
+        refused rename materialises nothing.
+
+        Charges one token to ``_mcp_bucket`` under the key
+        ``_mcp_rate_limit_key(client_id or "rest", rate_limit_label)``, like
+        every other synchronous MCP write.
         """
         if not is_valid_session_id(session_id):
             raise SessionNotFound()
         if name is not None and not isinstance(name, str):
             raise OpError("'name' must be a string or null")
+        actor = client_id or "rest"
+        if not self._mcp_bucket.consume(
+            self._mcp_rate_limit_key(actor, rate_limit_label), 1.0
+        ):
+            raise RateLimited()
         self.get_or_create(session_id)
         if self._lock(session_id).locked():
             raise LayoutBusy()
@@ -669,39 +1175,17 @@ class SessionManager:
         if session is None:
             raise SessionNotFound()
 
-        op = {"op": "session_renamed", "name": name, "client_id": client_id or "rest"}
-        saved_state = copy.deepcopy(session.state)
-        saved_seq = session.seq
-        saved_name = session.name
-        saved_updated_at = session.updated_at
-        ring = self.store.ring(session_id)
-        saved_ring = list(ring) if ring is not None else None
-        try:
-            applied = self.store.apply_state_op(session, op)
-            self.store.persist(session)
-        except Exception:
-            session.state = saved_state
-            session.seq = saved_seq
-            session.name = saved_name
-            session.updated_at = saved_updated_at
-            if ring is not None and saved_ring is not None:
-                ring.clear()
-                ring.extend(saved_ring)
-            raise
-
-        self.bus.publish(
-            session_id,
-            {
-                "type": "op",
-                "client_id": op["client_id"],
-                "op": applied,
-                "seq": applied["seq"],
-            },
-        )
+        op = {"op": "session_renamed", "name": name, "client_id": actor}
+        self._apply_op_sync(session, session_id, actor, op)
         return session
 
     def delete_session_sync(
-        self, session_id: str, deleted_by: Optional[str] = None
+        self,
+        session_id: str,
+        deleted_by: Optional[str] = None,
+        *,
+        rate_limit_label: Optional[str] = None,
+        discard_staged: bool = False,
     ) -> bool:
         """Delete a session **synchronously** (the MCP tool path).
 
@@ -712,14 +1196,31 @@ class SessionManager:
         otherwise deletes inline on the event-loop thread, where no coroutine can
         interleave. Stale lock objects are left in ``self._locks`` for the same
         reason ``delete_session`` documents.
+
+        Charges one token to ``_mcp_bucket`` under the key
+        ``_mcp_rate_limit_key(deleted_by or "rest", rate_limit_label)``, like
+        every other synchronous MCP write. A malformed id is reported as not
+        found before that charge, as ``rename_session_sync`` does, so a direct
+        caller that skipped the tool's own id check spends nothing on it.
         """
+        if not is_valid_session_id(session_id):
+            return False
+        if not self._mcp_bucket.consume(
+            self._mcp_rate_limit_key(deleted_by or "rest", rate_limit_label), 1.0
+        ):
+            raise RateLimited()
         if self._lock(session_id).locked():
             raise LayoutBusy()
-        existed = self.store.delete(session_id)
+        write_mode = self._retire_for_delete(session_id, discard_staged)
+        existed = self.store.delete(session_id) or write_mode == WRITE_MODE_STAGED
         if existed:
             self.bus.publish(
                 session_id,
-                {"type": "session_deleted", "deleted_by": deleted_by},
+                {
+                    "type": "session_deleted",
+                    "deleted_by": deleted_by,
+                    "write_mode": write_mode,
+                },
             )
         return existed
 
@@ -786,7 +1287,13 @@ class SessionManager:
             raise OpBatchTooLarge()
         if not isinstance(client_id, str) or not client_id:
             raise OpError("'client_id' is required")
-        if not self._bucket.consume(client_id, max(1, len(ops))):
+        cost = max(1, len(ops))
+        # A batch costing more than the full bucket can never be admitted,
+        # however long the client backs off, so it is too large rather than a
+        # retryable rate limit — the same rule as ``_consume_mcp_budget``.
+        if cost > self._bucket.capacity:
+            raise OpBatchTooLarge()
+        if not self._bucket.consume(client_id, cost):
             raise RateLimited()
 
         if self.store.get(session_id) is None:
@@ -805,7 +1312,7 @@ class SessionManager:
             op_type = op.get("op")
             if op_type in CLAIM_OPS or op_type in LEASE_OPS:
                 self._validate_claim_op(op)
-            elif op_type not in STATE_OPS:
+            elif op_type not in STATE_OPS or op_type in SERVER_ONLY_OPS:
                 raise OpError(f"unknown op: {op_type!r}")
 
         async with self._lock(session_id):
@@ -821,12 +1328,17 @@ class SessionManager:
             # a persistence-layer failure (disk full, IO error) rolls back too —
             # otherwise in-memory state/seq/ring would advance while disk and all
             # subscribers stayed behind, duplicating non-idempotent ops on retry.
-            # The deepcopy cost is negligible at drag-end op cadence (D9).
+            # The activity log is copied shallowly: inside this region it is
+            # only appended to and pruned (``apply_state_op``), never edited in
+            # place, so a list copy restores it exactly. Deep-copying it here
+            # and again in the snapshot below cost ~28 ms of event-loop time
+            # per batch at the default 500-record cap.
             saved_state = copy.deepcopy(session.state)
             saved_seq = session.seq
             saved_name = session.name
             saved_updated_at = session.updated_at
-            saved_activity_log = copy.deepcopy(session.activity_log)
+            saved_activity_log = list(session.activity_log)
+            saved_deleted_ids = list(session._deleted_annotation_ids)
             ring = self.store.ring(session_id)
             saved_ring = list(ring) if ring is not None else None
 
@@ -892,7 +1404,7 @@ class SessionManager:
                     # the worker must never read ``session.state`` while a
                     # loop-thread writer (the synchronous ``apply_layout`` path)
                     # may be mutating it during this await. See persist_snapshot.
-                    snapshot = copy.deepcopy(session.to_dict())
+                    snapshot = _detached_snapshot(session)
 
                     # Cumulative budget check (smallfix-session-ops-path-ignores-
                     # image-budgets): the per-batch caps above only bound *one*
@@ -915,7 +1427,7 @@ class SessionManager:
                             f"bytes, over the {max_session_image_bytes}-byte "
                             "session limit"
                         )
-                    total_doc_bytes = len(json.dumps(snapshot))
+                    total_doc_bytes = _document_bytes(snapshot, session)
                     if total_doc_bytes > max_session_document_bytes:
                         raise ImageBudgetExceeded(
                             f"this batch would bring the session document to "
@@ -929,9 +1441,8 @@ class SessionManager:
                 session.name = saved_name
                 session.updated_at = saved_updated_at
                 session.activity_log = saved_activity_log
-                if ring is not None and saved_ring is not None:
-                    ring.clear()
-                    ring.extend(saved_ring)
+                _restore_deleted_ids(session, saved_deleted_ids)
+                self.store.restore_ring(session_id, saved_ring)
                 raise
 
             # Commit succeeded: apply ephemeral claim/lease effects and broadcast
@@ -1035,6 +1546,7 @@ class SessionManager:
         deltas: Optional[Dict[str, Any]] = None,
         expected_revision: Optional[int] = None,
         animation: Optional[Dict[str, Any]] = None,
+        rate_limit_label: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Apply one ``layout_applied`` op **synchronously** (the MCP write path).
 
@@ -1068,8 +1580,9 @@ class SessionManager:
             raise OpBatchTooLarge()
         if len(json.dumps(moves)) > self._max_op_batch_bytes:
             raise OpBatchTooLarge()
-        if not self._bucket.consume(client_id, max(1, len(moves))):
-            raise RateLimited()
+        self._consume_mcp_budget(
+            self._mcp_rate_limit_key(client_id, rate_limit_label), max(1, len(moves))
+        )
 
         # A held lock means an apply_ops batch is mid-flight for this session
         # (see the seq-ordering rationale in this method's docstring).
@@ -1118,6 +1631,8 @@ class SessionManager:
         node_ids: List[str],
         *,
         expected_revision: Optional[int] = None,
+        rate_limit_label: Optional[str] = None,
+        precharged: bool = False,
     ) -> Dict[str, Any]:
         """Add node references to a session **synchronously** (the MCP write path).
 
@@ -1135,6 +1650,11 @@ class SessionManager:
         Ids already in the session are not re-added and do not advance the
         session's revision: when the set adds nothing new the call is a no-op
         that broadcasts nothing.
+
+        Charges ``max(1, len(node_ids))`` to ``_mcp_bucket`` unless
+        ``precharged`` says the caller already paid through
+        ``consume_mcp_rate_budget``; a charge above the bucket's capacity is
+        ``OpBatchTooLarge``.
         """
         if not is_valid_session_id(session_id):
             raise SessionNotFound()
@@ -1146,8 +1666,11 @@ class SessionManager:
             raise OpBatchTooLarge()
         if len(json.dumps(node_ids)) > self._max_op_batch_bytes:
             raise OpBatchTooLarge()
-        if not self._bucket.consume(client_id, max(1, len(node_ids))):
-            raise RateLimited()
+        if not precharged:
+            self._consume_mcp_budget(
+                self._mcp_rate_limit_key(client_id, rate_limit_label),
+                max(1, len(node_ids)),
+            )
 
         # A held lock means an apply_ops batch is mid-flight for this session
         # (see apply_layout's docstring for the seq-ordering rationale).
@@ -1192,6 +1715,80 @@ class SessionManager:
             "node_count": len(session.state.get("node_refs", [])),
         }
 
+    def remove_node_refs(
+        self,
+        session_id: str,
+        client_id: str,
+        node_ids: List[str],
+        *,
+        expected_revision: Optional[int] = None,
+        rate_limit_label: Optional[str] = None,
+        precharged: bool = False,
+    ) -> Dict[str, Any]:
+        """Remove node references from a session **synchronously** (MCP write path).
+
+        The complement of ``add_node_refs``, with the same atomicity, cap and
+        rate-budget contract. It broadcasts the same ``nodes_removed`` op a
+        browser sends, so the stored state drops each removed node's position,
+        hidden/dimmed flags and group membership with it, and a later
+        ``add_node_refs`` of that id starts from a clean slate.
+
+        Ids not in the session are not removed and do not advance the revision:
+        when none of them is present the call is a no-op that broadcasts nothing.
+        """
+        if not is_valid_session_id(session_id):
+            raise SessionNotFound()
+        if not isinstance(client_id, str) or not client_id:
+            raise OpError("'client_id' is required")
+        if not isinstance(node_ids, list) or not node_ids:
+            raise OpError("'node_ids' must be a non-empty list")
+        if len(node_ids) > self._max_ops:
+            raise OpBatchTooLarge()
+        if len(json.dumps(node_ids)) > self._max_op_batch_bytes:
+            raise OpBatchTooLarge()
+        if not precharged:
+            self._consume_mcp_budget(
+                self._mcp_rate_limit_key(client_id, rate_limit_label),
+                max(1, len(node_ids)),
+            )
+
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+
+        session = self.store.get(session_id)
+        if session is None:
+            raise SessionNotFound()
+        if expected_revision is not None and expected_revision != session.seq:
+            raise RevisionConflict(expected_revision, session.seq)
+
+        present = set(session.state.get("node_refs", []))
+        removed: List[str] = []
+        for node_id in node_ids:
+            if not isinstance(node_id, str) or node_id not in present:
+                continue
+            present.discard(node_id)
+            removed.append(node_id)
+        if not removed:
+            return {
+                "applied": None,
+                "revision": session.seq,
+                "removed": [],
+                "node_count": len(session.state.get("node_refs", [])),
+            }
+
+        op: Dict[str, Any] = {
+            "op": "nodes_removed",
+            "node_ids": removed,
+            "client_id": client_id,
+        }
+        applied = self._apply_op_sync(session, session_id, client_id, op)
+        return {
+            "applied": applied,
+            "revision": session.seq,
+            "removed": removed,
+            "node_count": len(session.state.get("node_refs", [])),
+        }
+
     def upsert_annotation(
         self,
         session_id: str,
@@ -1201,6 +1798,7 @@ class SessionManager:
         expected_revision: Optional[int] = None,
         max_session_image_bytes: int = DEFAULT_MAX_SESSION_IMAGE_BYTES,
         max_session_document_bytes: int = DEFAULT_MAX_SESSION_DOCUMENT_BYTES,
+        rate_limit_label: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create, or replace by id, one annotation **synchronously** (MCP write path).
 
@@ -1236,7 +1834,9 @@ class SessionManager:
             raise OpError("'client_id' is required")
         if not isinstance(annotation, dict):
             raise OpError("'annotation' must be an object")
-        if not self._bucket.consume(client_id, 1):
+        if not self._mcp_bucket.consume(
+            self._mcp_rate_limit_key(client_id, rate_limit_label), 1
+        ):
             raise RateLimited()
 
         # A held lock means an apply_ops batch is mid-flight for this session
@@ -1304,6 +1904,7 @@ class SessionManager:
         max_session_image_bytes: int = DEFAULT_MAX_SESSION_IMAGE_BYTES,
         max_session_document_bytes: int = DEFAULT_MAX_SESSION_DOCUMENT_BYTES,
         expected_revision: Optional[int] = None,
+        rate_limit_label: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create, or replace by id, one `image` annotation (MCP write path).
 
@@ -1352,13 +1953,16 @@ class SessionManager:
         could lock out everyone else. The REST ingest endpoint passes the
         request's source key for exactly that reason.
 
-        When it is omitted the throttle falls back to ``client_id`` in the
-        shared op bucket. That is the MCP path, and it is a known instance of
-        the same shared-marker problem, not an exemption from it: every MCP
-        tool passes one fixed agent marker, so all MCP callers share a bucket.
-        Fixing that needs a decision about what an MCP caller should be keyed
-        on (no request source exists at those call sites), so it is tracked
-        separately rather than settled here.
+        When it is omitted the throttle falls back to ``client_id`` in
+        ``_mcp_bucket`` (the same dedicated bucket every other synchronous MCP
+        write method uses — see its definition in ``__init__``), not in the
+        browser-reachable ``_bucket`` ``/ops`` draws from. That is the MCP
+        path, and every MCP tool still passes one fixed agent marker, so all
+        MCP callers still share one bucket *key* — that is a separate, broader
+        question (what an MCP caller should be keyed on, with no request
+        source at those call sites) tracked and left open elsewhere; only the
+        bucket's reachability from an unauthenticated ``client_id`` is settled
+        here.
         """
         if not is_valid_session_id(session_id):
             raise SessionNotFound()
@@ -1366,12 +1970,6 @@ class SessionManager:
             raise OpError("'client_id' is required")
         if not isinstance(annotation, dict):
             raise OpError("'annotation' must be an object")
-        if rate_limit_key is not None:
-            if not self._image_bucket.consume(rate_limit_key, 1):
-                raise RateLimited()
-        elif not self._bucket.consume(client_id, 1):
-            raise RateLimited()
-
         if self._lock(session_id).locked():
             raise LayoutBusy()
 
@@ -1423,6 +2021,15 @@ class SessionManager:
             lease_client_id if lease_client_id is not None else client_id,
             op,
         )
+
+        if rate_limit_key is not None:
+            if not self._image_bucket.consume(rate_limit_key, 1):
+                raise RateLimited()
+        elif not self._mcp_bucket.consume(
+            self._mcp_rate_limit_key(client_id, rate_limit_label), 1
+        ):
+            raise RateLimited()
+
         applied = self._apply_op_sync(session, session_id, client_id, op)
         if applied is None:
             raise AnnotationRecentlyDeleted(annotation.get("id"))
@@ -1440,6 +2047,7 @@ class SessionManager:
         *,
         expected_revision: Optional[int] = None,
         base_version: Optional[int] = None,
+        rate_limit_label: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Patch one existing annotation **synchronously** (MCP write path).
 
@@ -1474,7 +2082,9 @@ class SessionManager:
             raise OpError("'patch' must be an object with a string 'id'")
         if len(json.dumps(patch)) > self._max_op_batch_bytes:
             raise OpBatchTooLarge()
-        if not self._bucket.consume(client_id, 1):
+        if not self._mcp_bucket.consume(
+            self._mcp_rate_limit_key(client_id, rate_limit_label), 1
+        ):
             raise RateLimited()
 
         if self._lock(session_id).locked():
@@ -1510,6 +2120,7 @@ class SessionManager:
         annotation_id: str,
         *,
         expected_revision: Optional[int] = None,
+        rate_limit_label: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Delete one annotation by id **synchronously** (MCP write path).
 
@@ -1528,7 +2139,9 @@ class SessionManager:
             raise OpError("'client_id' is required")
         if not isinstance(annotation_id, str) or not annotation_id:
             raise OpError("'annotation_id' is required")
-        if not self._bucket.consume(client_id, 1):
+        if not self._mcp_bucket.consume(
+            self._mcp_rate_limit_key(client_id, rate_limit_label), 1
+        ):
             raise RateLimited()
 
         if self._lock(session_id).locked():
@@ -1568,6 +2181,7 @@ class SessionManager:
         member_node_ids: List[str],
         *,
         expected_revision: Optional[int] = None,
+        rate_limit_label: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Replace a ``group`` annotation's ``member_node_ids`` **synchronously**
         (the MCP write path for group membership).
@@ -1602,7 +2216,9 @@ class SessionManager:
             raise OpError("'member_node_ids' must be a list of strings")
         if len(json.dumps(member_node_ids)) > self._max_op_batch_bytes:
             raise OpBatchTooLarge()
-        if not self._bucket.consume(client_id, 1):
+        if not self._mcp_bucket.consume(
+            self._mcp_rate_limit_key(client_id, rate_limit_label), 1
+        ):
             raise RateLimited()
 
         if self._lock(session_id).locked():
@@ -1698,7 +2314,10 @@ class SessionManager:
         if conflict_reason is not None:
             raise UndoConflict(record["id"], conflict_reason)
 
-        inverse_op = dict(record["inverse_op"])
+        # Deep, so the replay never shares objects with the record: state an
+        # op later edits in place must not reach back into the activity log,
+        # whose rollback copies are shallow.
+        inverse_op = copy.deepcopy(record["inverse_op"])
         # Undo is a browser write like any other, so it answers to the same
         # edit-lease rule apply_ops does. Actor-scoping is not a substitute:
         # undo reverts *your own* past action, but the annotation it touches
@@ -1718,6 +2337,7 @@ class SessionManager:
             if holder is not None and holder != client_id:
                 raise LeaseConflict(conflict_id, holder)
 
+        saved_deleted_ids = list(session._deleted_annotation_ids)
         if inverse_op.get("op") == "annotation_created":
             ann_id = (inverse_op.get("annotation") or {}).get("id")
             if isinstance(ann_id, str):
@@ -1733,23 +2353,39 @@ class SessionManager:
         # self-echo.
         inverse_op["client_id"] = _UNDO_REPLAY_CLIENT_ID
 
-        applied = self._apply_op_sync(
-            session,
-            session_id,
-            _UNDO_REPLAY_CLIENT_ID,
-            inverse_op,
-            record_activity=False,
-            trusted_replay=True,
-        )
+        # Marked before the replay so its one persist writes the reverted state
+        # and the flag together; a second write afterwards could fail and leave
+        # the record undone in memory but not on disk. ``_apply_op_sync`` rolls
+        # back the state on failure; the record is not part of its (shallow)
+        # log copy, so its flags are restored here — but only while seq shows
+        # nothing was committed: a broadcast that fails after the persist
+        # landed must leave memory matching what is now on disk.
+        saved_flags = {k: record[k] for k in ("undone", "undone_at") if k in record}
+        seq_before = session.seq
+        record["undone"] = True
+        record["undone_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        applied = None
+        try:
+            applied = self._apply_op_sync(
+                session,
+                session_id,
+                _UNDO_REPLAY_CLIENT_ID,
+                inverse_op,
+                record_activity=False,
+                trusted_replay=True,
+            )
+        finally:
+            if session.seq == seq_before:
+                record.pop("undone", None)
+                record.pop("undone_at", None)
+                record.update(saved_flags)
+                _restore_deleted_ids(session, saved_deleted_ids)
         if applied is None:
             # The conflict check above passed but the replay still turned out
             # to be a no-op (e.g. the store dropped it as an update on a
             # since-deleted annotation) — surface it the same way any other
             # unsafe-to-undo state does, rather than marking the record undone.
             raise UndoConflict(record["id"], "action could not be reverted")
-        record["undone"] = True
-        record["undone_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        self.store.persist(session)
 
         return {
             "undone_activity_id": record["id"],
@@ -1764,8 +2400,8 @@ class SessionManager:
         """Raise ``LeaseConflict`` if ``op`` would mutate an annotation a
         *different* client currently holds a live edit lease on.
 
-        Shared by every synchronous MCP write method that can mutate an
-        existing annotation (``upsert_annotation``/``upsert_image_annotation``/
+        Shared by every synchronous MCP write method whose op targets an
+        annotation directly (``upsert_annotation``/``upsert_image_annotation``/
         ``update_annotation``/``delete_annotation``/``set_group_members``) —
         each calls this immediately before its own ``_apply_op_sync``, after
         every other precondition (revision/existence/budget checks), so a
@@ -1799,13 +2435,15 @@ class SessionManager:
         """Apply, persist and broadcast one state op on the calling thread.
 
         Snapshots for rollback so a persistence failure leaves in-memory state,
-        seq and ring untouched — mirroring apply_ops' all-or-nothing guarantee.
+        name, seq and ring untouched — mirroring apply_ops' all-or-nothing
+        guarantee (``session_renamed`` writes ``session.name``, not the state).
         Returns ``None`` when ``apply_state_op`` reports a legitimate no-op (e.g.
         an update on an already-deleted annotation, or a create retry for an id
         another collaborator just deleted) — nothing is persisted or broadcast,
         and the caller decides how to surface that (the two annotation callers
-        above raise a typed exception; ``apply_layout``/``add_node_refs`` never
-        hit this branch, since their ops always apply). ``record_activity=False``
+        above raise a typed exception; ``apply_layout``, ``add_node_refs``,
+        ``remove_node_refs`` and ``rename_session_sync`` never hit this branch,
+        since their ops always apply). ``record_activity=False``
         is passed through to ``apply_state_op`` by ``undo_last_action`` so
         replaying an inverse op does not itself become a new undoable action,
         together with ``trusted_replay=True`` so restoring the session's own
@@ -1813,8 +2451,11 @@ class SessionManager:
         """
         saved_state = copy.deepcopy(session.state)
         saved_seq = session.seq
+        saved_name = session.name
         saved_updated_at = session.updated_at
-        saved_activity_log = copy.deepcopy(session.activity_log)
+        # Shallow, as in apply_ops: an op only appends to and prunes the log.
+        saved_activity_log = list(session.activity_log)
+        saved_deleted_ids = list(session._deleted_annotation_ids)
         ring = self.store.ring(session_id)
         saved_ring = list(ring) if ring is not None else None
         try:
@@ -1829,11 +2470,11 @@ class SessionManager:
         except Exception:
             session.state = saved_state
             session.seq = saved_seq
+            session.name = saved_name
             session.updated_at = saved_updated_at
             session.activity_log = saved_activity_log
-            if ring is not None and saved_ring is not None:
-                ring.clear()
-                ring.extend(saved_ring)
+            _restore_deleted_ids(session, saved_deleted_ids)
+            self.store.restore_ring(session_id, saved_ring)
             raise
 
         if applied is None:
@@ -1963,3 +2604,127 @@ class SessionManager:
             return False
         self.bus.publish(session_id, {"type": "command", "command": command})
         return True
+
+    # ---------------- summon to viewport ----------------
+
+    def summon_viewport(
+        self, session_id: str, client_id: str, bounds: Any
+    ) -> Dict[str, Any]:
+        """Ask every client connected to ``session_id`` to frame ``bounds``.
+
+        The browser path (REST ``/summon``): charged to the op bucket under the
+        caller's ``client_id`` like ``/ops``, so summoning cannot be used to
+        flood collaborators' cameras. The summoner is named by the display name
+        its ``client_id`` joined the session's presence with; the request
+        carries no free-text name. ``client_id`` is self-asserted, as it is for
+        ``/ops``, so the name is a courtesy label, not an authenticated
+        identity.
+
+        Ephemeral by design: the event goes straight to the bus — no state
+        change, no ``seq``, no ring entry — so a client joining later is not
+        moved and a catch-up never replays it.
+
+        Raises ``OpError`` for an invalid target, ``SessionNotFound`` for an
+        unknown session (a summon never creates one) and ``RateLimited``.
+        """
+        target = self._check_summon(session_id, client_id, bounds)
+        if not self._bucket.consume(client_id, 1.0):
+            raise RateLimited()
+        member = next(
+            (
+                m
+                for m in self.presence.roster(session_id)
+                if m.get("client_id") == client_id
+            ),
+            None,
+        )
+        return self._publish_summon(
+            session_id,
+            client_id,
+            target,
+            member.get("display_name") if member else None,
+        )
+
+    def summon_viewport_sync(
+        self,
+        session_id: str,
+        client_id: str,
+        bounds: Any,
+        *,
+        display_name: Optional[str],
+        rate_limit_label: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """``summon_viewport`` for the MCP tool path: charges ``_mcp_bucket``
+        like every other synchronous MCP write, and names the summoner with the
+        ``display_name`` the tool resolved."""
+        target = self._check_summon(session_id, client_id, bounds)
+        self._consume_mcp_budget(
+            self._mcp_rate_limit_key(client_id, rate_limit_label), 1.0
+        )
+        return self._publish_summon(session_id, client_id, target, display_name)
+
+    def _check_summon(
+        self, session_id: str, client_id: str, bounds: Any
+    ) -> Dict[str, float]:
+        if not is_valid_session_id(session_id):
+            raise SessionNotFound()
+        if not isinstance(client_id, str) or not client_id:
+            raise OpError("'client_id' is required")
+        target = validate_summon_bounds(bounds)
+        if self.store.get(session_id) is None:
+            raise SessionNotFound()
+        return target
+
+    def _publish_summon(
+        self,
+        session_id: str,
+        client_id: str,
+        target: Dict[str, float],
+        display_name: Optional[str],
+    ) -> Dict[str, Any]:
+        # Only the target and the summoner's name, plus the originating
+        # client_id envelope every broadcast carries (the summoner's own
+        # browser uses it to ignore its echo).
+        self.bus.publish(
+            session_id,
+            {
+                "type": "viewport_summoned",
+                "client_id": client_id,
+                "summoned_by": display_name,
+                "bounds": target,
+            },
+        )
+        return {
+            "bounds": target,
+            "connected_clients": self.presence.count(session_id),
+        }
+
+
+# Model-space coordinates are pixels at zoom 1; anything this far out is a
+# caller error, not a region a canvas could usefully frame.
+_SUMMON_MAX_COORDINATE = 1e7
+
+
+def validate_summon_bounds(bounds: Any) -> Dict[str, float]:
+    """Normalise a summon target ``{x, y, width, height}`` in model space.
+
+    ``x``/``y`` is the region's top-left corner, the same convention as node
+    positions in the layout contract. Every value must be a finite number
+    within ``±_SUMMON_MAX_COORDINATE`` and the extent strictly positive, so
+    every client — whatever its screen size — can fit the same region.
+    """
+    if not isinstance(bounds, dict):
+        raise OpError("'bounds' must be an object with x, y, width and height")
+    normalised: Dict[str, float] = {}
+    for key in ("x", "y", "width", "height"):
+        value = bounds.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise OpError(f"bounds.{key} must be a number")
+        # Range-checked before float(): a JSON integer beyond float range
+        # parses to a Python int that float() would refuse with OverflowError.
+        if value != value or abs(value) > _SUMMON_MAX_COORDINATE:
+            raise OpError(f"bounds.{key} must be a finite number")
+        normalised[key] = float(value)
+    if normalised["width"] <= 0 or normalised["height"] <= 0:
+        raise OpError("bounds.width and bounds.height must be positive")
+    return normalised

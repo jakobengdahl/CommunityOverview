@@ -106,6 +106,9 @@ describe('GraphCanvas preserves groups and annotations across an in-place node e
     });
 
     expectOverlaysPresent();
+    // The edit itself must land too, not only survive alongside the overlays:
+    // node-1's own data carries the edited field.
+    expect(store.nodes.find((n) => n.id === 'node-1').data.description).toBe('edited');
   });
 
   it('still clears every overlay on an explicit clearGroupsFlag (genuine replace/clear)', () => {
@@ -137,5 +140,235 @@ describe('GraphCanvas preserves groups and annotations across an in-place node e
     expect(ids.has('note-1')).toBe(false);
     expect(ids.has('label-1')).toBe(false);
     expect(ids.has('shape-1')).toBe(false);
+  });
+
+  // A host passes canvasBaselineEpoch (moved on every clear); a host that does
+  // not falls back to the rise of clearGroupsFlag.
+  it.each([
+    ['with canvasBaselineEpoch', { canvasBaselineEpoch: 0 }, { canvasBaselineEpoch: 1 }],
+    ['without canvasBaselineEpoch', {}, {}],
+  ])(
+    'keeps the restored overlays of a just-opened session when the nodes change while clearGroupsFlag is still raised (%s)',
+    (_label, before, opened) => {
+      const nodeA = { id: 'node-a', name: 'A', type: 'Actor', description: 'a' };
+      const { rerender } = render(<GraphCanvas nodes={[nodeA]} edges={[]} {...before} />);
+
+      // Opening a session: clearVisualization raises the flag and the session's
+      // overlays are queued for restore in the same commit.
+      const nodeB = { id: 'node-b', name: 'B', type: 'Actor', description: 'b' };
+      const groups = GROUPS_TO_RESTORE.map((g) => ({ ...g }));
+      const annotations = ANNOTATIONS_TO_RESTORE.map((a) => ({ ...a }));
+      act(() => {
+        rerender(
+          <GraphCanvas
+            nodes={[nodeB]}
+            edges={[]}
+            clearGroupsFlag={true}
+            groupsToRestore={groups}
+            annotationsToRestore={annotations}
+            {...opened}
+          />
+        );
+      });
+      expectOverlaysPresent();
+
+      // Inside the flag's window the node list changes again (hydration,
+      // layout). That re-run must not drop the overlays the restore just added:
+      // the next autosave would send a delete for each of them.
+      act(() => {
+        rerender(
+          <GraphCanvas
+            nodes={[{ ...nodeB, description: 'hydrated' }]}
+            edges={[]}
+            clearGroupsFlag={true}
+            groupsToRestore={groups}
+            annotationsToRestore={annotations}
+            {...opened}
+          />
+        );
+      });
+      expectOverlaysPresent();
+    }
+  );
+
+  it('drops the overlays on a second clear while clearGroupsFlag is still raised from the first', () => {
+    const nodeA = { id: 'node-a', name: 'A', type: 'Actor', description: 'a' };
+    const { rerender } = render(
+      <GraphCanvas nodes={[nodeA]} edges={[]} sessionKey="s1" canvasBaselineEpoch={0} />
+    );
+    act(() => {
+      rerender(
+        <GraphCanvas
+          nodes={[nodeA]}
+          edges={[]}
+          sessionKey="s1"
+          canvasBaselineEpoch={1}
+          clearGroupsFlag={true}
+          groupsToRestore={GROUPS_TO_RESTORE.map((g) => ({ ...g }))}
+          annotationsToRestore={ANNOTATIONS_TO_RESTORE.map((a) => ({ ...a }))}
+        />
+      );
+    });
+    expectOverlaysPresent();
+
+    // The shared reset timer keeps the flag up through a second clear, so only
+    // the epoch tells the canvas this is a new wholesale replace.
+    act(() => {
+      rerender(
+        <GraphCanvas
+          nodes={[]}
+          edges={[]}
+          sessionKey="s1"
+          canvasBaselineEpoch={2}
+          clearGroupsFlag={true}
+        />
+      );
+    });
+    const ids = manualNodeIds();
+    expect(ids.has('g1')).toBe(false);
+    expect(ids.has('note-1')).toBe(false);
+    expect(ids.has('label-1')).toBe(false);
+    expect(ids.has('shape-1')).toBe(false);
+  });
+
+  it('keeps the overlays when canvasBaselineEpoch moves without clearGroupsFlag', () => {
+    // A host may move the epoch only to drop the undo history on a new result.
+    const nodeA = { id: 'node-a', name: 'A', type: 'Actor', description: 'a' };
+    const { rerender } = render(
+      <GraphCanvas
+        nodes={[nodeA]}
+        edges={[]}
+        canvasBaselineEpoch={0}
+        groupsToRestore={GROUPS_TO_RESTORE}
+        annotationsToRestore={ANNOTATIONS_TO_RESTORE}
+      />
+    );
+    expectOverlaysPresent();
+
+    const nodeB = { id: 'node-b', name: 'B', type: 'Actor', description: 'b' };
+    act(() => {
+      rerender(
+        <GraphCanvas
+          nodes={[nodeB]}
+          edges={[]}
+          canvasBaselineEpoch={1}
+          groupsToRestore={GROUPS_TO_RESTORE}
+          annotationsToRestore={ANNOTATIONS_TO_RESTORE}
+        />
+      );
+    });
+    expectOverlaysPresent();
+  });
+
+  it('keeps the restored overlays when the host hands over the new sessionKey after restoring', () => {
+    const nodeA = { id: 'node-a', name: 'A', type: 'Actor', description: 'a' };
+    const { rerender } = render(
+      <GraphCanvas nodes={[nodeA]} edges={[]} sessionKey="s1" canvasBaselineEpoch={0} />
+    );
+
+    // The switch loads first: clear and restore land under the old key.
+    const nodeB = { id: 'node-b', name: 'B', type: 'Actor', description: 'b' };
+    const groups = {
+      groups: GROUPS_TO_RESTORE.map((g) => ({ ...g })),
+      parentIds: { 'node-b': 'g1' },
+    };
+    const annotations = ANNOTATIONS_TO_RESTORE.map((a) => ({ ...a }));
+    act(() => {
+      rerender(
+        <GraphCanvas
+          nodes={[nodeB]}
+          edges={[]}
+          sessionKey="s1"
+          canvasBaselineEpoch={1}
+          clearGroupsFlag={true}
+          groupsToRestore={groups}
+          annotationsToRestore={annotations}
+        />
+      );
+    });
+    expectOverlaysPresent();
+
+    // Then the new id is adopted, nothing left to restore.
+    act(() => {
+      rerender(
+        <GraphCanvas
+          nodes={[nodeB]}
+          edges={[]}
+          sessionKey="s2"
+          canvasBaselineEpoch={1}
+          clearGroupsFlag={true}
+        />
+      );
+    });
+    expectOverlaysPresent();
+    // The group keeps its members too, or the autosave would store it empty.
+    expect(store.nodes.find((n) => n.id === 'node-b').parentId).toBe('g1');
+  });
+
+  it('drops the overlays on a sessionKey change outside a clear', () => {
+    const nodeA = { id: 'node-a', name: 'A', type: 'Actor', description: 'a' };
+    const { rerender } = render(
+      <GraphCanvas
+        nodes={[nodeA]}
+        edges={[]}
+        sessionKey="s1"
+        groupsToRestore={GROUPS_TO_RESTORE}
+        annotationsToRestore={ANNOTATIONS_TO_RESTORE}
+      />
+    );
+    expectOverlaysPresent();
+
+    act(() => {
+      rerender(
+        <GraphCanvas
+          nodes={[nodeA]}
+          edges={[]}
+          sessionKey="s2"
+          groupsToRestore={GROUPS_TO_RESTORE}
+          annotationsToRestore={ANNOTATIONS_TO_RESTORE}
+        />
+      );
+    });
+    const ids = manualNodeIds();
+    expect(ids.has('g1')).toBe(false);
+    expect(ids.has('note-1')).toBe(false);
+  });
+
+  it('gives a node shared by both sessions the target session position on a switch', () => {
+    const shared = { id: 'shared', name: 'S', type: 'Actor', description: 's' };
+    const { rerender } = render(
+      <GraphCanvas
+        nodes={[{ ...shared, _savedPosition: { x: 900, y: 900 } }]}
+        edges={[]}
+        sessionKey="s1"
+        canvasBaselineEpoch={0}
+      />
+    );
+    expect(store.nodes.find((n) => n.id === 'shared').position).toEqual({ x: 900, y: 900 });
+
+    const target = [{ ...shared, _savedPosition: { x: 40, y: 40 } }];
+    act(() => {
+      rerender(
+        <GraphCanvas
+          nodes={target}
+          edges={[]}
+          sessionKey="s1"
+          canvasBaselineEpoch={1}
+          clearGroupsFlag={true}
+        />
+      );
+    });
+    act(() => {
+      rerender(
+        <GraphCanvas
+          nodes={target}
+          edges={[]}
+          sessionKey="s2"
+          canvasBaselineEpoch={1}
+          clearGroupsFlag={true}
+        />
+      );
+    });
+    expect(store.nodes.find((n) => n.id === 'shared').position).toEqual({ x: 40, y: 40 });
   });
 });

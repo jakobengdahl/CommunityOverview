@@ -7,12 +7,18 @@ This module provides FastAPI endpoints for:
 
 All graph mutations go through ChatService -> GraphService.
 This module does NOT create graph objects directly.
+
+Every route that reaches the graph binds the caller's request authorization
+(as the REST and MCP surfaces do), so the assistant's tool calls are
+authorized as the caller rather than as an anonymous request.
 """
 
 import logging
 from typing import List, Dict, Any, Optional
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
+
+from backend.runtime.authorization import use_request_authorization
 
 from .chat_service import ChatService
 from .document_service import DocumentService
@@ -172,7 +178,7 @@ def create_ui_router(
     # ==================== Chat Endpoints ====================
 
     @router.post("/chat", response_model=ChatResponse)
-    async def chat(request: ChatRequest) -> ChatResponse:
+    async def chat(request: ChatRequest, http_request: Request) -> ChatResponse:
         """
         Process a chat message with the LLM.
 
@@ -189,18 +195,19 @@ def create_ui_router(
             # Convert messages to dict format
             messages = [msg.model_dump() for msg in request.messages]
 
-            result = chat_service.process_message(
-                messages=messages,
-                api_key=request.api_key,
-                provider=request.provider,
-                model_profile_id=request.model_profile_id,
-                federation_depth=request.federation_depth,
-                expert_agent_id=request.expert_agent_id,
-                skills_context=request.skills_context,
-                collection_short_name=request.collection_short_name,
-                visible_node_ids=request.visible_node_ids,
-                selected_node_ids=request.selected_node_ids,
-            )
+            with use_request_authorization(headers=http_request.headers):
+                result = chat_service.process_message(
+                    messages=messages,
+                    api_key=request.api_key,
+                    provider=request.provider,
+                    model_profile_id=request.model_profile_id,
+                    federation_depth=request.federation_depth,
+                    expert_agent_id=request.expert_agent_id,
+                    skills_context=request.skills_context,
+                    collection_short_name=request.collection_short_name,
+                    visible_node_ids=request.visible_node_ids,
+                    selected_node_ids=request.selected_node_ids,
+                )
 
             return ChatResponse(
                 content=result.get("content", ""),
@@ -212,7 +219,9 @@ def create_ui_router(
             raise HTTPException(status_code=500, detail="Internal server error")
 
     @router.post("/chat/simple", response_model=ChatResponse)
-    async def chat_simple(request: SimpleChatRequest) -> ChatResponse:
+    async def chat_simple(
+        request: SimpleChatRequest, http_request: Request
+    ) -> ChatResponse:
         """
         Simplified chat endpoint for single messages.
 
@@ -226,14 +235,15 @@ def create_ui_router(
             LLM response with any tool results
         """
         try:
-            result = chat_service.process_chat_request(
-                user_message=request.message,
-                api_key=request.api_key,
-                provider=request.provider,
-                model_profile_id=request.model_profile_id,
-                federation_depth=request.federation_depth,
-                expert_agent_id=request.expert_agent_id,
-            )
+            with use_request_authorization(headers=http_request.headers):
+                result = chat_service.process_chat_request(
+                    user_message=request.message,
+                    api_key=request.api_key,
+                    provider=request.provider,
+                    model_profile_id=request.model_profile_id,
+                    federation_depth=request.federation_depth,
+                    expert_agent_id=request.expert_agent_id,
+                )
 
             return ChatResponse(
                 content=result.get("content", ""),
@@ -245,7 +255,9 @@ def create_ui_router(
             raise HTTPException(status_code=500, detail="Internal server error")
 
     @router.post("/propose-nodes")
-    async def propose_nodes_from_text(request: ProposeNodesRequest) -> Dict[str, Any]:
+    async def propose_nodes_from_text(
+        request: ProposeNodesRequest, http_request: Request
+    ) -> Dict[str, Any]:
         """
         Extract and propose nodes from text using LLM analysis.
 
@@ -264,15 +276,16 @@ def create_ui_router(
             Proposed nodes with similarity information
         """
         try:
-            result = chat_service.propose_nodes_from_text(
-                text=request.text,
-                node_type=request.node_type,
-                communities=request.communities,
-                api_key=request.api_key,
-                provider=request.provider,
-                model_profile_id=request.model_profile_id,
-                federation_depth=request.federation_depth,
-            )
+            with use_request_authorization(headers=http_request.headers):
+                result = chat_service.propose_nodes_from_text(
+                    text=request.text,
+                    node_type=request.node_type,
+                    communities=request.communities,
+                    api_key=request.api_key,
+                    provider=request.provider,
+                    model_profile_id=request.model_profile_id,
+                    federation_depth=request.federation_depth,
+                )
             return result
         except Exception:
             logger.exception("Error in /propose-nodes endpoint")
@@ -282,6 +295,7 @@ def create_ui_router(
 
     @router.post("/upload", response_model=UploadResponse)
     async def upload_document(
+        http_request: Request,
         file: UploadFile = File(...),
         message: Optional[str] = Form(None),
         analyze: bool = Form(True),
@@ -339,13 +353,14 @@ def create_ui_router(
                     or "Please analyze this document and summarize its main points."
                 )
 
-                chat_result = chat_service.process_chat_request(
-                    user_message=user_message,
-                    document_context=result["text"],
-                    api_key=api_key,
-                    provider=provider,
-                    model_profile_id=model_profile_id,
-                )
+                with use_request_authorization(headers=http_request.headers):
+                    chat_result = chat_service.process_chat_request(
+                        user_message=user_message,
+                        document_context=result["text"],
+                        api_key=api_key,
+                        provider=provider,
+                        model_profile_id=model_profile_id,
+                    )
 
                 response.chat_response = ChatResponse(
                     content=chat_result.get("content", ""),
@@ -389,7 +404,7 @@ def create_ui_router(
     # ==================== Capabilities Endpoint ====================
 
     @router.get("/capabilities")
-    async def get_ui_capabilities() -> Dict[str, Any]:
+    async def get_ui_capabilities(http_request: Request) -> Dict[str, Any]:
         """
         Return UI feature availability based on runtime configuration.
 
@@ -397,29 +412,38 @@ def create_ui_router(
         Reports LLM availability so the chat panel can be hidden when no API
         keys are configured, and the public (non-secret) model profile list so
         the chat UI can preselect the default profile and offer a selector when
-        more than one enabled profile exists.
+        more than one enabled profile exists. ``staged_sessions`` and
+        ``session_write_mode_default`` say whether a session can be created
+        staged here, so the UI offers the choice only where the backend would
+        accept it (docs/SESSION_OVERLAY_CONTRACT.md §5, §17).
         """
         from backend.llm.llm_providers import get_llm_availability
         from backend.config import config_loader
 
         llm = get_llm_availability()
+        write_modes = getattr(http_request.app.state, "write_modes", None)
         return {
             "llm_available": llm["available"],
             "llm_provider": llm["provider"],
             "model_profiles": config_loader.get_model_profiles_public(),
+            "staged_sessions": bool(write_modes and write_modes.supports_staged),
+            "session_write_mode_default": (
+                write_modes.default_mode if write_modes else "direct"
+            ),
         }
 
     # ==================== Info Endpoints ====================
 
     @router.get("/info")
-    async def get_info() -> Dict[str, Any]:
+    async def get_info(http_request: Request) -> Dict[str, Any]:
         """
         Get information about the UI backend configuration.
 
         Returns:
             Provider info, available tools, and graph stats
         """
-        return chat_service.get_system_info()
+        with use_request_authorization(headers=http_request.headers):
+            return chat_service.get_system_info()
 
     @router.get("/supported-formats")
     async def get_supported_formats() -> Dict[str, Any]:

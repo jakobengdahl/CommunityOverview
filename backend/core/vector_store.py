@@ -14,9 +14,13 @@ Imports are deferred (lazy) so the module loads fast and so the absence of the
 optional ML stack surfaces only when embedding generation is actually attempted.
 """
 
+import logging
+import threading
 from typing import List, Dict, Optional, Tuple, Any
 
 from .models import Node
+
+logger = logging.getLogger(__name__)
 
 # Global references for lazy-loaded modules
 _np = None
@@ -119,6 +123,11 @@ class VectorStore:
     def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
         self.model_name = model_name
         self.model = None
+        # Guards _load_model so two background passes that both need the
+        # model - preload_model at startup and a backfill of nodes missing
+        # a vector, which can legitimately run at the same time - load it
+        # once between them rather than racing to construct it twice.
+        self._model_lock = threading.Lock()
         self.embeddings: Dict[str, Any] = {}  # node_id -> embedding (numpy array)
         self.node_ids: List[
             str
@@ -140,25 +149,27 @@ class VectorStore:
 
     def _load_model(self):
         """Lazy load the model"""
-        if self.model is None:
-            SentenceTransformer = _ensure_sentence_transformers()
-            print(f"Loading embedding model: {self.model_name}...")
-            self.model = SentenceTransformer(self.model_name)
-            print("Model loaded.")
+        with self._model_lock:
+            if self.model is None:
+                SentenceTransformer = _ensure_sentence_transformers()
+                logger.info(f"Loading embedding model: {self.model_name}...")
+                self.model = SentenceTransformer(self.model_name)
+                logger.info("Model loaded.")
 
     def preload_model(self):
         """
         Preload the embedding model in a background thread.
         Call at startup to avoid slow first request.
         """
-        import threading
 
         def _load():
             try:
                 self._load_model()
-                print(f"Embedding model '{self.model_name}' preloaded in background.")
+                logger.info(
+                    f"Embedding model '{self.model_name}' preloaded in background."
+                )
             except Exception as e:
-                print(f"Warning: Background model preload failed: {e}")
+                logger.warning(f"background model preload failed: {e}")
 
         t = threading.Thread(target=_load, name="embedding-preload", daemon=True)
         t.start()
@@ -175,7 +186,7 @@ class VectorStore:
         self.load_vectors(
             {node.id: node.embedding for node in nodes if node.embedding is not None}
         )
-        print(f"VectorStore index rebuilt with {len(self.embeddings)} embeddings")
+        logger.info(f"VectorStore index rebuilt with {len(self.embeddings)} embeddings")
 
     def load_vectors(self, vectors: Dict[str, Any]) -> None:
         """Replace the index with vectors read back from persistence.
@@ -187,8 +198,8 @@ class VectorStore:
         np = _ensure_numpy()
         kept = matching_dimension(vectors, dominant_dimension(vectors))
         if len(kept) != len(vectors):
-            print(
-                f"Warning: dropped {len(vectors) - len(kept)} embedding(s) whose "
+            logger.warning(
+                f"dropped {len(vectors) - len(kept)} embedding(s) whose "
                 f"width did not match the rest of the index"
             )
         self.embeddings = {
@@ -220,8 +231,8 @@ class VectorStore:
         width = widths.pop()
         current = self.dimension
         if current is not None and current != width:
-            print(
-                f"Warning: embedding dimension changed from {current} to {width}; "
+            logger.warning(
+                f"embedding dimension changed from {current} to {width}; "
                 f"discarding {len(self.embeddings)} vector(s) that can no longer be "
                 f"compared. Re-run scripts/generate_embeddings.py to rebuild them."
             )
@@ -290,20 +301,49 @@ class VectorStore:
         embedding = self.model.encode(text)
         return embedding.tolist()
 
+    def embed_query(self, query_text: str) -> Optional[Any]:
+        """The vector of ``query_text`` as ``search`` embeds it, or None where
+        it cannot be embedded (the ML-free base install)."""
+        try:
+            self._load_model()
+            return self.model.encode(query_text)
+        except ImportError as e:
+            logger.warning(
+                f"semantic search unavailable (embedding model not installed): {e}"
+            )
+            return None
+
     def update_node_embedding(self, node: Node):
         """Generate and store the embedding for a node."""
         self._absorb({node.id: self.generate_embedding(node)})
 
     def update_nodes_embeddings(self, nodes: List[Node]):
         """Update embeddings for multiple nodes in batch"""
-        if not nodes:
-            return
+        self._absorb(self.compute_node_embeddings(nodes))
 
+    def compute_node_embeddings(self, nodes: List[Node]) -> Dict[str, Any]:
+        """Encode ``nodes`` and return their vectors WITHOUT touching the index.
+
+        Split out of ``update_nodes_embeddings`` so a caller can run the slow
+        encode step, check some precondition that may have changed while it
+        ran, and only then decide whether to commit the result — see the
+        import worker's generation-staleness guard
+        (``GraphStorage.commit_generation_embeddings``), which computes here
+        and absorbs (via ``absorb_embeddings``) only if nothing superseded the
+        graph these vectors were computed against in the meantime.
+        """
+        if not nodes:
+            return {}
         self._load_model()
         texts = [self._get_text_representation(node) for node in nodes]
         embeddings = self.model.encode(texts)
+        return {node.id: embedding for node, embedding in zip(nodes, embeddings)}
 
-        self._absorb({node.id: embedding for node, embedding in zip(nodes, embeddings)})
+    def absorb_embeddings(self, vectors: Dict[str, Any]) -> None:
+        """Merge freshly computed vectors (e.g. from ``compute_node_embeddings``)
+        into the live index. Public counterpart to ``_absorb`` for callers
+        outside this module that computed the vectors themselves."""
+        self._absorb(vectors)
 
     def remove_node_embedding(self, node_id: str):
         """Remove embedding for a node"""
@@ -367,8 +407,8 @@ class VectorStore:
             else:
                 return []
         except ImportError as e:
-            print(
-                f"Warning: semantic search unavailable (embedding model not installed): {e}"
+            logger.warning(
+                f"semantic search unavailable (embedding model not installed): {e}"
             )
             return []
 

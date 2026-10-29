@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 
 import SessionDrawer from '../src/components/SessionDrawer';
 import { I18nProvider } from '../src/i18n';
@@ -108,5 +108,32 @@ describe('SessionDrawer', () => {
     const props = renderDrawer();
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(props.onClose).toHaveBeenCalled();
+  });
+
+  it('stops Escape from reaching listeners outside the drawer, so the canvas keeps its selection', () => {
+    const outerListener = vi.fn();
+    window.addEventListener('keydown', outerListener);
+    const props = renderDrawer();
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    window.removeEventListener('keydown', outerListener);
+    expect(props.onClose).toHaveBeenCalled();
+    expect(outerListener).not.toHaveBeenCalled();
+  });
+
+  it('puts the install affordance in the menu drawer when the browser exposes one', async () => {
+    const prompt = vi.fn().mockResolvedValue({ outcome: 'accepted' });
+    renderDrawer();
+
+    act(() => {
+      const event = new Event('beforeinstallprompt');
+      event.preventDefault = vi.fn();
+      event.prompt = prompt;
+      window.dispatchEvent(event);
+    });
+
+    const installButton = await screen.findByRole('button', { name: 'Install app' });
+    fireEvent.click(installButton);
+
+    await waitFor(() => expect(prompt).toHaveBeenCalledTimes(1));
   });
 });

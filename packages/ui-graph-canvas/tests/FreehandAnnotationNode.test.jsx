@@ -46,6 +46,14 @@ describe('FreehandAnnotationNode rendering', () => {
     expect(visiblePaths[0].getAttribute('stroke-width')).toBe('3');
   });
 
+  it('falls back to the 2px default stroke width when the data carries none', () => {
+    const { container } = render(
+      <FreehandAnnotationNode id="f1" data={{ points: straightPoints }} />
+    );
+    const path = container.querySelector('.graph-freehand-stroke path');
+    expect(path.getAttribute('stroke-width')).toBe('2');
+  });
+
   it('renders one segment per adjacent point pair when pressure is present', () => {
     const points = [
       { x: 0, y: 0, pressure: 0.2 },

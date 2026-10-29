@@ -33,7 +33,17 @@ select = ["E4", "E7", "E9", "F"]
 quote-style = "double"
 
 [tool.pytest.ini_options]
-# Convert a hang into a failure. The whole backend suite runs in about three
-# minutes, so no single test comes near this; it exists so a deadlock names a
-# red test instead of stalling the job until the runner kills it.
+# Convert a hang into a failure. The whole backend suite takes about 14
+# minutes serially and about 4 with `-n 4` (measured with the PostgreSQL
+# contract tests enabled), and no single test comes near this; it exists so a
+# deadlock names a red test instead of stalling the job until the runner kills it.
 timeout = 300
+
+[tool.coverage.run]
+# Read only when coverage runs (`pytest --cov`, see backend/DEVELOPMENT.md);
+# a plain `pytest` never imports coverage, so this costs it nothing. Measures
+# the Python subprocesses tests start: coverage hands its configuration to the
+# child in COVERAGE_PROCESS_CONFIG, which its site-packages .pth hook reads.
+# A child started with `env={}`, `-S` or a zero file-size limit (the attachment
+# worker, the function sandbox) is not, and cannot be, measured this way.
+patch = ["subprocess"]

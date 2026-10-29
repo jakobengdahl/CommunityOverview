@@ -23,10 +23,17 @@ import { isRemoteLocked } from '../utils/annotations';
  * Returns the state and handlers a caller wires onto its own input element —
  * the element itself (textarea vs. input, styling, rows) stays with the
  * caller, since that is the part that actually differs between them.
+ *
+ * `field` names the `data` key being edited, defaulting to `text` — the key
+ * every kind that predates `reference` stores its editable string under, so
+ * every existing call site is unchanged. A `reference` tile's editable
+ * string is its `label`, not a `text` it does not have.
  */
-export function useEditableText(id, data, { commitOnEnter = false } = {}) {
+export function useEditableText(id, data, { commitOnEnter = false, field = 'text' } = {}) {
+  const persistedText = data[field] || '';
   const [isEditing, setIsEditing] = useState(false);
-  const [text, setText] = useState(data.text || '');
+  const [text, setText] = useState(persistedText);
+  const [textWhenLastRendered, setTextWhenLastRendered] = useState(persistedText);
   const inputRef = useRef(null);
   const { setNodes } = useReactFlow();
   const { notifyChange, notifyRemoteLockedAttempt, beginEditing, endEditing } =
@@ -59,9 +66,10 @@ export function useEditableText(id, data, { commitOnEnter = false } = {}) {
     if (releaseSignal > 0) releaseLease();
   }, [releaseSignal, releaseLease]);
 
-  useEffect(() => {
-    setText(data.text || '');
-  }, [data.text]);
+  if (persistedText !== textWhenLastRendered) {
+    setTextWhenLastRendered(persistedText);
+    setText(persistedText);
+  }
 
   useEffect(() => {
     if (isEditing && inputRef.current) {
@@ -90,7 +98,7 @@ export function useEditableText(id, data, { commitOnEnter = false } = {}) {
     if (locked && isEditing) {
       setReleaseSignal((s) => s + 1);
       setIsEditing(false);
-      setText(data.text || '');
+      setText(persistedText);
     }
   }
 
@@ -160,7 +168,7 @@ export function useEditableText(id, data, { commitOnEnter = false } = {}) {
       // already refused entry when remoteLocked was true from the start),
       // so there is no draft risk here — this is the pre-existing "refused
       // before it began" case, not the mid-edit interruption above.
-      setText(data.text || '');
+      setText(persistedText);
       notifyRemoteLockedAttempt();
       return;
     }
@@ -169,13 +177,13 @@ export function useEditableText(id, data, { commitOnEnter = false } = {}) {
     // handleLabelBlur.
     if (locked) {
       releaseLease();
-      setText(data.text || '');
+      setText(persistedText);
       return;
     }
     releaseLease();
     const trimmed = text.trim();
     setNodes((nds) =>
-      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, text: trimmed } } : n))
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, [field]: trimmed } } : n))
     );
     notifyChange('text');
   };
@@ -188,7 +196,7 @@ export function useEditableText(id, data, { commitOnEnter = false } = {}) {
     setText(next);
     if (remoteLocked) return;
     setNodes((nds) =>
-      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, text: next } } : n))
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, [field]: next } } : n))
     );
     notifyChange('text');
   };
@@ -200,7 +208,7 @@ export function useEditableText(id, data, { commitOnEnter = false } = {}) {
     } else if (e.key === 'Escape') {
       e.preventDefault();
       releaseLease();
-      setText(data.text || '');
+      setText(persistedText);
       setIsEditing(false);
     }
   };

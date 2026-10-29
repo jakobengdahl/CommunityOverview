@@ -11,7 +11,158 @@ export const ANNOTATION_TYPES = Object.freeze([
   'vote_dot',
   'image',
   'freehand',
+  'heatmap',
+  'reference',
 ]);
+
+// A heat-map circle's intensity is a whole level from 0 (invisible) to 10
+// (strongest red) — docs/ANNOTATION_CONTRACT.md's "Heat-map circles".
+// Mirrors HEATMAP_* in backend/core/session_annotations.py.
+export const HEATMAP_MIN_INTENSITY = 0;
+export const HEATMAP_MAX_INTENSITY = 10;
+export const HEATMAP_DEFAULT_INTENSITY = 5;
+export const HEATMAP_DEFAULT_DIAMETER = 160;
+
+// Clamp and round whatever is stored into a whole level. A browser's op batch
+// reaches the store without the MCP tool's strict check, so a stored value can
+// be anything; reading it this way means every client draws the same level
+// for the same stored value. Anything non-numeric reads as the default.
+export function normalizeHeatmapIntensity(value) {
+  const number = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+  if (typeof number !== 'number' || !Number.isFinite(number)) return HEATMAP_DEFAULT_INTENSITY;
+  return Math.min(HEATMAP_MAX_INTENSITY, Math.max(HEATMAP_MIN_INTENSITY, Math.round(number)));
+}
+
+// The three things a `reference` annotation may point at
+// (docs/ANNOTATION_CONTRACT.md's "Reference tiles"). Mirrors
+// REFERENCE_TARGET_KINDS in backend/core/session_annotations.py.
+export const REFERENCE_TARGET_KINDS = Object.freeze(['session', 'url', 'resource']);
+
+const REFERENCE_TARGET_KIND_SET = new Set(REFERENCE_TARGET_KINDS);
+
+// The only schemes a `url` reference's target may be rendered as an
+// activatable link with. Mirrors REFERENCE_SAFE_URL_SCHEMES in
+// backend/core/session_annotations.py — an allowlist on both sides, so a
+// scheme nobody thought to name is refused rather than drawn as a link.
+export const REFERENCE_SAFE_URL_SCHEMES = Object.freeze(['http:', 'https:']);
+
+const REFERENCE_SAFE_URL_SCHEME_SET = new Set(REFERENCE_SAFE_URL_SCHEMES);
+
+/**
+ * Whether `value` is a URL this package may render as an activatable link.
+ *
+ * The backend gate (`reference_url_error`) is the one that decides what may
+ * be *stored*; this is the renderer's own independent check on what it may
+ * *draw as clickable*, deliberately duplicated rather than trusted. A stored
+ * annotation reaches the canvas from session state, a saved view, a remote
+ * collaborator's op or a host that hydrated it from somewhere else — so a
+ * canvas that drew whatever it was handed would turn any gap in any of those
+ * paths into a `javascript:` link under the user's cursor. Returning false
+ * here is what makes such a reference render in its broken state instead.
+ *
+ * Control characters are rejected outright, not stripped: a browser removes
+ * a tab or newline before resolving `java\tscript:alert(1)`, so a check that
+ * normalises first and asks afterwards passes exactly the string the browser
+ * then runs.
+ */
+// An explicit `scheme://` followed by the start of a real authority. Checked
+// on the RAW string, before `new URL` ever sees it, because the WHATWG parser
+// repairs these forms into a different destination rather than rejecting them:
+//   `http:///path`      -> `http://path/`      (re-reads the path as the host!)
+//   `https:/example.org` -> `https://example.org/` (infers the missing slash)
+// The first is the dangerous one — a tile would open somewhere its author
+// never wrote — and neither is something an author can have meant. Requiring
+// the authority up front also closes the gap where this side and the backend
+// gate (`reference_url_error`, which parses with the lenient `urlsplit`) read
+// the same string as different destinations.
+const REFERENCE_EXPLICIT_AUTHORITY = /^https?:\/\/[^/?#]/i;
+
+// The whitespace a target may not contain, and the set trimmed from its ends.
+// Enumerated rather than written `\s` because the backend runs the same gate
+// in Python and the two languages disagree: `\s` matches U+FEFF where
+// `str.isspace()` does not, and `str.isspace()` is true for U+0085 (NEL)
+// where `\s` is not — and `trim()` and `str.strip()` split the same way.
+// Round 3 of the review loop measured both directions costing a real defect;
+// `REFERENCE_WHITESPACE_CHARS` in backend/core/session_annotations.py carries
+// the full note. It is the union of the two notions less the C0 separators
+// U+001C-U+001F, which the control-character check above already refuses, so
+// each side still refuses everything either language calls whitespace — by
+// two checks rather than by this class alone. The characters are listed in
+// docs/fixtures/reference_url_gate.json, which both sides drive.
+export const REFERENCE_WHITESPACE_CLASS =
+  '\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680' +
+  '\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff';
+const REFERENCE_WHITESPACE_RE = new RegExp(`[${REFERENCE_WHITESPACE_CLASS}]`, 'u');
+const REFERENCE_WHITESPACE_TRIM_RE = new RegExp(
+  `^[${REFERENCE_WHITESPACE_CLASS}]+|[${REFERENCE_WHITESPACE_CLASS}]+$`,
+  'gu'
+);
+
+/** Trim a reference target with the gate's own whitespace set, not `trim()`. */
+export function trimReferenceTarget(value) {
+  if (typeof value !== 'string') return '';
+  return value.replace(REFERENCE_WHITESPACE_TRIM_RE, '');
+}
+
+export function isSafeReferenceUrl(value) {
+  if (typeof value !== 'string') return false;
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(value)) return false;
+  const candidate = trimReferenceTarget(value);
+  if (!candidate) return false;
+  // Whitespace anywhere in the trimmed target, read off the same enumerated
+  // set the backend gate (`reference_url_error`) uses. The WHATWG parser
+  // tolerates a space in a path or query and rejects one in a host, so
+  // without this the two sides disagreed in BOTH directions — see that
+  // function's comment for what each direction costs. A real URL
+  // percent-encodes its spaces, and `%20` passes.
+  if (REFERENCE_WHITESPACE_RE.test(candidate)) return false;
+  if (!REFERENCE_EXPLICIT_AUTHORITY.test(candidate)) return false;
+  let parsed;
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    // No base is passed on purpose: a relative or scheme-relative target has
+    // no scheme of its own, and resolving it against the app's own origin
+    // would let an innocuous-looking tile point back into the app.
+    return false;
+  }
+  if (!REFERENCE_SAFE_URL_SCHEME_SET.has(parsed.protocol)) return false;
+  if (!parsed.hostname) return false;
+  // A port is optional, but a present one must be a real port. WHATWG accepts
+  // `:0`; the backend does not, and a tile pointing at port 0 opens nothing.
+  if (parsed.port !== '' && !(Number(parsed.port) >= 1 && Number(parsed.port) <= 65535)) {
+    return false;
+  }
+  return true;
+}
+
+export function normalizeReferenceTargetKind(value) {
+  return REFERENCE_TARGET_KIND_SET.has(value) ? value : null;
+}
+
+/**
+ * Why a reference cannot be opened, or `null` when it can.
+ *
+ * `'missing'` — no target kind, or no target at all.
+ * `'unsafe'`  — a url target this package will not render as a link.
+ * Anything the *host* knows is unresolvable (a session that no longer
+ * exists, a resource node that was deleted) is not visible from here; the
+ * host reports those separately, and GenericAnnotationNode folds the two
+ * together into one broken state.
+ */
+export function referenceTargetProblem(data = {}) {
+  const kind = normalizeReferenceTargetKind(data.target_kind);
+  const target = trimReferenceTarget(data.target);
+  if (!kind || !target) return 'missing';
+  if (kind === 'url' && !isSafeReferenceUrl(target)) return 'unsafe';
+  return null;
+}
+
+// The default on-canvas box for a reference tile — it shows a badge, a label
+// and, when present, a preview line, so it is wider than tall. Mirrors
+// DEFAULT_REFERENCE_SIZE in backend/core/session_annotations.py.
+export const REFERENCE_DEFAULT_SIZE = Object.freeze({ w: 220, h: 72 });
 
 // The shape variants `content.shape` accepts (docs/ANNOTATION_CONTRACT.md).
 // Every one renders as its own distinct visual in GenericAnnotationNode.
@@ -53,7 +204,7 @@ const DEFAULT_FREEHAND_STROKE_WIDTH = 2;
 // Semantic default layer at creation (task-annotation-render-direct-
 // manipulation's remaining scope: "semantic default layers - a per-kind
 // default z at creation", docs/ANNOTATION_CONTRACT.md's "Layer order").
-// Every kind still starts at 0 except `shape`: a shape is the decorative
+// Every kind still starts at 0 except `shape` (and `heatmap`, below): a shape is the decorative
 // kind most often used as a background/frame other annotations get drawn
 // over (the merged-in `frame` look — a transparent fill with a coloured
 // border — being the clearest case), so it starts one layer below the 0
@@ -71,7 +222,11 @@ const DEFAULT_FREEHAND_STROKE_WIDTH = 2;
 // Both annotation-creation paths (this model and GraphCanvas.jsx's own node
 // builder) apply the identical mapping, so a GUI-created and an MCP/REST-
 // created shape start on the same layer.
-export const DEFAULT_ANNOTATION_Z_BY_TYPE = Object.freeze({ shape: -1 });
+//
+// `heatmap` starts on the same layer as `shape`, for the same reason: a heat
+// field is a backdrop. Drawn over graph nodes it would tint them and take
+// their clicks, which a marking meant to sit underneath content should not.
+export const DEFAULT_ANNOTATION_Z_BY_TYPE = Object.freeze({ shape: -1, heatmap: -1 });
 
 export function defaultAnnotationZ(type) {
   return DEFAULT_ANNOTATION_Z_BY_TYPE[type] ?? 0;
@@ -123,9 +278,9 @@ function normalizeSize(size, fallback = DEFAULT_SIZE) {
   };
 }
 
-function normalizeGeometry(annotation) {
+function normalizeGeometry(annotation, fallbackSize = DEFAULT_SIZE) {
   const position = normalizePoint(annotation.position || annotation.geometry);
-  const size = normalizeSize(annotation.size || annotation.geometry, DEFAULT_SIZE);
+  const size = normalizeSize(annotation.size || annotation.geometry, fallbackSize);
   const geometry = isPlainObject(annotation.geometry) ? annotation.geometry : {};
   return {
     x: finiteNumber(geometry.x, position.x),
@@ -236,6 +391,24 @@ function withTypePayload(annotation, type, geometry) {
     // yet) — rather than carried forward unread.
     return {};
   }
+  if (type === 'heatmap') {
+    return { intensity: normalizeHeatmapIntensity(annotation.intensity) };
+  }
+  if (type === 'reference') {
+    // Every field is carried, including an unrecognised target kind and an
+    // unsafe target: normalising either away would hide a broken reference
+    // instead of showing it as broken, and silently rewriting a target is
+    // how a tile ends up pointing somewhere the author never chose.
+    // `referenceTargetProblem` is what reads them back.
+    const preview = isPlainObject(annotation.preview) ? clone(annotation.preview) : undefined;
+    return {
+      target_kind: annotation.target_kind ?? null,
+      target: typeof annotation.target === 'string' ? annotation.target : '',
+      label: annotation.label || '',
+      icon: annotation.icon || undefined,
+      ...(preview ? { preview } : {}),
+    };
+  }
   if (type === 'image') {
     return {
       image: clone(annotation.image || {}),
@@ -268,7 +441,14 @@ export function createAnnotation(input = {}) {
   const id =
     input.id || `annotation-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const type = normalizeType(input);
-  const geometry = normalizeGeometry(input);
+  const geometry = normalizeGeometry(
+    input,
+    type === 'heatmap'
+      ? { w: HEATMAP_DEFAULT_DIAMETER, h: HEATMAP_DEFAULT_DIAMETER }
+      : type === 'reference'
+        ? REFERENCE_DEFAULT_SIZE
+        : DEFAULT_SIZE
+  );
   const style = clone(input.style) || {};
   if (input.color !== undefined && style.color === undefined) style.color = input.color;
   const payload = withTypePayload(input, type, geometry);

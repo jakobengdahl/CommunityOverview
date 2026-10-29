@@ -5,10 +5,15 @@ what a backend is actually held to. Subclass `PersistenceBackendContract` in
 a test module, provide a `factory` fixture, and every test here runs against
 your backend. Three implementations are held to it in this repo: the file
 backend, the in-memory reference backend below, and the optional PostgreSQL
-backend, which is developed against exactly this class and meets everything
-here but the change-notification clauses and the backwards-compatibility
-one - the latter because a store written by a previous release of that
-backend does not exist yet.
+backend, which is developed against exactly this class and meets every
+clause here - change notification included, since PostgreSQL's transport
+always reports via the deferred `entities_read_on_demand` form - except the
+backwards-compatibility one, skipped because a store written by a previous
+release of that backend does not exist yet. The in-memory reference backend
+below reports eagerly by default and can be constructed with `deferred=True`
+to report the same way PostgreSQL does, so the deferred path is also held to
+every clause here by a backend that needs no server to run; see its
+docstring.
 
 What a subclass provides:
 
@@ -32,13 +37,15 @@ What a subclass provides:
 from __future__ import annotations
 
 import copy
+import dataclasses
 import threading
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Sequence, Tuple
 
 import pytest
 
+import backend.core.layer_store as layer
 from backend.core.models import Edge, Node, NodeType
 from backend.core.storage import GraphStorage
 from backend.core.storage_backends import (
@@ -47,6 +54,7 @@ from backend.core.storage_backends import (
     TraversingBackend,
     EntityOperation,
     ExternalChange,
+    ExternalChangeRefused,
     IncrementalGraphPersistenceBackend,
     capabilities_of,
 )
@@ -122,11 +130,36 @@ class InMemoryGraphPersistenceBackend:
     Both writes are atomic the simplest way there is: the new state is built
     first and swapped in at the end, so a failure part-way - in a copy, say -
     leaves the store exactly as it was.
+
+    `deferred` decides how an entity write reports itself to other instances.
+    Off (the default) embeds the payload in the announcement, exactly as
+    every version of this class has - the shape every existing subclass of
+    `PersistenceBackendContract` below is already held to. On, it reports via
+    `ExternalChange.entities_read_on_demand`, reading the entities' current
+    content back out of the store at delivery time instead - the shape
+    PostgreSQL uses, and the one this store is equally able to serve, since
+    it already holds its own content to re-read.
+    `TestInMemoryBackendContractWithDeferredReports` in
+    `test_persistence_contract_memory.py` runs with it on, so the deferred
+    path - not just PostgreSQL's transport for it - is held to every
+    notification clause in `PersistenceBackendContract` by at least one
+    backend that needs no server to run.
     """
 
-    def __init__(self, store: Dict[str, Any], *, incremental: bool = True):
+    def __init__(
+        self,
+        store: Dict[str, Any],
+        *,
+        incremental: bool = True,
+        deferred: bool = False,
+        staged: bool = False,
+    ):
         self._store = store
         self._incremental = incremental
+        self._deferred = deferred
+        self._staged = staged
+        store.setdefault("sessions", {})
+        store.setdefault("merges", {})
         self._lock = store.setdefault("lock", threading.Lock())
         store.setdefault("nodes", {})
         store.setdefault("edges", {})
@@ -138,6 +171,13 @@ class InMemoryGraphPersistenceBackend:
     def capabilities(self) -> BackendCapabilities:
         if not self._incremental:
             return BackendCapabilities()
+        if self._staged:
+            # The layer store's reference: a single-writer store, the shape
+            # of the file backend. A notifying store would also have to
+            # enforce revisions (§4.4), which this reference does not.
+            return BackendCapabilities(
+                incremental_writes=True, transactions=True, staged_sessions=True
+            )
         return BackendCapabilities(
             incremental_writes=True,
             transactions=True,
@@ -197,10 +237,221 @@ class InMemoryGraphPersistenceBackend:
             self._store["nodes"] = nodes
             self._store["edges"] = edges
             self._store["written"] = True
-        self._notify_others(ExternalChange.entities(operations))
+        self._notify_others(self._describe(operations))
+
+    def _describe(self, operations: Sequence[EntityOperation]) -> ExternalChange:
+        """The announcement for one batch, eager or deferred per `self._deferred`."""
+        if not self._deferred:
+            return ExternalChange.entities(operations)
+        identifiers = [(op.kind, op.entity_id) for op in operations]
+        return ExternalChange.entities_read_on_demand(
+            lambda: self._read_back(identifiers)
+        )
+
+    def _read_back(
+        self, identifiers: Sequence[Tuple[str, str]]
+    ) -> List[EntityOperation]:
+        """Answer `identifiers` with what the store holds right now.
+
+        Read at delivery time, on the notifier thread - never at dispatch,
+        which is the one thing that makes this the deferred form rather than
+        the eager one with extra steps. An id absent now is a delete, whatever
+        the batch that announced it did; one present is an upsert carrying the
+        current content, which may already differ from what that batch wrote
+        if a later write landed first.
+        """
+        with self._lock:
+            nodes = self._store["nodes"]
+            edges = self._store["edges"]
+            resolved = []
+            for kind, entity_id in identifiers:
+                table = nodes if kind == "node" else edges
+                doc = table.get(entity_id)
+                if doc is None:
+                    resolved.append(EntityOperation(kind, "delete", entity_id))
+                else:
+                    resolved.append(
+                        EntityOperation(kind, "upsert", entity_id, copy.deepcopy(doc))
+                    )
+            return resolved
 
     def checkpoint(self) -> None:
         pass  # nothing is deferred
+
+    # -- the layer store (staged_sessions) ------------------------------------
+    #
+    # The reference semantics of backend.core.layer_store, as plainly as they
+    # can be written: every operation builds the new state and swaps it in at
+    # the end, so a refusal part-way leaves the store as it was. A merge is
+    # one swap of graph, layer and merge record together, which is I8 in its
+    # simplest form.
+
+    def load_layer(self, session_id):
+        session_id = layer.check_session_id(session_id)
+        with self._lock:
+            session = self._store["sessions"].get(session_id)
+            return copy.deepcopy(list(session["entries"].values())) if session else []
+
+    def staged_status(self, session_id):
+        session_id = layer.check_session_id(session_id)
+        with self._lock:
+            session = self._store["sessions"].get(session_id)
+            return session["status"] if session else layer.STATUS_NONE
+
+    def layers_in_use(self):
+        with self._lock:
+            return sorted(
+                sid for sid, s in self._store["sessions"].items() if s["entries"]
+            )
+
+    def load_merge(self, merge_id):
+        merge_id = layer.check_merge_id(merge_id)
+        with self._lock:
+            return copy.deepcopy(self._store["merges"].get(merge_id))
+
+    def record_staged(self, session_id):
+        session_id = layer.check_session_id(session_id)
+        with self._lock:
+            session = self._store["sessions"].get(session_id)
+            if session is not None:
+                if session["status"] == layer.STATUS_RETIRED:
+                    raise layer.StagedSessionRetired(session_id)
+                return
+            self._swap_session(session_id, layer.STATUS_ACTIVE, {})
+
+    def retire(self, session_id, *, require_empty=False):
+        session_id = layer.check_session_id(session_id)
+        with self._lock:
+            session = self._store["sessions"].get(session_id)
+            if session is not None and session["status"] == layer.STATUS_RETIRED:
+                return
+            if require_empty and session is not None and session["entries"]:
+                raise layer.LayerNotEmpty(session_id, len(session["entries"]))
+            self._swap_session(
+                session_id,
+                layer.STATUS_RETIRED,
+                {},
+                retired_at=layer.format_retired_at(layer.utc_now()),
+            )
+
+    def purge_merge_records(self, retention, *, limit, now=None):
+        retention, limit, now = layer.check_purge_request(retention, limit, now)
+        with self._lock:
+            now = now or layer.utc_now()
+            sessions = dict(self._store["sessions"])
+            for sid, s in sessions.items():
+                if s["status"] == layer.STATUS_RETIRED and not s.get("retired_at"):
+                    sessions[sid] = {**s, "retired_at": layer.format_retired_at(now)}
+            victims = layer.merge_records_to_purge(
+                self._store["merges"], sessions, now - retention, limit
+            )
+            purged = [(m, self._store["merges"][m]["session_id"]) for m in victims]
+            merges = {
+                k: v for k, v in self._store["merges"].items() if k not in victims
+            }
+            self._store.update(sessions=sessions, merges=merges)
+            layer.log_purged_merge_records(purged)
+            return len(victims)
+
+    def stage(
+        self,
+        session_id,
+        entries,
+        removals=(),
+        *,
+        max_entries=None,
+        expected=None,
+        exact=False,
+    ):
+        session_id = layer.check_session_id(session_id)
+        by_key, removed = layer.check_entries(entries, removals)
+        limit = layer.check_max_entries(max_entries)
+        expectations = layer.check_expected(expected)
+        with self._lock:
+            session = self._active(session_id)
+            layer.verify_expected(session_id, session["entries"], expectations, exact)
+            updated = dict(session["entries"])
+            for key in removed:
+                updated.pop(key, None)
+            updated.update(by_key)
+            if limit is not None and len(updated) > limit:
+                raise layer.LayerFull(session_id, limit, len(updated))
+            self._swap_session(session_id, session["status"], updated)
+
+    def discard(self, session_id, removals=None, *, expected=None):
+        session_id = layer.check_session_id(session_id)
+        keys = None if removals is None else layer.check_keys(removals)
+        expectations = layer.check_expected(expected)
+        with self._lock:
+            session = self._active(session_id)
+            layer.verify_expected(session_id, session["entries"], expectations)
+            present = session["entries"]
+            gone = list(present) if keys is None else [k for k in keys if k in present]
+            updated = {k: v for k, v in present.items() if k not in set(gone)}
+            self._swap_session(session_id, session["status"], updated)
+            return gone
+
+    def drop_layer(self, session_id):
+        session_id = layer.check_session_id(session_id)
+        with self._lock:
+            session = self._store["sessions"].get(session_id)
+            if session is not None:
+                self._swap_session(session_id, session["status"], {})
+
+    def merge(self, session_id, merge_id, operations, checks, removals, record):
+        session_id = layer.check_session_id(session_id)
+        merge_id = layer.check_merge_id(merge_id)
+        ops, verified, removed, caller_record = layer.check_merge_request(
+            operations, checks, removals, record
+        )
+        ops = [dataclasses.replace(op, payload=copy.deepcopy(op.payload)) for op in ops]
+        with self._lock:
+            existing = self._store["merges"].get(merge_id)
+            if existing is not None:
+                return layer.replay(existing, session_id, merge_id)
+            session = self._active(session_id)
+            nodes = dict(self._store["nodes"])
+            edges = dict(self._store["edges"])
+            layer.apply_merge_to_model(
+                nodes, edges, session["entries"], ops, verified, removed
+            )
+            revisions = [
+                layer.stored_revision(op.payload) if op.action == "upsert" else None
+                for op in ops
+            ]
+            stored = layer.build_record(
+                caller_record,
+                merge_id=merge_id,
+                session_id=session_id,
+                status=layer.MERGE_APPLIED,
+                applied=layer.applied_items(ops, revisions),
+            )
+            entries = {k: v for k, v in session["entries"].items() if k not in removed}
+            sessions = {
+                **self._store["sessions"],
+                session_id: {"status": session["status"], "entries": entries},
+            }
+            merges = {**self._store["merges"], merge_id: stored}
+            self._store.update(
+                nodes=nodes, edges=edges, sessions=sessions, merges=merges, written=True
+            )
+            return layer.MergeResult(record=copy.deepcopy(stored))
+
+    def _active(self, session_id):
+        session = self._store["sessions"].get(session_id)
+        if session is None or session["status"] != layer.STATUS_ACTIVE:
+            raise layer.StagedSessionNotActive(
+                session_id, session["status"] if session else layer.STATUS_NONE
+            )
+        return session
+
+    def _swap_session(self, session_id, status, entries, *, retired_at=None):
+        session = {"status": status, "entries": entries}
+        previous = self._store["sessions"].get(session_id) or {}
+        retired_at = retired_at or previous.get("retired_at")
+        if retired_at:
+            session["retired_at"] = retired_at
+        self._store["sessions"] = {**self._store["sessions"], session_id: session}
 
     # -- change notification --------------------------------------------------
 
@@ -430,8 +681,13 @@ class PersistenceBackendContract:
         backend.upsert_node(replacement)
 
         nodes = by_id(factory().load_graph_data(), "nodes")
-        assert nodes["a"] == replacement
-        assert "embedding" not in nodes["a"]  # replaced whole, not patched
+        stored = dict(nodes["a"])
+        if capabilities_of(backend).revision_enforcement:
+            # The store lays its own revision over the payload (§4.4); that
+            # one key is the store's, everything else is the replacement.
+            assert isinstance(stored.pop("revision"), int)
+        assert stored == replacement
+        assert "embedding" not in stored  # replaced whole, not patched
         assert by_id(factory().load_graph_data(), "edges")["e"]["source"] == "a"
 
     def test_a_delete_removes_and_deleting_the_absent_is_not_an_error(self, factory):
@@ -626,12 +882,21 @@ class PersistenceBackendContract:
             calls.append("snapshot"),
             real_save(data),
         )
+        enforcing = capabilities_of(backend).revision_enforcement
         if incremental:
             real_upsert = backend.upsert_node
             backend.upsert_node = lambda node: (
                 calls.append("upsert"),
                 real_upsert(node),
             )
+        if enforcing:
+            # A store that assigns revisions always gets apply_batch, which
+            # is the call that carries the write token and returns them.
+            real_batch = backend.apply_batch
+            backend.apply_batch = lambda operations, write_token=None: (
+                calls.append("upsert"),
+                real_batch(operations, write_token=write_token),
+            )[1]
 
         storage = GraphStorage(persistence_backend=backend)
         try:
@@ -846,6 +1111,29 @@ class PersistenceBackendContract:
         )
         self.settle_notifications(elsewhere)
         assert storage.get_node("q") is None
+
+    def test_a_report_from_the_write_queues_own_thread_is_refused(self, factory):
+        """The one thread a report must never come from: the one the write
+        queue runs on. `GraphStorage` detects that one case and raises
+        `ExternalChangeRefused` back at whoever reported it - and refusing it
+        is not wedging: the backend must be exactly as usable afterwards as
+        it was before."""
+        if not self._notifying(factory()):
+            pytest.skip("backend does not report external changes")
+        storage = GraphStorage(persistence_backend=factory())
+        try:
+            refused = storage._io_executor.submit(
+                storage.apply_external_change, ExternalChange.unknown()
+            )
+            with pytest.raises(ExternalChangeRefused, match="backend's own thread"):
+                refused.result(timeout=30)
+
+            # And the queue still works: refusing is not wedging.
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+            assert storage.get_node("a") is not None
+        finally:
+            storage.shutdown_events()
 
 
 __all__ = [

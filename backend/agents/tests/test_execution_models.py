@@ -91,3 +91,14 @@ def test_copy_is_independent():
     clone = job.copy()
     clone.payload["x"] = 2
     assert job.payload["x"] == 1
+
+
+def test_redacted_at_round_trips_through_dict():
+    from datetime import datetime, timezone
+
+    from backend.agents.execution.models import ExecutionJob, ExecutionKind
+
+    stamp = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    job = ExecutionJob(agent_id="a", kind=ExecutionKind.EVENT, idempotency_key="k")
+    job.redacted_at = stamp
+    assert ExecutionJob.from_dict(job.to_dict()).redacted_at == stamp

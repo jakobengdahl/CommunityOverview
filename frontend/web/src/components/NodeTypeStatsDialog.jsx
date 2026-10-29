@@ -48,7 +48,7 @@ function NodeTypeStatsDialog({ nodesByType, schema, onClose }) {
           <span id="nts-dialog-title" className="nts-dialog-title">
             Nodes by type
           </span>
-          <button className="nts-dialog-close" onClick={onClose} aria-label="Close">
+          <button className="nts-dialog-close" onClick={onClose} aria-label="Close" title="Close">
             <XLg size={14} />
           </button>
         </div>

@@ -307,3 +307,10 @@
     min-height: 44px;
   }
 }
+
+.settings-dialog-version {
+  margin-top: 12px;
+  font-size: 12px;
+  opacity: 0.65;
+  text-align: center;
+}

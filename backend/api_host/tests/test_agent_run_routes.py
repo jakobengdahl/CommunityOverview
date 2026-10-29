@@ -13,7 +13,7 @@ def _client(registry):
     register_agent_routes(
         app,
         agent_registry=registry,
-        graph_storage=MagicMock(),
+        graph_service=MagicMock(),
         federation_manager=MagicMock(),
     )
     return TestClient(app)
@@ -76,3 +76,15 @@ def test_run_detail_missing_returns_404():
 
     resp = client.get("/agents/runs/nope")
     assert resp.status_code == 404
+
+
+def test_retention_policy_route_is_not_shadowed_by_run_detail():
+    registry = MagicMock()
+    registry.get_run_retention_policy.return_value = {"sweeps": False}
+    client = _client(registry)
+
+    resp = client.get("/agents/runs/retention-policy")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"sweeps": False}
+    registry.get_run.assert_not_called()

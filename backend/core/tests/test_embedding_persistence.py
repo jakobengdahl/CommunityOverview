@@ -7,6 +7,7 @@ without the optional ML stack.
 """
 
 import json
+import logging
 import os
 import struct
 import threading
@@ -603,8 +604,7 @@ def test_a_stale_graph_file_cannot_outvote_the_sidecar_on_dimension(tmpdir_path)
 
 
 def test_one_add_nodes_call_writes_the_sidecar_once(storage, tmpdir_path):
-    """add_nodes saves twice — once for the nodes, once for the edges — and the
-    edge save changes no vector, so it must not resnapshot the same matrix."""
+    """One add_nodes call with nodes and edges writes the sidecar once."""
     calls = []
     real_save = storage._embedding_sidecar.save
 
@@ -625,6 +625,35 @@ def test_one_add_nodes_call_writes_the_sidecar_once(storage, tmpdir_path):
         "n2",
         "n3",
     }
+
+
+def test_a_second_write_before_the_first_lands_does_not_resnapshot_the_matrix(
+    storage,
+):
+    """A write issued while one carrying the same vector revision is still
+    queued must not export and rewrite the identical matrix."""
+    calls = []
+    real_save = storage._embedding_sidecar.save
+
+    def counting_save(vectors):
+        calls.append(sorted(vectors))
+        return real_save(vectors)
+
+    storage._embedding_sidecar.save = counting_save
+    # Hold the single writer so neither write lands before both are issued.
+    release = threading.Event()
+    storage._io_executor.submit(release.wait)
+    try:
+        storage.add_nodes(_sample_nodes(), [])
+        storage.add_nodes(
+            [],
+            [Edge(id="e1", source="n1", target="n2", type=RelationshipType.RELATES_TO)],
+        )
+    finally:
+        release.set()
+    storage.flush()
+
+    assert len(calls) == 1, f"sidecar rewritten {len(calls)} times: {calls}"
 
 
 def test_a_zero_length_inline_vector_does_not_empty_the_whole_sidecar(tmpdir_path):
@@ -1120,8 +1149,7 @@ def test_the_matrix_handed_to_the_writer_is_a_snapshot_not_the_live_index(
     it: what is handed over is not the object the store keeps mutating.
     Both writers are captured: the snapshot one and the entity one, which is
     what a mutation on the file backend now goes through."""
-    # add_nodes writes twice — once for the nodes, once for the edges — and
-    # only the first carries a matrix, so keep every call rather than the last.
+    # Keep every call rather than the last: not every write carries a matrix.
     captured = []
     original_save = storage._do_save_to_disk
     original_apply = storage._do_apply
@@ -1915,7 +1943,7 @@ def test_a_relative_graph_path_still_owns_its_absolutely_configured_sidecar(
         storage.flush()
 
 
-def test_a_same_named_file_in_another_directory_is_not_ours(tmpdir_path, capsys):
+def test_a_same_named_file_in_another_directory_is_not_ours(tmpdir_path, storage_log):
     """Ownership is the whole path, not the basename. No test configured an
     operator path with our own file's NAME in a different directory, so
     comparing only the last component passed every one of them - while
@@ -1946,7 +1974,7 @@ def test_a_same_named_file_in_another_directory_is_not_ours(tmpdir_path, capsys)
         # separately. The refusal warning itself is the only direct evidence
         # the write was attempted and rejected.
         assert storage.vector_store.export_vectors()
-        assert "refusing to overwrite" in capsys.readouterr().out
+        assert any("refusing to overwrite" in m for m in storage_log()[logging.WARNING])
     finally:
         storage.flush()
 

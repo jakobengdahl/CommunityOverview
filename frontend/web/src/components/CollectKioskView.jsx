@@ -419,6 +419,7 @@ function CollectKioskView({ shortName }) {
           onClick={handleSend}
           disabled={!inputValue.trim() || isProcessing}
           title="Send message"
+          aria-label="Send message"
         >
           <SendFill size={20} />
         </button>

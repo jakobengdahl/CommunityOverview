@@ -40,13 +40,20 @@ function renderDrawer(props = {}) {
 
 describe('SessionDrawer mobile overlay', () => {
   let originalMatchMedia;
+  let originalUserAgent;
 
   beforeEach(() => {
     originalMatchMedia = window.matchMedia;
+    originalUserAgent = window.navigator.userAgent;
+    window.localStorage.clear();
   });
 
   afterEach(() => {
     window.matchMedia = originalMatchMedia;
+    Object.defineProperty(window.navigator, 'userAgent', {
+      configurable: true,
+      value: originalUserAgent,
+    });
   });
 
   it('renders no scrim and the desktop docked class on a wide viewport', () => {
@@ -106,6 +113,25 @@ describe('SessionDrawer mobile overlay', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
+  it('shows a one-time iOS Add to Home Screen hint in the mobile menu', () => {
+    setMobile(true);
+    Object.defineProperty(window.navigator, 'userAgent', {
+      configurable: true,
+      value: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)',
+    });
+
+    renderDrawer();
+
+    expect(screen.getByText('Use Share, then Add to Home Screen.')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss install hint' }));
+    expect(screen.queryByText('Use Share, then Add to Home Screen.')).not.toBeInTheDocument();
+
+    renderDrawer();
+    expect(screen.queryByText('Use Share, then Add to Home Screen.')).not.toBeInTheDocument();
+    expect(window.localStorage.getItem('app_install_ios_hint_dismissed')).toBe('true');
+  });
+
   it('moves focus into the drawer and traps Tab inside it on a mobile viewport', () => {
     setMobile(true);
     renderDrawer();
@@ -117,6 +143,56 @@ describe('SessionDrawer mobile overlay', () => {
     fireEvent.keyDown(document, { key: 'Tab', shiftKey: true });
     const buttons = screen.getAllByRole('button');
     expect(buttons[buttons.length - 1]).toHaveFocus();
+  });
+
+  it('wraps Tab from the last focusable element back to the first on a mobile viewport', () => {
+    setMobile(true);
+    renderDrawer();
+    const buttons = screen.getAllByRole('button');
+    buttons[buttons.length - 1].focus();
+
+    fireEvent.keyDown(document, { key: 'Tab' });
+    expect(screen.getByRole('button', { name: 'Close menu' })).toHaveFocus();
+  });
+
+  it('pulls focus back into the drawer on Tab when it has escaped on a mobile viewport', () => {
+    setMobile(true);
+    renderDrawer();
+    const outside = document.createElement('button');
+    document.body.appendChild(outside);
+    outside.focus();
+
+    fireEvent.keyDown(document, { key: 'Tab' });
+    expect(screen.getByRole('button', { name: 'Close menu' })).toHaveFocus();
+    outside.remove();
+  });
+
+  it('neither moves focus in nor traps Tab on desktop', () => {
+    setMobile(false);
+    const trigger = document.createElement('button');
+    document.body.appendChild(trigger);
+    trigger.focus();
+
+    renderDrawer();
+    expect(trigger).toHaveFocus();
+    const notPrevented = fireEvent.keyDown(document, { key: 'Tab' });
+    expect(notPrevented).toBe(true);
+    expect(trigger).toHaveFocus();
+    trigger.remove();
+  });
+
+  it('stops trapping Tab while a stacked dialog suspends Escape', () => {
+    setMobile(true);
+    const onClose = vi.fn();
+    renderDrawer({ suspendEscape: true, onClose });
+    const buttons = screen.getAllByRole('button');
+    buttons[buttons.length - 1].focus();
+
+    const notPrevented = fireEvent.keyDown(document, { key: 'Tab' });
+    expect(notPrevented).toBe(true);
+    expect(buttons[buttons.length - 1]).toHaveFocus();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it('restores focus to the previously-focused element on close in mobile mode', () => {

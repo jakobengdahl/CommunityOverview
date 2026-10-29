@@ -1,12 +1,16 @@
 import json
 import logging
+import re
 import sys
 
 from backend.api_host.config import AppConfig
 from backend.api_host.logging_config import (
+    TEXT_LOG_FORMAT,
     StructuredJsonFormatter,
     configure_root_logging,
 )
+
+_UVICORN_NAMES = ("uvicorn", "uvicorn.error", "uvicorn.access")
 
 
 def test_app_config_reads_log_format_from_env(monkeypatch):
@@ -67,3 +71,167 @@ def test_structured_json_formatter_emits_json_log_line():
     assert payload["level"] == "INFO"
     assert payload["timestamp"]
     assert "RuntimeError: boom" in payload["exception"]
+
+
+def test_text_format_labels_app_logs_from_boot_at_info():
+    previous_handlers = logging.root.handlers[:]
+    previous_level = logging.root.level
+    try:
+        logging.root.handlers = []
+        logging.root.setLevel(logging.WARNING)
+
+        configure_root_logging("text")
+
+        assert len(logging.root.handlers) == 1
+        assert logging.root.level == logging.INFO
+        record = logging.LogRecord(
+            name="backend.core.postgres_backend",
+            level=logging.WARNING,
+            pathname=__file__,
+            lineno=1,
+            msg="graph checkpoint failed, will retry: disk full",
+            args=(),
+            exc_info=None,
+        )
+        line = logging.root.handlers[0].format(record)
+        assert re.fullmatch(
+            r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} WARNING "
+            r"backend\.core\.postgres_backend: "
+            r"graph checkpoint failed, will retry: disk full",
+            line,
+        ), line
+    finally:
+        for handler in logging.root.handlers:
+            if handler not in previous_handlers:
+                handler.close()
+        logging.root.handlers = previous_handlers
+        logging.root.setLevel(previous_level)
+
+
+def test_text_format_is_not_replaced_by_fastmcp_logging_setup():
+    """FastMCP's constructor configures logging with basicConfig; once the
+    text-mode handler exists that must be a no-op, not a second handler."""
+    from mcp.server.fastmcp import FastMCP
+
+    previous_handlers = logging.root.handlers[:]
+    previous_level = logging.root.level
+    try:
+        logging.root.handlers = []
+
+        configure_root_logging("text")
+        installed = logging.root.handlers[:]
+        FastMCP("probe")
+
+        assert logging.root.handlers == installed
+        assert logging.root.level == logging.INFO
+    finally:
+        for handler in logging.root.handlers:
+            if handler not in previous_handlers:
+                handler.close()
+        logging.root.handlers = previous_handlers
+        logging.root.setLevel(previous_level)
+
+
+def test_text_format_leaves_an_existing_root_handler_and_uvicorn_alone():
+    """The uvicorn loggers are set to a fixed state first, so what an earlier
+    test left on them can neither mask nor fake a change."""
+    previous_handlers = logging.root.handlers[:]
+    previous_level = logging.root.level
+    previous_uvicorn = {
+        name: (
+            logging.getLogger(name).level,
+            logging.getLogger(name).propagate,
+            logging.getLogger(name).handlers[:],
+        )
+        for name in _UVICORN_NAMES
+    }
+    existing = logging.StreamHandler()
+    uvicorn_handlers = {name: logging.StreamHandler() for name in _UVICORN_NAMES}
+    try:
+        logging.root.handlers = [existing]
+        for name in _UVICORN_NAMES:
+            logger = logging.getLogger(name)
+            logger.setLevel(logging.DEBUG)
+            logger.propagate = False
+            logger.handlers = [uvicorn_handlers[name]]
+
+        configure_root_logging("text")
+
+        assert logging.root.handlers == [existing]
+        assert existing.formatter is None
+        for name in _UVICORN_NAMES:
+            logger = logging.getLogger(name)
+            assert logger.level == logging.DEBUG
+            assert logger.propagate is False
+            assert logger.handlers == [uvicorn_handlers[name]]
+            assert uvicorn_handlers[name].formatter is None
+    finally:
+        logging.root.handlers = previous_handlers
+        logging.root.setLevel(previous_level)
+        for name, (level, propagate, handlers) in previous_uvicorn.items():
+            logger = logging.getLogger(name)
+            logger.setLevel(level)
+            logger.propagate = propagate
+            logger.handlers = handlers
+
+
+def test_structured_json_with_an_empty_root_logs_json_to_stdout():
+    """basicConfig would put a handler on stderr with the text format; the
+    JSON handler must be the only one, and on stdout.
+
+    The call also re-formats whatever handlers the uvicorn loggers carry, so
+    they are pinned empty and restored: otherwise this test would re-format
+    handlers another test or a real server left on them."""
+    previous_handlers = logging.root.handlers[:]
+    previous_level = logging.root.level
+    previous_uvicorn_handlers = {
+        name: logging.getLogger(name).handlers[:] for name in _UVICORN_NAMES
+    }
+    try:
+        logging.root.handlers = []
+        logging.root.setLevel(logging.WARNING)
+        for name in _UVICORN_NAMES:
+            logging.getLogger(name).handlers = []
+
+        configure_root_logging("structured_json")
+
+        assert len(logging.root.handlers) == 1
+        handler = logging.root.handlers[0]
+        assert isinstance(handler, logging.StreamHandler)
+        assert handler.stream is sys.stdout
+        assert isinstance(handler.formatter, StructuredJsonFormatter)
+        assert logging.root.level == logging.INFO
+        for name in _UVICORN_NAMES:
+            assert logging.getLogger(name).handlers == []
+    finally:
+        for handler in logging.root.handlers:
+            if handler not in previous_handlers:
+                handler.close()
+        logging.root.handlers = previous_handlers
+        logging.root.setLevel(previous_level)
+        for name, handlers in previous_uvicorn_handlers.items():
+            logging.getLogger(name).handlers = handlers
+
+
+def test_an_unrecognised_log_format_takes_the_text_branch():
+    previous_handlers = logging.root.handlers[:]
+    previous_level = logging.root.level
+    try:
+        logging.root.handlers = []
+        # Not INFO, so the level assertion below sees the call set it rather
+        # than what an earlier test left behind.
+        logging.root.setLevel(logging.WARNING)
+
+        configure_root_logging("xml")
+
+        assert len(logging.root.handlers) == 1
+        formatter = logging.root.handlers[0].formatter
+        assert not isinstance(formatter, StructuredJsonFormatter)
+        assert formatter._fmt == TEXT_LOG_FORMAT
+        assert logging.root.level == logging.INFO
+    finally:
+        for handler in logging.root.handlers:
+            if handler not in previous_handlers:
+                handler.close()
+        logging.root.handlers = previous_handlers
+        logging.root.setLevel(previous_level)

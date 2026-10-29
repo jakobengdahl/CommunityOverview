@@ -114,10 +114,20 @@ class ExecutionStore(Protocol):
         """
         ...
 
-    def cancel(self, job_id: str, *, now: Optional[datetime] = None) -> bool:
+    def cancel(
+        self,
+        job_id: str,
+        *,
+        result: Optional[dict] = None,
+        now: Optional[datetime] = None,
+    ) -> bool:
         """
         Cancel a non-terminal job. Returns True if it was cancelled, False if it
         was already terminal or unknown. Cancellation is sticky.
+
+        ``result`` is stored on the job exactly like ``complete``'s, for a
+        caller cancelling a job it can explain (e.g. "superseded by a later
+        import") rather than plain external cancellation.
         """
         ...
 
@@ -144,9 +154,78 @@ class ExecutionStore(Protocol):
         agent_id: Optional[str] = None,
         kind: Optional[ExecutionKind] = None,
         limit: Optional[int] = None,
+        created_after: Optional[datetime] = None,
     ) -> List[ExecutionJob]:
         """
         Return jobs matching the filters, newest-first by ``created_at``. This is
         the inspection surface durable AgentRun history builds on.
+        ``created_after`` keeps only jobs created strictly after that instant.
+        """
+        ...
+
+    def erase_actor(self, actor_id: str, replacement_token: str) -> int:
+        """Replace structured actor attribution; return changed record count."""
+        ...
+
+    # -- retention ------------------------------------------------------------
+
+    def list_terminal_older_than(
+        self,
+        cutoff: datetime,
+        *,
+        redacted: Optional[bool] = None,
+    ) -> List[ExecutionJob]:
+        """
+        Return terminal jobs that reached their terminal state strictly before
+        ``cutoff`` (``finished_at``, falling back to ``updated_at``), oldest
+        first. ``redacted`` True/False keeps only redacted / unredacted jobs.
+        Non-terminal jobs are never returned.
+        """
+        ...
+
+    def list_running_older_than(self, cutoff: datetime) -> List[ExecutionJob]:
+        """
+        Return RUNNING jobs last updated strictly before ``cutoff``
+        (``updated_at``), oldest first: the candidates ``abandon`` would move.
+        """
+        ...
+
+    def abandon(
+        self,
+        job_ids: Sequence[str],
+        *,
+        cutoff: datetime,
+        now: Optional[datetime] = None,
+    ) -> int:
+        """
+        Dead-letter each listed job that is still RUNNING and was last updated
+        strictly before ``cutoff``, with ``models.ABANDONED_REASON`` as its
+        reason and its last update as ``finished_at`` (so retention ages it
+        from when it was last seen alive, not from now). Skips (without error)
+        ids that are unknown, not RUNNING or updated since ``cutoff``, so a
+        repeat call changes nothing. Returns how many jobs were abandoned.
+        """
+        ...
+
+    def redact(
+        self,
+        job_ids: Sequence[str],
+        *,
+        now: Optional[datetime] = None,
+    ) -> int:
+        """
+        Strip the content of each listed job per ``models.redact_job`` and stamp
+        ``redacted_at``. Skips (without error) ids that are unknown, non-terminal
+        or already redacted, so a repeat call changes nothing. Returns how many
+        jobs were redacted.
+        """
+        ...
+
+    def purge(self, job_ids: Sequence[str]) -> int:
+        """
+        Permanently delete each listed terminal job. Skips ids that are unknown
+        or non-terminal. A purged job's ``idempotency_key`` is forgotten, so a
+        later ``enqueue`` with that key creates a new job. Returns how many
+        jobs were deleted.
         """
         ...

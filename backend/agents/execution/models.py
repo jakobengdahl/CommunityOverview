@@ -29,6 +29,7 @@ class ExecutionKind(str, Enum):
 
     SCHEDULED = "scheduled"  # time-based trigger (AgentScheduler)
     EVENT = "event"  # graph-mutation / subscription trigger
+    IMPORT = "import"  # background embedding generation after a graph.json import
 
 
 class ExecutionState(str, Enum):
@@ -182,6 +183,8 @@ class ExecutionJob:
     updated_at: datetime = field(default_factory=utcnow)
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
+    # Set once retention has stripped the job's content (see redact_job).
+    redacted_at: Optional[datetime] = None
 
     def __post_init__(self) -> None:
         # Accept plain strings for enum fields so from_dict / callers stay simple.
@@ -223,6 +226,7 @@ class ExecutionJob:
             "updated_at": _fmt_dt(self.updated_at),
             "started_at": _fmt_dt(self.started_at),
             "finished_at": _fmt_dt(self.finished_at),
+            "redacted_at": _fmt_dt(self.redacted_at),
         }
 
     @classmethod
@@ -249,4 +253,75 @@ class ExecutionJob:
         job.updated_at = _parse_dt(data.get("updated_at")) or job.updated_at
         job.started_at = _parse_dt(data.get("started_at"))
         job.finished_at = _parse_dt(data.get("finished_at"))
+        job.redacted_at = _parse_dt(data.get("redacted_at"))
         return job
+
+    @property
+    def terminal_at(self) -> datetime:
+        """When the job reached its terminal state; the age retention measures."""
+        return self.finished_at or self.updated_at
+
+
+# The fixed, content-free reason ``abandon`` records on a job it dead-letters.
+ABANDONED_REASON = "abandoned: still running past the retention window"
+
+_MAX_KEPT_LEN = 200
+
+
+def _kept_scalar(value: Any) -> Any:
+    """An identifier kept through redaction: a short str/int, else None."""
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return None
+    if isinstance(value, str) and len(value) > _MAX_KEPT_LEN:
+        return None
+    return value
+
+
+def redact_job(job: ExecutionJob, now: datetime) -> None:
+    """
+    Strip ``job``'s content in place, keeping what an operator needs to account
+    for the run: state, timestamps, ids, ``agent_id``, ``correlation_id`` and
+    ``attempts``.
+
+    * ``payload.event`` shrinks to ``{event_type, entity: {kind, id, type}}``
+      (the entity's before/after/patch data and the event's actor attribution
+      go); every other payload key except ``agent_name`` is dropped. Kept
+      values survive only as short strings or integers.
+    * ``result.summary`` is nulled and only boolean/numeric result values are
+      kept, so free text under any other key goes too.
+    * ``last_error`` and the attribution fields ``session_id`` and ``origin``
+      are nulled.
+
+    Shared by every adapter so redaction means the same thing in each.
+    """
+    payload = job.payload or {}
+    redacted: Dict[str, Any] = {}
+    if "agent_name" in payload:
+        redacted["agent_name"] = _kept_scalar(payload["agent_name"])
+    event = payload.get("event")
+    if isinstance(event, dict):
+        entity = event.get("entity") if isinstance(event.get("entity"), dict) else {}
+        redacted["event"] = {
+            "event_type": _kept_scalar(event.get("event_type")),
+            "entity": {
+                "kind": _kept_scalar(entity.get("kind")),
+                "id": _kept_scalar(entity.get("id")),
+                "type": _kept_scalar(entity.get("type")),
+            },
+        }
+    job.payload = redacted
+    if isinstance(job.result, dict):
+        job.result = {
+            key: (
+                value
+                if key != "summary" and isinstance(value, (bool, int, float))
+                else None
+            )
+            for key, value in job.result.items()
+        }
+    elif job.result is not None:
+        job.result = None
+    job.last_error = None
+    job.session_id = None
+    job.origin = None
+    job.redacted_at = now

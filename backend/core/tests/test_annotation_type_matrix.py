@@ -86,8 +86,19 @@ class TestAnnotationTypeMatrixFixture:
             "vote_dot",
             "image",
             "freehand",
+            "heatmap",
+            "reference",
         }
         assert types.count("shape") == 2
+        # One reference case per target kind. A reference's payload differs
+        # by target kind far more than a shape's differs by subtype — the
+        # scheme gate applies to exactly one of the three — so covering only
+        # one kind would leave the other two unexercised through the model,
+        # persistence and MCP legs this matrix exists to compare.
+        assert types.count("reference") == 3
+        assert {
+            c["fields"]["target_kind"] for c in CASES if c["type"] == "reference"
+        } == {"session", "url", "resource"}
 
 
 @pytest.fixture
@@ -270,7 +281,7 @@ class TestSequentialWritesDoNotRollBackEarlierSuccesses:
     ``apply_ops``/``POST /sessions/{id}/ops`` op batch, a different and
     deliberately *non*-partial-success mechanism pinned by
     ``test_a_poisoned_op_rolls_back_the_whole_batch`` in
-    ``backend/core/tests/test_session_annotations_image_guard.py``). So "a
+    ``backend/core/tests/test_session_annotations_guards.py``). So "a
     batch where some entries are invalid saves the valid ones and returns a
     per-object error for the rest" is a property of a *sequence* of
     independent create/update calls, one per v1 type: a later call's error

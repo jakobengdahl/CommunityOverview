@@ -185,3 +185,94 @@ describe('identifier minting', () => {
     expect(randomSpy).not.toHaveBeenCalled();
   });
 });
+
+// resolveTeleport is the one place the browser and the backend's
+// ResolveTeleportRequest meet, and both sides were written together. It is
+// mocked in every component test that exercises teleport, so without this the
+// path and all three field names could be wrong and nothing would notice.
+// The backend half is pinned by test_federated_teleport_rest_endpoint.py's
+// test_the_request_body_field_names_are_the_ones_the_client_sends.
+describe('resolveTeleport', () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    vi.resetModules();
+  });
+
+  async function capture(nodeId, options) {
+    const calls = [];
+    global.fetch = vi.fn(async (url, init) => {
+      calls.push({ url, init });
+      return { ok: true, status: 200, json: async () => ({ status: 'local' }) };
+    });
+    const { resolveTeleport } = await import('../src/services/api.js');
+    await resolveTeleport(nodeId, options);
+    return calls[0];
+  }
+
+  it('posts to the federation teleport endpoint', async () => {
+    const call = await capture('n1', {});
+
+    expect(call.url).toMatch(/\/api\/federation\/teleport$/);
+    expect(call.init.method).toBe('POST');
+  });
+
+  it('sends the node, session and search context under the names the server reads', async () => {
+    const call = await capture('federated::esam-main::remote-1', {
+      sessionId: '1111-2222',
+      searchQuery: 'external',
+    });
+
+    expect(JSON.parse(call.init.body)).toEqual({
+      node_id: 'federated::esam-main::remote-1',
+      session_id: '1111-2222',
+      search_query: 'external',
+    });
+  });
+
+  it('returns the resolved body to the caller', async () => {
+    global.fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ status: 'ok', route: 'https://esam.example/app?node=remote-1' }),
+    }));
+    const { resolveTeleport } = await import('../src/services/api.js');
+
+    await expect(resolveTeleport('n1')).resolves.toMatchObject({ status: 'ok' });
+  });
+});
+
+// Plain HTTP browsers omit Sec-Fetch-Site, even on same-origin requests.
+describe('browser write authorization header', () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    vi.resetModules();
+  });
+
+  it('marks JSON, multipart, raw attachment and image writes without fetch metadata', async () => {
+    global.fetch = vi.fn(async (_url, options) => ({
+      ok: !!options.headers['X-Requested-With'],
+      status: options.headers['X-Requested-With'] ? 200 : 403,
+      json: async () => ({}),
+    }));
+    const api = await import('../src/services/api.js');
+    const file = new File(['hello'], 'hello.txt', { type: 'text/plain' });
+
+    await api.addNodes([]);
+    await api.uploadFile(file);
+    await api.uploadNodeAttachment('node-1', file);
+    await api.deleteNodeAttachment('node-1', 'attachment-1');
+    await api.ingestSessionImage('1234-5678', { x: 0, y: 0 });
+
+    expect(global.fetch).toHaveBeenCalledTimes(5);
+    for (const [, options] of global.fetch.mock.calls) {
+      expect(options.headers['X-Requested-With']).toBe('XMLHttpRequest');
+      expect(options.headers['Sec-Fetch-Site']).toBeUndefined();
+    }
+    expect(global.fetch.mock.calls[1][1].headers['Content-Type']).toBeUndefined();
+    expect(global.fetch.mock.calls[2][1].headers['Content-Type']).toBe('text/plain');
+  });
+});

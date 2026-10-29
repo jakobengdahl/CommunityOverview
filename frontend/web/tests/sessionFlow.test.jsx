@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 
 import * as sessionStore from '../src/services/sessionStore';
 
@@ -47,18 +47,33 @@ vi.mock('@community-graph/ui-graph-canvas/styles', () => ({}));
 const NODE_A = { id: 'node-a', type: 'Actor', name: 'Actor A' };
 const NODE_B = { id: 'node-b', type: 'Theme', name: 'Theme B' };
 
+// The api mock the latest App import was given (a fresh App gets fresh mocks).
+const apiMocks = vi.hoisted(() => ({ latest: null }));
 vi.mock('../src/services/api', () => {
   let idCounter = 0;
-  return {
+  apiMocks.latest = {
     generateVisualizationSessionId: vi.fn(() => `1234-000${++idCounter}`),
     getVisualizationStreamUrl: vi.fn(() => 'http://localhost/stream'),
     getSessionStreamUrl: vi.fn((id) => `http://localhost/api/sessions/${id}/stream`),
     getSessionOpsUrl: vi.fn((id) => `http://localhost/api/sessions/${id}/ops`),
     getClientId: vi.fn(() => 'client-test'),
+    setActiveSessionForRequests: vi.fn(),
+    setSessionStaged: vi.fn(),
+    setSessionModeUnknown: vi.fn(),
+    isActiveSessionPossiblyStaged: vi.fn(() => false),
+    setSessionModeDirect: vi.fn(),
+    setSessionOnServer: vi.fn(),
+    setStagingAvailable: vi.fn(),
+    subscribeStagedMarks: vi.fn(() => () => {}),
+    setMessageTranslator: vi.fn(),
+    getStagedSessionBinding: vi.fn(() => null),
+    getStagedChanges: vi.fn(async () => ({ items: [], count: 0 })),
     getDisplayName: vi.fn(() => null),
     listServerSessions: vi.fn(async () => ({ sessions: [] })),
     renameServerSession: vi.fn(async () => ({})),
     deleteServerSession: vi.fn(async () => ({ deleted: true })),
+    createSession: vi.fn(async () => ({ id: '9999-0001', write_mode: 'staged' })),
+    setSessionWriteMode: vi.fn(async (id) => ({ id, write_mode: 'staged' })),
     getSession: vi.fn(async (id, opts) => {
       if (id === '5555-6666' && opts?.resolve) {
         return {
@@ -92,6 +107,7 @@ vi.mock('../src/services/api', () => {
     deleteEdge: vi.fn(async () => ({ success: true })),
     exportGraph: vi.fn(async () => ({ nodes: [], edges: [] })),
   };
+  return apiMocks.latest;
 });
 
 // EventSource is not implemented in jsdom. This fake auto-delivers a snapshot so
@@ -102,15 +118,32 @@ class FakeEventSource {
     this.onmessage = null;
     this.onerror = null;
     FakeEventSource.instances.push(this);
-    setTimeout(() => {
+    const scripted = FakeEventSource.microtaskMessagesByUrl[url.split('?')[0]];
+    if (scripted) {
+      queueMicrotask(() =>
+        scripted.forEach((msg) => this.onmessage?.({ data: JSON.stringify(msg) }))
+      );
+      return;
+    }
+    const configuredSeq = FakeEventSource.snapshotSeqByUrl[url.split('?')[0]];
+    const deliver = () =>
       this.onmessage?.({
-        data: JSON.stringify({ type: 'snapshot', seq: 0, session: { state: {} } }),
+        data: JSON.stringify({ type: 'snapshot', seq: configuredSeq ?? 0, session: { state: {} } }),
       });
-    }, 0);
+    // A configured seq is delivered on a microtask: it lands after the load's
+    // setBaseline but before App re-renders with the new session id, the
+    // window where App's handlers are still bound to the previous session.
+    if (configuredSeq === undefined) setTimeout(deliver, 0);
+    else queueMicrotask(deliver);
   }
   close() {}
 }
 FakeEventSource.instances = [];
+FakeEventSource.snapshotSeqByUrl = {};
+// Messages delivered in order on one microtask, in place of the default
+// snapshot: they land while App's handlers are still bound to the session
+// being left (see the configured-seq note above).
+FakeEventSource.microtaskMessagesByUrl = {};
 global.EventSource = FakeEventSource;
 
 // The sync client posts op batches with global fetch; capture them.
@@ -124,7 +157,16 @@ import App from '../src/App';
 import * as api from '../src/services/api';
 import useGraphStore from '../src/store/graphStore';
 import { I18nProvider } from '../src/i18n';
-import { SessionSyncClient } from '../src/services/sessionSyncClient';
+import { SessionSyncClient, DEFAULT_REQUEST_TIMEOUT_MS } from '../src/services/sessionSyncClient';
+
+// vi.clearAllMocks() keeps a mockImplementation() a test installed, so each
+// module default is captured here and put back before every test; otherwise
+// a test inherits whatever the test before it left behind (e.g. a
+// getNodeDetails that resolves node-a lets a resync replay it).
+const defaultMockImplementations = [
+  ...Object.values(api).filter((fn) => vi.isMockFunction(fn)),
+  global.fetch,
+].map((fn) => [fn, fn.getMockImplementation()]);
 
 function renderApp() {
   return render(
@@ -150,10 +192,40 @@ describe('Server-backed session lifecycle', () => {
     window.localStorage.clear();
     useGraphStore.getState().clearVisualization();
     FakeEventSource.instances = [];
+    FakeEventSource.snapshotSeqByUrl = {};
+    FakeEventSource.microtaskMessagesByUrl = {};
     // Reset, or a leftover value from the previous test satisfies the "canvas
     // has rendered" barrier below and it stops being a barrier at all.
     canvasProps.baselineEpoch = null;
     vi.clearAllMocks();
+    defaultMockImplementations.forEach(([fn, impl]) => {
+      fn.mockReset();
+      fn.mockImplementation(impl);
+    });
+    Object.defineProperty(window.navigator, 'onLine', {
+      configurable: true,
+      value: true,
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('shows a clear read-only offline state when the network is gone', async () => {
+    renderApp();
+
+    act(() => {
+      Object.defineProperty(window.navigator, 'onLine', {
+        configurable: true,
+        value: false,
+      });
+      window.dispatchEvent(new Event('offline'));
+    });
+
+    expect(
+      await screen.findByText('Offline — viewing only. Reconnect before editing the graph.')
+    ).toBeInTheDocument();
   });
 
   it('toolbar Save View still opens the naming dialog and emits ops to the server', async () => {
@@ -654,7 +726,12 @@ describe('Server-backed session lifecycle', () => {
     await waitFor(() => expect(getSessionCalls.length).toBe(1));
     deliverCatchUp(); // second reconnect while the first resync is still in flight
     await new Promise((r) => setTimeout(r, 20));
-    expect(getSessionCalls.length).toBe(1); // the second resync never called getSession
+    expect(getSessionCalls.length).toBe(1);
+    // getSessionCalls only sees the gated first call; a second resync would
+    // reach the default mock instead, so count every call for this session.
+    const resyncLoads = () =>
+      api.getSession.mock.calls.filter(([id]) => id === getSessionCalls[0]).length;
+    expect(resyncLoads()).toBe(1); // the second resync never called getSession
 
     await act(async () => {
       releaseGetSession();
@@ -665,7 +742,7 @@ describe('Server-backed session lifecycle', () => {
     await waitFor(() => {
       expect(useGraphStore.getState().nodes.map((n) => n.id)).toContain('node-a');
     });
-    expect(getSessionCalls.length).toBe(1);
+    expect(resyncLoads()).toBe(1);
 
     getPendingOpsSpy.mockRestore();
   });
@@ -788,6 +865,57 @@ describe('Server-backed session lifecycle', () => {
     getPendingOpsSpy.mockRestore();
   });
 
+  it('does not report a recovered count for a stale pending add already in the server snapshot', async () => {
+    const pendingOp = { op: 'nodes_added', node_ids: ['node-a'] };
+    const getPendingOpsSpy = vi
+      .spyOn(SessionSyncClient.prototype, 'getPendingOps')
+      .mockReturnValue([pendingOp]);
+
+    const { container } = renderApp();
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+    const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+    fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+    await waitFor(() => screen.getByText('Save View'));
+
+    const sessionSource = await waitFor(() => {
+      const found = FakeEventSource.instances.find(
+        (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')
+      );
+      expect(found).toBeTruthy();
+      return found;
+    });
+
+    api.getSession.mockImplementationOnce(async (id) => ({
+      id,
+      state: { node_refs: ['node-a'], positions: {}, annotations: [] },
+      resolved: { nodes: [NODE_A], edges: [] },
+      roster: [],
+    }));
+
+    act(() => {
+      sessionSource.onmessage({
+        data: JSON.stringify({
+          type: 'catch_up',
+          seq: 5,
+          ops: [{ op: 'nodes_hidden', node_ids: [] }],
+          roster: [],
+          claims: {},
+        }),
+      });
+    });
+
+    await waitFor(() => {
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toContain('node-a');
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.queryByText(/Reconnected — restored/)).not.toBeInTheDocument();
+    expect(api.getNodeDetails).not.toHaveBeenCalledWith('node-a');
+
+    getPendingOpsSpy.mockRestore();
+  });
+
   it('switching session loads the target from the server, carrying its saved position', async () => {
     // Seed a previous session in the recents list so it shows in the drawer
     sessionStore.touchSession('5555-6666');
@@ -894,6 +1022,1051 @@ describe('Server-backed session lifecycle', () => {
     getPendingOpsSpy.mockRestore();
   });
 
+  // A resync for the session being left, still waiting on its reload, must
+  // not swallow the first-snapshot resync of the session just switched to:
+  // the old call bails at its switched-away check, so nothing else would
+  // reload the new session and its canvas would stay on the stale load.
+  it('a slow resync for the session being left does not block the new session first-snapshot resync', async () => {
+    sessionStore.touchSession('5555-6666');
+    FakeEventSource.snapshotSeqByUrl['http://localhost/api/sessions/5555-6666/stream'] = 7;
+    const NODE_C = { id: 'node-c', type: 'Theme', name: 'Theme C' };
+
+    let releaseOldReload;
+    const oldReloadGate = new Promise((resolve) => {
+      releaseOldReload = resolve;
+    });
+    let gateOtherSessions = false;
+    let targetLoads = 0;
+    const originalGetSession = api.getSession.getMockImplementation();
+    api.getSession.mockImplementation(async (id, opts) => {
+      if (id === '5555-6666') {
+        targetLoads += 1;
+        // The load is older (seq 3) than the stream's first snapshot (seq 7);
+        // only the resync that snapshot triggers returns node-c.
+        const nodes = targetLoads === 1 ? [NODE_B] : [NODE_B, NODE_C];
+        return {
+          id,
+          seq: targetLoads === 1 ? 3 : 7,
+          state: { positions: {}, hidden_node_ids: [], hidden_edge_ids: [], annotations: [] },
+          resolved: { nodes, edges: [] },
+          roster: [],
+        };
+      }
+      if (gateOtherSessions) {
+        await oldReloadGate;
+        return { id, state: {}, resolved: { nodes: [NODE_A], edges: [] }, roster: [] };
+      }
+      return originalGetSession(id, opts);
+    });
+
+    try {
+      const { container } = renderApp();
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A], []);
+      });
+      const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+      fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+      await waitFor(() => screen.getByText('Save View'));
+
+      const oldSource = await waitFor(() => {
+        const found = FakeEventSource.instances.find(
+          (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')
+        );
+        expect(found).toBeTruthy();
+        return found;
+      });
+      const oldSessionId = oldSource.url.split('/api/sessions/')[1].split('/')[0];
+
+      gateOtherSessions = true;
+      act(() => {
+        oldSource.onmessage({
+          data: JSON.stringify({
+            type: 'catch_up',
+            seq: 5,
+            ops: [{ op: 'nodes_hidden', node_ids: [] }],
+            roster: [],
+            claims: {},
+          }),
+        });
+      });
+      await waitFor(() =>
+        expect(api.getSession).toHaveBeenCalledWith(oldSessionId, { resolve: true })
+      );
+
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getByText('5555-6666'));
+
+      await waitFor(() => expect(targetLoads).toBe(2));
+      await waitFor(() => {
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b', 'node-c']);
+      });
+
+      // The old reload settling late must not clobber the new session's canvas.
+      await act(async () => {
+        releaseOldReload();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b', 'node-c']);
+    } finally {
+      releaseOldReload();
+      api.getSession.mockImplementation(originalGetSession);
+    }
+  });
+
+  // Switching away and back builds a new sync client for the same session
+  // id. Its first-snapshot resync must not be swallowed by the resync the
+  // previous client for that id left in flight, and that older resync, when
+  // it finally settles, must not overwrite the newer reload.
+  it('a slow resync from an earlier visit does not block the resync on returning to the session', async () => {
+    sessionStore.touchSession('5555-6666');
+    sessionStore.touchSession('7777-8888');
+    FakeEventSource.snapshotSeqByUrl['http://localhost/api/sessions/7777-8888/stream'] = 9;
+    const NODE_C = { id: 'node-c', type: 'Theme', name: 'Theme C' };
+    const emptyState = { positions: {}, hidden_node_ids: [], hidden_edge_ids: [], annotations: [] };
+
+    let releaseFirstResync;
+    const firstResyncGate = new Promise((resolve) => {
+      releaseFirstResync = resolve;
+    });
+    let returningLoads = 0;
+    const originalGetSession = api.getSession.getMockImplementation();
+    api.getSession.mockImplementation(async (id, opts) => {
+      if (id !== '7777-8888') return originalGetSession(id, opts);
+      returningLoads += 1;
+      const call = returningLoads;
+      // 1: first load (seq 3, older than the stream's seq 9) — 2: the resync
+      // that first snapshot triggers, held open — 3: the reload on returning
+      // — 4: the returning client's own first-snapshot resync.
+      if (call === 2) {
+        await firstResyncGate;
+        return { id, seq: 9, state: emptyState, resolved: { nodes: [NODE_A], edges: [] } };
+      }
+      const nodes = call === 4 ? [NODE_A, NODE_C] : [NODE_A];
+      return { id, seq: call === 4 ? 9 : 3, state: emptyState, resolved: { nodes, edges: [] } };
+    });
+
+    try {
+      renderApp();
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getByText('7777-8888'));
+      await waitFor(() => expect(returningLoads).toBe(2));
+
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getByText('5555-6666'));
+      await waitFor(() => {
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b']);
+      });
+
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getByText('7777-8888'));
+      await waitFor(() => expect(returningLoads).toBe(4));
+      await waitFor(() => {
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a', 'node-c']);
+      });
+
+      await act(async () => {
+        releaseFirstResync();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a', 'node-c']);
+    } finally {
+      releaseFirstResync();
+      api.getSession.mockImplementation(originalGetSession);
+    }
+  });
+
+  // Same away-and-back shape, but the reload on returning is already current
+  // (seq 9), so the returning client's first snapshot starts no resync of its
+  // own and nothing supersedes the first visit's call. Its session id matches
+  // the returning client's, so only a client-identity check stops it from
+  // applying its older payload over the return load.
+  it('a slow resync from an earlier visit does not overwrite a current return load', async () => {
+    sessionStore.touchSession('5555-6666');
+    sessionStore.touchSession('7777-8888');
+    FakeEventSource.snapshotSeqByUrl['http://localhost/api/sessions/7777-8888/stream'] = 9;
+    const NODE_C = { id: 'node-c', type: 'Theme', name: 'Theme C' };
+    const emptyState = { positions: {}, hidden_node_ids: [], hidden_edge_ids: [], annotations: [] };
+
+    let releaseFirstResync;
+    const firstResyncGate = new Promise((resolve) => {
+      releaseFirstResync = resolve;
+    });
+    let returningLoads = 0;
+    const originalGetSession = api.getSession.getMockImplementation();
+    api.getSession.mockImplementation(async (id, opts) => {
+      if (id !== '7777-8888') return originalGetSession(id, opts);
+      returningLoads += 1;
+      const call = returningLoads;
+      // 1: first load (seq 3, older than the stream's seq 9) — 2: the resync
+      // that first snapshot triggers, held open — 3: the reload on returning,
+      // already at the stream's seq.
+      if (call === 1) return { id, seq: 3, state: emptyState, resolved: { nodes: [], edges: [] } };
+      if (call === 2) {
+        await firstResyncGate;
+        return { id, seq: 9, state: emptyState, resolved: { nodes: [NODE_A], edges: [] } };
+      }
+      return { id, seq: 9, state: emptyState, resolved: { nodes: [NODE_A, NODE_C], edges: [] } };
+    });
+
+    try {
+      renderApp();
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getByText('7777-8888'));
+      await waitFor(() => expect(returningLoads).toBe(2));
+
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getByText('5555-6666'));
+      await waitFor(() => {
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b']);
+      });
+
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getByText('7777-8888'));
+      await waitFor(() => {
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a', 'node-c']);
+      });
+      // Let the returning client's first snapshot land: it must not start a
+      // resync (seq 9 is not above the load's), or this test proves nothing.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(returningLoads).toBe(3);
+
+      await act(async () => {
+        releaseFirstResync();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a', 'node-c']);
+    } finally {
+      releaseFirstResync();
+      api.getSession.mockImplementation(originalGetSession);
+    }
+  });
+
+  // Materialise a session with a live stream and return the stream. Unlike
+  // startResyncHeldOnGate it sends no catch_up, so no resync (and no resync
+  // guard timer) runs; the fake's default snapshot still makes the client
+  // ready.
+  async function startSyncedSession() {
+    const { container } = renderApp();
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+    const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+    fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+    await waitFor(() => screen.getByText('Save View'));
+    return waitFor(() => {
+      const found = FakeEventSource.instances.find(
+        (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')
+      );
+      expect(found).toBeTruthy();
+      return found;
+    });
+  }
+
+  // Materialise a session with a live stream, start a resync whose reload is
+  // held on `gate`, and return the stream so a test can deliver ops while the
+  // reload is in flight.
+  async function startResyncHeldOnGate(gate, loadsById) {
+    const source = await startSyncedSession();
+    const sessionId = source.url.split('/api/sessions/')[1].split('/')[0];
+    gate.active = true;
+    act(() => {
+      source.onmessage({
+        data: JSON.stringify({
+          type: 'catch_up',
+          seq: 5,
+          ops: [{ op: 'nodes_hidden', node_ids: [] }],
+          roster: [],
+          claims: {},
+        }),
+      });
+    });
+    await waitFor(() => expect(loadsById(sessionId)).toBe(1));
+    return source;
+  }
+
+  // An op that streams in while the resync's reload is in flight is applied
+  // to the canvas and advances the client's applied seq; a reload payload
+  // older than that op must not be applied over it, or the op is lost for
+  // good (the stream never resends it).
+  it('an op streamed in during the resync reload survives: a payload behind the stream is refetched', async () => {
+    let releaseReload;
+    const reloadGate = new Promise((resolve) => {
+      releaseReload = resolve;
+    });
+    const gate = { active: false };
+    const loads = {};
+    const originalGetSession = api.getSession.getMockImplementation();
+    api.getSession.mockImplementation(async (id, opts) => {
+      if (!gate.active) return originalGetSession(id, opts);
+      loads[id] = (loads[id] || 0) + 1;
+      if (loads[id] === 1) {
+        await reloadGate;
+        return { id, seq: 5, state: {}, resolved: { nodes: [NODE_A], edges: [] } };
+      }
+      return { id, seq: 6, state: {}, resolved: { nodes: [NODE_A, NODE_B], edges: [] } };
+    });
+    api.getNodeDetails.mockImplementation(async (id) =>
+      id === 'node-b' ? { node: NODE_B, edges: [] } : { success: false }
+    );
+
+    try {
+      const source = await startResyncHeldOnGate(gate, (id) => loads[id] || 0);
+      act(() => {
+        source.onmessage({
+          data: JSON.stringify({
+            type: 'op',
+            seq: 6,
+            client_id: 'someone-else',
+            op: { op: 'nodes_added', node_ids: ['node-b'] },
+          }),
+        });
+      });
+      await waitFor(() => {
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toContain('node-b');
+      });
+
+      await act(async () => {
+        releaseReload();
+      });
+      await waitFor(() => expect(Object.values(loads)).toEqual([2]));
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a', 'node-b']);
+    } finally {
+      releaseReload();
+      api.getSession.mockImplementation(originalGetSession);
+    }
+  });
+
+  // The refetch is bounded: a stream that stays ahead of every payload must
+  // not keep the resync fetching forever; it applies the last payload.
+  it('a resync refetches a payload behind the stream at most three times in all', async () => {
+    let releaseReload;
+    const reloadGate = new Promise((resolve) => {
+      releaseReload = resolve;
+    });
+    const gate = { active: false };
+    const loads = {};
+    const originalGetSession = api.getSession.getMockImplementation();
+    api.getSession.mockImplementation(async (id, opts) => {
+      if (!gate.active) return originalGetSession(id, opts);
+      loads[id] = (loads[id] || 0) + 1;
+      if (loads[id] === 1) await reloadGate;
+      const nodes = loads[id] >= 3 ? [NODE_B] : [NODE_A];
+      return { id, seq: 5, state: {}, resolved: { nodes, edges: [] } };
+    });
+
+    try {
+      const source = await startResyncHeldOnGate(gate, (id) => loads[id] || 0);
+      act(() => {
+        source.onmessage({
+          data: JSON.stringify({
+            type: 'op',
+            seq: 6,
+            client_id: 'someone-else',
+            op: { op: 'nodes_hidden', node_ids: [] },
+          }),
+        });
+      });
+
+      await act(async () => {
+        releaseReload();
+      });
+      await waitFor(() => {
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b']);
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(Object.values(loads)).toEqual([3]);
+    } finally {
+      releaseReload();
+      api.getSession.mockImplementation(originalGetSession);
+    }
+  });
+
+  // During a switch the new client's stream can deliver before App re-renders,
+  // while its handlers still name the session being left: a second snapshot
+  // on the new client then asks to resync the old id. That call must neither
+  // load the old session onto the new canvas nor hold the in-flight marker
+  // that the new session's own later resync needs.
+  it('a resync naming the session being left neither loads it nor blocks the new session', async () => {
+    sessionStore.touchSession('5555-6666');
+    FakeEventSource.microtaskMessagesByUrl['http://localhost/api/sessions/5555-6666/stream'] = [
+      { type: 'snapshot', seq: 0, session: { state: {} } },
+      { type: 'snapshot', seq: 0, session: { state: {} } },
+    ];
+    const originalGetSession = api.getSession.getMockImplementation();
+    let holdOthers = false;
+    api.getSession.mockImplementation(async (id, opts) => {
+      if (holdOthers && id !== '5555-6666') await new Promise(() => {});
+      return originalGetSession(id, opts);
+    });
+
+    try {
+      renderApp();
+      const callsBeforeSwitch = api.getSession.mock.calls.length;
+      holdOthers = true;
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getByText('5555-6666'));
+      await waitFor(() => {
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b']);
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      const idsSinceSwitch = () =>
+        api.getSession.mock.calls.slice(callsBeforeSwitch).map(([id]) => id);
+      expect(idsSinceSwitch()).toEqual(['5555-6666']);
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b']);
+
+      const source = FakeEventSource.instances.find((es) =>
+        es.url.includes('/api/sessions/5555-6666/stream')
+      );
+      act(() => {
+        source.onmessage({
+          data: JSON.stringify({
+            type: 'catch_up',
+            seq: 5,
+            ops: [{ op: 'nodes_hidden', node_ids: [] }],
+            roster: [],
+            claims: {},
+          }),
+        });
+      });
+      await waitFor(() => expect(idsSinceSwitch()).toEqual(['5555-6666', '5555-6666']));
+    } finally {
+      api.getSession.mockImplementation(originalGetSession);
+    }
+  });
+
+  // Switching away and back to the same id while a recovered op's node fetch
+  // is pending must stop the replay: the returning client is a new one, and
+  // the paused call's remaining ops belong to the client it started for.
+  it('stops replaying recovered ops after switching away and back to the same session', async () => {
+    sessionStore.touchSession('5555-6666');
+    sessionStore.touchSession('7777-8888');
+    let releaseNodeA;
+    const nodeAGate = new Promise((resolve) => {
+      releaseNodeA = resolve;
+    });
+    const pendingOps = [
+      { op: 'nodes_added', node_ids: ['node-a'] },
+      { op: 'nodes_hidden', node_ids: ['ghost-node'] },
+    ];
+    const getPendingOpsSpy = vi
+      .spyOn(SessionSyncClient.prototype, 'getPendingOps')
+      .mockReturnValue(pendingOps);
+    const originalGetNodeDetails = api.getNodeDetails.getMockImplementation();
+    api.getNodeDetails.mockImplementation(async (id) => {
+      if (id !== 'node-a') return { success: false };
+      await nodeAGate;
+      return { node: NODE_A, edges: [] };
+    });
+
+    try {
+      renderApp();
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getByText('7777-8888'));
+      const source = await waitFor(() => {
+        const found = FakeEventSource.instances.find((es) =>
+          es.url.includes('/api/sessions/7777-8888/stream')
+        );
+        expect(found).toBeTruthy();
+        return found;
+      });
+      act(() => {
+        source.onmessage({
+          data: JSON.stringify({
+            type: 'catch_up',
+            seq: 5,
+            ops: [{ op: 'nodes_hidden', node_ids: [] }],
+            roster: [],
+            claims: {},
+          }),
+        });
+      });
+      await waitFor(() => expect(api.getNodeDetails).toHaveBeenCalledWith('node-a'));
+
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getByText('5555-6666'));
+      await waitFor(() => {
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b']);
+      });
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getByText('7777-8888'));
+      await waitFor(() => {
+        expect(useGraphStore.getState().nodes).toEqual([]);
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      await act(async () => {
+        releaseNodeA();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(useGraphStore.getState().hiddenNodeIds || []).not.toContain('ghost-node');
+    } finally {
+      releaseNodeA();
+      getPendingOpsSpy.mockRestore();
+      api.getNodeDetails.mockImplementation(originalGetNodeDetails);
+    }
+  });
+
+  // The switched-away check runs after every fetch, not only the first: a
+  // switch while the refetch of a payload behind the stream is pending must
+  // keep that payload off the new session's canvas.
+  it('a refetch that settles after a session switch does not load onto the new session', async () => {
+    sessionStore.touchSession('5555-6666');
+    let releaseReload;
+    const reloadGate = new Promise((resolve) => {
+      releaseReload = resolve;
+    });
+    let releaseRefetch;
+    const refetchGate = new Promise((resolve) => {
+      releaseRefetch = resolve;
+    });
+    const gate = { active: false };
+    const loads = {};
+    const originalGetSession = api.getSession.getMockImplementation();
+    api.getSession.mockImplementation(async (id, opts) => {
+      if (!gate.active || id === '5555-6666') return originalGetSession(id, opts);
+      loads[id] = (loads[id] || 0) + 1;
+      if (loads[id] === 1) {
+        await reloadGate;
+        return { id, seq: 5, state: {}, resolved: { nodes: [NODE_A], edges: [] } };
+      }
+      await refetchGate;
+      return { id, seq: 6, state: {}, resolved: { nodes: [NODE_A], edges: [] } };
+    });
+
+    try {
+      const source = await startResyncHeldOnGate(gate, (id) => loads[id] || 0);
+      act(() => {
+        source.onmessage({
+          data: JSON.stringify({
+            type: 'op',
+            seq: 6,
+            client_id: 'someone-else',
+            op: { op: 'nodes_hidden', node_ids: [] },
+          }),
+        });
+      });
+      await act(async () => {
+        releaseReload();
+      });
+      await waitFor(() => expect(Object.values(loads)).toEqual([2]));
+
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getByText('5555-6666'));
+      await waitFor(() => {
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b']);
+      });
+
+      await act(async () => {
+        releaseRefetch();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b']);
+    } finally {
+      releaseReload();
+      releaseRefetch();
+      api.getSession.mockImplementation(originalGetSession);
+    }
+  });
+
+  // The client's seq also advances on this client's own POST responses (the
+  // server's global seq after the batch landed), which says nothing about
+  // what the canvas has applied from the stream. A payload that is current
+  // with appliedSeq must be applied, not refetched, however far seq ran ahead.
+  it('a resync payload current with the applied stream is not refetched after an own POST', async () => {
+    let releaseReload;
+    const reloadGate = new Promise((resolve) => {
+      releaseReload = resolve;
+    });
+    const gate = { active: false };
+    const loads = {};
+    const originalGetSession = api.getSession.getMockImplementation();
+    api.getSession.mockImplementation(async (id, opts) => {
+      if (!gate.active) return originalGetSession(id, opts);
+      loads[id] = (loads[id] || 0) + 1;
+      if (loads[id] === 1) await reloadGate;
+      const nodes = loads[id] === 1 ? [NODE_B] : [NODE_A];
+      return { id, seq: 5, state: {}, resolved: { nodes, edges: [] } };
+    });
+    const originalFetch = global.fetch.getMockImplementation();
+    global.fetch.mockImplementation(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ applied: [], seq: 50 }),
+    }));
+    const clients = [];
+    const originalConnect = SessionSyncClient.prototype.connect;
+    const connectSpy = vi
+      .spyOn(SessionSyncClient.prototype, 'connect')
+      .mockImplementation(function connect(...args) {
+        clients.push(this);
+        return originalConnect.apply(this, args);
+      });
+
+    try {
+      const source = await startResyncHeldOnGate(gate, (id) => loads[id] || 0);
+      const client = clients.find((c) => source.url.includes(`/api/sessions/${c.sessionId}/`));
+      await act(async () => {
+        client.sendOps([{ op: 'nodes_hidden', node_ids: [] }]);
+        await client.flush();
+      });
+      expect(client.seq).toBe(50);
+      expect(client.appliedSeq).toBe(5);
+
+      await act(async () => {
+        releaseReload();
+      });
+      await waitFor(() => {
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toContain('node-b');
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(Object.values(loads)).toEqual([1]);
+    } finally {
+      releaseReload();
+      connectSpy.mockRestore();
+      global.fetch.mockImplementation(originalFetch);
+      api.getSession.mockImplementation(originalGetSession);
+    }
+  });
+
+  // Holds back App's resync guard timers so a test can fire them by hand
+  // instead of waiting out the real delay. The sync client's ops POST timers
+  // share the guard's length, so length alone cannot tell them apart; a guard
+  // timer is the one of that length whose setTimeout call is made by App.jsx
+  // itself, and anything else runs on the real clock. A cleared timer is
+  // dropped here too, so only the guard timers still scheduled are ever fired.
+  function holdRequestTimeouts() {
+    const held = new Map();
+    let nextId = 0;
+    const realSetTimeout = globalThis.setTimeout;
+    const realClearTimeout = globalThis.clearTimeout;
+    // Only the direct caller counts: App.jsx also reaches the ops POST timer
+    // through synchronous calls into the sync client, with App.jsx further
+    // down the same stack.
+    const scheduledFromApp = () => {
+      const limit = Error.stackTraceLimit;
+      Error.stackTraceLimit = 50;
+      const stack = new Error().stack || '';
+      Error.stackTraceLimit = limit;
+      const caller = stack
+        .split('\n')
+        .slice(1)
+        .find((frame) => !/node_modules|sessionFlow\.test\.jsx/.test(frame));
+      return /[\\/]src[\\/]App\.jsx/.test(caller || '');
+    };
+    const setSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation((cb, ms, ...args) => {
+      if (ms === DEFAULT_REQUEST_TIMEOUT_MS && scheduledFromApp()) {
+        nextId -= 1;
+        held.set(nextId, cb);
+        return nextId;
+      }
+      return realSetTimeout(cb, ms, ...args);
+    });
+    const clearSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation((id) => {
+      if (held.has(id)) held.delete(id);
+      else realClearTimeout(id);
+    });
+    const fire = (ids) =>
+      ids.forEach((id) => {
+        const cb = held.get(id);
+        held.delete(id);
+        cb?.();
+      });
+    return {
+      pending: () => [...held.keys()],
+      fire,
+      fireAll: () => fire([...held.keys()]),
+      restore: () => {
+        setSpy.mockRestore();
+        clearSpy.mockRestore();
+      },
+    };
+  }
+
+  // A session switch flushes the old client's queue through a call chain
+  // that starts in App.jsx, so its ops POST timer has App.jsx on the stack
+  // below the sync client. The harness must still leave that timer on the
+  // real clock: firing it by hand would abort the POST, not the guard.
+  it('holdRequestTimeouts leaves an ops POST timer scheduled under App.jsx unheld', async () => {
+    sessionStore.touchSession('5555-6666');
+    const clients = [];
+    const originalConnect = SessionSyncClient.prototype.connect;
+    const connectSpy = vi
+      .spyOn(SessionSyncClient.prototype, 'connect')
+      .mockImplementation(function connect(...args) {
+        clients.push(this);
+        return originalConnect.apply(this, args);
+      });
+    const op = { op: 'nodes_hidden', node_ids: ['held-probe'] };
+    let timeouts = null;
+    let probeStack = null;
+    // Kept in flight: a settled POST clears its own timer, which would empty
+    // pending() whether or not the harness had wrongly held it.
+    const originalFetch = global.fetch.getMockImplementation();
+    global.fetch.mockImplementation((url, opts) => {
+      if (!opts?.body?.includes('held-probe')) return originalFetch(url, opts);
+      const limit = Error.stackTraceLimit;
+      Error.stackTraceLimit = 50;
+      probeStack = new Error().stack || '';
+      Error.stackTraceLimit = limit;
+      return new Promise(() => {});
+    });
+
+    try {
+      const source = await startSyncedSession();
+      const client = clients.find((c) => source.url.includes(`/api/sessions/${c.sessionId}/`));
+      timeouts = holdRequestTimeouts();
+      act(() => client.sendOps([op]));
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getByText('5555-6666'));
+
+      await waitFor(() => expect(opsFrom(global.fetch)).toContainEqual(op));
+      // The POST, and the timer _postOps arms in the same synchronous call,
+      // must come from the switch: from the debounced flush instead, App.jsx
+      // would be off the stack and this test would prove nothing.
+      expect(probeStack).toMatch(/[\\/]src[\\/]App\.jsx/);
+      expect(timeouts.pending()).toEqual([]);
+    } finally {
+      timeouts?.restore();
+      connectSpy.mockRestore();
+      global.fetch.mockImplementation(originalFetch);
+    }
+  });
+
+  const catchUpMessage = () => ({
+    data: JSON.stringify({
+      type: 'catch_up',
+      seq: 5,
+      ops: [{ op: 'nodes_hidden', node_ids: [] }],
+      roster: [],
+      claims: {},
+    }),
+  });
+
+  // A reload that never settles must not disable reconnect recovery: once
+  // the guard timer fires, the next resync runs. The hung call, settling
+  // later, must neither apply its outdated payload nor release the marker
+  // the newer call now holds.
+  it('a hung resync self-heals on its guard timer and cannot disturb the resync after it', async () => {
+    const NODE_C = { id: 'node-c', type: 'Theme', name: 'Theme C' };
+    const timeouts = holdRequestTimeouts();
+    let releaseHung;
+    const hungGate = new Promise((resolve) => {
+      releaseHung = resolve;
+    });
+    let releaseNext;
+    const nextGate = new Promise((resolve) => {
+      releaseNext = resolve;
+    });
+    const gate = { active: false };
+    const loads = {};
+    const originalGetSession = api.getSession.getMockImplementation();
+    api.getSession.mockImplementation(async (id, opts) => {
+      if (!gate.active) return originalGetSession(id, opts);
+      loads[id] = (loads[id] || 0) + 1;
+      if (loads[id] === 1) {
+        await hungGate;
+        return { id, seq: 5, state: {}, resolved: { nodes: [NODE_C], edges: [] } };
+      }
+      await nextGate;
+      return { id, seq: 5, state: {}, resolved: { nodes: [NODE_A, NODE_B], edges: [] } };
+    });
+    const settle = () =>
+      act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+    try {
+      const source = await startResyncHeldOnGate(gate, (id) => loads[id] || 0);
+      const totalLoads = () => Object.values(loads).reduce((a, b) => a + b, 0);
+
+      act(() => source.onmessage(catchUpMessage()));
+      await settle();
+      expect(totalLoads()).toBe(1); // still guarded while the first call hangs
+
+      act(() => timeouts.fireAll());
+      act(() => source.onmessage(catchUpMessage()));
+      await waitFor(() => expect(totalLoads()).toBe(2));
+
+      await act(async () => {
+        releaseHung();
+      });
+      await settle();
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).not.toContain('node-c');
+
+      act(() => source.onmessage(catchUpMessage()));
+      await settle();
+      expect(totalLoads()).toBe(2); // the newer call still owns the marker
+
+      await act(async () => {
+        releaseNext();
+      });
+      await waitFor(() => {
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a', 'node-b']);
+      });
+    } finally {
+      releaseHung();
+      releaseNext();
+      timeouts.restore();
+      api.getSession.mockImplementation(originalGetSession);
+    }
+  });
+
+  // The token check runs after every fetch, not only the first: a call
+  // refetching a payload behind the stream can outlive its guard timer, and
+  // a newer resync on the same client then owns the reload. The older call's
+  // refetch settling afterwards must not apply over it.
+  it('a refetch settling after its guard timer fired does not overwrite the newer resync', async () => {
+    const NODE_C = { id: 'node-c', type: 'Theme', name: 'Theme C' };
+    const timeouts = holdRequestTimeouts();
+    let releaseReload;
+    const reloadGate = new Promise((resolve) => {
+      releaseReload = resolve;
+    });
+    let releaseRefetch;
+    const refetchGate = new Promise((resolve) => {
+      releaseRefetch = resolve;
+    });
+    const gate = { active: false };
+    const loads = {};
+    const originalGetSession = api.getSession.getMockImplementation();
+    api.getSession.mockImplementation(async (id, opts) => {
+      if (!gate.active) return originalGetSession(id, opts);
+      loads[id] = (loads[id] || 0) + 1;
+      if (loads[id] === 1) {
+        await reloadGate;
+        return { id, seq: 5, state: {}, resolved: { nodes: [NODE_A], edges: [] } };
+      }
+      if (loads[id] === 2) {
+        await refetchGate;
+        return { id, seq: 6, state: {}, resolved: { nodes: [NODE_C], edges: [] } };
+      }
+      return { id, seq: 6, state: {}, resolved: { nodes: [NODE_A, NODE_B], edges: [] } };
+    });
+
+    try {
+      const source = await startResyncHeldOnGate(gate, (id) => loads[id] || 0);
+      const totalLoads = () => Object.values(loads).reduce((a, b) => a + b, 0);
+      act(() => {
+        source.onmessage({
+          data: JSON.stringify({
+            type: 'op',
+            seq: 6,
+            client_id: 'someone-else',
+            op: { op: 'nodes_hidden', node_ids: [] },
+          }),
+        });
+      });
+      await act(async () => {
+        releaseReload();
+      });
+      await waitFor(() => expect(totalLoads()).toBe(2));
+
+      expect(timeouts.pending()).toHaveLength(1); // the refetching call's guard timer
+      act(() => timeouts.fireAll());
+      act(() => source.onmessage(catchUpMessage()));
+      await waitFor(() => expect(totalLoads()).toBe(3));
+      await waitFor(() => {
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a', 'node-b']);
+      });
+
+      await act(async () => {
+        releaseRefetch();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a', 'node-b']);
+    } finally {
+      releaseReload();
+      releaseRefetch();
+      timeouts.restore();
+      api.getSession.mockImplementation(originalGetSession);
+    }
+  });
+
+  // A resync superseded by the returning client's own resync no longer owns
+  // the in-flight marker: neither its guard timer firing nor its reload
+  // settling may release the marker the newer call holds.
+  it('a superseded resync leaves the newer resync its in-flight marker', async () => {
+    sessionStore.touchSession('5555-6666');
+    sessionStore.touchSession('7777-8888');
+    FakeEventSource.snapshotSeqByUrl['http://localhost/api/sessions/7777-8888/stream'] = 9;
+    const NODE_C = { id: 'node-c', type: 'Theme', name: 'Theme C' };
+    const emptyState = { positions: {}, hidden_node_ids: [], hidden_edge_ids: [], annotations: [] };
+    const timeouts = holdRequestTimeouts();
+
+    let releaseFirstResync;
+    const firstResyncGate = new Promise((resolve) => {
+      releaseFirstResync = resolve;
+    });
+    let releaseReturnResync;
+    const returnResyncGate = new Promise((resolve) => {
+      releaseReturnResync = resolve;
+    });
+    let returningLoads = 0;
+    const originalGetSession = api.getSession.getMockImplementation();
+    api.getSession.mockImplementation(async (id, opts) => {
+      if (id !== '7777-8888') return originalGetSession(id, opts);
+      returningLoads += 1;
+      const call = returningLoads;
+      // 1: first load (seq 3) — 2: its first-snapshot resync, held — 3: the
+      // reload on returning (seq 3) — 4: the returning client's resync, held.
+      if (call === 2) {
+        await firstResyncGate;
+        return { id, seq: 9, state: emptyState, resolved: { nodes: [NODE_A], edges: [] } };
+      }
+      if (call === 4) {
+        await returnResyncGate;
+        return { id, seq: 9, state: emptyState, resolved: { nodes: [NODE_A, NODE_C], edges: [] } };
+      }
+      return { id, seq: call > 4 ? 9 : 3, state: emptyState, resolved: { nodes: [], edges: [] } };
+    });
+
+    try {
+      renderApp();
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getByText('7777-8888'));
+      await waitFor(() => expect(returningLoads).toBe(2));
+      const firstVisitTimeouts = timeouts.pending();
+      expect(firstVisitTimeouts).toHaveLength(1); // the held resync's guard timer
+
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getByText('5555-6666'));
+      await waitFor(() => {
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b']);
+      });
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getByText('7777-8888'));
+      await waitFor(() => expect(returningLoads).toBe(4));
+
+      act(() => timeouts.fire(firstVisitTimeouts));
+      await act(async () => {
+        releaseFirstResync();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      const returningSource = FakeEventSource.instances
+        .filter((es) => es.url.includes('/api/sessions/7777-8888/stream'))
+        .at(-1);
+      act(() => returningSource.onmessage(catchUpMessage()));
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(returningLoads).toBe(4);
+
+      await act(async () => {
+        releaseReturnResync();
+      });
+      await waitFor(() => {
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a', 'node-c']);
+      });
+    } finally {
+      releaseFirstResync();
+      releaseReturnResync();
+      timeouts.restore();
+      api.getSession.mockImplementation(originalGetSession);
+    }
+  });
+
+  // Same client, superseded mid-replay: the guard timer fired while a slow
+  // recovered op's node fetch was pending, and a newer resync has run since.
+  // The paused call must stop at its next op instead of applying the rest of
+  // its now-stale batch over what the newer resync established.
+  it('a resync superseded mid-replay on the same client stops replaying', async () => {
+    const timeouts = holdRequestTimeouts();
+    let releaseNodeA;
+    const nodeAGate = new Promise((resolve) => {
+      releaseNodeA = resolve;
+    });
+    let recovering = true;
+    const pendingOps = [
+      { op: 'nodes_added', node_ids: ['node-a'] },
+      { op: 'nodes_hidden', node_ids: ['ghost-node'] },
+    ];
+    const getPendingOpsSpy = vi
+      .spyOn(SessionSyncClient.prototype, 'getPendingOps')
+      .mockImplementation(() => (recovering ? pendingOps : []));
+    const originalGetNodeDetails = api.getNodeDetails.getMockImplementation();
+    api.getNodeDetails.mockImplementation(async (id) => {
+      if (id !== 'node-a') return { success: false };
+      await nodeAGate;
+      return { node: NODE_A, edges: [] };
+    });
+
+    try {
+      const { container } = renderApp();
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A], []);
+      });
+      const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+      fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+      await waitFor(() => screen.getByText('Save View'));
+      const source = await waitFor(() => {
+        const found = FakeEventSource.instances.find(
+          (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')
+        );
+        expect(found).toBeTruthy();
+        return found;
+      });
+      const sessionId = source.url.split('/api/sessions/')[1].split('/')[0];
+      const loads = () => api.getSession.mock.calls.filter(([id]) => id === sessionId).length;
+      const loadsBefore = loads();
+
+      act(() => source.onmessage(catchUpMessage()));
+      await waitFor(() => expect(api.getNodeDetails).toHaveBeenCalledWith('node-a'));
+
+      recovering = false;
+      act(() => timeouts.fireAll());
+      act(() => source.onmessage(catchUpMessage()));
+      await waitFor(() => expect(loads()).toBe(loadsBefore + 2));
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      await act(async () => {
+        releaseNodeA();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(useGraphStore.getState().hiddenNodeIds || []).not.toContain('ghost-node');
+    } finally {
+      releaseNodeA();
+      timeouts.restore();
+      getPendingOpsSpy.mockRestore();
+      api.getNodeDetails.mockImplementation(originalGetNodeDetails);
+    }
+  });
+
   it('drawer name-refresh does not overwrite a locally kept name with a null server name (R7)', async () => {
     // A session renamed locally before the server ever materialised it (or
     // simply one the server hasn't got a name for) must keep its local name
@@ -915,6 +2088,396 @@ describe('Server-backed session lifecycle', () => {
     expect(sessionStore.listSessions().find((s) => s.id === '5555-6666').name).toBe(
       'My local name'
     );
+  });
+
+  it('learns that a session it never read from the server is staged once the stream connects', async () => {
+    // Someone else switched this browser-only session to staged; the switch
+    // op is not replayed to a first connect, so the mode is read then.
+    api.getUiCapabilities.mockImplementation(async () => ({
+      llm_available: false,
+      staged_sessions: true,
+    }));
+    api.getSession.mockImplementation(async (id) => ({
+      id,
+      write_mode: 'staged',
+      state: {},
+      resolved: { nodes: [], edges: [] },
+      roster: [],
+    }));
+    const { container } = renderApp();
+    await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+    const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+    fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+    await waitFor(() => expect(api.setSessionOnServer).toHaveBeenCalled());
+    const [sessionId] = api.setSessionOnServer.mock.calls.at(-1);
+    await waitFor(() => expect(api.setSessionStaged).toHaveBeenCalledWith(sessionId, true));
+  });
+
+  it('replaces a session the delete answer says was staged with a staged one', async () => {
+    // Switched to staged after the delete dialog opened; the switch notice
+    // has not reached this tab, only the delete answer says so.
+    api.getUiCapabilities.mockImplementation(async () => ({
+      llm_available: false,
+      staged_sessions: true,
+    }));
+    api.deleteServerSession.mockImplementation(async (id) => ({
+      deleted: true,
+      id,
+      write_mode: 'staged',
+    }));
+    sessionStore.touchSession('7777-8888');
+    renderApp();
+    await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+    fireEvent.click(screen.getByTitle('Menu'));
+    fireEvent.click(screen.getByText('7777-8888'));
+    await waitFor(() =>
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('7777-8888')
+    );
+    // The drawer stays open after picking a session.
+    const rows = await screen.findAllByText('7777-8888');
+    let row = rows.find((el) => el.closest('.session-drawer'));
+    while (!row.querySelector('[aria-label="Session actions"]')) row = row.parentElement;
+    fireEvent.click(row.querySelector('[aria-label="Session actions"]'));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete session' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete' }));
+    await waitFor(() =>
+      expect(api.createSession).toHaveBeenCalledWith(null, { writeMode: 'staged' })
+    );
+  });
+
+  it('leaves a staged session once when the user opens it while deleting it', async () => {
+    // The delete's own notice reaches the tab after it switched to the
+    // session: it is still this tab's delete, not someone else's.
+    api.getUiCapabilities.mockImplementation(async () => ({
+      llm_available: false,
+      staged_sessions: true,
+    }));
+    api.getSession.mockImplementation(async (id) => ({
+      id,
+      write_mode: 'staged',
+      state: {},
+      resolved: { nodes: [], edges: [] },
+      roster: [],
+    }));
+    let answerDelete;
+    api.deleteServerSession.mockImplementation(
+      (id) => new Promise((resolve) => (answerDelete = () => resolve({ deleted: true, id })))
+    );
+    sessionStore.touchSession('7777-8888');
+    renderApp();
+    await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+    fireEvent.click(screen.getByTitle('Menu'));
+    const rows = await screen.findAllByText('7777-8888');
+    let row = rows.find((el) => el.closest('.session-drawer'));
+    while (!row.querySelector('[aria-label="Session actions"]')) row = row.parentElement;
+    fireEvent.click(row.querySelector('[aria-label="Session actions"]'));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete session' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(api.deleteServerSession).toHaveBeenCalled());
+    fireEvent.click(screen.getAllByText('7777-8888').find((el) => el.closest('.session-drawer')));
+    await waitFor(() =>
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('7777-8888')
+    );
+    await waitFor(() =>
+      expect(
+        FakeEventSource.instances.some((es) => es.url.includes('/sessions/7777-8888/stream'))
+      ).toBe(true)
+    );
+    const stream = FakeEventSource.instances.find((es) =>
+      es.url.includes('/sessions/7777-8888/stream')
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    // The replacement is still being created when the delete answers.
+    const created = [];
+    api.createSession.mockImplementation(
+      () =>
+        new Promise((resolve) =>
+          created.push(() => resolve({ id: `9999-000${created.length}`, write_mode: 'staged' }))
+        )
+    );
+    await act(async () => {
+      stream.onmessage?.({
+        data: JSON.stringify({
+          type: 'session_deleted',
+          deleted_by: 'client-test',
+          write_mode: 'staged',
+        }),
+      });
+    });
+    await act(async () => answerDelete());
+    await waitFor(() => expect(api.createSession).toHaveBeenCalled());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    expect(api.createSession).toHaveBeenCalledTimes(1);
+    await act(async () => created.forEach((resolve) => resolve()));
+  });
+
+  describe('the starting session', () => {
+    const stagesByDefault = () =>
+      api.getUiCapabilities.mockImplementation(async () => ({
+        llm_available: false,
+        staged_sessions: true,
+        session_write_mode_default: 'staged',
+      }));
+
+    // App reads the link's parameters once, at import: each URL gets a fresh
+    // App, and the fresh mocks that come with it.
+    async function renderFreshAppAt(search) {
+      window.history.replaceState(null, '', `/${search}`);
+      vi.resetModules();
+      const [{ default: FreshApp }, { I18nProvider: FreshI18nProvider }] = await Promise.all([
+        import('../src/App'),
+        import('../src/i18n'),
+      ]);
+      const freshApi = apiMocks.latest;
+      freshApi.getUiCapabilities.mockImplementation(async () => ({
+        llm_available: false,
+        staged_sessions: true,
+        session_write_mode_default: 'staged',
+      }));
+      render(
+        <FreshI18nProvider>
+          <FreshApp />
+        </FreshI18nProvider>
+      );
+      return freshApi;
+    }
+
+    describe('a link that fills the canvas or a kiosk', () => {
+      afterEach(() => window.history.replaceState(null, '', '/'));
+
+      it.each(['?view=Overview', '?node=n1', '?akc=kiosk'])(
+        'starts %s in the session it opened with, even where staging is the default',
+        async (search) => {
+          const freshApi = await renderFreshAppAt(search);
+          const [startId] = freshApi.setActiveSessionForRequests.mock.calls[0];
+          await waitFor(() => expect(freshApi.setSessionModeDirect).toHaveBeenCalledWith(startId));
+          expect(freshApi.createSession).not.toHaveBeenCalled();
+        }
+      );
+
+      it('opens ?collect= as the kiosk alone, with no session to create', async () => {
+        const freshApi = await renderFreshAppAt('?collect=survey');
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        });
+        expect(freshApi.setActiveSessionForRequests).not.toHaveBeenCalled();
+        expect(freshApi.createSession).not.toHaveBeenCalled();
+      });
+
+      it('without one, the same harness starts in a created staged session', async () => {
+        const freshApi = await renderFreshAppAt('?other=1');
+        await waitFor(() => expect(freshApi.createSession).toHaveBeenCalledWith(null));
+      });
+    });
+
+    it('holds writes from the starting id until the capabilities are known', async () => {
+      renderApp();
+      const [startId] = api.setActiveSessionForRequests.mock.calls[0];
+      expect(api.setSessionModeUnknown).toHaveBeenCalledWith(startId);
+      // A direct default settles it as direct, without a server session.
+      await waitFor(() => expect(api.setSessionModeDirect).toHaveBeenCalledWith(startId));
+      expect(api.createSession).not.toHaveBeenCalled();
+    });
+
+    it('shows no mode bar, so no Retry, until the start is settled', async () => {
+      let answerCapabilities;
+      api.getUiCapabilities.mockImplementation(
+        () =>
+          new Promise(
+            (resolve) =>
+              (answerCapabilities = () =>
+                resolve({
+                  llm_available: false,
+                  staged_sessions: true,
+                  session_write_mode_default: 'staged',
+                }))
+          )
+      );
+      api.createSession.mockRejectedValue(Object.assign(new Error('no'), { status: 403 }));
+      renderApp();
+      const [startId] = api.setActiveSessionForRequests.mock.calls[0];
+      await waitFor(() => expect(answerCapabilities).toBeTruthy());
+      expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+      expect(
+        screen.queryByText(
+          'Loading how this session writes — edits are paused until it has loaded.'
+        )
+      ).toBeNull();
+      await act(async () => answerCapabilities());
+      await waitFor(() => expect(api.setSessionModeDirect).toHaveBeenCalledWith(startId));
+      expect(await screen.findByText('Switch to staged…')).toBeTruthy();
+    });
+
+    it('starts in a server-created session where the installation stages by default', async () => {
+      stagesByDefault();
+      api.createSession.mockImplementation(async () => ({
+        id: '9999-0001',
+        write_mode: 'staged',
+      }));
+      renderApp();
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('9999-0001')
+      );
+      // No write mode in the request: the installation's default, past the hook.
+      expect(api.createSession).toHaveBeenCalledWith(null);
+      expect(api.setSessionStaged).toHaveBeenCalledWith('9999-0001', true);
+      // Its stream connects at once, and the diff is read when it is ready,
+      // so staged changes made before then show too.
+      expect(FakeEventSource.instances.some((es) => es.url.includes('/9999-0001/stream'))).toBe(
+        true
+      );
+      await waitFor(() => expect(api.getStagedChanges).toHaveBeenCalledWith('9999-0001'));
+      // Entered without a load a user's own switch could overtake: it is new
+      // and empty.
+      expect(api.getSession).not.toHaveBeenCalledWith('9999-0001', { resolve: true });
+      expect(new URLSearchParams(window.location.search).get('session')).toBe('9999-0001');
+    });
+
+    it('keeps the browser session, direct, when the server refuses to create one', async () => {
+      stagesByDefault();
+      api.createSession.mockRejectedValue(
+        Object.assign(new Error('forbidden'), { status: 403, code: 'forbidden' })
+      );
+      renderApp();
+      const [startId] = api.setActiveSessionForRequests.mock.calls[0];
+      await waitFor(() => expect(api.setSessionModeDirect).toHaveBeenCalledWith(startId));
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith(startId);
+      expect(api.setSessionStaged).not.toHaveBeenCalled();
+    });
+
+    it('keeps a start the user already works in', async () => {
+      stagesByDefault();
+      let answer;
+      api.createSession.mockImplementation(() => new Promise((resolve) => (answer = resolve)));
+      renderApp();
+      const [startId] = api.setActiveSessionForRequests.mock.calls[0];
+      await waitFor(() => expect(api.createSession).toHaveBeenCalled());
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A], []);
+      });
+      await act(async () => answer({ id: '9999-0001', write_mode: 'staged' }));
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith(startId);
+      expect(api.setSessionModeDirect).toHaveBeenCalledWith(startId);
+      expect(api.deleteServerSession).toHaveBeenCalledWith('9999-0001', 'client-test');
+    });
+
+    it('creates the session after a delete as the installation default says', async () => {
+      stagesByDefault();
+      api.createSession
+        .mockImplementationOnce(async () => ({ id: '9999-0001', write_mode: 'staged' }))
+        .mockImplementationOnce(async () => ({ id: '9999-0002', write_mode: 'staged' }));
+      api.getSession.mockImplementation(async (id) => ({
+        id,
+        write_mode: id === '7777-8888' ? 'direct' : 'staged',
+        state: {},
+        resolved: { nodes: [], edges: [] },
+        roster: [],
+      }));
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('9999-0001')
+      );
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getAllByText('7777-8888').find((el) => el.closest('.session-drawer')));
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('7777-8888')
+      );
+      let row = screen.getAllByText('7777-8888').find((el) => el.closest('.session-drawer'));
+      while (!row.querySelector('[aria-label="Session actions"]')) row = row.parentElement;
+      fireEvent.click(row.querySelector('[aria-label="Session actions"]'));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Delete session' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Delete' }));
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('9999-0002')
+      );
+      expect(api.createSession).toHaveBeenLastCalledWith(null);
+      // The deleted id held its writes before the new one was asked for.
+      const deletedAt = api.deleteServerSession.mock.invocationCallOrder[0];
+      const createdAt = api.createSession.mock.invocationCallOrder[1];
+      const heldBetween = api.setSessionModeUnknown.mock.calls.some(
+        ([id], i) =>
+          id === '7777-8888' &&
+          api.setSessionModeUnknown.mock.invocationCallOrder[i] > deletedAt &&
+          api.setSessionModeUnknown.mock.invocationCallOrder[i] < createdAt
+      );
+      expect(heldBetween).toBe(true);
+    });
+  });
+
+  it('never binds the stream to a session the user left while switching it to staged', async () => {
+    api.getUiCapabilities.mockImplementation(async () => ({
+      llm_available: false,
+      staged_sessions: true,
+    }));
+    let answerSwitch;
+    api.setSessionWriteMode.mockImplementation(
+      (id) => new Promise((resolve) => (answerSwitch = () => resolve({ id, write_mode: 'staged' })))
+    );
+    sessionStore.touchSession('7777-8888');
+    renderApp();
+    const [startId] = api.setActiveSessionForRequests.mock.calls[0];
+    fireEvent.click(await screen.findByText('Switch to staged…'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Switch to staged' }));
+    await waitFor(() =>
+      expect(api.setSessionWriteMode).toHaveBeenCalledWith(startId, 'staged', 'client-test')
+    );
+    fireEvent.click(screen.getByTitle('Menu'));
+    fireEvent.click(screen.getAllByText('7777-8888').find((el) => el.closest('.session-drawer')));
+    await waitFor(() =>
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('7777-8888')
+    );
+    const streamsFor = (id) =>
+      FakeEventSource.instances.filter((es) => es.url.includes(`/${id}/stream`)).length;
+    const before = streamsFor(startId);
+    await act(async () => answerSwitch());
+    expect(streamsFor(startId)).toBe(before);
+  });
+
+  it('a mode retry answering after the user moved on leaves one consistent session', async () => {
+    api.getUiCapabilities.mockImplementation(async () => ({
+      llm_available: false,
+      staged_sessions: true,
+    }));
+    // The switch's answer is lost and the re-read fails: the mode is unknown.
+    api.setSessionWriteMode.mockRejectedValue(new TypeError('Failed to fetch'));
+    const defaultGetSession = api.getSession.getMockImplementation();
+    let startId;
+    let answerRetry = null;
+    api.getSession.mockImplementation(async (id, opts) => {
+      if (id === startId && !opts) throw new TypeError('Failed to fetch');
+      if (id === startId && opts?.resolve) {
+        return new Promise((resolve) => (answerRetry = () => resolve(defaultGetSession(id, opts))));
+      }
+      return defaultGetSession(id, opts);
+    });
+    sessionStore.touchSession('7777-8888');
+    renderApp();
+    [startId] = api.setActiveSessionForRequests.mock.calls[0];
+    fireEvent.click(await screen.findByText('Switch to staged…'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Switch to staged' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(answerRetry).not.toBeNull());
+    fireEvent.click(screen.getByTitle('Menu'));
+    fireEvent.click(screen.getAllByText('7777-8888').find((el) => el.closest('.session-drawer')));
+    await waitFor(() =>
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('7777-8888')
+    );
+    await act(async () => answerRetry());
+    // The late retry is a switch back: requests, stream and URL agree.
+    await waitFor(() => expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith(startId));
+    const lastStream = FakeEventSource.instances
+      .filter((es) => es.url.includes('/api/sessions/'))
+      .at(-1);
+    expect(lastStream.url).toContain(`/${startId}/stream`);
+    expect(new URLSearchParams(window.location.search).get('session')).toBe(startId);
   });
 
   it('a real load failure (non-404) shows an error notice and stays on the current session', async () => {
@@ -1009,7 +2572,8 @@ describe('Server-backed session lifecycle', () => {
     expect(window.location.search).not.toContain('session=aaaa-bbbb');
   });
 
-  // Regression: App.jsx's handleNodeCreated (guarded on isCoarsePointer) must
+  // Regression: App.jsx's focusCreatedNode (guarded on isCoarsePointer, and
+  // handed to createDialogNode as onDrawn by handleNodeCreated) must
   // schedule setFocusNodeId(createdNode.id) on a later tick than
   // addNodesToVisualization, not call it in the same synchronous update —
   // mirroring the identical two-step ordering FloatingSearch.jsx already uses
@@ -1057,5 +2621,785 @@ describe('Server-backed session lifecycle', () => {
     } finally {
       window.matchMedia = originalMatchMedia;
     }
+  });
+
+  describe('staged-session residue', () => {
+    const stagingOn = (extra = {}) =>
+      api.getUiCapabilities.mockImplementation(async () => ({
+        llm_available: false,
+        staged_sessions: true,
+        ...extra,
+      }));
+    const drawerRow = (id) => {
+      let row = screen.getAllByText(id).find((el) => el.closest('.session-drawer'));
+      while (!row.querySelector('[aria-label="Session actions"]')) row = row.parentElement;
+      return row;
+    };
+    async function switchViaDrawer(id) {
+      fireEvent.click(screen.getAllByText(id).find((el) => el.closest('.session-drawer')));
+      await waitFor(() => expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith(id));
+    }
+    function openSessionAction(id, name) {
+      fireEvent.click(drawerRow(id).querySelector('[aria-label="Session actions"]'));
+      fireEvent.click(screen.getByRole('menuitem', { name }));
+    }
+    async function deleteViaDrawer(id) {
+      openSessionAction(id, 'Delete session');
+      fireEvent.click(await screen.findByRole('button', { name: 'Delete' }));
+    }
+    const STREAM_7777 = 'http://localhost/api/sessions/7777-8888/stream';
+    const notFound = () => Object.assign(new Error('session not found'), { status: 404 });
+    // As api.js's responseError builds the server's own 404 for a rename.
+    const renameNotFound = () =>
+      Object.assign(new Error('session not found'), {
+        status: 404,
+        data: { detail: 'session not found' },
+      });
+    const UNREACHABLE_NOTICE =
+      "This session can't be saved: the server no longer accepts it. Changes made here are not kept — start a new session to keep working.";
+    const streamsFor = (id) =>
+      FakeEventSource.instances.filter((es) => es.url.includes(`/api/sessions/${id}/stream`));
+    const getSessionAnswering = (answers) => {
+      const fallback = api.getSession.getMockImplementation();
+      api.getSession.mockImplementation(async (id, opts) => {
+        if (id in answers) {
+          const answer = answers[id];
+          if (answer instanceof Error) throw answer;
+          return typeof answer === 'function' ? answer(opts) : answer;
+        }
+        return fallback(id, opts);
+      });
+    };
+    const directPayload = (id) => ({
+      id,
+      write_mode: 'direct',
+      state: {},
+      resolved: { nodes: [], edges: [] },
+      roster: [],
+    });
+
+    // Item: a retired id (a deleted staged session) answers its load like an
+    // unknown one, so it opens browser-only and direct and can never save.
+    it('leaves a retired session for a staged one when its stream is refused', async () => {
+      stagingOn();
+      getSessionAnswering({ '7777-8888': notFound() });
+      global.fetch.mockImplementation(async (url) =>
+        String(url).includes('/7777-8888/stream')
+          ? { ok: false, status: 404, json: async () => ({ detail: 'session not found' }) }
+          : { ok: true, status: 200, json: async () => ({ applied: [], seq: 1 }) }
+      );
+      // A stream that never delivers its first snapshot.
+      FakeEventSource.microtaskMessagesByUrl[STREAM_7777] = [];
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('7777-8888');
+      // The first edit connects the stream, which the server refuses.
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A], []);
+      });
+      const toolbarButtons = document.querySelectorAll('.floating-toolbar-item');
+      fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+      await waitFor(() => expect(streamsFor('7777-8888')).toHaveLength(1));
+      await act(async () => {
+        const es = streamsFor('7777-8888')[0];
+        es.readyState = 2;
+        es.onerror?.();
+      });
+      await waitFor(() =>
+        expect(api.createSession).toHaveBeenCalledWith(null, { writeMode: 'staged' })
+      );
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('9999-0001')
+      );
+      // Writes naming the retired id were refused until the replacement existed.
+      expect(api.setSessionStaged).toHaveBeenCalledWith('7777-8888', true);
+      expect(
+        await screen.findByText(
+          'This session was deleted and can no longer be saved to — continuing in a new session.'
+        )
+      ).toBeTruthy();
+      expect(sessionStore.hasSession('7777-8888')).toBe(false);
+    });
+
+    it('leaves only once while every stream is refused, until one opens', async () => {
+      stagingOn();
+      getSessionAnswering({
+        '7777-8888': notFound(),
+        '6666-0000': notFound(),
+        '4444-0000': notFound(),
+      });
+      // Every stream is refused as retired.
+      global.fetch.mockImplementation(async (url) =>
+        String(url).includes('/stream')
+          ? { ok: false, status: 404, json: async () => ({ detail: 'session not found' }) }
+          : { ok: true, status: 200, json: async () => ({ applied: [], seq: 1 }) }
+      );
+      FakeEventSource.microtaskMessagesByUrl[STREAM_7777] = [];
+      FakeEventSource.microtaskMessagesByUrl['http://localhost/api/sessions/9999-0001/stream'] = [];
+      FakeEventSource.microtaskMessagesByUrl['http://localhost/api/sessions/6666-0000/stream'] = [];
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      FakeEventSource.microtaskMessagesByUrl['http://localhost/api/sessions/4444-0000/stream'] = [];
+      sessionStore.touchSession('4444-0000');
+      sessionStore.touchSession('6666-0000');
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('7777-8888');
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A], []);
+      });
+      const toolbarButtons = document.querySelectorAll('.floating-toolbar-item');
+      fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+      await waitFor(() => expect(streamsFor('7777-8888')).toHaveLength(1));
+      const refuse = async (id) => {
+        await act(async () => {
+          const es = streamsFor(id).at(-1);
+          es.readyState = 2;
+          es.onerror?.();
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        });
+      };
+      await refuse('7777-8888');
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('9999-0001')
+      );
+      await waitFor(() => expect(streamsFor('9999-0001').length).toBeGreaterThan(0));
+      await refuse('9999-0001');
+      expect(api.createSession).toHaveBeenCalledTimes(1);
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('9999-0001');
+      expect(errors).toHaveBeenCalledWith(
+        'Session stream refused again; not leaving a second time:',
+        '9999-0001'
+      );
+      // Its writes are refused: the user is told rather than left editing.
+      expect(await screen.findByText(UNREACHABLE_NOTICE)).toBeTruthy();
+      // A retired session opened while leaving is disarmed is not left, but
+      // its writes are refused rather than sent unbound.
+      await switchViaDrawer('4444-0000');
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A], []);
+      });
+      fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+      await waitFor(() => expect(streamsFor('4444-0000')).toHaveLength(1));
+      expect(api.setSessionStaged).not.toHaveBeenCalledWith('4444-0000', true);
+      await refuse('4444-0000');
+      expect(api.setSessionStaged).toHaveBeenCalledWith('4444-0000', true);
+      expect(api.createSession).toHaveBeenCalledTimes(1);
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('4444-0000');
+      // Once a stream opens, the next retired session is left again.
+      await act(async () => {
+        streamsFor('4444-0000')
+          .at(-1)
+          .onmessage({
+            data: JSON.stringify({ type: 'snapshot', seq: 0, session: { state: {} } }),
+          });
+      });
+      api.createSession.mockImplementation(async () => ({ id: '9999-0002', write_mode: 'staged' }));
+      await switchViaDrawer('6666-0000');
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_B], []);
+      });
+      fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+      await waitFor(() => expect(streamsFor('6666-0000')).toHaveLength(1));
+      await refuse('6666-0000');
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('9999-0002')
+      );
+    });
+
+    it('leaves the next retired session too when no replacement could be created', async () => {
+      stagingOn();
+      getSessionAnswering({ '7777-8888': notFound(), '6666-0000': notFound() });
+      api.createSession.mockRejectedValue(Object.assign(new Error('no'), { status: 403 }));
+      global.fetch.mockImplementation(async (url) =>
+        String(url).includes('/stream')
+          ? { ok: false, status: 404, json: async () => ({ detail: 'session not found' }) }
+          : { ok: true, status: 200, json: async () => ({ applied: [], seq: 1 }) }
+      );
+      FakeEventSource.microtaskMessagesByUrl[STREAM_7777] = [];
+      FakeEventSource.microtaskMessagesByUrl['http://localhost/api/sessions/6666-0000/stream'] = [];
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      sessionStore.touchSession('6666-0000');
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      fireEvent.click(screen.getByTitle('Menu'));
+      const toolbarButtons = document.querySelectorAll('.floating-toolbar-item');
+      const editAndRefuse = async (id, node) => {
+        await switchViaDrawer(id);
+        act(() => {
+          useGraphStore.getState().updateVisualization([node], []);
+        });
+        fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+        await waitFor(() => expect(streamsFor(id)).toHaveLength(1));
+        await act(async () => {
+          const es = streamsFor(id)[0];
+          es.readyState = 2;
+          es.onerror?.();
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        });
+      };
+      await editAndRefuse('7777-8888', NODE_A);
+      await waitFor(() => expect(api.createSession).toHaveBeenCalledTimes(1));
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).not.toHaveBeenLastCalledWith('7777-8888')
+      );
+      await editAndRefuse('6666-0000', NODE_B);
+      await waitFor(() => expect(api.createSession).toHaveBeenCalledTimes(2));
+    });
+
+    it('keeps a session whose stream fails for another reason', async () => {
+      stagingOn();
+      getSessionAnswering({ '7777-8888': notFound() });
+      global.fetch.mockImplementation(async (url) =>
+        String(url).includes('/7777-8888/stream')
+          ? { ok: false, status: 503, json: async () => ({}) }
+          : { ok: true, status: 200, json: async () => ({ applied: [], seq: 1 }) }
+      );
+      FakeEventSource.microtaskMessagesByUrl[STREAM_7777] = [];
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('7777-8888');
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A], []);
+      });
+      const toolbarButtons = document.querySelectorAll('.floating-toolbar-item');
+      fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+      await waitFor(() => expect(streamsFor('7777-8888')).toHaveLength(1));
+      await act(async () => {
+        const es = streamsFor('7777-8888')[0];
+        es.readyState = 2;
+        es.onerror?.();
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+      expect(api.createSession).not.toHaveBeenCalled();
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('7777-8888');
+    });
+
+    it('leaves a retired session when renaming it is refused', async () => {
+      stagingOn();
+      getSessionAnswering({ '7777-8888': notFound() });
+      api.renameServerSession.mockRejectedValue(renameNotFound());
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('7777-8888');
+      openSessionAction('7777-8888', 'Name session');
+      await screen.findByText('Session name');
+      fireEvent.change(document.querySelector('.input-dialog input'), {
+        target: { value: 'Mine' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('9999-0001')
+      );
+      expect(api.createSession).toHaveBeenCalledTimes(1);
+      expect(api.createSession).toHaveBeenCalledWith(null, { writeMode: 'staged' });
+    });
+
+    it('stays in the active session when renaming another, retired one is refused', async () => {
+      stagingOn();
+      api.renameServerSession.mockRejectedValue(renameNotFound());
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      const [startId] = api.setActiveSessionForRequests.mock.calls[0];
+      fireEvent.click(screen.getByTitle('Menu'));
+      openSessionAction('7777-8888', 'Name session');
+      await screen.findByText('Session name');
+      fireEvent.change(document.querySelector('.input-dialog input'), {
+        target: { value: 'Mine' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(api.renameServerSession).toHaveBeenCalled());
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+      expect(api.createSession).not.toHaveBeenCalled();
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith(startId);
+    });
+
+    it("stays in a session when a rename's 404 is not the server's own", async () => {
+      stagingOn();
+      getSessionAnswering({ '7777-8888': notFound() });
+      // A proxy that does not route the call answers 404 with its own body.
+      api.renameServerSession.mockRejectedValue(
+        Object.assign(new Error('HTTP error: 404'), { status: 404, data: {} })
+      );
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('7777-8888');
+      openSessionAction('7777-8888', 'Name session');
+      await screen.findByText('Session name');
+      fireEvent.change(document.querySelector('.input-dialog input'), {
+        target: { value: 'Mine' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(api.renameServerSession).toHaveBeenCalled());
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+      expect(api.createSession).not.toHaveBeenCalled();
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('7777-8888');
+    });
+
+    it('names a rename, not the stream, when a rename is refused while leaving is disarmed', async () => {
+      stagingOn();
+      getSessionAnswering({ '7777-8888': notFound() });
+      api.renameServerSession.mockRejectedValue(renameNotFound());
+      global.fetch.mockImplementation(async (url) =>
+        String(url).includes('/7777-8888/stream')
+          ? { ok: false, status: 404, json: async () => ({ detail: 'session not found' }) }
+          : { ok: true, status: 200, json: async () => ({ applied: [], seq: 1 }) }
+      );
+      FakeEventSource.microtaskMessagesByUrl[STREAM_7777] = [];
+      FakeEventSource.microtaskMessagesByUrl['http://localhost/api/sessions/9999-0001/stream'] = [];
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('7777-8888');
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A], []);
+      });
+      const toolbarButtons = document.querySelectorAll('.floating-toolbar-item');
+      fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+      await waitFor(() => expect(streamsFor('7777-8888')).toHaveLength(1));
+      await act(async () => {
+        const es = streamsFor('7777-8888')[0];
+        es.readyState = 2;
+        es.onerror?.();
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('9999-0001')
+      );
+      // No stream has opened since, so a refused rename of the replacement is
+      // not left again, and is logged as the rename it was.
+      openSessionAction('9999-0001', 'Name session');
+      await screen.findByText('Session name');
+      // The edit's save left its own dialog open.
+      const renameDialog = [...document.querySelectorAll('.input-dialog')].find(
+        (d) => d.querySelector('h3')?.textContent === 'Name session'
+      );
+      fireEvent.change(renameDialog.querySelector('input'), { target: { value: 'Mine' } });
+      fireEvent.click(within(renameDialog).getByRole('button', { name: 'Save' }));
+      await waitFor(() =>
+        expect(errors).toHaveBeenCalledWith(
+          'Session rename refused again; not leaving a second time:',
+          '9999-0001'
+        )
+      );
+      expect(errors).not.toHaveBeenCalledWith(
+        'Session stream refused again; not leaving a second time:',
+        '9999-0001'
+      );
+      expect(await screen.findByText(UNREACHABLE_NOTICE)).toBeTruthy();
+      expect(api.createSession).toHaveBeenCalledTimes(1);
+    });
+
+    // Shared by the two guard tests below: 7777-8888 is retired, its stream
+    // never opens and the server refuses it.
+    async function openRefusedSession() {
+      stagingOn();
+      getSessionAnswering({ '7777-8888': notFound() });
+      global.fetch.mockImplementation(async (url) =>
+        String(url).includes('/7777-8888/stream')
+          ? { ok: false, status: 404, json: async () => ({ detail: 'session not found' }) }
+          : { ok: true, status: 200, json: async () => ({ applied: [], seq: 1 }) }
+      );
+      FakeEventSource.microtaskMessagesByUrl[STREAM_7777] = [];
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('7777-8888');
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A], []);
+      });
+      const toolbarButtons = document.querySelectorAll('.floating-toolbar-item');
+      fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+      await waitFor(() => expect(streamsFor('7777-8888')).toHaveLength(1));
+    }
+    const refuseStream = async (id) => {
+      await act(async () => {
+        const es = streamsFor(id).at(-1);
+        es.readyState = 2;
+        es.onerror?.();
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+    };
+
+    it('a second refusal of a session already being left is not taken for a disarmed one', async () => {
+      let refuseRename;
+      api.renameServerSession.mockImplementation(
+        () => new Promise((resolve, reject) => (refuseRename = reject))
+      );
+      let created;
+      api.createSession.mockImplementation(() => new Promise((resolve) => (created = resolve)));
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      await openRefusedSession();
+      openSessionAction('7777-8888', 'Name session');
+      await screen.findByText('Session name');
+      const renameDialog = [...document.querySelectorAll('.input-dialog')].find(
+        (d) => d.querySelector('h3')?.textContent === 'Name session'
+      );
+      fireEvent.change(renameDialog.querySelector('input'), { target: { value: 'Mine' } });
+      fireEvent.click(within(renameDialog).getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(api.renameServerSession).toHaveBeenCalled());
+      // The stream's refusal starts the leave; the rename's arrives before the
+      // replacement exists, while the id is still the active one.
+      await refuseStream('7777-8888');
+      await waitFor(() => expect(api.createSession).toHaveBeenCalledTimes(1));
+      await act(async () => {
+        refuseRename(renameNotFound());
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+      expect(errors).not.toHaveBeenCalledWith(
+        'Session rename refused again; not leaving a second time:',
+        '7777-8888'
+      );
+      expect(screen.queryByText(UNREACHABLE_NOTICE)).toBeNull();
+      await act(async () => created({ id: '9999-0001', write_mode: 'staged' }));
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('9999-0001')
+      );
+      expect(api.createSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('a stream refused while this tab deletes the session is left by the delete, not the refusal', async () => {
+      let deleted;
+      api.deleteServerSession.mockImplementation(
+        () => new Promise((resolve) => (deleted = resolve))
+      );
+      await openRefusedSession();
+      await deleteViaDrawer('7777-8888');
+      await waitFor(() => expect(api.deleteServerSession).toHaveBeenCalled());
+      await refuseStream('7777-8888');
+      expect(api.createSession).not.toHaveBeenCalled();
+      expect(
+        screen.queryByText(
+          'This session was deleted and can no longer be saved to — continuing in a new session.'
+        )
+      ).toBeNull();
+      await act(async () => deleted({}));
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).not.toHaveBeenLastCalledWith('7777-8888')
+      );
+    });
+
+    it('stays in the session when a rename fails for another reason', async () => {
+      api.renameServerSession.mockRejectedValue(new TypeError('Failed to fetch'));
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('7777-8888');
+      openSessionAction('7777-8888', 'Name session');
+      await screen.findByText('Session name');
+      fireEvent.change(document.querySelector('.input-dialog input'), {
+        target: { value: 'Mine' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(api.renameServerSession).toHaveBeenCalled());
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+      expect(api.createSession).not.toHaveBeenCalled();
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('7777-8888');
+    });
+
+    it('logs, rather than swallows, a failed delete of the unused starting session', async () => {
+      stagingOn({ session_write_mode_default: 'staged' });
+      let answer;
+      api.createSession.mockImplementation(() => new Promise((resolve) => (answer = resolve)));
+      const failure = new TypeError('Failed to fetch');
+      api.deleteServerSession.mockRejectedValue(failure);
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      renderApp();
+      await waitFor(() => expect(api.createSession).toHaveBeenCalled());
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A], []);
+      });
+      await act(async () => answer({ id: '9999-0001', write_mode: 'staged' }));
+      await waitFor(() =>
+        expect(errors).toHaveBeenCalledWith('Error deleting the unused starting session:', failure)
+      );
+    });
+
+    it('deletes the created start when the user switched away before it answered', async () => {
+      stagingOn({ session_write_mode_default: 'staged' });
+      let answer;
+      api.createSession.mockImplementation(() => new Promise((resolve) => (answer = resolve)));
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.createSession).toHaveBeenCalled());
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('7777-8888');
+      await act(async () => answer({ id: '9999-0001', write_mode: 'staged' }));
+      expect(api.deleteServerSession).toHaveBeenCalledWith('9999-0001', 'client-test');
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('7777-8888');
+      expect(api.setSessionStaged).not.toHaveBeenCalledWith('9999-0001', true);
+    });
+
+    // Regression for clearing deletedStagedRef per delete: what one delete of
+    // an id learnt must not decide the next delete of the same id.
+    it('a second delete of an id is decided by its own answer, not the first one', async () => {
+      stagingOn();
+      getSessionAnswering({ '7777-8888': directPayload('7777-8888') });
+      api.deleteServerSession.mockImplementationOnce(async (id) => ({
+        deleted: true,
+        id,
+        write_mode: 'staged',
+      }));
+      sessionStore.touchSession('5555-6666');
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      fireEvent.click(screen.getByTitle('Menu'));
+      // First delete, while elsewhere: its answer says staged.
+      await deleteViaDrawer('7777-8888');
+      await waitFor(() => expect(api.deleteServerSession).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(sessionStore.hasSession('7777-8888')).toBe(false));
+      // Opened again (direct now), and deleted again while in it.
+      api.deleteServerSession.mockImplementation(async (id) => ({
+        deleted: true,
+        id,
+        write_mode: 'direct',
+      }));
+      sessionStore.touchSession('7777-8888');
+      // A switch refreshes the drawer's list.
+      await switchViaDrawer('5555-6666');
+      await switchViaDrawer('7777-8888');
+      await deleteViaDrawer('7777-8888');
+      await waitFor(() => expect(api.deleteServerSession).toHaveBeenCalledTimes(2));
+      await waitFor(() =>
+        expect(api.setActiveSessionForRequests).not.toHaveBeenLastCalledWith('7777-8888')
+      );
+      expect(api.createSession).not.toHaveBeenCalled();
+      expect(await screen.findByText('Session deleted — started a new one')).toBeTruthy();
+    });
+
+    it('reads an edge an op names from the composed view while the session may be staged', async () => {
+      api.isActiveSessionPossiblyStaged.mockReturnValue(true);
+      sessionStore.touchSession('5555-6666');
+      renderApp();
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('5555-6666');
+      await waitFor(() =>
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b'])
+      );
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A, NODE_B], []);
+      });
+      api.getNodeDetails.mockImplementation(async (id) =>
+        id === 'node-a'
+          ? {
+              node: NODE_A,
+              edges: [
+                { id: 'e1', source: 'node-a', target: 'node-b', type: 'RELATES_TO', label: 'read' },
+              ],
+            }
+          : { node: NODE_B, edges: [] }
+      );
+      await waitFor(() => expect(streamsFor('5555-6666')).toHaveLength(1));
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+      await act(async () => {
+        streamsFor('5555-6666')[0].onmessage({
+          data: JSON.stringify({
+            type: 'op',
+            seq: 5,
+            client_id: 'client-other',
+            op: {
+              op: 'edges_added',
+              edges: [
+                { id: 'e1', source: 'node-a', target: 'node-b', label: 'from the stream' },
+                { id: 'e2', source: 'node-a', target: 'node-b', label: 'not readable here' },
+              ],
+            },
+          }),
+        });
+      });
+      await waitFor(() =>
+        expect(useGraphStore.getState().edges.map((e) => [e.id, e.label])).toEqual([['e1', 'read']])
+      );
+      expect(api.getNodeDetails).toHaveBeenCalledWith('node-a');
+    });
+
+    it('deleting a staged session discards its changes and lands in a staged one', async () => {
+      stagingOn();
+      getSessionAnswering({ '7777-8888': { ...directPayload('7777-8888'), write_mode: 'staged' } });
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('7777-8888');
+      await deleteViaDrawer('7777-8888');
+      await waitFor(() =>
+        expect(api.deleteServerSession).toHaveBeenCalledWith('7777-8888', 'client-test', {
+          discardStaged: true,
+        })
+      );
+      await waitFor(() =>
+        expect(api.createSession).toHaveBeenCalledWith(null, { writeMode: 'staged' })
+      );
+    });
+
+    it('deleting a direct session discards nothing and lands in a direct one', async () => {
+      stagingOn();
+      getSessionAnswering({ '7777-8888': directPayload('7777-8888') });
+      api.deleteServerSession.mockImplementation(async (id) => ({
+        deleted: true,
+        id,
+        write_mode: 'direct',
+      }));
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('7777-8888');
+      await deleteViaDrawer('7777-8888');
+      await waitFor(() =>
+        expect(api.deleteServerSession).toHaveBeenCalledWith('7777-8888', 'client-test', {
+          discardStaged: false,
+        })
+      );
+      expect(await screen.findByText('Session deleted — started a new one')).toBeTruthy();
+      expect(api.createSession).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['still there', () => directPayload('7777-8888'), false],
+      ['gone', notFound(), true],
+    ])(
+      'a delete whose answer is lost asks whether the session is %s',
+      async (_label, afterwards, gone) => {
+        stagingOn();
+        let deleting = false;
+        getSessionAnswering({
+          '7777-8888': (opts) => {
+            if (deleting && !opts) {
+              if (afterwards instanceof Error) throw afterwards;
+              return afterwards();
+            }
+            return directPayload('7777-8888');
+          },
+        });
+        api.deleteServerSession.mockImplementation(async () => {
+          deleting = true;
+          throw new TypeError('Failed to fetch');
+        });
+        sessionStore.touchSession('7777-8888');
+        renderApp();
+        await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+        fireEvent.click(screen.getByTitle('Menu'));
+        await switchViaDrawer('7777-8888');
+        await deleteViaDrawer('7777-8888');
+        await waitFor(() => expect(api.deleteServerSession).toHaveBeenCalled());
+        if (gone) {
+          expect(await screen.findByText('Session deleted — started a new one')).toBeTruthy();
+          expect(sessionStore.hasSession('7777-8888')).toBe(false);
+        } else {
+          expect(await screen.findByText('The staged session was not deleted')).toBeTruthy();
+          expect(sessionStore.hasSession('7777-8888')).toBe(true);
+          expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('7777-8888');
+        }
+      }
+    );
+
+    // The starting session's mode is unknown until the capabilities answer.
+    async function startUnknownAndSave() {
+      let answerCapabilities;
+      api.getUiCapabilities.mockImplementation(
+        () =>
+          new Promise(
+            (resolve) =>
+              (answerCapabilities = () => resolve({ llm_available: false, staged_sessions: true }))
+          )
+      );
+      const view = renderApp();
+      const [startId] = api.setActiveSessionForRequests.mock.calls[0];
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A], []);
+      });
+      const toolbarButtons = view.container.querySelectorAll('.floating-toolbar-item');
+      fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+      await waitFor(() => expect(streamsFor(startId)).toHaveLength(1));
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+      return { startId, answerCapabilities };
+    }
+
+    it('a remote delete notice without a mode, while the mode is unknown, counts as staged', async () => {
+      const { startId } = await startUnknownAndSave();
+      await act(async () => {
+        streamsFor(startId)[0].onmessage({
+          data: JSON.stringify({ type: 'session_deleted', deleted_by: 'client-other' }),
+        });
+      });
+      await waitFor(() =>
+        expect(api.createSession).toHaveBeenCalledWith(null, { writeMode: 'staged' })
+      );
+      expect(api.setSessionStaged).toHaveBeenCalledWith(startId, true);
+    });
+
+    it('deleting a session the server never held leaves for a direct one even while its mode is unknown', async () => {
+      const { startId } = await startUnknownAndSave();
+      getSessionAnswering({ [startId]: notFound() });
+      api.deleteServerSession.mockRejectedValue(notFound());
+      fireEvent.click(screen.getByTitle('Menu'));
+      await waitFor(() =>
+        expect(screen.getAllByText(startId).some((el) => el.closest('.session-drawer'))).toBe(true)
+      );
+      await deleteViaDrawer(startId);
+      expect(await screen.findByText('Session deleted — started a new one')).toBeTruthy();
+      expect(api.createSession).not.toHaveBeenCalledWith(null, { writeMode: 'staged' });
+    });
+
+    it('does not adopt a mode the ready re-read answers after the user left the session', async () => {
+      stagingOn();
+      let answerReread;
+      getSessionAnswering({
+        '5555-6666': (opts) =>
+          opts?.resolve
+            ? { ...directPayload('5555-6666'), resolved: { nodes: [NODE_B], edges: [] } }
+            : new Promise(
+                (resolve) =>
+                  (answerReread = () =>
+                    resolve({ ...directPayload('5555-6666'), write_mode: 'staged' }))
+              ),
+      });
+      sessionStore.touchSession('5555-6666');
+      sessionStore.touchSession('7777-8888');
+      renderApp();
+      await waitFor(() => expect(api.setStagingAvailable).toHaveBeenCalledWith(true));
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('5555-6666');
+      await waitFor(() => expect(answerReread).toBeTruthy());
+      await switchViaDrawer('7777-8888');
+      await act(async () => answerReread());
+      expect(api.setSessionStaged).not.toHaveBeenCalledWith('5555-6666', true);
+    });
+
+    it('keeps the browser start, direct, when the create answers without an id', async () => {
+      stagingOn({ session_write_mode_default: 'staged' });
+      api.createSession.mockImplementation(async () => ({}));
+      renderApp();
+      const [startId] = api.setActiveSessionForRequests.mock.calls[0];
+      await waitFor(() => expect(api.setSessionModeDirect).toHaveBeenCalledWith(startId));
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith(startId);
+      expect(api.deleteServerSession).not.toHaveBeenCalled();
+    });
   });
 });

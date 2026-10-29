@@ -17,6 +17,7 @@ function DesktopShell({
   roster,
   currentClientId,
   onClear,
+  onSummonEveryone,
   drawerOpen,
   onToggleDrawer,
   onCloseDrawer,
@@ -36,6 +37,8 @@ function DesktopShell({
   onEnterFullscreen,
   suspendEscape,
   onCreateNodeForType,
+  // Teleport a federated search result to the graph that owns it.
+  onTeleportToSourceGraph,
   onCreateAgent,
   onCreateSubscription,
   onSaveView,
@@ -52,6 +55,7 @@ function DesktopShell({
         currentClientId={currentClientId}
         onClear={onClear}
         onToggleDrawer={onToggleDrawer}
+        onSummonEveryone={onSummonEveryone}
       />
       <SessionDrawer
         open={drawerOpen}
@@ -72,7 +76,7 @@ function DesktopShell({
         onEnterFullscreen={onEnterFullscreen}
         suspendEscape={suspendEscape}
       />
-      <FloatingSearch />
+      <FloatingSearch onTeleport={onTeleportToSourceGraph} />
       <FloatingToolbar
         onCreateNode={onCreateNodeForType}
         onCreateAgent={onCreateAgent}

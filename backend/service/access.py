@@ -19,6 +19,7 @@ from backend.core import (
     GraphStats,
     Node,
 )
+from backend.core.events.causation import current_agent_mutation_context
 from backend.runtime.authorization import (
     GRAPH_ACTION_READ,
     GraphAccessNarrowing,
@@ -38,10 +39,20 @@ if TYPE_CHECKING:
 
 
 def evaluate_graph_access(
-    hook: GraphAuthorizationHook, *, action: str, target: str
+    hook: GraphAuthorizationHook,
+    *,
+    action: str,
+    target: str,
+    graph_operation: str = "",
+    session_id: Optional[str] = None,
 ) -> GraphAuthorizationDecision:
     return hook.evaluate(
-        build_graph_authorization_context(action=action, target=target)
+        build_graph_authorization_context(
+            action=action,
+            target=target,
+            graph_operation=graph_operation,
+            session_id=session_id,
+        )
     )
 
 
@@ -66,10 +77,21 @@ def build_access_denied_result(
 
 
 def authorize_graph_access(
-    hook: GraphAuthorizationHook, *, action: str, target: str
+    hook: GraphAuthorizationHook,
+    *,
+    action: str,
+    target: str,
+    graph_operation: str = "",
+    session_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Return None when access is allowed; return error dict when denied."""
-    decision = evaluate_graph_access(hook, action=action, target=target)
+    decision = evaluate_graph_access(
+        hook,
+        action=action,
+        target=target,
+        graph_operation=graph_operation,
+        session_id=session_id,
+    )
     if decision.allowed:
         return None
     return build_access_denied_result(action=action, target=target, decision=decision)
@@ -286,6 +308,17 @@ def build_mutation_attribution(*, target: str) -> Optional[EventAttribution]:
     return attribution if attribution.has_attribution() else None
 
 
+def build_mutation_actor_id(*, target: str) -> str:
+    """Who a staged entry records as having staged it (§14): the actor the
+    request resolved, else "anonymous" - the core has no accounts (D7)."""
+    from backend.runtime.authorization import GRAPH_ACTION_MUTATE
+
+    context = build_graph_authorization_context(
+        action=GRAPH_ACTION_MUTATE, target=target
+    )
+    return context.actor.get("actor_id") or "anonymous"
+
+
 def build_event_context(
     *,
     target: str,
@@ -293,6 +326,11 @@ def build_event_context(
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
 ) -> Optional[EventContext]:
+    agent_context = current_agent_mutation_context()
+    if agent_context is not None:
+        # Agent tool arguments cannot reset the inherited chain or impersonate a user.
+        event_origin = agent_context.event_origin
+        event_correlation_id = agent_context.event_correlation_id
     attribution = build_mutation_attribution(target=target)
     if not any((event_origin, event_session_id, event_correlation_id, attribution)):
         return None
@@ -301,6 +339,9 @@ def build_event_context(
         event_session_id=event_session_id,
         event_correlation_id=event_correlation_id,
         attribution=attribution,
+        event_causation_depth=agent_context.event_causation_depth
+        if agent_context
+        else 0,
     )
 
 

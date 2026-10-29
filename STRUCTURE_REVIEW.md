@@ -7,13 +7,15 @@ supports continued AI-agent-driven development.
 **How to use this document:** each action item below is written to be executable
 as a standalone Claude session. Pick the highest-priority open item, start a
 session with the *Session brief* text, and follow the Standard Development
-Workflow in `CLAUDE.md` (branch → PR → review loop → merge to `dev`). When an
+Workflow in `CLAUDE.md` (branch → PR → review loop → merge to `main`). When an
 item is completed, move it to the *Completed* section at the bottom with the PR
 number. Items are intentionally sliced so no single session needs more context
 than its own brief.
 
-This is a working backlog document (like `SMALL_FIXES.md`), not current-state
-documentation — items describe *desired* changes, not the present system.
+This is a working backlog document, not current-state documentation — items
+describe *desired* changes, not the present system. (New small fixes are no
+longer logged in `SMALL_FIXES.md`, which is now a historical archive; they go
+to the planning graph as `small-fix` tasks, see `CLAUDE.md`.)
 
 ---
 
@@ -24,8 +26,10 @@ The fundamentals are healthy. The layered backend architecture
 documented; REST and MCP share one service layer with integration tests
 asserting parity; the event/webhook system has real SSRF protection; auth
 comparison uses `secrets.compare_digest`; tests exist for every backend module
-and all three frontend workspaces; `SMALL_FIXES.md` plus the CLAUDE.md workflow
-is an unusually good fit for agent-driven maintenance.
+and all three frontend workspaces; a small-fix backlog (at the time
+`SMALL_FIXES.md`, now a historical archive superseded by `small-fix` tasks in
+the planning graph) plus the CLAUDE.md workflow is an unusually good fit for
+agent-driven maintenance.
 
 The problems are concentrated in four areas:
 
@@ -227,16 +231,17 @@ option (b) is the cheapest partial add and can be reopened as a new item.
 - **Definition of done:** `enable_pr_auto_merge` works on a `dev` PR; a red
   PR cannot merge.
 - **Effort:** XS (settings) — mostly a Jakob action; do together with A1.
-- **When marking checks required (noted during C5, PR #234):** every workflow
-  here — `ci.yml` (test + lint jobs) and the C5 `Security Scan` — sets
-  `paths-ignore` (`**.md`, `docs/**`, `SMALL_FIXES.md`) on its triggers, so a
-  docs-only PR never runs them. That is fine while the checks are non-required,
-  but GitHub treats a *required* check that is skipped (never reported) as
-  perpetually pending, which blocks merge — the standard `required check` +
-  `paths-ignore` footgun. Before promoting any check to required, drop
-  `paths-ignore` from that workflow (or add a required-status shim job that
-  reports success on the skipped paths); note this affects the test jobs too,
-  not just the security/lint ones.
+- **When marking checks required (noted during C5, PR #234):** GitHub treats a
+  *required* check that is skipped (never reported) as perpetually pending,
+  which blocks merge — the standard `required check` + `paths-ignore` footgun.
+  So no workflow may set `paths-ignore` on a `pull_request` trigger that
+  reports a required check; path-scoping belongs in the jobs instead, behind a
+  gate job that always reports. Current state: PR #243 removed the
+  `pull_request` `paths-ignore` from `ci.yml`, whose `detect-changes` job and
+  always-running `*-tests` gates now do the path-scoping. `ci.yml` keeps
+  `paths-ignore` (`**.md`, `docs/**`) on its `push` trigger only, where no
+  merge gate applies. The C5 `Security Scan` workflow sets no `paths-ignore`
+  on any trigger, so it runs on every PR to `main` or `preview`.
 
 ---
 
@@ -525,6 +530,12 @@ cluster. Decompose them behavior-preservingly, one slice per PR.
   extra-index is slow/fragile to resolve and adds no default-install coverage).
   CodeQL default setup is also now enabled at the repository level (2026-07-14),
   still intentionally outside the committed workflow files.
+- **Note (2026-10-02):** the reporting-first stage is over. gitleaks, the three
+  `pip-audit` steps, `npm audit` and bandit all block: no step in the Security
+  Scan workflow carries `continue-on-error`, so any finding fails the run. The
+  last medium+ bandit findings (a hardcoded shared-temp workspace path used in
+  two places) were cleared by routing both call sites through one overridable
+  workspace setting. The workflow is not a branch-protection required check.
 
 ### C6. Consolidate the root start scripts
 
@@ -672,10 +683,10 @@ in PR #239; row 13 fully done.)*
 
 1. Pick the first `open` item (top to bottom) whose dependencies are `done`,
    skipping *(owner action)* rows. Before starting, check
-   `git log --oneline origin/dev -20` to confirm the item hasn't already been
+   `git log --oneline origin/main -20` to confirm the item hasn't already been
    addressed.
 2. Implement it per its *Session brief*, following the Standard Development
-   Workflow in `CLAUDE.md` (branch → tests → PR to `dev` → review loop → merge).
+   Workflow in `CLAUDE.md` (branch → tests → PR to `main` → review loop → merge).
 3. In the same PR, update this file: set the Status cell, and on completion
    move a one-line summary (date, PR number, what changed) to *Completed*
    below.
@@ -683,8 +694,8 @@ in PR #239; row 13 fully done.)*
    assumption, changed priorities), correct the item text rather than forcing
    the described change — this document must stay true.
 5. New structural findings discovered en route: add them as new rows/items
-   (or `SMALL_FIXES.md` entries if they are small bugs), never fix them in the
-   same branch.
+   (or `small-fix`-tagged Task nodes in the planning graph if they are small
+   bugs, per `CLAUDE.md`), never fix them in the same branch.
 
 ## Completed
 

@@ -51,6 +51,7 @@ describe('annotation overlay translation', () => {
         position: { x: 3, y: 4 },
         text: 'Region',
         color: '#fff',
+        size: { w: 0, h: 0 },
         z: 0,
         locked: false,
         rotation: 0,
@@ -72,6 +73,7 @@ describe('annotation overlay translation', () => {
         color: '#fff',
         startArrow: false,
         endArrow: true,
+        size: { w: 0, h: 0 },
         z: 0,
         locked: false,
         rotation: 0,
@@ -96,6 +98,7 @@ describe('annotation overlay translation', () => {
         endArrow: false,
         startAnchor: 'node-a',
         endAnchor: 'node-b',
+        size: { w: 0, h: 0 },
         z: 0,
         locked: false,
         rotation: 0,
@@ -166,6 +169,7 @@ describe('annotation overlay translation', () => {
         color: '#fff',
         startArrow: false,
         endArrow: true,
+        size: { w: 0, h: 0 },
         z: 0,
         locked: false,
         rotation: 0,
@@ -247,6 +251,7 @@ describe('annotation overlay translation', () => {
         smoothing: 0.4,
         pointerType: 'pen',
         pressureSource: 'device',
+        size: { w: 0, h: 0 },
         z: 0,
         locked: false,
         rotation: 0,
@@ -261,6 +266,35 @@ describe('annotation overlay translation', () => {
       { x: 23, y: 4 },
     ]);
     expect(annotationsToOverlays(server)).toEqual(overlays);
+  });
+
+  it('preserves a freehand envelope position that differs from its first point', () => {
+    const server = [
+      {
+        id: 'freehand-offset',
+        type: 'freehand',
+        position: { x: 0, y: 0 },
+        geometry: { x: 0, y: 0, w: 32, h: 41, rotation: 0 },
+        points: [
+          { x: 120, y: 340, pressure: 0.6 },
+          { x: 130, y: 350 },
+        ],
+        strokeWidth: 3,
+        smoothing: 0.4,
+      },
+    ];
+
+    const [overlay] = annotationsToOverlays(server);
+    expect(overlay.position).toEqual({ x: 0, y: 0 });
+    expect(overlay.points).toEqual([
+      { x: 120, y: 340, pressure: 0.6 },
+      { x: 130, y: 350 },
+    ]);
+
+    const [roundTripped] = overlaysToAnnotations([overlay]);
+    expect(roundTripped.position).toEqual({ x: 0, y: 0 });
+    expect(roundTripped.geometry).toMatchObject({ x: 0, y: 0, w: 32, h: 41 });
+    expect(roundTripped.points).toEqual(server[0].points);
   });
 
   it('defaults strokeWidth/smoothing for a freehand stroke drawn at the origin with no style given', () => {
@@ -320,6 +354,7 @@ describe('annotation overlay translation', () => {
         text: 'l',
         color: '#fff',
         fontSize: 28,
+        size: { w: 220, h: 60 },
         z: 0,
         locked: false,
         rotation: 0,

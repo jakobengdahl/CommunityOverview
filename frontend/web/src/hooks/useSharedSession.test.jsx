@@ -210,6 +210,7 @@ describe('useSharedSession.loadSessionFromServer', () => {
     const setBaseline = vi.fn();
     const deps = makeDeps({ ensureSyncConnected: vi.fn(() => ({ setBaseline, sessionId: null })) });
     api.getSession.mockResolvedValueOnce({
+      seq: 4,
       state: { positions: {}, annotations: [] },
       resolved: { nodes: [NODE_A], edges: [] },
     });
@@ -222,7 +223,32 @@ describe('useSharedSession.loadSessionFromServer', () => {
     expect(api.getSession).toHaveBeenCalledWith('1234-5678', { resolve: true });
     expect(deps.clearVisualization).toHaveBeenCalledTimes(1);
     expect(deps.addNodesToVisualization).toHaveBeenCalled();
-    expect(setBaseline).toHaveBeenCalledWith(expect.objectContaining({ node_refs: ['node-a'] }));
+    // The load's seq goes with it, so the first stream snapshot can tell
+    // whether ops landed before the stream subscribed.
+    expect(setBaseline).toHaveBeenCalledWith(expect.objectContaining({ node_refs: ['node-a'] }), {
+      seq: 4,
+    });
+  });
+
+  // A load without a seq must not claim seq 0: the client would then resync
+  // on any first snapshot, instead of skipping the check it cannot make.
+  it('passes an undefined load seq through when the payload carries none', async () => {
+    const setBaseline = vi.fn();
+    const deps = makeDeps({ ensureSyncConnected: vi.fn(() => ({ setBaseline, sessionId: null })) });
+    api.getSession.mockResolvedValueOnce({
+      state: { positions: {}, annotations: [] },
+      resolved: { nodes: [NODE_A], edges: [] },
+    });
+    const { result } = renderHook(() => useSharedSession(deps));
+
+    await act(async () => {
+      await result.current.loadSessionFromServer('1234-5678');
+    });
+
+    expect(setBaseline).toHaveBeenCalledTimes(1);
+    expect(setBaseline).toHaveBeenCalledWith(expect.objectContaining({ node_refs: ['node-a'] }), {
+      seq: undefined,
+    });
   });
 
   it('treats a 404 as an empty session and seeds an empty eager baseline', async () => {
@@ -238,7 +264,40 @@ describe('useSharedSession.loadSessionFromServer', () => {
     });
 
     expect(deps.clearVisualization).toHaveBeenCalledTimes(1);
-    expect(setBaseline).toHaveBeenCalledWith({});
+    expect(setBaseline).toHaveBeenCalledWith({}, { seq: 0 });
+  });
+
+  it('reports a 404 as a session the server does not hold', async () => {
+    const err = Object.assign(new Error('not found'), { status: 404 });
+    api.getSession.mockRejectedValueOnce(err);
+    const onSessionPayload = vi.fn();
+    const { result } = renderHook(() => useSharedSession(makeDeps({ onSessionPayload })));
+    await act(async () => {
+      await result.current.loadSessionFromServer('1234-5678');
+    });
+    expect(onSessionPayload).toHaveBeenCalledWith('1234-5678', null);
+  });
+
+  it.each([
+    ['reply', () => api.getSession.mockResolvedValueOnce({ write_mode: 'staged', state: {} })],
+    [
+      '404',
+      () =>
+        api.getSession.mockRejectedValueOnce(
+          Object.assign(new Error('not found'), { status: 404 })
+        ),
+    ],
+  ])('adopts the mode from a stale %s but leaves the canvas alone', async (_label, arrange) => {
+    arrange();
+    const onSessionPayload = vi.fn();
+    const deps = makeDeps({ onSessionPayload });
+    const { result } = renderHook(() => useSharedSession(deps));
+    await act(async () => {
+      await result.current.loadSessionFromServer('1234-5678', { isStale: () => true });
+    });
+    expect(onSessionPayload).toHaveBeenCalledTimes(1);
+    expect(onSessionPayload.mock.calls[0][0]).toBe('1234-5678');
+    expect(deps.clearVisualization).not.toHaveBeenCalled();
   });
 
   it('calls onMissing on a 404 while still seeding the empty fallback', async () => {
@@ -259,7 +318,23 @@ describe('useSharedSession.loadSessionFromServer', () => {
 
     // The not-found notice fires, and the empty-session fallback still runs.
     expect(onMissing).toHaveBeenCalledWith('1234-5678');
-    expect(setBaseline).toHaveBeenCalledWith({});
+    expect(setBaseline).toHaveBeenCalledWith({}, { seq: 0 });
+  });
+
+  it('reseeds an already-connected client on a non-eager 404 without a load seq', async () => {
+    const setBaseline = vi.fn();
+    const deps = makeDeps({ syncRef: { current: { sessionId: '1234-5678', setBaseline } } });
+    const err = new Error('not found');
+    err.status = 404;
+    api.getSession.mockRejectedValueOnce(err);
+    const { result } = renderHook(() => useSharedSession(deps));
+
+    await act(async () => {
+      await result.current.loadSessionFromServer('1234-5678');
+    });
+
+    expect(deps.ensureSyncConnected).not.toHaveBeenCalled();
+    expect(setBaseline.mock.calls).toEqual([[{}]]);
   });
 
   it('does not call onMissing when the session loads successfully', async () => {

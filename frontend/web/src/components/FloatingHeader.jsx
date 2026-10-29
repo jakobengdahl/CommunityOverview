@@ -1,4 +1,4 @@
-import { List, Feather, XCircle } from 'react-bootstrap-icons';
+import { List, Feather, XCircle, BroadcastPin } from 'react-bootstrap-icons';
 import { useI18n } from '../i18n';
 import './FloatingHeader.css';
 
@@ -49,9 +49,21 @@ function PresenceRoster({ roster, currentClientId, t }) {
   );
 }
 
-function FloatingHeader({ title, sessionId, roster, currentClientId, onClear, onToggleDrawer }) {
+function FloatingHeader({
+  title,
+  sessionId,
+  roster,
+  currentClientId,
+  onClear,
+  onToggleDrawer,
+  onSummonEveryone,
+}) {
   const { t } = useI18n();
   const heading = title || t('header.title');
+  // Summoning only makes sense with someone else to bring along.
+  const hasOthers = (Array.isArray(roster) ? roster : []).some(
+    (m) => m.client_id !== currentClientId
+  );
   return (
     <div className="floating-header" id="guide-target-header">
       <div className="floating-header-bar">
@@ -71,6 +83,16 @@ function FloatingHeader({ title, sessionId, roster, currentClientId, onClear, on
           </span>
         )}
         <PresenceRoster roster={roster} currentClientId={currentClientId} t={t} />
+        {hasOthers && onSummonEveryone && (
+          <button
+            className="floating-header-summon"
+            onClick={() => onSummonEveryone()}
+            title={t('summon.bring_everyone_tooltip')}
+            aria-label={t('summon.bring_everyone')}
+          >
+            <BroadcastPin size={15} />
+          </button>
+        )}
         <button
           className="floating-header-clear"
           onClick={() => onClear?.()}

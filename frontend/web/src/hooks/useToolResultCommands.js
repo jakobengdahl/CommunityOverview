@@ -10,6 +10,22 @@ import useGraphStore from '../store/graphStore';
 // `command` events stay wired in App.jsx via `syncHandlersRef` (useSyncConnection's
 // domain) and route through the `applyToolResultCommand` this hook returns, so an
 // AI agent's pushes look identical regardless of which channel delivered them.
+// Most pushed nodes re-read per staged push; an agent's push is a view, not a
+// bulk import, and each id costs one request.
+const MAX_COMPOSED_REREADS = 200;
+
+async function composedToolResult(pushed) {
+  const ids = [...new Set((pushed.nodes || []).map((n) => n?.id).filter(Boolean))].slice(
+    0,
+    MAX_COMPOSED_REREADS
+  );
+  const reads = await Promise.all(ids.map((id) => api.getNodeDetails(id).catch(() => null)));
+  const nodes = reads.map((r) => r?.node).filter(Boolean);
+  const edges = new Map();
+  reads.forEach((r) => (r?.edges || []).forEach((e) => edges.set(e.id, e)));
+  return { action: pushed.action, nodes, edges: [...edges.values()] };
+}
+
 export function useToolResultCommands({ sessionId, opStreamReady, latestViewport }) {
   // Bounded recent-command-id history for MCP push dedup (R5) — a small LRU
   // rather than a single last-applied slot, and keyed by the server-assigned
@@ -18,21 +34,9 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
   // mistaken for the same broadcast delivered twice.
   const appliedCommandIdsRef = useRef([]);
 
-  // Apply an MCP tool-result command to the canvas. Shared by the legacy push
-  // stream and the op-protocol stream's `command` events (design §3.8, R5) so
-  // an AI agent's pushes look identical regardless of which channel delivered
-  // them. Deduped by command_id against recently applied ids: during the
-  // handover from the legacy stream to the op stream (or a brief overlap
-  // window) the same MCP push can be broadcast on both.
-  const applyToolResultCommand = useCallback(
-    (toolResult, commandId) => {
-      if (!toolResult) return;
-      if (commandId) {
-        if (appliedCommandIdsRef.current.includes(commandId)) return;
-        appliedCommandIdsRef.current.push(commandId);
-        if (appliedCommandIdsRef.current.length > 20) appliedCommandIdsRef.current.shift();
-      }
-
+  // Apply a tool result's nodes and edges to the canvas.
+  const applyToCanvas = useCallback(
+    (toolResult) => {
       const {
         nodes: currentNodes,
         edges: currentEdges,
@@ -93,6 +97,59 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
       }
     },
     [latestViewport]
+  );
+
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
+  const queueRef = useRef(Promise.resolve());
+  const pendingRef = useRef(0);
+
+  // Apply an MCP tool-result command to the canvas. Shared by the legacy push
+  // stream and the op-protocol stream's `command` events (design §3.8, R5) so
+  // an AI agent's pushes look identical regardless of which channel delivered
+  // them. Deduped by command_id against recently applied ids: during the
+  // handover from the legacy stream to the op stream (or a brief overlap
+  // window) the same MCP push can be broadcast on both.
+  const applyToolResultCommand = useCallback(
+    (pushed, commandId) => {
+      if (!pushed) return;
+      if (commandId) {
+        if (appliedCommandIdsRef.current.includes(commandId)) return;
+        appliedCommandIdsRef.current.push(commandId);
+        if (appliedCommandIdsRef.current.length > 20) appliedCommandIdsRef.current.shift();
+      }
+      // In a staged session the pushed nodes may be staged content, and the
+      // push reaches anyone holding the session id: show each as this viewer's
+      // composed read returns it, which asks the authorization hook
+      // (docs/SESSION_OVERLAY_CONTRACT.md §15). Ids the read refuses are left
+      // out.
+      // Pushes apply in the order they arrived: one waiting on its composed
+      // re-read holds back every later one.
+      if (!api.isActiveSessionPossiblyStaged() && pendingRef.current === 0) {
+        applyToCanvas(pushed);
+        return;
+      }
+      const target = sessionIdRef.current;
+      const prepared = api.isActiveSessionPossiblyStaged()
+        ? composedToolResult(pushed)
+        : Promise.resolve(pushed);
+      pendingRef.current += 1;
+      queueRef.current = queueRef.current
+        .then(() => prepared)
+        .then((toolResult) => {
+          if (sessionIdRef.current !== target) return; // switched away meanwhile
+          // Nothing of a replacing push could be read (a transient failure):
+          // keep the canvas rather than clear it for nothing.
+          const replaces = ['load_visualization', 'replace_visualization'].includes(pushed.action);
+          if (replaces && (pushed.nodes || []).length && !toolResult.nodes.length) return;
+          applyToCanvas(toolResult);
+        })
+        .catch(() => {})
+        .finally(() => {
+          pendingRef.current -= 1;
+        });
+    },
+    [applyToCanvas]
   );
 
   // Apply a `node_pulse` command (external pulse-trigger URLs): play a transient

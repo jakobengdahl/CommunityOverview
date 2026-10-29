@@ -2,15 +2,20 @@
 Tests for agent configuration models.
 """
 
+import json
 import os
 from unittest.mock import patch
 
+import pytest
+
 from backend.agents.config import (
+    AGENTS_WORKSPACE_ENV_VAR,
     MCPIntegration,
     AgentConfig,
     AgentsSettings,
     MCPTransport,
     REDACTED_ENV_VALUE,
+    agent_workspace_dir,
 )
 from backend.agents.secrets import SECRET_REF_PREFIX
 
@@ -54,7 +59,7 @@ class TestMCPIntegration:
             id="WEB",
             name="Web Fetch",
             transport=MCPTransport.HTTP,
-            url="http://example.com/mcp",
+            url="http://operator:password@private-host.invalid/mcp?token=url-secret",
             description="Web tools",
         )
 
@@ -62,7 +67,8 @@ class TestMCPIntegration:
 
         assert result["id"] == "WEB"
         assert result["transport"] == "http"
-        assert result["url"] == "http://example.com/mcp"
+        assert "url" not in result
+        assert integration.url not in json.dumps(result)
         assert result["description"] == "Web tools"
 
     def test_to_dict_redacts_literal_env_secret(self):
@@ -130,6 +136,23 @@ class TestAgentConfig:
 
 class TestAgentsSettings:
     """Tests for AgentsSettings global configuration."""
+
+    def test_serialized_settings_omit_integration_connection_details(self):
+        """Settings must not reintroduce credentials or argv hidden by integrations."""
+        integration = MCPIntegration(
+            id="CUSTOM",
+            name="Custom",
+            url="http://operator:password@private-host.invalid/mcp?token=url-secret",
+            command=["/home/argv-marker/private-tool", "--token=argv-secret"],
+        )
+
+        result = AgentsSettings(mcp_integrations=[integration]).to_dict()
+        serialized = json.dumps(result)
+
+        assert "url" not in result["mcp_integrations"][0]
+        assert "command" not in result["mcp_integrations"][0]
+        for value in [integration.url, *integration.command]:
+            assert value not in serialized
 
     def test_default_settings(self):
         """Test default settings when no environment variables set."""
@@ -224,3 +247,135 @@ class TestAgentsSettings:
 
             ids = [i.id for i in settings.mcp_integrations]
             assert "GRAPH" in ids
+
+
+class TestAgentWorkspaceDir:
+    """The one setting that decides where the agent's files live."""
+
+    def _fs_command(self):
+        with patch.dict(os.environ, {"AGENTS_ENABLED": "true"}, clear=True):
+            integrations = AgentsSettings._get_default_integrations()
+        fs = [i for i in integrations if i.id == "FS"]
+        assert len(fs) == 1, "no FS integration in the defaults"
+        return fs[0].command
+
+    def test_filesystem_mcp_root_is_the_shared_workspace_setting(self):
+        """The npx server and the built-in FS executor must get the same root.
+
+        They are configured in different modules; if they drift apart the agent
+        reads through one tree and writes through another.
+        """
+        with patch.dict(os.environ, {"AGENTS_ENABLED": "true"}, clear=True):
+            expected = agent_workspace_dir()
+        assert self._fs_command()[-1] == expected
+
+    def test_filesystem_mcp_root_follows_the_override(self):
+        """Overriding the setting moves the server's root with it."""
+        with patch.dict(
+            os.environ,
+            {"AGENTS_ENABLED": "true", AGENTS_WORKSPACE_ENV_VAR: "/srv/workspace"},
+            clear=True,
+        ):
+            integrations = AgentsSettings._get_default_integrations()
+            fs = [i for i in integrations if i.id == "FS"][0]
+        assert fs.command[-1] == "/srv/workspace"
+
+    def test_override_is_honoured_and_expanded(self):
+        with patch.dict(
+            os.environ, {AGENTS_WORKSPACE_ENV_VAR: "/srv/agent-ws"}, clear=True
+        ):
+            assert agent_workspace_dir() == "/srv/agent-ws"
+        with patch.dict(os.environ, {AGENTS_WORKSPACE_ENV_VAR: "~/ws"}, clear=True):
+            assert agent_workspace_dir() == os.path.join(os.path.expanduser("~"), "ws")
+
+    def test_override_is_absolute(self):
+        """A relative override would resolve against the process cwd."""
+        with patch.dict(os.environ, {AGENTS_WORKSPACE_ENV_VAR: "ws"}, clear=True):
+            assert agent_workspace_dir() == os.path.join(os.getcwd(), "ws")
+
+    @pytest.mark.parametrize("override", ["", "/srv/explicit-workspace"])
+    def test_other_environment_settings_cannot_override_the_workspace(
+        self, monkeypatch, override
+    ):
+        """An unrelated setting cannot take precedence over the workspace setting."""
+        monkeypatch.setenv("HOME", "/home/workspace-user")
+        monkeypatch.setattr(
+            os.environ,
+            "get",
+            lambda key, default=None: (
+                override
+                if key == AGENTS_WORKSPACE_ENV_VAR
+                else "/srv/unrelated-setting"
+            ),
+        )
+
+        assert agent_workspace_dir() == (
+            override or "/home/workspace-user/.communityoverview/agent-workspace"
+        )
+
+    def test_default_is_per_user_not_merely_outside_the_shared_temp_dir(self):
+        """B108: a predictable path any other local user can pre-create - as a
+        directory or a symlink - lets them choose where the agent reads and
+        writes. Excluding /tmp is not enough: /opt/agent-workspace is just as
+        shared. The default has to be specific to this user."""
+        with patch.dict(os.environ, {"HOME": "/home/someone"}, clear=True):
+            default = agent_workspace_dir()
+        assert os.path.isabs(default)
+        assert default.startswith("/home/someone" + os.sep), (
+            f"default workspace {default!r} is not under this user's home"
+        )
+
+    def test_default_is_absolute_without_a_usable_home(self):
+        """A uid with neither HOME nor a passwd entry gets "~" from expanduser.
+
+        Joining onto that yields a cwd-relative path, so the workspace would
+        land wherever the process happened to be started and move if it
+        chdir'd. Reachable in a container run as an arbitrary uid.
+        """
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("os.path.expanduser", return_value="~"):
+                default = agent_workspace_dir()
+        assert os.path.isabs(default), f"{default!r} is not absolute"
+
+    def test_default_is_not_the_filesystem_root_when_home_is_empty(self):
+        """HOME="" makes expanduser return "/", which would put the workspace
+        directly under the filesystem root."""
+        with patch.dict(os.environ, {"HOME": ""}, clear=True):
+            default = agent_workspace_dir()
+        assert os.path.isabs(default)
+        assert os.path.dirname(default.rstrip(os.sep)) != ""
+        assert not default.startswith(os.sep + ".communityoverview"), (
+            f"default workspace {default!r} sits at the filesystem root"
+        )
+
+    def test_no_home_fallback_is_specific_to_this_user(self):
+        """The fallback lives in the shared temp dir, so it must not be a path
+        another user's process would pick too."""
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("os.path.expanduser", return_value="~"):
+                default = agent_workspace_dir()
+        geteuid = getattr(os, "geteuid", None)
+        if geteuid is not None:
+            assert str(geteuid()) in os.path.basename(default), (
+                f"fallback {default!r} carries no per-user component"
+            )
+
+    def test_blank_override_falls_back_to_the_default(self):
+        with patch.dict(os.environ, {AGENTS_WORKSPACE_ENV_VAR: ""}, clear=True):
+            fallback = agent_workspace_dir()
+        with patch.dict(os.environ, {}, clear=True):
+            assert fallback == agent_workspace_dir()
+
+
+@pytest.mark.parametrize(
+    "access", [None, "unknown", [], {}, "read", "read_write", "none"]
+)
+def test_agent_attachment_access_fails_closed(sample_agent_node, access, caplog):
+    sample_agent_node.metadata["attachment_access"] = access
+    config = AgentConfig.from_node(sample_agent_node)
+    expected = access if access in ("none", "read", "read_write") else "none"
+    assert config.attachment_access == config.to_dict()["attachment_access"] == expected
+    if access != expected:
+        assert "invalid attachment_access" in caplog.text
+    sample_agent_node.id = "federated::remote::agent"
+    assert AgentConfig.from_node(sample_agent_node).attachment_access == "none"

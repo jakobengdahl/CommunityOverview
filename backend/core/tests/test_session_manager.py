@@ -7,6 +7,7 @@ presence/claim lifecycle on connect/disconnect.
 
 import asyncio
 import copy
+import dataclasses
 import json
 import threading
 
@@ -37,9 +38,14 @@ from backend.core.session_manager import (
     SessionManager,
     SessionNotFound,
     UndoConflict,
+    _DEFAULT_IMAGE_BUCKET_CAPACITY,
+    _DEFAULT_IMAGE_BUCKET_REFILL_PER_SEC,
     _TokenBucket,
     _UNDO_REPLAY_CLIENT_ID,
+    _detached_snapshot,
+    _document_bytes,
 )
+from backend.core.tests.rate_buckets import REQUIRED_BUCKET_ATTRS, bucket_attrs
 from backend.service.rest_api import _resolve_stream_event
 
 pytestmark = pytest.mark.asyncio
@@ -183,6 +189,38 @@ class TestApplyOps:
             await mgr.apply_ops(
                 s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["c"]}]
             )
+
+    async def test_a_batch_costing_more_than_the_whole_bucket_is_too_large_and_charges_nothing(
+        self,
+    ):
+        mgr = _manager(bucket_capacity=2, bucket_refill_per_sec=0)
+        # A roomier MCP bucket, so a check reading the wrong bucket would pass.
+        mgr._mcp_bucket = _TokenBucket(10.0, 0.0)
+        s = mgr.create_session()
+        three = [{"op": "nodes_added", "node_ids": [n]} for n in ("a", "b", "c")]
+
+        with pytest.raises(OpBatchTooLarge):
+            await mgr.apply_ops(s.id, "c1", 0, three)
+        await mgr.apply_ops(s.id, "c1", 0, three[:2])
+        with pytest.raises(RateLimited):
+            await mgr.apply_ops(s.id, "c1", 0, three[2:])
+        assert s.state["node_refs"] == ["a", "b"]
+
+    async def test_at_default_settings_a_batch_over_the_burst_is_too_large_not_rate_limited(
+        self,
+    ):
+        """The bucket holds 200 while the op-count cap is 500, so a 201-500 op
+        batch passes both caps but could never be admitted by backing off."""
+        mgr = _manager(bucket_refill_per_sec=0)
+        s = mgr.create_session()
+        assert mgr._bucket.capacity == 200 < mgr.max_ops_per_batch
+        ops = [{"op": "nodes_added", "node_ids": [f"n{i}"]} for i in range(201)]
+
+        with pytest.raises(OpBatchTooLarge):
+            await mgr.apply_ops(s.id, "c1", 0, ops)
+        res = await mgr.apply_ops(s.id, "c1", 0, ops[:200])
+
+        assert res["seq"] == 200
 
     async def test_lookup_rate_limit_throttles_per_key(self):
         """Session-id lookups are throttled per source and refill over time."""
@@ -366,6 +404,50 @@ class TestApplyOps:
         assert after.state["node_refs"] == []
         assert store.ops_since(s.id, 0) == []
         assert await _drain(sub) == []
+
+    async def test_persist_failure_drops_a_ring_the_batch_created(self):
+        """No ring before the batch means none after a rollback: the store
+        creates one on demand, and keeping it would leave an entry for a seq
+        that never committed (smallfix-apply-op-sync-ring-created-mid-op)."""
+        store = SessionStore(InMemorySessionPersistenceBackend())
+        mgr = SessionManager(store)
+        s = mgr.create_session()
+        store._rings.pop(s.id)
+        real_persist = store.persist_snapshot
+
+        def _boom(snapshot):
+            raise OSError("disk full")
+
+        store.persist_snapshot = _boom
+        with pytest.raises(OSError):
+            await mgr.apply_ops(
+                s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["x"]}]
+            )
+        assert store.ring(s.id) is None
+
+        store.persist_snapshot = real_persist
+        await mgr.apply_ops(s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["y"]}])
+        assert [op["node_ids"] for op in store.ops_since(s.id, 0)] == [["y"]]
+
+    async def test_persist_failure_restores_a_non_empty_ring(self):
+        """A rollback puts back the ring's prior contents, not an empty or
+        missing ring, and not the ring as the failed batch left it."""
+        store = SessionStore(InMemorySessionPersistenceBackend())
+        mgr = SessionManager(store)
+        s = mgr.create_session()
+        await mgr.apply_ops(s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["a"]}])
+        ring_before = list(store.ring(s.id))
+        assert len(ring_before) == 1
+
+        def _boom(snapshot):
+            raise OSError("disk full")
+
+        store.persist_snapshot = _boom
+        with pytest.raises(OSError):
+            await mgr.apply_ops(
+                s.id, "c1", 1, [{"op": "nodes_added", "node_ids": ["b"]}]
+            )
+        assert list(store.ring(s.id)) == ring_before
 
 
 class TestClaimOps:
@@ -2818,6 +2900,367 @@ class TestRenameSession:
             await mgr.rename_session("9999-9999", "x")
 
 
+class TestRenameSessionSync:
+    """The MCP rename path shares ``_apply_op_sync``'s rollback, name included."""
+
+    async def test_persist_failure_restores_name_seq_and_ring(self):
+        mgr = _manager()
+        s = mgr.create_session(name="Before")
+        mgr.rename_session_sync(s.id, "Committed-7f3a", client_id="mcp")
+        s.updated_at = "2000-01-01T00:00:00Z"
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+        seq_before = s.seq
+        ring_before = list(mgr.store.ring(s.id))
+
+        def boom(_session):
+            raise IOError("disk full")
+
+        mgr.store.persist = boom
+        with pytest.raises(IOError):
+            mgr.rename_session_sync(s.id, "After", client_id="mcp")
+        assert s.name == "Committed-7f3a"
+        assert s.updated_at == "2000-01-01T00:00:00Z"
+        assert s.seq == seq_before
+        assert list(mgr.store.ring(s.id)) == ring_before
+        assert await _drain(sub) == []
+
+    async def test_persist_failure_drops_a_ring_the_op_created(self):
+        """``_apply_op_sync``'s rollback restores "no ring" too, not only a
+        ring's prior contents (smallfix-apply-op-sync-ring-created-mid-op)."""
+        mgr = _manager()
+        s = mgr.create_session(name="Before")
+        mgr.store._rings.pop(s.id)
+        real_persist = mgr.store.persist
+
+        def boom(_session):
+            raise IOError("disk full")
+
+        mgr.store.persist = boom
+        with pytest.raises(IOError):
+            mgr.rename_session_sync(s.id, "After", client_id="mcp")
+        assert mgr.store.ring(s.id) is None
+
+        mgr.store.persist = real_persist
+        mgr.rename_session_sync(s.id, "Again", client_id="mcp")
+        assert [op["name"] for op in mgr.store.ops_since(s.id, 0)] == ["Again"]
+
+    async def test_apply_op_sync_restores_a_renamed_name_on_failure(self):
+        mgr = _manager()
+        s = mgr.create_session(name="Before")
+        mgr.rename_session_sync(s.id, "Committed-c21e")
+
+        def boom(_session):
+            raise IOError("disk full")
+
+        mgr.store.persist = boom
+        with pytest.raises(IOError):
+            mgr._apply_op_sync(
+                s,
+                s.id,
+                "mcp",
+                {"op": "session_renamed", "name": "After", "client_id": "mcp"},
+            )
+        assert s.name == "Committed-c21e"
+
+    async def test_apply_op_sync_restores_the_activity_log_on_failure(self):
+        """``session_renamed`` is not undoable, so a rename never writes an
+        activity record and cannot show whether the rollback restores the log.
+        An undoable op does."""
+        mgr = _manager()
+        s = mgr.create_session()
+
+        def move(x):
+            return {
+                "op": "node_moved",
+                "node_id": "a",
+                "position": {"x": x, "y": 0},
+                "client_id": "mcp",
+            }
+
+        mgr._apply_op_sync(s, s.id, "mcp", move(1))
+        log_before = copy.deepcopy(s.activity_log)
+        assert len(log_before) == 1
+
+        def boom(_session):
+            raise IOError("disk full")
+
+        mgr.store.persist = boom
+        with pytest.raises(IOError):
+            mgr._apply_op_sync(s, s.id, "mcp", move(2))
+        assert s.activity_log == log_before
+
+    async def test_a_non_string_name_is_rejected_before_the_session_is_created(self):
+        """A rename materialises an unknown id — but not for a request that is
+        refused anyway, or a bad call leaves an empty session behind."""
+        mgr = _manager()
+        sid = "1234-5678-9012-3456"
+
+        with pytest.raises(OpError):
+            mgr.rename_session_sync(sid, 42)
+        assert mgr.get_session(sid) is None
+        assert mgr.store.session_count() == 0
+
+    async def test_an_invalid_id_is_not_found(self):
+        mgr = _manager()
+
+        with pytest.raises(SessionNotFound):
+            mgr.rename_session_sync("nope", "Name")
+        assert mgr.store.session_count() == 0
+
+    async def test_broadcast_carries_the_callers_actor(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+        mgr.rename_session_sync(s.id, "Renamed", client_id="mcp-agent")
+        events = await _drain(sub)
+        renamed = [e for e in events if e.get("op", {}).get("op") == "session_renamed"]
+        assert len(renamed) == 1
+        assert renamed[0]["client_id"] == "mcp-agent"
+
+    async def test_broadcast_carries_the_rest_default_actor(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+        mgr.rename_session_sync(s.id, "Renamed")
+        events = await _drain(sub)
+        renamed = [e for e in events if e.get("op", {}).get("op") == "session_renamed"]
+        assert len(renamed) == 1
+        assert renamed[0]["client_id"] == "rest"
+        assert renamed[0]["op"]["name"] == "Renamed"
+        assert renamed[0]["seq"] == s.seq
+        assert s.name == "Renamed"
+
+    async def test_a_rate_limited_rename_changes_and_creates_nothing(self):
+        mgr = _manager()
+        s = mgr.create_session(name="Before")
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+        mgr._mcp_bucket = _TokenBucket(0.0, 0.0)
+        unknown = "1234-5678-9012-3456"
+
+        with pytest.raises(RateLimited):
+            mgr.rename_session_sync(s.id, "After", client_id="mcp-agent")
+        with pytest.raises(RateLimited):
+            mgr.rename_session_sync(unknown, "After", client_id="mcp-agent")
+
+        assert s.name == "Before" and s.seq == 0
+        assert mgr.get_session(unknown) is None
+        assert await _drain(sub) == []
+
+
+class TestDeleteSessionSyncRateLimit:
+    async def test_a_rate_limited_delete_leaves_the_session_and_broadcasts_nothing(
+        self,
+    ):
+        mgr = _manager()
+        s = mgr.create_session()
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+        mgr._mcp_bucket = _TokenBucket(0.0, 0.0)
+
+        with pytest.raises(RateLimited):
+            mgr.delete_session_sync(s.id, deleted_by="mcp-agent")
+
+        assert mgr.get_session(s.id) is s
+        assert await _drain(sub) == []
+
+
+class _AdmittingRecordingBucket:
+    """Admits every consume and records ``(key, amount)``, so a test can pin
+    which key a write charged and how many times."""
+
+    capacity = float("inf")
+
+    def __init__(self):
+        self.calls = []
+
+    def consume(self, key, n=1.0):
+        self.calls.append((key, n))
+        return True
+
+
+def _recording_mcp_bucket(mgr):
+    bucket = _AdmittingRecordingBucket()
+    mgr._mcp_bucket = bucket
+    return bucket
+
+
+def _spy_publish(mgr):
+    published = []
+    mgr.bus.publish = lambda session_id, event: published.append((session_id, event))
+    return published
+
+
+class TestRenameDeleteSyncCharges:
+    """Which ``_mcp_bucket`` key rename/delete charge, and exactly when."""
+
+    @pytest.mark.parametrize(
+        "actor, label, key",
+        [
+            (None, None, "rest"),
+            (None, "tool", "rest:tool"),
+            ("mcp-agent", None, "mcp-agent"),
+            ("mcp-agent", "tool", "mcp-agent:tool"),
+        ],
+    )
+    @pytest.mark.parametrize("name", ["Renamed", None])
+    async def test_rename_charges_one_token_under_the_actor_key(
+        self, actor, label, key, name
+    ):
+        mgr = _manager()
+        s = mgr.create_session(name="Before")
+        bucket = _recording_mcp_bucket(mgr)
+
+        mgr.rename_session_sync(s.id, name, client_id=actor, rate_limit_label=label)
+
+        assert bucket.calls == [(key, 1.0)]
+        assert s.name == name
+
+    @pytest.mark.parametrize(
+        "actor, label, key",
+        [
+            (None, None, "rest"),
+            (None, "tool", "rest:tool"),
+            ("mcp-agent", None, "mcp-agent"),
+            ("mcp-agent", "tool", "mcp-agent:tool"),
+        ],
+    )
+    async def test_delete_charges_one_token_under_the_actor_key(
+        self, actor, label, key
+    ):
+        mgr = _manager()
+        s = mgr.create_session()
+        bucket = _recording_mcp_bucket(mgr)
+        published = _spy_publish(mgr)
+
+        assert mgr.delete_session_sync(s.id, deleted_by=actor, rate_limit_label=label)
+
+        assert bucket.calls == [(key, 1.0)]
+        assert mgr.get_session(s.id) is None
+        assert published == [
+            (
+                s.id,
+                {
+                    "type": "session_deleted",
+                    "deleted_by": actor,
+                    "write_mode": "direct",
+                },
+            )
+        ]
+
+    async def test_rename_of_an_invalid_id_charges_nothing(self):
+        mgr = _manager()
+        bucket = _recording_mcp_bucket(mgr)
+
+        with pytest.raises(SessionNotFound):
+            mgr.rename_session_sync("nope", "Name", client_id="mcp-agent")
+
+        assert bucket.calls == []
+
+    async def test_rename_with_a_non_string_name_charges_nothing(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        bucket = _recording_mcp_bucket(mgr)
+
+        with pytest.raises(OpError):
+            mgr.rename_session_sync(s.id, 42, client_id="mcp-agent")
+
+        assert bucket.calls == []
+
+    @pytest.mark.parametrize("bad_id", ["nope", "../1234-5678", "", "1234-5678-"])
+    async def test_delete_of_an_invalid_id_is_not_found_and_charges_nothing(
+        self, bad_id
+    ):
+        mgr = _manager()
+        s = mgr.create_session()
+        bucket = _recording_mcp_bucket(mgr)
+        published = _spy_publish(mgr)
+        deleted = []
+        mgr.store.delete = deleted.append
+
+        assert mgr.delete_session_sync(bad_id, deleted_by="mcp-agent") is False
+
+        assert bucket.calls == []
+        assert deleted == []
+        assert published == []
+        assert mgr.get_session(s.id) is s
+        assert bad_id not in mgr._locks
+
+    async def test_delete_of_a_missing_valid_id_charges_exactly_once(self):
+        mgr = _manager()
+        bucket = _recording_mcp_bucket(mgr)
+        published = _spy_publish(mgr)
+
+        assert (
+            mgr.delete_session_sync("1234-5678-9012-3456", deleted_by="mcp-agent")
+            is False
+        )
+
+        assert bucket.calls == [("mcp-agent", 1.0)]
+        assert published == []
+
+    async def test_a_busy_rename_charges_exactly_once(self):
+        mgr = _manager()
+        s = mgr.create_session(name="Before")
+        await mgr._lock(s.id).acquire()
+        bucket = _recording_mcp_bucket(mgr)
+
+        with pytest.raises(LayoutBusy):
+            mgr.rename_session_sync(s.id, "After", client_id="mcp-agent")
+
+        assert bucket.calls == [("mcp-agent", 1.0)]
+        assert s.name == "Before"
+
+    async def test_a_busy_delete_charges_exactly_once(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        await mgr._lock(s.id).acquire()
+        bucket = _recording_mcp_bucket(mgr)
+
+        with pytest.raises(LayoutBusy):
+            mgr.delete_session_sync(s.id, deleted_by="mcp-agent")
+
+        assert bucket.calls == [("mcp-agent", 1.0)]
+        assert mgr.get_session(s.id) is s
+
+    async def test_delete_broadcasts_only_after_the_session_is_gone(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        stored_at_publish = []
+        mgr.bus.publish = lambda session_id, event: stored_at_publish.append(
+            mgr.store.get(session_id)
+        )
+
+        assert mgr.delete_session_sync(s.id, deleted_by="mcp-agent")
+
+        assert stored_at_publish == [None]
+
+    @pytest.mark.parametrize("write", ["rename", "delete"])
+    async def test_an_empty_rate_limit_label_is_refused_and_charges_nothing(
+        self, write
+    ):
+        mgr = _manager()
+        s = mgr.create_session(name="Before")
+        bucket = _recording_mcp_bucket(mgr)
+
+        with pytest.raises(OpError):
+            if write == "rename":
+                mgr.rename_session_sync(
+                    s.id, "After", client_id="mcp-agent", rate_limit_label=""
+                )
+            else:
+                mgr.delete_session_sync(
+                    s.id, deleted_by="mcp-agent", rate_limit_label=""
+                )
+
+        assert bucket.calls == []
+        assert mgr.get_session(s.id) is s
+        assert s.name == "Before"
+
+
 class TestDeleteRenameLocking:
     """R10: delete must not race an in-flight apply_ops batch for the same session."""
 
@@ -2937,6 +3380,35 @@ class TestApplyLayout:
         assert len(events) == 1
         assert events[0]["op"]["op"] == "layout_applied"
         assert events[0]["seq"] == 1
+
+    async def test_more_moves_than_the_bucket_capacity_is_too_large_and_charges_nothing(
+        self,
+    ):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr._mcp_bucket = _TokenBucket(2.0, 0.0)
+        three = {n: {"x": 1, "y": 1} for n in ("a", "b", "c")}
+        two = {n: {"x": 1, "y": 1} for n in ("a", "b")}
+
+        with pytest.raises(OpBatchTooLarge):
+            mgr.apply_layout(s.id, "mcp-agent", positions=three)
+        assert mgr.apply_layout(s.id, "mcp-agent", positions=two)["moved"] == 2
+        with pytest.raises(RateLimited):
+            mgr.apply_layout(s.id, "mcp-agent", positions={"a": {"x": 2, "y": 2}})
+
+    @pytest.mark.parametrize(
+        "caps", [{"max_ops_per_batch": 2}, {"max_op_batch_bytes": 32}]
+    )
+    async def test_a_write_over_a_batch_cap_is_too_large_before_any_charge(self, caps):
+        mgr = _manager(**caps)
+        s = mgr.create_session()
+        bucket = _recording_mcp_bucket(mgr)
+        moves = {n: {"x": 1, "y": 1} for n in ("a", "b", "c")}
+
+        with pytest.raises(OpBatchTooLarge):
+            mgr.apply_layout(s.id, "mcp-agent", positions=moves)
+
+        assert bucket.calls == []
 
     async def test_deltas_resolve_against_current_positions(self):
         mgr = _manager()
@@ -3109,6 +3581,25 @@ class TestApplyLayout:
         assert s.state["positions"]["a"] == {"x": 1.0, "y": 1.0}
 
 
+class TestRemoveNodeRefs:
+    """The synchronous MCP session-pruning path (``remove_node_refs``)."""
+
+    async def test_a_repeated_present_id_is_removed_and_broadcast_once(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.add_node_refs(s.id, "mcp-agent", ["a", "b", "c"])
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+
+        res = mgr.remove_node_refs(s.id, "mcp-agent", ["a", "a", "b", "x"])
+
+        assert res["removed"] == ["a", "b"]
+        assert s.state["node_refs"] == ["c"]
+        events = await _drain(sub)
+        assert [e["op"]["op"] for e in events] == ["nodes_removed"]
+        assert events[0]["op"]["node_ids"] == ["a", "b"]
+
+
 class TestAddNodeRefs:
     """The synchronous MCP session-population path (``add_node_refs``)."""
 
@@ -3210,6 +3701,454 @@ class TestAddNodeRefs:
         assert s.state["node_refs"] == ["a", "b"]
         events = await _drain(sub)
         assert events[0]["op"]["node_ids"] == ["a", "b"]
+
+    async def test_rate_limit_label_splits_mcp_marker_bucket(self):
+        mgr = _manager(bucket_capacity=1, bucket_refill_per_sec=0)
+        s = mgr.create_session()
+
+        mgr.add_node_refs(
+            s.id, "mcp-agent", ["a"], rate_limit_label="add_nodes_to_session"
+        )
+        with pytest.raises(RateLimited):
+            mgr.add_node_refs(
+                s.id, "mcp-agent", ["b"], rate_limit_label="add_nodes_to_session"
+            )
+
+        res = mgr.apply_layout(
+            s.id,
+            "mcp-agent",
+            positions={"a": {"x": 1, "y": 2}},
+            rate_limit_label="apply_visualization_layout",
+        )
+        assert res["moved"] == 1
+
+    async def test_unlabelled_mcp_writes_keep_the_legacy_bucket_key(self):
+        mgr = _manager(bucket_capacity=1, bucket_refill_per_sec=0)
+        s = mgr.create_session()
+
+        mgr.add_node_refs(s.id, "mcp-agent", ["a"])
+
+        with pytest.raises(RateLimited):
+            mgr.apply_layout(s.id, "mcp-agent", positions={"a": {"x": 1, "y": 2}})
+
+    async def test_a_precharged_write_is_not_charged_again(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        bucket = _recording_mcp_bucket(mgr)
+
+        res = mgr.add_node_refs(
+            s.id,
+            "mcp-agent",
+            ["a", "b"],
+            rate_limit_label="add_nodes_to_session",
+            precharged=True,
+        )
+
+        assert res["added"] == ["a", "b"]
+        assert bucket.calls == []
+
+    async def test_an_uncharged_write_charges_one_token_per_id(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        bucket = _recording_mcp_bucket(mgr)
+
+        mgr.add_node_refs(
+            s.id, "mcp-agent", ["a", "b"], rate_limit_label="add_nodes_to_session"
+        )
+
+        assert bucket.calls == [("mcp-agent:add_nodes_to_session", 2)]
+
+    async def test_an_uncharged_write_charges_a_repeated_id_every_time(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        bucket = _recording_mcp_bucket(mgr)
+
+        mgr.add_node_refs(
+            s.id, "mcp-agent", ["a", "a"], rate_limit_label="add_nodes_to_session"
+        )
+
+        assert bucket.calls == [("mcp-agent:add_nodes_to_session", 2)]
+
+    @pytest.mark.parametrize(
+        "caps", [{"max_ops_per_batch": 2}, {"max_op_batch_bytes": 12}]
+    )
+    async def test_an_uncharged_write_over_a_batch_cap_is_too_large_before_any_charge(
+        self, caps
+    ):
+        mgr = _manager(**caps)
+        s = mgr.create_session()
+        bucket = _recording_mcp_bucket(mgr)
+
+        with pytest.raises(OpBatchTooLarge):
+            mgr.add_node_refs(s.id, "mcp-agent", ["a", "b", "c"])
+
+        assert bucket.calls == []
+
+    async def test_an_uncharged_write_above_the_bucket_capacity_is_too_large(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr._mcp_bucket = _TokenBucket(2.0, 0.0)
+
+        with pytest.raises(OpBatchTooLarge):
+            mgr.add_node_refs(s.id, "mcp-agent", ["a", "b", "c"])
+        mgr.add_node_refs(s.id, "mcp-agent", ["a", "b"])
+
+        assert mgr.get_session(s.id).state["node_refs"] == ["a", "b"]
+
+
+class TestConsumeMcpRateBudget:
+    async def test_charges_the_amount_under_the_labelled_key(self):
+        mgr = _manager()
+        bucket = _recording_mcp_bucket(mgr)
+
+        mgr.consume_mcp_rate_budget("mcp-agent", 3, rate_limit_label="tool")
+
+        assert bucket.calls == [("mcp-agent:tool", 3)]
+
+    async def test_a_spent_budget_raises(self):
+        mgr = _manager()
+        mgr._mcp_bucket = _TokenBucket(2.0, 0.0)
+
+        mgr.consume_mcp_rate_budget("mcp-agent", 2, rate_limit_label="tool")
+        with pytest.raises(RateLimited):
+            mgr.consume_mcp_rate_budget("mcp-agent", 1, rate_limit_label="tool")
+
+    async def test_an_amount_above_the_bucket_capacity_is_too_large_and_charges_nothing(
+        self,
+    ):
+        mgr = _manager()
+        mgr._mcp_bucket = _TokenBucket(2.0, 0.0)
+
+        with pytest.raises(OpBatchTooLarge):
+            mgr.consume_mcp_rate_budget("mcp-agent", 3, rate_limit_label="tool")
+        mgr.consume_mcp_rate_budget("mcp-agent", 2, rate_limit_label="tool")
+        with pytest.raises(RateLimited):
+            mgr.consume_mcp_rate_budget("mcp-agent", 1, rate_limit_label="tool")
+
+    async def test_an_empty_label_is_refused_and_charges_nothing(self):
+        mgr = _manager()
+        bucket = _recording_mcp_bucket(mgr)
+
+        with pytest.raises(OpError):
+            mgr.consume_mcp_rate_budget("mcp-agent", 1, rate_limit_label="")
+
+        assert bucket.calls == []
+
+    @pytest.mark.parametrize("client_id", ["", None])
+    async def test_a_missing_client_id_is_refused_and_charges_nothing(self, client_id):
+        mgr = _manager()
+        bucket = _recording_mcp_bucket(mgr)
+
+        with pytest.raises(OpError):
+            mgr.consume_mcp_rate_budget(client_id, 1, rate_limit_label="tool")
+
+        assert bucket.calls == []
+
+
+def _seed_annotations(mgr, sid):
+    for ann_id in ("note-1", "note-2"):
+        mgr.upsert_annotation(sid, "mcp-agent", {"id": ann_id, "type": "note"})
+    mgr.upsert_annotation(sid, "mcp-agent", {"id": "group-1", "type": "group"})
+
+
+_MCP_BUCKET_WRITES = {
+    "set_write_mode_sync": lambda mgr, sid, i, label: mgr.set_write_mode_sync(
+        sid, "direct", "mcp-agent", rate_limit_label=label
+    ),
+    "apply_layout": lambda mgr, sid, i, label: mgr.apply_layout(
+        sid, "mcp-agent", positions={"n1": {"x": i, "y": i}}, rate_limit_label=label
+    ),
+    "add_node_refs": lambda mgr, sid, i, label: mgr.add_node_refs(
+        sid, "mcp-agent", [f"n{i}"], rate_limit_label=label
+    ),
+    "remove_node_refs": lambda mgr, sid, i, label: mgr.remove_node_refs(
+        sid, "mcp-agent", [f"n{i}"], rate_limit_label=label
+    ),
+    "consume_mcp_rate_budget": lambda mgr, sid, i, label: mgr.consume_mcp_rate_budget(
+        "mcp-agent", 1, rate_limit_label=label
+    ),
+    "upsert_annotation": lambda mgr, sid, i, label: mgr.upsert_annotation(
+        sid, "mcp-agent", {"id": f"new-{i}", "type": "note"}, rate_limit_label=label
+    ),
+    "update_annotation": lambda mgr, sid, i, label: mgr.update_annotation(
+        sid,
+        "mcp-agent",
+        {"id": "note-1", "type": "note", "text": f"v{i}"},
+        rate_limit_label=label,
+    ),
+    "delete_annotation": lambda mgr, sid, i, label: mgr.delete_annotation(
+        sid, "mcp-agent", f"note-{i + 1}", rate_limit_label=label
+    ),
+    "set_group_members": lambda mgr, sid, i, label: mgr.set_group_members(
+        sid, "mcp-agent", "group-1", [f"n{i}"], rate_limit_label=label
+    ),
+    # Without rate_limit_key, which would route it to _image_bucket instead.
+    "upsert_image_annotation": lambda mgr, sid, i, label: mgr.upsert_image_annotation(
+        sid,
+        "mcp-agent",
+        _image_annotation(f"img-{i}", data_bytes=100),
+        optimized_image_bytes=100,
+        rate_limit_label=label,
+    ),
+    "summon_viewport_sync": lambda mgr, sid, i, label: mgr.summon_viewport_sync(
+        sid,
+        "mcp-agent",
+        {"x": i, "y": i, "width": 10, "height": 10},
+        display_name="AI assistant",
+        rate_limit_label=label,
+    ),
+    "rename_session_sync": lambda mgr, sid, i, label: mgr.rename_session_sync(
+        sid, f"name-{i}", client_id="mcp-agent", rate_limit_label=label
+    ),
+    "delete_session_sync": lambda mgr, sid, i, label: _delete_existing_session(
+        mgr, sid, label
+    ),
+}
+
+
+def _delete_existing_session(mgr, sid, label):
+    # Recreated first so every admitted call really deletes: a harness call
+    # against an already-deleted id returns False and proves only "not limited".
+    mgr.get_or_create(sid)
+    assert mgr.delete_session_sync(sid, deleted_by="mcp-agent", rate_limit_label=label)
+
+
+# session_manager calls in mcp_tools.py that spend no rate-limit bucket.
+_MCP_UNMETERED_CALLS = {
+    "claimed_elements",
+    "connected_count",
+    "create_session",
+    "get_session",
+    "list_sessions",
+    "push_command",
+    "write_mode_of",
+}
+
+
+def _mcp_tools_session_manager_calls():
+    """``{method: [call keyword names, ...]}`` for every ``session_manager.X(...)``
+    call in ``backend/service/mcp_tools.py``."""
+    import ast
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[2] / "service" / "mcp_tools.py"
+    ).read_text()
+    calls = {}
+    for node in ast.walk(ast.parse(source)):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "session_manager"
+        ):
+            calls.setdefault(node.func.attr, []).append(
+                [kw.arg for kw in node.keywords]
+            )
+    return calls
+
+
+class TestMcpBucketWriteListMatchesMcpTools:
+    """``_MCP_BUCKET_WRITES`` is maintained by hand; these fail when an MCP tool
+    starts calling a session_manager method neither it nor
+    ``_MCP_UNMETERED_CALLS`` classifies, so a new write cannot skip the
+    bucket-routing test below unnoticed."""
+
+    async def test_every_mcp_tools_call_is_classified(self):
+        called = set(_mcp_tools_session_manager_calls())
+        assert called - _MCP_UNMETERED_CALLS == set(_MCP_BUCKET_WRITES)
+        assert _MCP_UNMETERED_CALLS <= called
+
+    async def test_every_metered_mcp_tools_call_passes_a_rate_limit_label(self):
+        calls = _mcp_tools_session_manager_calls()
+        for method in _MCP_BUCKET_WRITES:
+            for keywords in calls[method]:
+                assert "rate_limit_label" in keywords, method
+                # rate_limit_key would move the write to _image_bucket; a
+                # ``**`` splat (arg None) could carry it past this check.
+                assert "rate_limit_key" not in keywords, method
+                assert None not in keywords, method
+
+    async def test_every_manager_method_taking_a_rate_limit_label_is_listed(self):
+        import inspect
+
+        labelled = {
+            name
+            for name, fn in inspect.getmembers(SessionManager, inspect.isfunction)
+            if not name.startswith("_")
+            and "rate_limit_label" in inspect.signature(fn).parameters
+        }
+        assert labelled == set(_MCP_BUCKET_WRITES)
+
+
+class _RecordingBucket:
+    def __init__(self, calls):
+        self._calls = calls
+
+    def consume(self, key, n=1.0):
+        self._calls.append(key)
+        return False
+
+
+_MCP_UNMETERED_RUNS = {
+    "claimed_elements": lambda mgr, sid: mgr.claimed_elements(sid),
+    "connected_count": lambda mgr, sid: mgr.connected_count(sid),
+    "create_session": lambda mgr, sid: mgr.create_session(),
+    "get_session": lambda mgr, sid: mgr.get_session(sid),
+    "list_sessions": lambda mgr, sid: mgr.list_sessions(),
+    "push_command": lambda mgr, sid: mgr.push_command(sid, {"type": "noop"}),
+    "write_mode_of": lambda mgr, sid: mgr.write_mode_of(
+        mgr.get_session(sid) or Session(id=sid)
+    ),
+}
+
+
+class TestBucketAttrsReach:
+    """``bucket_attrs`` is what the swap-every-bucket tests below and in
+    ``test_mcp_add_nodes_to_session.py`` rely on to see every bucket, so a
+    bucket it cannot swap must fail it rather than be skipped."""
+
+    async def test_every_instance_bucket_is_returned(self):
+        mgr = _manager()
+        mgr._extra_bucket = _TokenBucket(1.0, 0.0)
+
+        attrs = bucket_attrs(mgr)
+
+        assert REQUIRED_BUCKET_ATTRS | {"_extra_bucket"} <= set(attrs)
+
+    async def test_a_bucket_on_the_class_fails_discovery(self):
+        class ClassBucketManager(SessionManager):
+            _shared_bucket = _TokenBucket(1.0, 0.0)
+
+        mgr = ClassBucketManager(SessionStore(InMemorySessionPersistenceBackend()))
+
+        with pytest.raises(AssertionError, match=r"ClassBucketManager\._shared_bucket"):
+            bucket_attrs(mgr)
+
+    async def test_a_bucket_on_a_base_class_fails_discovery(self):
+        class Base(SessionManager):
+            _shared_bucket = _TokenBucket(1.0, 0.0)
+
+        class Derived(Base):
+            pass
+
+        mgr = Derived(SessionStore(InMemorySessionPersistenceBackend()))
+
+        with pytest.raises(AssertionError, match=r"Base\._shared_bucket"):
+            bucket_attrs(mgr)
+
+    @pytest.mark.parametrize(
+        "wrap",
+        [
+            lambda b: {"k": b},
+            lambda b: {b: "v"},
+            lambda b: [b],
+            lambda b: (b,),
+            lambda b: {b},
+            lambda b: frozenset({b}),
+        ],
+        ids=["dict-value", "dict-key", "list", "tuple", "set", "frozenset"],
+    )
+    async def test_a_bucket_in_an_instance_container_fails_discovery(self, wrap):
+        mgr = _manager()
+        mgr._buckets_by_route = wrap(_TokenBucket(1.0, 0.0))
+
+        with pytest.raises(AssertionError, match=r"self\._buckets_by_route\[\.\.\.\]"):
+            bucket_attrs(mgr)
+
+    async def test_a_bucket_in_a_class_container_fails_discovery(self):
+        class ContainerManager(SessionManager):
+            _route_buckets = {"route": _TokenBucket(1.0, 0.0)}
+
+        mgr = ContainerManager(SessionStore(InMemorySessionPersistenceBackend()))
+
+        with pytest.raises(
+            AssertionError, match=r"ContainerManager\._route_buckets\[\.\.\.\]"
+        ):
+            bucket_attrs(mgr)
+
+    async def test_a_missing_required_bucket_fails_discovery(self):
+        mgr = _manager()
+        del mgr._lookup_bucket
+
+        with pytest.raises(
+            AssertionError, match=r"required rate buckets missing.*'_lookup_bucket'"
+        ):
+            bucket_attrs(mgr)
+
+
+class TestMcpUnmeteredCallsSpendNoBucket:
+    async def test_every_unmetered_call_has_a_run(self):
+        assert set(_MCP_UNMETERED_RUNS) == _MCP_UNMETERED_CALLS
+
+    @pytest.mark.parametrize("call", sorted(_MCP_UNMETERED_CALLS))
+    async def test_call_succeeds_with_every_bucket_spent_and_consumes_none(self, call):
+        mgr = _manager()
+        s = mgr.create_session()
+        consumed = []
+        for attr in bucket_attrs(mgr):
+            setattr(mgr, attr, _RecordingBucket(consumed))
+
+        _MCP_UNMETERED_RUNS[call](mgr, s.id)
+
+        assert consumed == []
+
+    @pytest.mark.parametrize("state", ["claimed_with_presence", "missing"])
+    @pytest.mark.parametrize("call", sorted(_MCP_UNMETERED_CALLS))
+    async def test_call_leaves_the_buckets_bound_in_init_untouched(self, call, state):
+        """The buckets are the ones ``__init__`` built, not swapped-in fakes, and
+        the call runs against a live claim with a client connected or against a
+        session that does not exist, so a consume on either branch shows."""
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.connect(s.id, "c1", "A")
+        mgr.claims.claim(s.id, "c1", ["n1"])
+        sid = s.id if state == "claimed_with_presence" else "9999-9999"
+        buckets = bucket_attrs(mgr)
+        before = {
+            attr: (dict(getattr(mgr, attr)._tokens), dict(getattr(mgr, attr)._last))
+            for attr in buckets
+        }
+
+        try:
+            _MCP_UNMETERED_RUNS[call](mgr, sid)
+        except SessionNotFound:
+            assert state == "missing"
+
+        after = {
+            attr: (dict(getattr(mgr, attr)._tokens), dict(getattr(mgr, attr)._last))
+            for attr in buckets
+        }
+        assert after == before
+
+
+class TestMcpWritesDrawFromTheMcpBucket:
+    """Each rate-limited synchronous MCP write is charged to ``_mcp_bucket``,
+    never to the browser-reachable ``_bucket`` that ``/ops`` spends under a
+    caller-chosen ``client_id`` — otherwise a browser posting
+    ``client_id: "mcp-agent"`` could exhaust the MCP budget
+    (smallfix-ops-client-id-can-collide-with-mcp-agent-marker). The two buckets
+    get different capacities so a write charged to the wrong one cannot pass.
+    Run with and without ``rate_limit_label``, since the labelled key
+    (``client_id:label``) is what mcp_tools.py actually sends."""
+
+    @pytest.mark.parametrize("label", [None, "some_mcp_tool"])
+    @pytest.mark.parametrize("write", list(_MCP_BUCKET_WRITES))
+    async def test_write_succeeds_on_a_spent_ops_bucket_and_spends_the_mcp_bucket(
+        self, write, label
+    ):
+        mgr = _manager()
+        s = mgr.create_session()
+        _seed_annotations(mgr, s.id)
+        mgr._bucket = _TokenBucket(0.0, 0.0)
+        mgr._mcp_bucket = _TokenBucket(1.0, 0.0)
+        call = _MCP_BUCKET_WRITES[write]
+
+        call(mgr, s.id, 0, label)
+        with pytest.raises(RateLimited):
+            call(mgr, s.id, 1, label)
+        # The other key has its own budget: a label splits the MCP bucket.
+        call(mgr, s.id, 1, "other_mcp_tool" if label is None else None)
 
 
 class TestUpsertAnnotation:
@@ -3403,11 +4342,16 @@ class TestUpsertImageAnnotation:
             rate_limit_key="5.6.7.8",
         )
 
-    async def test_image_ingest_without_a_rate_limit_key_falls_back_to_op_bucket(self):
-        """The MCP path passes no key and must keep drawing from the op bucket
-        under its own client id — dropping that fallback would leave it
-        unthrottled entirely."""
-        mgr = _manager(bucket_capacity=1, bucket_refill_per_sec=0)
+    async def test_image_ingest_without_a_rate_limit_key_falls_back_to_mcp_bucket(
+        self,
+    ):
+        """The MCP path passes no key and must keep drawing from the dedicated
+        MCP bucket under its own client id — dropping that fallback would
+        leave it unthrottled entirely. ``_bucket`` gets no tokens at all, so a
+        fallback charged to it instead would fail the first call."""
+        mgr = _manager()
+        mgr._bucket = _TokenBucket(0.0, 0.0)
+        mgr._mcp_bucket = _TokenBucket(1.0, 0.0)
         s = mgr.create_session()
 
         mgr.upsert_image_annotation(
@@ -3439,6 +4383,108 @@ class TestUpsertImageAnnotation:
         )
 
         assert res["annotation"]["id"] == "img-1"
+
+    async def test_default_image_bucket_uses_source_keyed_ceiling(self):
+        """The REST image-ingest path has its own collision-resistant keyspace,
+        but it must not create another full generic write bucket by default.
+        Its default burst follows the source-keyed ceiling instead.
+
+        The bucket is the one ``__init__`` built, with its default capacity
+        and refill, but read against a clock the test moves: draining it
+        against the real clock let it refill mid-drain under CI load, so the
+        over-capacity call was admitted and the test failed with the ceiling
+        intact."""
+        mgr = _manager()
+        s = mgr.create_session()
+        now = [1000.0]
+        reads = []
+
+        def frozen_clock():
+            reads.append(now[0])
+            return now[0]
+
+        mgr._image_bucket._time = frozen_clock
+
+        def ingest(annotation_id):
+            mgr.upsert_image_annotation(
+                s.id,
+                "human-image-ingest",
+                _image_annotation(annotation_id, data_bytes=100),
+                optimized_image_bytes=100,
+                rate_limit_key="1.2.3.4",
+            )
+
+        for index in range(int(_DEFAULT_IMAGE_BUCKET_CAPACITY)):
+            ingest(f"img-{index}")
+
+        with pytest.raises(RateLimited):
+            ingest("img-over")
+        # The admission decisions were read off the frozen clock, not the real one.
+        assert len(reads) == int(_DEFAULT_IMAGE_BUCKET_CAPACITY) + 1
+
+        # One refill interval later exactly one more is admitted: the default
+        # refill rate is the source-keyed one too. The 0.1% margin keeps float
+        # rounding in the refill from landing just under one token at some rates.
+        now[0] += 1.001 / _DEFAULT_IMAGE_BUCKET_REFILL_PER_SEC
+        ingest("img-refilled")
+        with pytest.raises(RateLimited):
+            ingest("img-over-again")
+
+    async def test_image_budget_rejection_does_not_spend_source_quota(self):
+        """A request that is rejected before it can write should not consume
+        the source's one successful image-ingest slot."""
+        mgr = _manager(
+            image_bucket_capacity=1,
+            image_refill_per_sec=0,
+        )
+        s = mgr.create_session()
+
+        with pytest.raises(ImageBudgetExceeded):
+            mgr.upsert_image_annotation(
+                s.id,
+                "human-image-ingest",
+                _image_annotation("too-big", data_bytes=200),
+                optimized_image_bytes=200,
+                max_session_image_bytes=100,
+                rate_limit_key="1.2.3.4",
+            )
+
+        res = mgr.upsert_image_annotation(
+            s.id,
+            "human-image-ingest",
+            _image_annotation("ok", data_bytes=100),
+            optimized_image_bytes=100,
+            max_session_image_bytes=100,
+            rate_limit_key="1.2.3.4",
+        )
+
+        assert res["annotation"]["id"] == "ok"
+
+    async def test_revision_conflict_does_not_spend_mcp_image_quota(self):
+        """The no-rate-limit-key fallback should follow the same accepted-write
+        charging rule as source-keyed human image ingest."""
+        mgr = _manager(bucket_capacity=1, bucket_refill_per_sec=0)
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "setup-client", {"type": "label", "text": "v1"})
+
+        with pytest.raises(RevisionConflict):
+            mgr.upsert_image_annotation(
+                s.id,
+                "mcp-agent",
+                _image_annotation("img-conflict", data_bytes=100),
+                optimized_image_bytes=100,
+                expected_revision=0,
+            )
+
+        res = mgr.upsert_image_annotation(
+            s.id,
+            "mcp-agent",
+            _image_annotation("img-ok", data_bytes=100),
+            optimized_image_bytes=100,
+            expected_revision=s.seq,
+        )
+
+        assert res["annotation"]["id"] == "img-ok"
 
     async def test_creates_and_broadcasts(self):
         mgr = _manager()
@@ -3819,6 +4865,74 @@ class TestUndoLastAction:
         restored = next(a for a in s.state["annotations"] if a["id"] == "note-1")
         assert restored["text"] == "before"
 
+    async def test_undo_of_sparse_update_that_added_a_field_removes_it_entirely(self):
+        """Regression for smallfix-undo-of-a-field-adding-update-leaves-the-field.
+
+        The MCP patch path (``update_annotation``) sends a sparse patch — only
+        the fields actually being changed (``build_annotation_patch`` in
+        ``session_annotations.py``). Undoing an update that ADDED a field the
+        annotation never had must remove that field entirely: the pre-update
+        snapshot this undo replays has no key for it at all, so a plain merge
+        of that snapshot could restore/overwrite existing keys but could never
+        delete one the update introduced.
+        """
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "note-1", "type": "note"})
+        before = next(a for a in s.state["annotations"] if a["id"] == "note-1")
+        assert "text" not in before
+
+        mgr.update_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "hi"}
+        )
+        updated = next(a for a in s.state["annotations"] if a["id"] == "note-1")
+        assert updated["text"] == "hi"
+
+        mgr.undo_last_action(s.id, "mcp-agent")
+
+        restored = next(a for a in s.state["annotations"] if a["id"] == "note-1")
+        assert "text" not in restored
+
+    async def test_undo_of_full_payload_update_still_restores_prior_values(self):
+        """A browser client always resends the whole annotation on every write
+        (``computeOps`` in ``sessionSyncClient.js``), so the pre-update
+        snapshot an undo replays already carries every key the post-update
+        annotation has — the undo-replay's full-replace (see
+        smallfix-undo-of-a-field-adding-update-leaves-the-field) is then
+        equivalent to the old plain merge. Pins that this remains true rather
+        than relying on it by accident: an untouched field survives the undo
+        and a changed one reverts, exactly as before the fix.
+        """
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id,
+            "mcp-agent",
+            {
+                "id": "note-1",
+                "type": "note",
+                "text": "before",
+                "position": {"x": 1, "y": 2},
+            },
+        )
+        # Full-payload update: every key resent, only 'text' actually changes.
+        mgr.update_annotation(
+            s.id,
+            "mcp-agent",
+            {
+                "id": "note-1",
+                "type": "note",
+                "text": "after",
+                "position": {"x": 1, "y": 2},
+            },
+        )
+
+        mgr.undo_last_action(s.id, "mcp-agent")
+
+        restored = next(a for a in s.state["annotations"] if a["id"] == "note-1")
+        assert restored["text"] == "before"
+        assert restored["position"] == {"x": 1, "y": 2}
+
     async def test_undo_delete_restores_the_annotation(self):
         mgr = _manager()
         s = mgr.create_session()
@@ -4068,3 +5182,459 @@ class TestUndoLastAction:
         records = mgr.list_activity(s.id)
 
         assert [r["affected"]["id"] for r in records] == ["note-2", "note-1"]
+
+
+class TestActivityLogRollbackIsExact:
+    """A failed batch leaves the activity log, live and persisted, exactly as
+    it was — including when the failed batch already pruned it at its cap.
+    The rollback copies are shallow, so these also pin the invariants that
+    makes that safe (records are never shared with state or the snapshot)."""
+
+    @staticmethod
+    def _at_cap(cap):
+        backend = InMemorySessionPersistenceBackend()
+        store = SessionStore(backend, max_activity_records=cap)
+        mgr = SessionManager(store)
+        return backend, store, mgr
+
+    @staticmethod
+    def _move(x, node_id="a"):
+        return {"op": "node_moved", "node_id": node_id, "position": {"x": x, "y": 0}}
+
+    async def _fill(self, mgr, sid, count):
+        for i in range(count):
+            await mgr.apply_ops(sid, "c1", None, [self._move(i)])
+
+    async def test_a_mid_batch_op_error_restores_a_log_the_batch_pruned(self):
+        backend, store, mgr = self._at_cap(3)
+        s = mgr.create_session()
+        await self._fill(mgr, s.id, 3)
+        log_before = copy.deepcopy(s.activity_log)
+        assert len(log_before) == 3
+
+        # The first move appends a fourth record and prunes the oldest; the
+        # second fails validation after that has happened.
+        with pytest.raises(OpError):
+            await mgr.apply_ops(
+                s.id,
+                "c1",
+                None,
+                [self._move(99), {"op": "node_moved", "node_id": "a", "position": 1}],
+            )
+
+        assert s.activity_log == log_before
+        assert SessionStore(backend).get(s.id).activity_log == log_before
+        # The restored log is live, not a frozen copy: the next batch prunes it.
+        await mgr.apply_ops(s.id, "c1", None, [self._move(100)])
+        assert s.activity_log[:2] == log_before[1:]
+
+    async def test_a_persist_failure_restores_a_log_the_batch_pruned(self):
+        backend, store, mgr = self._at_cap(3)
+        s = mgr.create_session()
+        await self._fill(mgr, s.id, 3)
+        log_before = copy.deepcopy(s.activity_log)
+
+        def _boom(snapshot):
+            raise OSError("disk full")
+
+        store.persist_snapshot = _boom
+        with pytest.raises(OSError):
+            await mgr.apply_ops(s.id, "c1", None, [self._move(98), self._move(99)])
+
+        assert s.activity_log == log_before
+        assert SessionStore(backend).get(s.id).activity_log == log_before
+
+    async def test_apply_op_sync_restores_a_log_the_op_pruned(self):
+        _, store, mgr = self._at_cap(1)
+        s = mgr.create_session()
+        mgr._apply_op_sync(s, s.id, "mcp", {**self._move(1), "client_id": "mcp"})
+        log_before = copy.deepcopy(s.activity_log)
+
+        def boom(_session):
+            raise IOError("disk full")
+
+        store.persist = boom
+        with pytest.raises(IOError):
+            mgr._apply_op_sync(s, s.id, "mcp", {**self._move(2), "client_id": "mcp"})
+        assert s.activity_log == log_before
+
+    async def test_the_persisted_snapshot_shares_no_record_with_the_live_log(self):
+        """The worker serialises the snapshot while the loop may run other
+        writers; a later change to a live record (undo sets ``undone``) must
+        not reach a snapshot already handed off."""
+        _, store, mgr = self._at_cap(500)
+        s = mgr.create_session()
+        snapshots = []
+        real_persist = store.persist_snapshot
+
+        def _capture(snapshot):
+            snapshots.append(snapshot)
+            real_persist(snapshot)
+
+        store.persist_snapshot = _capture
+        await self._fill(mgr, s.id, 2)
+        snapshot = snapshots[-1]
+        assert snapshot == json.loads(json.dumps(s.to_dict()))
+
+        for record in s.activity_log:
+            record["undone"] = True
+        s.state["positions"]["a"]["x"] = -1.0
+        assert [r["undone"] for r in snapshot["activity_log"]] == [False, False]
+        assert snapshot["state"]["positions"]["a"]["x"] == 1.0
+
+    async def test_an_undo_replay_shares_no_object_with_its_record(self):
+        """State restored by undo is a copy of the record's inverse op, so a
+        later in-place state edit can never rewrite a logged record."""
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id, "c1", {"id": "note-1", "type": "note", "position": {"x": 1, "y": 2}}
+        )
+        mgr.delete_annotation(s.id, "c1", "note-1")
+        record = mgr.store.find_latest_undoable(s, "c1")
+        logged = record["inverse_op"]["annotation"]
+
+        mgr.undo_last_action(s.id, "c1")
+
+        restored = next(a for a in s.state["annotations"] if a["id"] == "note-1")
+        assert restored["position"] == logged["position"]
+        assert restored["position"] is not logged["position"]
+
+    @staticmethod
+    def _deleted_note(mgr):
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "c1", {"id": "note-1", "type": "note"})
+        mgr.delete_annotation(s.id, "c1", "note-1")
+        return s, mgr.store.find_latest_undoable(s, "c1")
+
+    async def test_a_failed_undo_write_leaves_memory_matching_disk(self):
+        """The write that records an undo can fail like any other. Memory must
+        then match disk: the record is not undone, the delete stands, nothing
+        was broadcast, and the undo can simply be retried."""
+        backend, store, mgr = self._at_cap(500)
+        s, record = self._deleted_note(mgr)
+        sub, _ = mgr.connect(s.id, "c2", "Watcher")
+        await _drain(sub)
+        real_persist = store.persist
+
+        def fail_once_undone(session):
+            if record.get("undone"):
+                raise OSError("disk full")
+            real_persist(session)
+
+        s._deleted_annotation_ids.appendleft("older")
+        s._deleted_annotation_ids.append("newer")
+        store.persist = fail_once_undone
+        with pytest.raises(OSError):
+            mgr.undo_last_action(s.id, "c1")
+
+        on_disk = SessionStore(backend).get(s.id).to_dict()
+        assert json.loads(json.dumps(s.to_dict())) == on_disk
+        assert record["undone"] is False and record["undone_at"] is None
+        assert s.state["annotations"] == []
+        assert list(s._deleted_annotation_ids) == ["older", "note-1", "newer"]
+        assert [e for e in await _drain(sub) if e.get("type") == "op"] == []
+
+        writes = []
+
+        def counting(session):
+            writes.append(session.seq)
+            real_persist(session)
+
+        store.persist = counting
+        mgr.undo_last_action(s.id, "c1")
+        assert len(writes) == 1  # state and flags land in one write
+        persisted = SessionStore(backend).get(s.id)
+        assert [r["undone"] for r in persisted.activity_log] == [False, True]
+        assert persisted.activity_log[-1]["undone_at"] == record["undone_at"]
+        assert record["undone"] is True and isinstance(record["undone_at"], str)
+        assert [a["id"] for a in persisted.state["annotations"]] == ["note-1"]
+
+    async def test_a_broadcast_failure_after_the_undo_landed_keeps_it_undone(self):
+        """Once the write has landed, the undo is committed: a failing bus
+        must not roll the record back in memory while disk keeps it undone."""
+        backend, store, mgr = self._at_cap(500)
+        s, record = self._deleted_note(mgr)
+
+        def broken_publish(*_args, **_kwargs):
+            raise RuntimeError("bus down")
+
+        mgr.bus.publish = broken_publish
+        with pytest.raises(RuntimeError):
+            mgr.undo_last_action(s.id, "c1")
+
+        on_disk = SessionStore(backend).get(s.id).to_dict()
+        assert json.loads(json.dumps(s.to_dict())) == on_disk
+        assert record["undone"] is True
+        assert [a["id"] for a in s.state["annotations"]] == ["note-1"]
+        assert "note-1" not in s._deleted_annotation_ids
+
+    async def test_a_failed_undo_adds_no_deleted_id_it_had_not_removed(self):
+        _, store, mgr = self._at_cap(500)
+        s, _ = self._deleted_note(mgr)
+        s._deleted_annotation_ids.clear()  # evicted by the deque's maxlen
+
+        def boom(_session):
+            raise OSError("disk full")
+
+        store.persist = boom
+        with pytest.raises(OSError):
+            mgr.undo_last_action(s.id, "c1")
+
+        assert list(s._deleted_annotation_ids) == []
+
+    async def test_an_undo_replay_that_turns_out_a_no_op_leaves_the_record_undoable(
+        self,
+    ):
+        _, store, mgr = self._at_cap(500)
+        s, record = self._deleted_note(mgr)
+        store.apply_state_op = lambda *args, **kwargs: None
+
+        with pytest.raises(UndoConflict):
+            mgr.undo_last_action(s.id, "c1")
+
+        assert record["undone"] is False and record["undone_at"] is None
+        assert "note-1" in s._deleted_annotation_ids
+        assert mgr.store.find_latest_undoable(s, "c1") is record
+
+    async def test_a_failed_undo_restores_flags_a_legacy_record_lacked(self):
+        """A record loaded from an older document may carry no undone keys;
+        a rollback puts it back exactly, not with keys it never had."""
+        backend, store, mgr = self._at_cap(500)
+        s, record = self._deleted_note(mgr)
+        del record["undone"], record["undone_at"]
+        legacy = dict(record)
+
+        def boom(_session):
+            raise OSError("disk full")
+
+        store.persist = boom
+        with pytest.raises(OSError):
+            mgr.undo_last_action(s.id, "c1")
+
+        assert record == legacy
+
+
+class TestDocumentBudgetIsExact:
+    """The document-size budget caches each activity record's encoded length
+    rather than re-encoding the log every batch; the total must still equal
+    ``len(json.dumps(snapshot))`` byte for byte."""
+
+    @staticmethod
+    def _move(x, node_id="a"):
+        return {"op": "node_moved", "node_id": node_id, "position": {"x": x, "y": 0}}
+
+    @staticmethod
+    def _size(session):
+        return len(json.dumps(_detached_snapshot(session)))
+
+    async def test_cached_sizes_track_every_edit_a_record_can_get(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        assert _document_bytes(_detached_snapshot(s), s) == self._size(s)
+        mgr.upsert_annotation(s.id, "c1", {"id": "n", "type": "note", "text": "åäö"})
+        for i in range(3):
+            await mgr.apply_ops(s.id, "c1", None, [self._move(i)])
+
+        def check():
+            assert _document_bytes(_detached_snapshot(s), s) == self._size(s)
+
+        check()  # warms the cache
+        mgr.undo_last_action(s.id, "c1")  # flips undone/undone_at in place
+        check()
+        record = s.activity_log[-1]
+        record["undone"] = 1  # == True, encodes differently
+        check()
+        record["undone"] = True
+        del record["undone_at"]  # missing vs None
+        check()
+        record["undone_at"] = None
+        check()
+        record["undone"] = None
+        check()
+        del record["undone"]  # missing vs None
+        check()
+        del s.activity_log[0]
+        check()
+        s.activity_log.clear()
+        check()
+
+    async def test_the_cache_holds_the_live_log_and_is_reused(self, monkeypatch):
+        mgr = _manager()
+        s = mgr.create_session()
+        for i in range(4):
+            await mgr.apply_ops(s.id, "c1", None, [self._move(i)])
+        assert set(s._activity_record_bytes) == {id(r) for r in s.activity_log}
+
+        del s.activity_log[:2]
+        snapshot = _detached_snapshot(s)
+        encoded = []
+        real_dumps = json.dumps
+
+        def counting_dumps(obj, *args, **kwargs):
+            encoded.append(obj)
+            return real_dumps(obj, *args, **kwargs)
+
+        monkeypatch.setattr(json, "dumps", counting_dumps)
+        size = _document_bytes(snapshot, s)
+        monkeypatch.undo()
+
+        assert size == len(json.dumps(snapshot))
+        assert len(encoded) == 1  # only the log-less head; every record hit
+        assert set(s._activity_record_bytes) == {id(r) for r in s.activity_log}
+        s.activity_log.clear()
+        _document_bytes(_detached_snapshot(s), s)
+        assert s._activity_record_bytes == {}
+
+    async def test_a_document_exactly_at_budget_is_accepted_one_byte_over_is_not(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        for i in range(3):
+            await mgr.apply_ops(s.id, "c1", None, [self._move(i)])
+        mgr.undo_last_action(s.id, "c1")  # a record changed after it was cached
+        before = self._size(s)
+        # Record ids and timestamps are fixed-width, so a refused attempt
+        # predicts the accepted document's length exactly.
+        with pytest.raises(ImageBudgetExceeded) as exc:
+            await mgr.apply_ops(
+                s.id, "c1", None, [self._move(9)], max_session_document_bytes=0
+            )
+        assert self._size(s) == before
+        needed = int(str(exc.value).split(" bytes")[0].rsplit(" ", 1)[1])
+
+        with pytest.raises(ImageBudgetExceeded):
+            await mgr.apply_ops(
+                s.id, "c1", None, [self._move(9)], max_session_document_bytes=needed - 1
+            )
+        assert self._size(s) == before
+
+        await mgr.apply_ops(
+            s.id, "c1", None, [self._move(9)], max_session_document_bytes=needed
+        )
+        assert self._size(s) == needed
+
+
+class TestRollbackRestoresRecentlyDeletedIds:
+    """The store's "recently deleted" ids live outside the persisted document,
+    so every rollback must put them back itself: a stray id makes a later
+    undo of the real delete fail forever, or evicts another id from the
+    bounded deque."""
+
+    @staticmethod
+    def _failing_store():
+        store = SessionStore(InMemorySessionPersistenceBackend())
+
+        def boom(*_args):
+            raise OSError("disk full")
+
+        return store, boom
+
+    @staticmethod
+    def _full(session):
+        """Fill the deque to its cap, so a stray append would evict the oldest
+        id and a rollback has to put back exactly what was there."""
+        ids = [f"old-{i}" for i in range(session._deleted_annotation_ids.maxlen)]
+        session._deleted_annotation_ids.extend(ids)
+        return ids
+
+    @staticmethod
+    def _assert_unchanged(session, ids):
+        assert list(session._deleted_annotation_ids) == ids
+        assert session._deleted_annotation_ids.maxlen == len(ids)
+
+    async def test_a_failed_undo_of_a_create_leaves_no_deleted_id(self):
+        store, boom = self._failing_store()
+        mgr = SessionManager(store)
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "c1", {"id": "note-1", "type": "note"})
+        store.persist = boom
+        with pytest.raises(OSError):
+            mgr.undo_last_action(s.id, "c1")
+        assert list(s._deleted_annotation_ids) == []
+
+    async def test_a_failed_sync_delete_leaves_no_deleted_id(self):
+        store, boom = self._failing_store()
+        mgr = SessionManager(store)
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "c1", {"id": "note-1", "type": "note"})
+        ids = self._full(s)
+        store.persist = boom
+        with pytest.raises(OSError):
+            mgr.delete_annotation(s.id, "c1", "note-1")
+        self._assert_unchanged(s, ids)
+
+    async def test_a_failed_batch_delete_leaves_no_deleted_id(self):
+        store, boom = self._failing_store()
+        mgr = SessionManager(store)
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "c1", {"id": "note-1", "type": "note"})
+        ids = self._full(s)
+        store.persist_snapshot = boom
+        with pytest.raises(OSError):
+            await mgr.apply_ops(
+                s.id,
+                "c1",
+                None,
+                [{"op": "annotation_deleted", "annotation_id": "note-1"}],
+            )
+        self._assert_unchanged(s, ids)
+
+
+class TestAnnounceLayerChange:
+    _OP = {"op": "graph_changes_discarded", "removals": [["node", "n1"]]}
+
+    async def test_an_announcement_while_the_session_lock_is_held_is_withheld(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        published = _spy_publish(mgr)
+        persisted = []
+        real_persist = mgr.store.persist
+        mgr.store.persist = lambda session: (
+            persisted.append(session.seq),
+            real_persist(session),
+        )
+        await mgr._lock(s.id).acquire()
+
+        assert mgr.announce_layer_change(s.id, dict(self._OP)) is None
+        assert s.seq == 0
+        assert s.activity_log == []
+        assert published == []
+        assert persisted == []
+
+        mgr._lock(s.id).release()
+        applied = mgr.announce_layer_change(s.id, dict(self._OP))
+        assert applied["op"] == "graph_changes_discarded"
+        assert s.seq == applied["seq"] == 1
+        assert persisted == [1]
+        assert [event["seq"] for _, event in published] == [1]
+
+    async def test_a_failed_persist_is_logged_and_the_op_still_fans_out(self, caplog):
+        mgr = _manager()
+        s = mgr.create_session()
+        published = _spy_publish(mgr)
+
+        def broken_persist(session):
+            raise OSError("disk full")
+
+        mgr.store.persist = broken_persist
+
+        with caplog.at_level("ERROR"):
+            applied = mgr.announce_layer_change(s.id, dict(self._OP))
+
+        assert applied["seq"] == s.seq == 1
+        assert [event["seq"] for _, event in published] == [1]
+        assert "persisting its seq failed" in caplog.text
+
+
+class TestSessionActivityByteCache:
+    """The cache is derived state: it must not make two otherwise equal
+    sessions differ, nor be printed with the session."""
+
+    async def test_equality_and_repr_ignore_the_activity_byte_cache(self):
+        s = _manager().create_session()
+        cached = dataclasses.replace(s)
+        cached._activity_record_bytes = {1: "record-bytes-marker"}
+
+        assert cached == s
+        assert "_activity_record_bytes" not in repr(cached)
+        assert "record-bytes-marker" not in repr(cached)

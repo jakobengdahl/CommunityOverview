@@ -8,9 +8,16 @@ Responsibilities:
 - Enqueue events for delivery
 """
 
+import copy
 import logging
 from typing import List, Dict, Any, Optional, Callable, TYPE_CHECKING
 from datetime import datetime, timezone
+from backend.runtime.extensions import (
+    DefaultEventDeliveryAdapter,
+    DeliveryOutcome,
+    get_runtime_extensions,
+    runtime_context,
+)
 
 from .models import (
     Event,
@@ -29,6 +36,92 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _copy_payload(value: Any) -> Any:
+    """Deep-copy nested dicts, lists and tuples without recursing once per level.
+
+    copy.deepcopy raises RecursionError near 500 levels, while writes accept
+    metadata nested up to MAX_METADATA_DEPTH (tuples count toward it). Containers
+    are copied with an explicit stack; anything else is a leaf and goes through
+    copy.deepcopy. A tuple is filled as a list and frozen afterwards, deepest
+    first, so every tuple is built from already-finished children.
+    """
+    containers = (dict, list, tuple)
+    if not isinstance(value, containers):
+        return copy.deepcopy(value)
+    root = {} if isinstance(value, dict) else []
+    stack = [(value, root)]
+    # (parent, key, filled list) for each tuple, in creation order
+    tuples = []
+    while stack:
+        source, target = stack.pop()
+        items = source.items() if isinstance(source, dict) else enumerate(source)
+        for key, item in items:
+            if isinstance(item, containers):
+                child = {} if isinstance(item, dict) else []
+                stack.append((item, child))
+                if isinstance(item, tuple):
+                    tuples.append(
+                        (
+                            target,
+                            key if isinstance(target, dict) else len(target),
+                            child,
+                        )
+                    )
+            else:
+                child = copy.deepcopy(item)
+            if isinstance(target, dict):
+                target[key] = child
+            else:
+                target.append(child)
+    for parent, key, filled in reversed(tuples):
+        parent[key] = tuple(filled)
+    return tuple(root) if isinstance(value, tuple) else root
+
+
+def _copy_event(event: Event) -> Event:
+    """Per-subscriber copy: subscribers may mutate theirs without affecting others."""
+    entity = event.entity.model_copy(
+        update={
+            field: _copy_payload(getattr(event.entity, field))
+            for field in ("before", "after", "patch")
+        }
+    )
+    return event.model_copy(
+        update={"entity": entity, "origin": event.origin.model_copy(deep=True)}
+    )
+
+
+def _repair_legacy_agent_delivery(
+    subscription_id: str, agent_id: Optional[str], delivery: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Return ``delivery`` with a UI-created agent's legacy loop guard fixed.
+
+    The web UI names an agent ``<prefix>-node`` and its subscription
+    ``<prefix>-subscription``. Before the dialog was fixed it stored
+    ``agent:<prefix>`` in ``ignore_origins`` and ``internal://agent/<prefix>``
+    as the webhook, but the runtime stamps the agent's own writes with
+    ``agent:<agent node id>`` and origins are matched exactly, so such an
+    agent was woken by its own writes. Only that exact pairing is rewritten;
+    the stored node is left as is and the result is the same when repeated.
+    """
+    if not agent_id or not agent_id.endswith("-node"):
+        return delivery
+    prefix = agent_id[: -len("-node")]
+    if subscription_id != f"{prefix}-subscription":
+        return delivery
+    repaired = dict(delivery)
+    origins = delivery.get("ignore_origins")
+    if (
+        isinstance(origins, list)
+        and f"agent:{prefix}" in origins
+        and f"agent:{agent_id}" not in origins
+    ):
+        repaired["ignore_origins"] = [*origins, f"agent:{agent_id}"]
+    if delivery.get("webhook_url") == f"internal://agent/{prefix}":
+        repaired["webhook_url"] = f"internal://agent/{agent_id}"
+    return repaired
+
+
 class EventDispatcher:
     """
     Dispatches graph mutation events to matching subscriptions.
@@ -45,6 +138,8 @@ class EventDispatcher:
         storage: "GraphStorage",
         on_deliver: Optional[Callable[[Event, str], None]] = None,
         on_agent_deliver: Optional[Callable[[Event, str], bool]] = None,
+        delivery_adapter=None,
+        on_delivery_outcome=None,
     ):
         """
         Initialize the dispatcher.
@@ -60,6 +155,11 @@ class EventDispatcher:
         self._storage = storage
         self._on_deliver = on_deliver
         self._on_agent_deliver = on_agent_deliver
+        extensions = (
+            getattr(storage, "runtime_extensions", None) or get_runtime_extensions()
+        )
+        self._delivery_adapter = delivery_adapter or extensions.event_delivery
+        self._on_delivery_outcome = on_delivery_outcome
         self._subscriptions_cache: Optional[List[Dict[str, Any]]] = None
         self._cache_time: Optional[datetime] = None
         self._cache_ttl_seconds = 30  # Refresh cache every 30 seconds
@@ -97,15 +197,22 @@ class EventDispatcher:
             return self._subscriptions_cache
 
         subscriptions = []
+        subscription_nodes = []
+        agent_by_subscription: Dict[str, str] = {}
 
-        # Search for EventSubscription nodes
+        # Search for EventSubscription nodes, and the Agent linked to each
         for node in self._storage.nodes.values():
             node_type = (
                 node.type.value if hasattr(node.type, "value") else str(node.type)
             )
-            if node_type != "EventSubscription":
-                continue
+            if node_type == "EventSubscription":
+                subscription_nodes.append(node)
+            elif node_type == "Agent":
+                linked = (node.metadata or {}).get("subscription_id")
+                if isinstance(linked, str):
+                    agent_by_subscription[linked] = node.id
 
+        for node in subscription_nodes:
             metadata = node.metadata or {}
 
             # Parse filters
@@ -120,7 +227,11 @@ class EventDispatcher:
                 )
                 continue
 
-            delivery = self._parse_delivery(delivery_data)
+            delivery = self._parse_delivery(
+                _repair_legacy_agent_delivery(
+                    node.id, agent_by_subscription.get(node.id), delivery_data
+                )
+            )
 
             subscriptions.append(
                 {
@@ -135,7 +246,6 @@ class EventDispatcher:
         self._subscriptions_cache = subscriptions
         self._cache_time = now
 
-        print(f"EVENT: Loaded {len(subscriptions)} EventSubscription(s)")
         logger.debug(f"Loaded {len(subscriptions)} EventSubscription(s)")
         return subscriptions
 
@@ -188,20 +298,20 @@ class EventDispatcher:
         Returns:
             Number of subscriptions the event was dispatched to
         """
-        if self._on_deliver is None:
+        if self._on_deliver is None and self._delivery_adapter is None:
             logger.warning("No delivery callback set, event will not be delivered")
             return 0
 
         subscriptions = self._load_subscriptions()
         dispatch_count = 0
 
-        print(
-            f"EVENT: Dispatching to {len(subscriptions)} subscription(s), event type: {event.event_type.value}"
+        logger.debug(
+            f"Dispatching to {len(subscriptions)} subscription(s), event type: {event.event_type.value}"
         )
 
         for sub in subscriptions:
             matches = self._matches(event, sub)
-            print(f"EVENT: Subscription '{sub['name']}' matches={matches}")
+            logger.debug(f"Subscription '{sub['name']}' matches={matches}")
             if matches:
                 # Check loop prevention
                 if self._should_block(event, sub["delivery"]):
@@ -212,7 +322,7 @@ class EventDispatcher:
                     continue
 
                 # Create event copy with subscription info
-                event_copy = event.model_copy(deep=True)
+                event_copy = _copy_event(event)
                 event_copy.subscription = SubscriptionInfo(
                     id=sub["id"],
                     name=sub["name"],
@@ -225,9 +335,6 @@ class EventDispatcher:
                         handled_by_agent = self._on_agent_deliver(event_copy, sub["id"])
                         if handled_by_agent:
                             dispatch_count += 1
-                            print(
-                                f"EVENT: Routed to agent for subscription '{sub['name']}'"
-                            )
                             logger.info(
                                 f"Routed event {event.event_id} to agent "
                                 f"via subscription {sub['name']}"
@@ -238,7 +345,9 @@ class EventDispatcher:
                         )
 
                 # Fall back to webhook delivery if not handled by agent
-                if not handled_by_agent and self._on_deliver:
+                if not handled_by_agent and (
+                    self._on_deliver or self._delivery_adapter
+                ):
                     webhook_url = sub["delivery"].webhook_url
 
                     # Prevent delivering internal agent URLs to external webhook handler
@@ -252,8 +361,42 @@ class EventDispatcher:
                         continue
 
                     try:
-                        self._on_deliver(event_copy, webhook_url)
-                        dispatch_count += 1
+                        context = runtime_context(
+                            "event_delivery",
+                            event_context=event_copy.origin,
+                            event_id=event.event_id,
+                            delivery_id=f"{sub['id']}:{event.event_id}",
+                        )
+                        adapter = self._delivery_adapter or DefaultEventDeliveryAdapter(
+                            self._on_deliver
+                        )
+                        try:
+                            outcome = adapter.deliver(
+                                copy.deepcopy(sub), event_copy, context
+                            )
+                            if not isinstance(
+                                outcome, DeliveryOutcome
+                            ) or outcome.outcome not in {
+                                "delivered",
+                                "deferred",
+                                "terminal_failure",
+                            }:
+                                raise ValueError("Invalid delivery outcome")
+                        except Exception:
+                            logger.exception("Event delivery adapter failed")
+                            outcome = DeliveryOutcome(
+                                "terminal_failure",
+                                context.delivery_id,
+                                context.correlation_id,
+                                "delivery_adapter_error",
+                            )
+                        if self._on_delivery_outcome:
+                            try:
+                                self._on_delivery_outcome(outcome)
+                            except Exception:
+                                logger.exception("Delivery outcome observer failed")
+                        if outcome.outcome != "terminal_failure":
+                            dispatch_count += 1
                         logger.info(
                             f"Dispatched event {event.event_id} ({event.event_type.value}) "
                             f"to webhook for subscription {sub['name']}"

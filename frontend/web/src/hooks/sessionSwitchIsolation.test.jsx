@@ -87,7 +87,6 @@ describe('session-switch state isolation (real store)', () => {
       editingNode: null,
       editingEdge: null,
       deleteDialog: null,
-      contextMenu: null,
       selectedNodeId: null,
       selectedGraphNodes: [],
       sessionEpoch: 0,

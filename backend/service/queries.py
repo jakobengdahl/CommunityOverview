@@ -7,11 +7,13 @@ and the federation manager as explicit parameters.
 
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from backend.core import NodeType, RelationshipType
+from backend.core import NodeType, RelationshipType, storage_search
 from backend.core.storage_search import MATCH_MODE_SUBSTRING, validate_match_mode
+from backend.federation import teleport
 from backend.runtime.authorization import GRAPH_ACTION_READ
 
 from . import access
+from .composed import applicability_violations, subtypes_by_node_type
 from .serializers import (
     serialize_edges,
     serialize_graph_stats,
@@ -175,16 +177,28 @@ def search_graph(
     if federation_manager and federation_manager.enabled:
         remaining = max(0, limit - len(visible_local_results))
         if remaining > 0:
+            # An adopted node's reference stub shares its id with the cached
+            # federated node, so the fetched window can repeat local ids that the
+            # dedup pass below drops. Widen the window by that overlap so those
+            # slots are refilled instead of left empty.
+            local_ids_in_cache = sum(
+                1
+                for node_id in result_node_ids
+                if federation_manager.get_cached_node(node_id) is not None
+            )
             federated = federation_manager.search_nodes(
                 query=query,
                 node_types=node_types,
                 limit=access.get_federated_search_limit(
                     federation_manager,
-                    remaining,
+                    remaining + local_ids_in_cache,
                     decision.graph_access,
                     widen=has_generic_filters,
                 ),
                 max_depth=federation_depth,
+                include_archived=include_archived,
+                type_searchable_text=getattr(storage, "_type_searchable_text", None),
+                match_mode=match_mode,
             )
             if include_archived:
                 federated_nodes = [
@@ -210,6 +224,22 @@ def search_graph(
 
     all_nodes = visible_local_results + federated_nodes
     all_edges = connecting_edges + federated_edges
+
+    # A federated node adopted via adopt_federated_node gets a local reference
+    # stub keyed by the same id it has in the federation cache (see
+    # mutations.adopt_federated_node), so the id can legitimately appear in
+    # both visible_local_results and federated_nodes. Dedup here — before the
+    # limit trim and the federated/total counts below — the same way edges are
+    # deduped further down; local results come first in the list above, so the
+    # local copy wins.
+    deduped_all_nodes = []
+    seen_node_ids: set = set()
+    for node in all_nodes:
+        if node.id in seen_node_ids:
+            continue
+        seen_node_ids.add(node.id)
+        deduped_all_nodes.append(node)
+    all_nodes = deduped_all_nodes
 
     visible_nodes, visible_edges = access.filter_nodes_and_edges(
         nodes=all_nodes,
@@ -268,6 +298,84 @@ def search_graph(
     if action:
         result["action"] = action
     return result
+
+
+def resolve_teleport(
+    storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
+    federation_manager: Optional["FederationManager"],
+    node_id: str,
+    *,
+    session_id: str = "",
+    search_query: str = "",
+    local_gui_url: str = "",
+) -> Dict[str, Any]:
+    """Resolve the canonical route from ``node_id`` to its source graph.
+
+    Looks the node up locally first and then in the federation cache, so the
+    same id resolves whether or not it has been adopted. Authorization is the
+    request's existing graph-access narrowing — this function hands that
+    narrowing to ``teleport.resolve_teleport_target`` and does not decide
+    visibility itself.
+    """
+    decision = access.evaluate_graph_access(
+        hook, action=GRAPH_ACTION_READ, target="resolve_teleport"
+    )
+    if not decision.allowed:
+        return access.build_access_denied_result(
+            action=GRAPH_ACTION_READ, target="resolve_teleport", decision=decision
+        )
+
+    node = storage.get_node(node_id)
+    if node is None and federation_manager is not None:
+        node = federation_manager.get_cached_node(node_id)
+
+    graph_config = None
+    cache_status = ""
+    # Only a found node's own provenance; a missing node skips the lookup block
+    # below regardless, and the resolver reads the graph out of node_id itself.
+    origin_graph_id = access.node_graph_id(node) if node is not None else ""
+    if (
+        origin_graph_id
+        and federation_manager is not None
+        # Every other federation path gates on the global flag — search_graph,
+        # get_graph_stats via access.get_visible_federation_graph_display_names,
+        # and adopt_federated_node, which refuses outright. A cache can be left
+        # healthy from before the flag was turned off, so without this the one
+        # path that ignored it would still route.
+        and federation_manager.enabled
+        # Read nothing about the graph for a caller the narrowing excludes, so
+        # G1's ordering holds at this layer too and not only inside the pure
+        # resolver, which would discard these values anyway.
+        and decision.graph_access.matches(graph_id=origin_graph_id)
+    ):
+        # Both keyed on origin_graph_id, the provenance field the local path
+        # narrows on. Resolving the config from the node's cache entry instead
+        # would report a configured, healthy graph as unavailable for any node
+        # that carries provenance without being cached — an adopted node's
+        # local reference stub (mutations.adopt_federated_node) above all.
+        graph_config = federation_manager.get_graph_config(origin_graph_id)
+        cache_status = federation_manager.get_cache_status(origin_graph_id)
+
+    target = teleport.resolve_teleport_target(
+        node_metadata=(node.metadata if node is not None else None),
+        node_exists=node is not None,
+        graph_access_matches=decision.graph_access.matches,
+        # Passed so the graph id can be read back out of the id itself when the
+        # node is not found and has no metadata to classify it by.
+        node_id=node_id,
+        graph_config=graph_config,
+        cache_status=cache_status,
+        session_id=session_id,
+        search_query=search_query,
+        # This deployment's configured public URL is the only origin compared
+        # against. The request's own base_url is derived from the Host header,
+        # so trusting it would let a caller claim the target's origin and
+        # suppress the UI's cross-deployment confirmation.
+        local_gui_url=local_gui_url,
+        local_graph_name=storage.get_graph_name(),
+    )
+    return target.to_dict()
 
 
 def get_node_details(
@@ -347,12 +455,28 @@ def get_related_nodes(
     if relationship_types:
         rel_filters = [RelationshipType(r) for r in relationship_types]
 
-    result = storage.get_related_nodes(
-        node_id=node_id,
-        relationship_types=rel_filters,
-        depth=depth,
-        include_archived=include_archived,
-    )
+    if decision.graph_access.enabled:
+        # Filter each hop: filtering only the answer leaks connectivity through
+        # hidden nodes. A backend traversal cannot enforce this reader's view.
+        result = storage_search.get_related_nodes(
+            storage.nodes,
+            storage.edges,
+            storage.graph,
+            node_id=node_id,
+            relationship_types=rel_filters,
+            depth=depth,
+            include_archived=include_archived,
+            node_visible=lambda node: access.is_node_visible(
+                node, decision.graph_access
+            ),
+        )
+    else:
+        result = storage.get_related_nodes(
+            node_id=node_id,
+            relationship_types=rel_filters,
+            depth=depth,
+            include_archived=include_archived,
+        )
 
     visible_nodes, visible_edges = access.filter_nodes_and_edges(
         nodes=result["nodes"],
@@ -606,17 +730,72 @@ def list_typed_edges(
     }
 
 
+class _NarrowedVectors:
+    """A vector index answering only for ``visible`` ids: it asks the index
+    for as many more hits as there are hidden nodes, so hidden ones never
+    take a visible one's place, and drops them."""
+
+    def __init__(self, vector_store: Any, visible: Dict[str, Any], hidden: int):
+        self._vector_store = vector_store
+        self._visible = visible
+        self._hidden = hidden
+
+    def search(self, query_text=None, query_node=None, limit=5, threshold=0.0):
+        if limit <= 0:
+            return []
+        hits = self._vector_store.search(
+            query_text=query_text,
+            query_node=query_node,
+            limit=limit + self._hidden,
+            threshold=threshold,
+        )
+        return [hit for hit in hits if hit[0] in self._visible][:limit]
+
+
+def _similarity_scope(storage: "GraphStorage", hook: "GraphAuthorizationHook", target):
+    """``(decision, nodes, vectors)`` a similarity read scores against: the
+    whole graph, or under graph-access narrowing only the nodes the caller may
+    see - as ``search_graph`` narrows - so a hidden node never shows up, nor
+    takes the place of a visible one, nor lends its score."""
+    decision = access.evaluate_graph_access(
+        hook, action=GRAPH_ACTION_READ, target=target
+    )
+    if not decision.allowed or not decision.graph_access.enabled:
+        return decision, None, None
+    all_nodes = storage.get_all_nodes()
+    visible = {
+        node.id: node
+        for node in all_nodes
+        if access.is_node_visible(node, decision.graph_access)
+    }
+    vectors = _NarrowedVectors(
+        storage.vector_store, visible, len(all_nodes) - len(visible)
+    )
+    return decision, visible, vectors
+
+
 def find_similar_nodes(
     storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
     name: str,
     node_type: Optional[str] = None,
     threshold: float = 0.7,
     limit: int = 5,
 ) -> Dict[str, Any]:
+    decision, visible, vectors = _similarity_scope(storage, hook, "find_similar_nodes")
+    if not decision.allowed:
+        return access.build_access_denied_result(
+            action=GRAPH_ACTION_READ, target="find_similar_nodes", decision=decision
+        )
     type_filter = NodeType.from_string(node_type) if node_type else None
-    similar = storage.find_similar_nodes(
-        name=name, node_type=type_filter, threshold=threshold, limit=limit
-    )
+    if visible is None:
+        similar = storage.find_similar_nodes(
+            name=name, node_type=type_filter, threshold=threshold, limit=limit
+        )
+    else:
+        similar = storage_search.find_similar_nodes(
+            visible, vectors, name, type_filter, threshold, limit
+        )
     return {
         "similar_nodes": serialize_similar_nodes(similar),
         "total": len(similar),
@@ -626,15 +805,30 @@ def find_similar_nodes(
 
 def find_similar_nodes_batch(
     storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
     names: List[str],
     node_type: Optional[str] = None,
     threshold: float = 0.7,
     limit: int = 5,
 ) -> Dict[str, Any]:
-    type_filter = NodeType.from_string(node_type) if node_type else None
-    results = storage.find_similar_nodes_batch(
-        names=names, node_type=type_filter, threshold=threshold, limit=limit
+    decision, visible, vectors = _similarity_scope(
+        storage, hook, "find_similar_nodes_batch"
     )
+    if not decision.allowed:
+        return access.build_access_denied_result(
+            action=GRAPH_ACTION_READ,
+            target="find_similar_nodes_batch",
+            decision=decision,
+        )
+    type_filter = NodeType.from_string(node_type) if node_type else None
+    if visible is None:
+        results = storage.find_similar_nodes_batch(
+            names=names, node_type=type_filter, threshold=threshold, limit=limit
+        )
+    else:
+        results = storage_search.find_similar_nodes_batch(
+            visible, vectors, names, type_filter, threshold, limit
+        )
     formatted: Dict[str, Any] = {}
     for name, similar_list in results.items():
         formatted[name] = {
@@ -789,9 +983,25 @@ def list_node_types() -> Dict[str, Any]:
 
 
 def get_subtypes(
-    storage: "GraphStorage", node_type: Optional[str] = None
+    storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
+    node_type: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return {"subtypes": storage.get_subtypes_by_node_type(node_type)}
+    decision = access.evaluate_graph_access(
+        hook, action=GRAPH_ACTION_READ, target="get_subtypes"
+    )
+    if not decision.allowed:
+        return access.build_access_denied_result(
+            action=GRAPH_ACTION_READ, target="get_subtypes", decision=decision
+        )
+    if not decision.graph_access.enabled:
+        return {"subtypes": storage.get_subtypes_by_node_type(node_type)}
+    visible = [
+        node
+        for node in storage.get_all_nodes()
+        if access.is_node_visible(node, decision.graph_access)
+    ]
+    return {"subtypes": subtypes_by_node_type(visible, node_type)}
 
 
 def list_relationship_types() -> Dict[str, Any]:
@@ -811,8 +1021,34 @@ def list_relationship_types() -> Dict[str, Any]:
     return {"relationship_types": relationship_types}
 
 
-def audit_relationship_applicability(storage: "GraphStorage") -> Dict[str, Any]:
-    violations = storage.audit_relationship_applicability()
+def audit_relationship_applicability(
+    storage: "GraphStorage", hook: "GraphAuthorizationHook"
+) -> Dict[str, Any]:
+    target = "audit_relationship_applicability"
+    decision = access.evaluate_graph_access(
+        hook, action=GRAPH_ACTION_READ, target=target
+    )
+    if not decision.allowed:
+        return access.build_access_denied_result(
+            action=GRAPH_ACTION_READ, target=target, decision=decision
+        )
+    if not decision.graph_access.enabled:
+        violations = storage.audit_relationship_applicability()
+    else:
+        # Only edges between nodes the caller may see; an edge to a node
+        # missing from the graph has no endpoint to judge and is left out.
+        def get_visible(node_id: str):
+            node = storage.get_node(node_id)
+            return node if access.is_node_visible(node, decision.graph_access) else None
+
+        violations = applicability_violations(
+            [
+                edge
+                for edge in storage.get_all_edges()
+                if get_visible(edge.source) and get_visible(edge.target)
+            ],
+            get_visible,
+        )
     return {
         "success": True,
         "violation_count": len(violations),

@@ -28,6 +28,9 @@ Two properties keep it from rotting into a green rubber stamp:
   split, so that is a live possibility rather than a hypothetical.
 """
 
+import json
+import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -180,8 +183,7 @@ def discover_gates(workflow):
 def gate_step(workflow, job_id):
     """The verification step - the one declaring RESULT - rather than steps[0].
 
-    This keeps the truth-table tests working if a gate gains a step; the
-    separate single-step assertion below still flags that change deliberately.
+    This keeps the truth-table tests working if a gate gains a step.
     """
     steps = workflow["jobs"][job_id]["steps"]
     verifying = [s for s in steps if "RESULT" in (s.get("env") or {})]
@@ -211,6 +213,19 @@ def run_gate(workflow, job_id, detect, result, code, tmp_path):
         capture_output=True,
         text=True,
     )
+
+
+def assert_gate_does_not_continue_on_error(workflow, job_id):
+    gate = workflow["jobs"][job_id]
+    assert not gate.get("continue-on-error", False), (
+        f"{job_id} is a required-check gate and must fail closed; "
+        "do not set job-level continue-on-error"
+    )
+    for step in gate["steps"]:
+        assert not step.get("continue-on-error", False), (
+            f"{job_id} step {step.get('name')!r} is the gate verdict; "
+            "do not set step-level continue-on-error"
+        )
 
 
 class TestTheGateSetIsDiscovered:
@@ -328,11 +343,31 @@ class TestTheWorkerGateWiringItself:
         assert set(gate["needs"]) == {"detect-changes", f"{job_id}-run"}
 
     @pytest.mark.parametrize("job_id,flag", sorted(GATES.items()))
-    def test_gate_is_a_single_verification_step(self, workflow, job_id, flag):
-        """Not a correctness requirement - a gate could legitimately gain a step.
-        Named separately so that change fails here with an obvious message
-        rather than scattering failures across the matrix."""
-        assert len(workflow["jobs"][job_id]["steps"]) == 1
+    def test_gate_does_not_continue_on_error(self, workflow, job_id, flag):
+        """A failing gate must make the required check red.
+
+        `continue-on-error` would preserve every shell-level truth-table result
+        above while making GitHub report the gate job as successful.
+        """
+        assert_gate_does_not_continue_on_error(workflow, job_id)
+
+    @pytest.mark.parametrize("job_id,flag", sorted(GATES.items()))
+    def test_gate_continue_on_error_true_is_rejected(self, workflow, job_id, flag):
+        """Pin the exact failure mode: the gate job itself must not be allowed
+        to report success after its verification step exits non-zero."""
+        mutated = {
+            **workflow,
+            "jobs": {
+                **workflow["jobs"],
+                job_id: {
+                    **workflow["jobs"][job_id],
+                    "continue-on-error": True,
+                },
+            },
+        }
+
+        with pytest.raises(AssertionError, match="job-level continue-on-error"):
+            assert_gate_does_not_continue_on_error(mutated, job_id)
 
     @pytest.mark.parametrize("job_id,flag", sorted(GATES.items()))
     def test_required_check_name_is_unchanged(self, workflow, job_id, flag):
@@ -360,3 +395,405 @@ class TestTheWorkerGateWiringItself:
             assert not (set(needs) & set(GATES)), (
                 f"{job_id} depends on a gate job: {needs}"
             )
+
+
+# ---------------------------------------------------------------------------
+# What a required check buys against a hand-edited lockfile.
+#
+# `npm ci` refuses a package-lock.json the manifests it was resolved from do not
+# satisfy — `Invalid: lock file's ws@7.5.10 does not satisfy ws@8.22.0` — and
+# that refusal is the ONLY thing in the required checks that notices such an
+# edit. `npm install` would instead resolve the tree afresh and rewrite the
+# lockfile to make it valid, so swapping one subcommand for the other is a
+# one-word edit that removes the gate and reports green. Nothing else in the
+# repo pins it, which is the same shape of hole as the permissive gate above.
+#
+# It is a narrow guarantee, and worth stating so it is not over-read: `npm ci`
+# sees a lockfile that contradicts a declared RANGE. A revert to an older
+# version still inside its range is valid by construction, and only a full
+# `npm audit` (dev included) sees that one — which the Security Scan workflow
+# runs, and `main`'s branch protection does not require.
+# ---------------------------------------------------------------------------
+# Every `npm` subcommand a required-check job may run. An ALLOWLIST, because the
+# other side cannot be enumerated: npm accepts `install`, `i`, `in`, `inst`,
+# `instal`, `isntall`, `add` and more for the same resolving install, and `ic` /
+# `clean-install` for `ci`. And not line-anchored, because the edit that actually
+# removes the gate is a chained one a reviewer would wave through -
+# `npm ci || npm install` installs from the lockfile, and on the lockfile `npm ci`
+# rejects it falls back to rewriting it.
+NPM_SUBCOMMANDS_ALLOWED = frozenset({"ci", "run"})
+NPM_CALL = re.compile(r"\bnpm\s+(\S+)")
+
+# The install step's whole run body, per required-check job. Pinned ENTIRE, not
+# just the subcommand, because every way of defeating the gate keeps a compliant
+# `npm ci` in the body and adds to it:
+#
+#   npm ci --no-audit --no-fund || true
+#   npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+#   npm ci --no-audit --no-fund || { n=npm; "$n" install --no-audit --no-fund; }
+#
+# The last defeats a subcommand scan outright - there is no whitespace after
+# `npm` in `n=npm;` - and unlike the others it leaves node_modules correct, so
+# the suite passes and the required check reports GREEN over a lockfile `npm ci`
+# had refused. `continue-on-error: true` on the step is the same hole again.
+NODE_INSTALL_BODIES = {
+    "frontend-tests-run": "npm ci --no-audit --no-fund",
+    "frontend-lint": (
+        "npm ci --no-audit --no-fund --workspace @community-graph/web "
+        "--workspace @community-graph/widget --include-workspace-root"
+    ),
+}
+
+
+def required_check_jobs(workflow):
+    """The jobs behind `main`'s required checks: each named job, plus its workers."""
+    named = {
+        job_id
+        for job_id, job in workflow["jobs"].items()
+        if job.get("name") in BRANCH_PROTECTION_CHECKS
+    }
+    workers = set()
+    for job_id in named:
+        needs = workflow["jobs"][job_id].get("needs") or []
+        workers.update([needs] if isinstance(needs, str) else needs)
+    return named | (workers - {"detect-changes"})
+
+
+class TestRequiredChecksInstallFromTheLockfile:
+    def test_the_job_set_is_discovered(self, workflow):
+        # The five required check names, plus the four workers their gates need.
+        assert required_check_jobs(workflow) == {
+            "backend-tests",
+            "backend-tests-run",
+            "frontend-tests",
+            "frontend-tests-run",
+            "gateway-tests",
+            "gateway-tests-run",
+            "python-lint",
+            "python-lint-run",
+            "frontend-lint",
+        }
+
+    def test_every_npm_call_is_an_allowed_subcommand(self, workflow):
+        calls = []
+        for job_id in sorted(required_check_jobs(workflow)):
+            for step in workflow["jobs"][job_id].get("steps", []):
+                for match in NPM_CALL.finditer(step.get("run", "")):
+                    subcommand = match.group(1)
+                    calls.append((job_id, subcommand))
+                    assert subcommand in NPM_SUBCOMMANDS_ALLOWED, (
+                        f"{job_id}:{step.get('name')} runs `npm {subcommand}`; a "
+                        "required check installs with `npm ci`, which refuses a "
+                        "lockfile its manifests do not satisfy — anything else "
+                        "either rewrites the lockfile instead and reports green, "
+                        f"or is not a required check's job. Allowed: "
+                        f"{sorted(NPM_SUBCOMMANDS_ALLOWED)}"
+                    )
+        # Not vacuous, and counted rather than just collected: an ADDED install
+        # cannot hide behind a compliant one in the same job.
+        assert sorted(calls) == [
+            ("frontend-lint", "ci"),
+            ("frontend-lint", "run"),
+            ("frontend-lint", "run"),
+            ("frontend-tests-run", "ci"),
+            ("frontend-tests-run", "run"),
+        ]
+
+    @pytest.mark.parametrize(
+        "body,subcommands",
+        [
+            ("npm ci --no-audit --no-fund", ["ci"]),
+            ("  npm  ci", ["ci"]),
+            ("npm install", ["install"]),
+            ("npm i", ["i"]),
+            ("npm add left-pad", ["add"]),
+            ("echo setting up\nnpm install\n", ["install"]),
+            # The chained fallback, which a line-anchored pattern read as `ci`.
+            ("npm ci --no-audit || npm install --no-audit", ["ci", "install"]),
+            ("cd frontend && npm install", ["install"]),
+            ("sudo npm install", ["install"]),
+            ("npm_config_x=1 npm install", ["install"]),
+            # npm's install aliases, which a subcommand denylist would miss.
+            ("npm isntall x", ["isntall"]),
+            ("npm in x", ["in"]),
+            ("npm ic", ["ic"]),
+            ("npm clean-install", ["clean-install"]),
+            ("npm run lint\nnpm ci", ["run", "ci"]),
+        ],
+    )
+    def test_every_npm_subcommand_in_a_body_is_read(self, body, subcommands):
+        assert [m.group(1) for m in NPM_CALL.finditer(body)] == subcommands
+
+    @pytest.mark.parametrize(
+        "subcommand",
+        ["install", "i", "add", "isntall", "ic", "clean-install", "update"],
+    )
+    def test_the_allowlist_admits_no_installing_subcommand(self, subcommand):
+        assert subcommand not in NPM_SUBCOMMANDS_ALLOWED
+
+    def test_each_install_step_body_is_pinned_whole_and_can_fail_the_job(
+        self, workflow
+    ):
+        installs = []
+        for job_id in sorted(required_check_jobs(workflow)):
+            # Job level too, and for every job behind a required check, not just
+            # the ones that install. A `continue-on-error` job REPORTS SUCCESS
+            # when its steps fail, so it neutralises the step-level assert below
+            # from one level up — on `frontend-lint` that turns the required
+            # check green over failed eslint; on a worker it turns the gate green,
+            # because the gate reads `needs.<worker>.result` and GitHub hands it
+            # `success` for a failed continue-on-error job.
+            assert not workflow["jobs"][job_id].get("continue-on-error", False), (
+                f"{job_id} is behind a required check and must fail closed; "
+                "do not set job-level continue-on-error"
+            )
+            for step in workflow["jobs"][job_id].get("steps", []):
+                body = step.get("run", "")
+                if not any(m.group(1) == "ci" for m in NPM_CALL.finditer(body)):
+                    continue
+                installs.append((job_id, body.strip()))
+                where = f"{job_id}:{step.get('name')}"
+                assert not step.get("continue-on-error", False), (
+                    f"{where} is continue-on-error, so the lockfile refusal "
+                    "cannot fail the job"
+                )
+                assert "if" not in step, f"{where} is conditional"
+        # A list, not a dict: a SECOND install step added to a job that already
+        # has a compliant one must fail here rather than overwrite it.
+        assert installs == sorted(NODE_INSTALL_BODIES.items())
+
+
+class TestImageTags:
+    @pytest.mark.parametrize("step_id", ["meta-core", "meta-gateway"])
+    def test_latest_tracks_only_the_prod_branch(self, workflow, step_id):
+        """Release tags cannot move latest through metadata-action's auto flavor."""
+        step = next(
+            step
+            for step in workflow["jobs"]["build"]["steps"]
+            if step.get("id") == step_id
+        )
+        assert step["with"].get("flavor") == "latest=false"
+        latest_rules = [
+            line.strip()
+            for line in step["with"]["tags"].splitlines()
+            if "value=latest" in line and not line.strip().startswith("#")
+        ]
+        assert latest_rules == [
+            "type=raw,value=latest,enable=${{ github.ref == 'refs/heads/prod' }}"
+        ]
+
+
+class TestReleaseSbomEvidence:
+    @pytest.fixture
+    def sbom_run(self, workflow, tmp_path):
+        """Execute the workflow shell with a scanner double, without a registry."""
+        scanner = tmp_path / "syft"
+        scanner.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, pathlib, sys\n"
+            "with open('scan-calls.jsonl', 'a') as log:\n"
+            "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            "if os.environ.get('SCAN_MODE') == 'fail':\n"
+            "    sys.exit(1)\n"
+            "refs = [{'referenceType': 'purl', 'referenceLocator': 'pkg:' + kind + '/fixture@1.0.0'}\n"
+            "        for kind in ('pypi', 'npm') if os.environ.get('SCAN_MODE') != 'no-' + kind]\n"
+            "payload = json.dumps({'packages': [{'externalRefs': refs}]})\n"
+            "for argument in sys.argv[1:]:\n"
+            "    if argument.startswith(('spdx-json@', 'cyclonedx-json@')):\n"
+            "        if os.environ.get('SCAN_MODE') == 'missing':\n"
+            "            continue\n"
+            "        path = pathlib.Path(argument.split('=', 1)[1])\n"
+            "        path.write_text('' if os.environ.get('SCAN_MODE') == 'empty' "
+            "else payload)\n"
+        )
+        scanner.chmod(0o755)
+        env = {
+            **os.environ,
+            "SYFT_CMD": str(scanner),
+            "REGISTRY": "ghcr.io",
+            "CORE_IMAGE": "Example/CommunityOverview",
+            "GATEWAY_IMAGE": "Example/CommunityOverview-gateway",
+            "CORE_DIGEST": "sha256:" + "a" * 64,
+            "GATEWAY_DIGEST": "sha256:" + "b" * 64,
+            "GITHUB_SHA": "c" * 40,
+            "GITHUB_REF": "refs/tags/v1.2.3",
+            "GITHUB_RUN_ID": "123",
+            "GITHUB_RUN_ATTEMPT": "2",
+        }
+        step = next(
+            step
+            for step in workflow["jobs"]["build"]["steps"]
+            if step.get("name") == "Generate release SBOMs"
+        )
+
+        def run(**overrides):
+            return subprocess.run(
+                ["bash", "-c", step["run"]],
+                cwd=tmp_path,
+                env={**env, **overrides},
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+
+        return run, env
+
+    def test_reports_bind_both_images_to_the_commit_and_digests(
+        self, sbom_run, tmp_path
+    ):
+        """Both formats scan immutable references; retained metadata binds the run."""
+        run, env = sbom_run
+        proc = run()
+        assert proc.returncode == 0, proc.stderr
+        calls = [
+            json.loads(line)
+            for line in (tmp_path / "scan-calls.jsonl").read_text().splitlines()
+        ]
+        assert len(calls) == 2
+        metadata = json.loads((tmp_path / "release-evidence/release.json").read_text())
+        assert metadata == {
+            "commit_sha": env["GITHUB_SHA"],
+            "version": "sha-" + env["GITHUB_SHA"],
+            "ref": env["GITHUB_REF"],
+            "run_id": "123",
+            "run_attempt": "2",
+            "images": {
+                artifact: f"ghcr.io/{env[f'{artifact.upper()}_IMAGE'].lower()}"
+                f"@{env[f'{artifact.upper()}_DIGEST']}"
+                for artifact in ("core", "gateway")
+            },
+        }
+        for artifact, call in zip(("core", "gateway"), calls, strict=True):
+            reference = metadata["images"][artifact]
+            assert call[:2] == ["scan", f"registry:{reference}"]
+            assert call[call.index("--source-name") + 1] == reference
+            assert call[call.index("--source-version") + 1] == env["GITHUB_SHA"]
+            for format_name, suffix in (
+                ("spdx-json@2.3", "spdx"),
+                ("cyclonedx-json@1.6", "cyclonedx"),
+            ):
+                assert (
+                    f"{format_name}=release-evidence/{artifact}-sha-"
+                    f"{env['GITHUB_SHA']}.{suffix}.json"
+                ) in call
+        evidence = tmp_path / "release-evidence"
+        assert len(list(evidence.glob("*.json"))) == 5
+        checksums = subprocess.run(
+            ["sha256sum", "--check", "SHA256SUMS"],
+            cwd=evidence,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert checksums.returncode == 0, checksums.stderr
+
+    @pytest.mark.parametrize(
+        "mode", ["fail", "missing", "empty", "bad-digest", "no-pypi", "no-npm"]
+    )
+    def test_incomplete_evidence_cannot_succeed(self, sbom_run, tmp_path, mode):
+        """Scanner failures, absent output and missing digests stop publication evidence."""
+        run, _ = sbom_run
+        overrides = {"SCAN_MODE": mode}
+        if mode == "bad-digest":
+            overrides["CORE_DIGEST"] = ""
+        assert run(**overrides).returncode != 0
+        assert not (tmp_path / "release-evidence/release.json").exists()
+
+    def test_evidence_upload_is_required_before_infra_notification(self, workflow):
+        """No release path may bypass scanning or retaining the reports."""
+        build = workflow["jobs"]["build"]
+        steps = build["steps"]
+        generate = next(
+            step for step in steps if step.get("name") == "Generate release SBOMs"
+        )
+        retain = next(
+            step for step in steps if step.get("name") == "Retain release evidence"
+        )
+        assert not build.get("continue-on-error")
+        for step in (generate, retain):
+            assert "if" not in step
+            assert not step.get("continue-on-error")
+        assert steps.index(generate) < steps.index(retain)
+        assert retain["with"]["path"] == "release-evidence/"
+        assert retain["with"]["if-no-files-found"] == "error"
+        assert retain["with"]["retention-days"] == 90
+        assert workflow["jobs"]["notify-infra"]["needs"] == "build"
+        assert (
+            "needs.build.result == 'success'" in workflow["jobs"]["notify-infra"]["if"]
+        )
+
+    def test_frontend_metadata_includes_runtime_tree_without_dev_or_xr(self, tmp_path):
+        """Use real npm traversal on a fixture tree; no dependencies are installed."""
+        app = tmp_path / "app"
+        app.mkdir()
+
+        def package(directory, name, **fields):
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "package.json").write_text(
+                json.dumps({"name": name, "version": "1.0.0", **fields})
+            )
+
+        package(
+            app,
+            "fixture",
+            private=True,
+            workspaces=["frontend/*", "packages/*"],
+            devDependencies={"build-tool": "1.0.0"},
+        )
+        for workspace in ("web", "widget", "xr"):
+            package(
+                app / "frontend" / workspace,
+                f"@community-graph/{workspace}",
+                dependencies={
+                    "xr-only" if workspace == "xr" else "runtime": "1.0.0",
+                    "@community-graph/ui-graph-canvas": "1.0.0",
+                },
+            )
+        canvas = app / "packages/ui-graph-canvas"
+        package(canvas, "@community-graph/ui-graph-canvas")
+        package(
+            app / "node_modules/runtime", "runtime", dependencies={"nested": "1.0.0"}
+        )
+        package(app / "node_modules/runtime/node_modules/nested", "nested")
+        package(app / "node_modules/build-tool", "build-tool")
+        scope = app / "node_modules/@community-graph"
+        scope.mkdir()
+        for workspace in ("web", "widget", "xr"):
+            (scope / workspace).symlink_to(app / "frontend" / workspace)
+        (scope / "ui-graph-canvas").symlink_to(canvas)
+
+        dockerfile = (REPO_ROOT / "Dockerfile").read_text()
+        command = re.search(r"RUN npm ls .*?(?=\n\n)", dockerfile, re.S).group()
+        evidence = tmp_path / "frontend-dependencies"
+        command = (
+            command.removeprefix("RUN ")
+            .replace("/app", str(app))
+            .replace("/tmp/frontend-packages", str(tmp_path / "frontend-packages"))
+            .replace("/frontend-dependencies", str(evidence))
+        )
+        proc = subprocess.run(
+            ["sh", "-c", command],
+            cwd=app,
+            env={**os.environ, "npm_config_offline": "true"},
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert proc.returncode == 0, proc.stderr
+        names = {
+            json.loads(path.read_text())["name"]
+            for path in evidence.rglob("package.json")
+        }
+        assert {
+            "runtime",
+            "nested",
+            "@community-graph/web",
+            "@community-graph/widget",
+            "@community-graph/ui-graph-canvas",
+        } <= names
+        assert not names & {"build-tool", "xr-only", "@community-graph/xr"}
+        assert not list(evidence.rglob("package-lock.json"))
+        assert (
+            "COPY --from=builder /frontend-dependencies "
+            "/usr/share/communityoverview/frontend-dependencies"
+        ) in dockerfile

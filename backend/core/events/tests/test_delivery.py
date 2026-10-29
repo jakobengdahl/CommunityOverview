@@ -2,8 +2,15 @@
 Tests for event delivery worker.
 """
 
+from contextlib import contextmanager
+
+import ipaddress
+import socket
 import time
 from unittest.mock import patch, Mock
+
+import httpx2 as httpx
+import pytest
 
 from backend.core.events.models import (
     Event,
@@ -14,7 +21,21 @@ from backend.core.events.models import (
     DeliveryStatus,
     SubscriptionInfo,
 )
-from backend.core.events.delivery import DeliveryWorker, DeliveryItem, is_safe_url
+from backend.core.events import delivery
+from backend.core.events.delivery import (
+    MAX_REDIRECTS,
+    DeliveryWorker,
+    DeliveryItem,
+    _MalformedRedirect,
+    _SSRFRedirectBlocked,
+    is_safe_url,
+)
+
+
+@contextmanager
+def _mock_stream(response):
+    response.iter_bytes.return_value = iter([b"Server Error"])
+    yield response
 
 
 def _wait_for(predicate, timeout: float = 5.0, interval: float = 0.02):
@@ -59,8 +80,25 @@ def create_test_event(
 class TestDeliveryWorker:
     """Tests for the DeliveryWorker class."""
 
-    def test_is_safe_url(self):
+    @patch("backend.core.events.delivery.socket.getaddrinfo")
+    def test_is_safe_url(self, mock_getaddrinfo):
         """Test the SSRF URL validation function."""
+
+        # Resolve the hostnames below without the network: a sandbox with no
+        # resolver would otherwise fail every public URL and make this a
+        # test of DNS rather than of the classifier.
+        def resolve(host, *args, **kwargs):
+            table = {
+                "example.com": "93.184.216.34",
+                "google.com": "142.250.74.46",
+                "localhost": "127.0.0.1",
+            }
+            if host not in table:
+                raise socket.gaierror(f"no such host in this test: {host}")
+            return [(None, None, None, None, (table[host], 0))]
+
+        mock_getaddrinfo.side_effect = resolve
+
         # Safe URLs
         assert is_safe_url("https://example.com/hook") is True
         assert is_safe_url("http://google.com") is True
@@ -182,7 +220,7 @@ class TestDeliveryWorker:
         mock_client = Mock()
         mock_client.__enter__ = Mock(return_value=mock_client)
         mock_client.__exit__ = Mock(return_value=None)
-        mock_client.post.return_value = mock_response
+        mock_client.stream.side_effect = lambda *a, **k: _mock_stream(mock_response)
         mock_client_cls.return_value = mock_client
 
         results = []
@@ -216,7 +254,7 @@ class TestDeliveryWorker:
         mock_client = Mock()
         mock_client.__enter__ = Mock(return_value=mock_client)
         mock_client.__exit__ = Mock(return_value=None)
-        mock_client.post.side_effect = mock_responses
+        mock_client.stream.side_effect = [_mock_stream(r) for r in mock_responses]
         mock_client_cls.return_value = mock_client
 
         results = []
@@ -256,7 +294,7 @@ class TestDeliveryWorker:
         mock_client = Mock()
         mock_client.__enter__ = Mock(return_value=mock_client)
         mock_client.__exit__ = Mock(return_value=None)
-        mock_client.post.return_value = mock_response
+        mock_client.stream.side_effect = lambda *a, **k: _mock_stream(mock_response)
         mock_client_cls.return_value = mock_client
 
         results = []
@@ -290,7 +328,7 @@ class TestDeliveryWorker:
         mock_client = Mock()
         mock_client.__enter__ = Mock(return_value=mock_client)
         mock_client.__exit__ = Mock(return_value=None)
-        mock_client.post.side_effect = httpx.TimeoutException("Connection timed out")
+        mock_client.stream.side_effect = httpx.TimeoutException("Connection timed out")
         mock_client_cls.return_value = mock_client
 
         results = []
@@ -321,7 +359,7 @@ class TestDeliveryWorker:
         mock_client = Mock()
         mock_client.__enter__ = Mock(return_value=mock_client)
         mock_client.__exit__ = Mock(return_value=None)
-        mock_client.post.return_value = mock_response
+        mock_client.stream.side_effect = lambda *a, **k: _mock_stream(mock_response)
         mock_client_cls.return_value = mock_client
 
         worker = DeliveryWorker()
@@ -334,11 +372,11 @@ class TestDeliveryWorker:
             # Wait for the worker thread to have actually made the call — a fixed
             # sleep races with CI load and can fire the assertion before the
             # background thread has posted, leaving call_args as None.
-            assert _wait_for(lambda: mock_client.post.called)
-            call_kwargs = mock_client.post.call_args.kwargs
+            assert _wait_for(lambda: mock_client.stream.called)
+            call_kwargs = mock_client.stream.call_args.kwargs
 
             # Check URL
-            assert mock_client.post.call_args.args[0] == "https://example.com/hook"
+            assert mock_client.stream.call_args.args[1] == "https://example.com/hook"
 
             # Check headers
             assert call_kwargs["headers"]["Content-Type"] == "application/json"
@@ -373,7 +411,7 @@ class TestDeliveryWorker:
         mock_client = Mock()
         mock_client.__enter__ = Mock(return_value=mock_client)
         mock_client.__exit__ = Mock(return_value=None)
-        mock_client.post.return_value = redirect_response
+        mock_client.stream.side_effect = lambda *a, **k: _mock_stream(redirect_response)
         mock_client_cls.return_value = mock_client
 
         results = []
@@ -393,6 +431,10 @@ class TestDeliveryWorker:
             # Must be dropped immediately — no retry, no follow-through to the internal address
             assert len(results) == 1
             assert results[0].status == DeliveryStatus.DROPPED
+            # The per-hop check only runs if httpx is told not to follow
+            # redirects itself, at both the client and the call.
+            assert mock_client_cls.call_args.kwargs["follow_redirects"] is False
+            assert mock_client.stream.call_args.kwargs["follow_redirects"] is False
             assert "169.254.169.254" in results[0].error_message
         finally:
             worker.stop(wait=True)
@@ -413,7 +455,7 @@ class TestDeliveryWorker:
         mock_client = Mock()
         mock_client.__enter__ = Mock(return_value=mock_client)
         mock_client.__exit__ = Mock(return_value=None)
-        mock_client.post.return_value = redirect_response
+        mock_client.stream.side_effect = lambda *a, **k: _mock_stream(redirect_response)
         mock_client_cls.return_value = mock_client
 
         results = []
@@ -437,6 +479,56 @@ class TestDeliveryWorker:
 
     @patch("backend.core.events.delivery.socket.getaddrinfo")
     @patch("backend.core.events.delivery.httpx.Client")
+    def test_redirect_without_a_location_is_dropped_without_retry(
+        self, mock_client_cls, mock_getaddrinfo
+    ):
+        """A malformed redirect reaches the same terminal outcome as an SSRF block.
+
+        The walker-level test above pins the refusal; this pins what the
+        operator sees. A refusal raised through the generic handler instead
+        would be retried to max_attempts and reported as a transient failure,
+        which is wrong -- a server that answers 3xx with no Location answers
+        the same way next time.
+        """
+        mock_getaddrinfo.return_value = [(None, None, None, None, ("93.184.216.34", 0))]
+
+        redirect_response = Mock()
+        redirect_response.is_redirect = True
+        redirect_response.status_code = 302
+        redirect_response.headers = {}
+
+        mock_client = Mock()
+        mock_client.__enter__ = Mock(return_value=mock_client)
+        mock_client.__exit__ = Mock(return_value=None)
+        mock_client.stream.side_effect = lambda *a, **k: _mock_stream(redirect_response)
+        mock_client_cls.return_value = mock_client
+
+        results = []
+        worker = DeliveryWorker(
+            max_attempts=3,
+            backoff_times=[0.05, 0.05, 0.05],
+            on_result=lambda r: results.append(r),
+        )
+        worker.start()
+
+        try:
+            event = create_test_event()
+            worker.enqueue(event, "http://example.com/hook")
+
+            _wait_for(lambda: len(results) >= 1)
+
+            assert len(results) == 1
+            assert results[0].status == DeliveryStatus.DROPPED
+            assert mock_client.stream.call_count == 1
+            # The reason reaches the operator, not just the status: emptying the
+            # exception message leaves "Redirect refused: ... ." with no stated
+            # cause, and every other assertion here still passes.
+            assert "Location" in results[0].error_message
+        finally:
+            worker.stop(wait=True)
+
+    @patch("backend.core.events.delivery.socket.getaddrinfo")
+    @patch("backend.core.events.delivery.httpx.Client")
     def test_safe_redirect_is_followed(self, mock_client_cls, mock_getaddrinfo):
         """A redirect to a safe public URL must be followed normally."""
         # Both the original and redirect target resolve to public IPs
@@ -450,11 +542,15 @@ class TestDeliveryWorker:
         success_response = Mock()
         success_response.is_redirect = False
         success_response.status_code = 200
+        success_response.headers = {}
 
         mock_client = Mock()
         mock_client.__enter__ = Mock(return_value=mock_client)
         mock_client.__exit__ = Mock(return_value=None)
-        mock_client.post.side_effect = [redirect_response, success_response]
+        mock_client.stream.side_effect = [
+            _mock_stream(redirect_response),
+            _mock_stream(success_response),
+        ]
         mock_client_cls.return_value = mock_client
 
         results = []
@@ -491,11 +587,15 @@ class TestDeliveryWorker:
         success_response = Mock()
         success_response.is_redirect = False
         success_response.status_code = 200
+        success_response.headers = {}
 
         mock_client = Mock()
         mock_client.__enter__ = Mock(return_value=mock_client)
         mock_client.__exit__ = Mock(return_value=None)
-        mock_client.post.side_effect = [redirect_response, success_response]
+        mock_client.stream.side_effect = [
+            _mock_stream(redirect_response),
+            _mock_stream(success_response),
+        ]
         mock_client_cls.return_value = mock_client
 
         results = []
@@ -514,7 +614,7 @@ class TestDeliveryWorker:
             assert len(results) == 1
             assert results[0].status == DeliveryStatus.SUCCESS
             assert (
-                mock_client.post.call_args_list[1].args[0]
+                mock_client.stream.call_args_list[1].args[1]
                 == "http://example.com/v2/hook"
             )
         finally:
@@ -536,7 +636,7 @@ class TestDeliveryWorker:
         mock_client = Mock()
         mock_client.__enter__ = Mock(return_value=mock_client)
         mock_client.__exit__ = Mock(return_value=None)
-        mock_client.post.return_value = redirect_response
+        mock_client.stream.side_effect = lambda *a, **k: _mock_stream(redirect_response)
         mock_client_cls.return_value = mock_client
 
         results = []
@@ -556,6 +656,9 @@ class TestDeliveryWorker:
             assert len(results) == 1
             assert results[0].status == DeliveryStatus.DROPPED
             assert results[0].error_message == "Exceeded redirect limit"
+            # Pin the effective cap, not just the outcome: any limit that
+            # eventually terminates satisfies the assertions above.
+            assert mock_client.stream.call_count == MAX_REDIRECTS
         finally:
             worker.stop(wait=True)
 
@@ -583,3 +686,624 @@ class TestDeliveryItem:
         item = DeliveryItem(event=event, webhook_url="https://example.com")
 
         assert item.attempt == 1
+
+
+def _addrinfo(*ips):
+    return [(None, None, None, None, (ip, 0)) for ip in ips]
+
+
+@pytest.fixture
+def _public_dns(monkeypatch):
+    # Offline, an unresolvable host is rejected by the DNS step, which would
+    # let a scheme check that had stopped working pass unnoticed.
+    monkeypatch.setattr(
+        delivery.socket, "getaddrinfo", lambda *a, **k: _addrinfo("93.184.216.34")
+    )
+
+
+@pytest.mark.usefixtures("_public_dns")
+class TestIsSafeUrlClauses:
+    """Each clause of is_safe_url pinned by an input only that clause decides."""
+
+    def test_public_host_is_accepted_under_the_dns_stub(self):
+        assert is_safe_url("http://example.com/x") is True
+        assert is_safe_url("https://example.com/x") is True
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "ftp://example.com/x",
+            "file://example.com/etc/passwd",
+            "gopher://example.com/",
+        ],
+    )
+    def test_non_http_scheme_is_rejected_even_when_the_host_resolves(self, url):
+        assert is_safe_url(url) is False
+
+    def test_reserved_ipv6_literal_is_rejected(self):
+        # 4000::/3 is unassigned: is_reserved, but neither is_private nor any
+        # other clause of _is_safe_ip, so only the is_reserved clause refuses it.
+        assert is_safe_url("http://[4000::1]/x") is False
+
+    @pytest.mark.parametrize(
+        "ip",
+        [
+            "100.64.0.1",
+            "100.127.255.255",
+            "192.88.99.1",
+            "192.88.99.255",
+            "fec0::1",
+            "feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+        ],
+        ids=[
+            "cgnat-bottom",
+            "cgnat-top",
+            "6to4-relay-anycast-bottom",
+            "6to4-relay-anycast-top",
+            "ipv6-site-local-bottom",
+            "ipv6-site-local-top",
+        ],
+    )
+    def test_internal_range_without_an_ipaddress_flag_is_rejected(
+        self, monkeypatch, ip
+    ):
+        # ipaddress classifies none of these as private or reserved, so only
+        # the explicit network list refuses them — as a literal and as a DNS
+        # answer alongside a public address.
+        literal = f"[{ip}]" if ":" in ip else ip
+        assert is_safe_url(f"http://{literal}/x") is False
+        monkeypatch.setattr(
+            delivery.socket,
+            "getaddrinfo",
+            lambda *a, **k: _addrinfo("93.184.216.34", ip),
+        )
+        assert is_safe_url("http://mixed.example.com/x") is False
+
+    @pytest.mark.parametrize("ip", ["224.0.0.1", "239.1.1.1", "ff02::1"])
+    def test_multicast_address_is_rejected(self, monkeypatch, ip):
+        # ipaddress flags these multicast only, not private or reserved, so
+        # only the is_multicast clause refuses them.
+        literal = f"[{ip}]" if ":" in ip else ip
+        assert is_safe_url(f"http://{literal}/x") is False
+        monkeypatch.setattr(
+            delivery.socket,
+            "getaddrinfo",
+            lambda *a, **k: _addrinfo("93.184.216.34", ip),
+        )
+        assert is_safe_url("http://mixed.example.com/x") is False
+
+    @pytest.mark.parametrize(
+        "ip", ["100.63.255.255", "100.128.0.0", "192.88.98.255", "192.88.100.0"]
+    )
+    def test_address_just_outside_an_unflagged_range_is_accepted(self, ip):
+        assert is_safe_url(f"http://{ip}/x") is True
+
+    @pytest.mark.parametrize(
+        "embedded",
+        [
+            "100.64.0.1",
+            "192.88.99.1",
+            "10.0.0.1",
+            "127.0.0.1",
+            "169.254.169.254",
+            "224.0.0.1",
+        ],
+    )
+    def test_ipv4_mapped_form_of_an_internal_address_is_rejected(
+        self, monkeypatch, embedded
+    ):
+        # A dual-stack socket connecting to ::ffff:a.b.c.d reaches a.b.c.d.
+        mapped = f"::ffff:{embedded}"
+        assert is_safe_url(f"http://[{mapped}]/x") is False
+        monkeypatch.setattr(
+            delivery.socket,
+            "getaddrinfo",
+            lambda *a, **k: _addrinfo("93.184.216.34", mapped),
+        )
+        assert is_safe_url("http://mixed.example.com/x") is False
+
+    def test_ipv4_mapped_form_of_a_public_address_is_judged_as_that_address(
+        self, monkeypatch
+    ):
+        # Python 3.12.3 flags all of ::ffff:0:0/96 is_reserved and 3.11/3.13 do
+        # not; judging the embedded host keeps the verdict the same everywhere.
+        # Forcing the wrapper's flag reproduces 3.12.3 on any interpreter.
+        assert is_safe_url("http://[::ffff:93.184.216.34]/x") is True
+        assert is_safe_url("http://[2606:4700::1]/x") is True
+        monkeypatch.setattr(
+            ipaddress.IPv6Address, "is_reserved", property(lambda self: True)
+        )
+        assert is_safe_url("http://[::ffff:93.184.216.34]/x") is True
+        # A normally accepted IPv6 address turning rejected shows the patch
+        # took effect.
+        assert is_safe_url("http://[2606:4700::1]/x") is False
+
+    @pytest.mark.parametrize(
+        "sixtofour", ["2002:6440:1::", "2002:c058:6301::", "2002:a00:1::"]
+    )
+    def test_6to4_form_of_an_internal_address_is_rejected(self, monkeypatch, sixtofour):
+        assert is_safe_url(f"http://[{sixtofour}]/x") is False
+        # ipaddress flags all of 2002::/16 is_private today; without that flag
+        # the embedded host alone must still decide.
+        monkeypatch.setattr(
+            ipaddress.IPv6Address, "is_private", property(lambda self: False)
+        )
+        assert is_safe_url(f"http://[{sixtofour}]/x") is False
+
+    def test_6to4_form_of_a_public_address_is_still_rejected_by_its_flags(self):
+        assert is_safe_url("http://[2002:5db8:d822::]/x") is False
+
+    def test_dns_failure_is_rejected(self, monkeypatch):
+        def fail(*args, **kwargs):
+            raise socket.gaierror("name resolution failed")
+
+        monkeypatch.setattr(delivery.socket, "getaddrinfo", fail)
+        assert is_safe_url("http://unresolvable.example.com/x") is False
+
+    def test_empty_dns_answer_is_rejected(self, monkeypatch):
+        monkeypatch.setattr(delivery.socket, "getaddrinfo", lambda *a, **k: [])
+        assert is_safe_url("http://empty.example.com/x") is False
+
+    @pytest.mark.parametrize(
+        "answer",
+        [("not-an-ip", "10.0.0.1"), ("93.184.216.34", "not-an-ip")],
+        ids=["garbage-before-internal", "garbage-after-public"],
+    )
+    def test_unparseable_dns_answer_is_rejected(self, monkeypatch, answer):
+        monkeypatch.setattr(
+            delivery.socket, "getaddrinfo", lambda *a, **k: _addrinfo(*answer)
+        )
+        assert is_safe_url("http://odd.example.com/x") is False
+
+
+class _StubHttpxModule:
+    """Stands in for delivery.py's module-level ``httpx`` name.
+
+    Rebinding that name (rather than ``@patch``-ing ``Client`` on the shared
+    httpx2 module object) keeps the mock transport local to delivery.py.
+    """
+
+    def __init__(self, transport):
+        self._transport = transport
+
+    def Client(self, **kwargs):
+        # The mock takes the place of the walker's own transport, which must
+        # be the address-pinning one: a walker that dropped it would otherwise
+        # pass every test here while connecting by name again.
+        assert isinstance(kwargs.pop("transport", None), delivery._PinnedTransport)
+        return httpx.Client(transport=self._transport, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(httpx, name)
+
+
+@pytest.mark.usefixtures("_public_dns")
+class TestWebhookRedirectHops:
+    """Drive _post_with_redirect_ssrf_check through a mock transport and record
+    every request that actually went out."""
+
+    def _post(
+        self,
+        monkeypatch,
+        handler,
+        url="http://start.example.com/hook",
+        headers=None,
+    ):
+        seen = []
+
+        def recording(request):
+            seen.append((request.method, str(request.url)))
+            return handler(request, len(seen) - 1)
+
+        transport = httpx.MockTransport(recording)
+        monkeypatch.setattr(delivery, "httpx", _StubHttpxModule(transport))
+        worker = DeliveryWorker()
+        try:
+            response = worker._post_with_redirect_ssrf_check(
+                url, {"k": "v"}, headers or {"Content-Type": "application/json"}
+            )
+        except Exception as exc:
+            return seen, exc
+        return seen, response
+
+    @pytest.mark.parametrize("internal_hop", [0, 1, 2, MAX_REDIRECTS - 2])
+    def test_every_hop_is_revalidated(self, monkeypatch, internal_hop):
+        def handler(request, index):
+            if index < internal_hop:
+                return httpx.Response(
+                    307, headers={"location": f"http://hop{index + 1}.example.com/h"}
+                )
+            if index == internal_hop:
+                return httpx.Response(307, headers={"location": "http://10.0.0.1/h"})
+            raise AssertionError(f"unexpected request {request.url}")
+
+        seen, outcome = self._post(monkeypatch, handler)
+
+        assert isinstance(outcome, _SSRFRedirectBlocked)
+        assert len(seen) == internal_hop + 1
+        assert all("10.0.0.1" not in url for _, url in seen)
+
+    def test_relative_location_resolves_against_the_current_hop(self, monkeypatch):
+        def handler(request, index):
+            if index == 0:
+                return httpx.Response(
+                    307, headers={"location": "https://second.example.com/dir/"}
+                )
+            if index == 1:
+                return httpx.Response(307, headers={"location": "next"})
+            return httpx.Response(200)
+
+        seen, outcome = self._post(monkeypatch, handler)
+
+        assert outcome.status_code == 200
+        assert [url for _, url in seen] == [
+            "http://start.example.com/hook",
+            "https://second.example.com/dir/",
+            "https://second.example.com/dir/next",
+        ]
+
+    @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+    def test_identity_encoding_is_requested_on_every_hop(self, monkeypatch, status):
+        """Initial requests and both POST and GET redirects request identity."""
+
+        def handler(request, index):
+            assert request.headers.get_list("accept-encoding") == ["identity"]
+            if index < 2:
+                return httpx.Response(status, headers={"location": f"/hop{index}"})
+            return httpx.Response(200)
+
+        seen, outcome = self._post(
+            monkeypatch, handler, headers={"accept-encoding": "gzip, deflate"}
+        )
+        assert outcome.status_code == 200
+        assert len(seen) == 3
+
+    def test_redirect_cap_is_ten(self):
+        assert MAX_REDIRECTS == 10
+
+    @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+    @pytest.mark.parametrize(
+        "location_headers",
+        [{}, {"location": ""}],
+        ids=["absent", "empty"],
+    )
+    def test_a_redirect_without_a_location_is_refused_after_one_request(
+        self, monkeypatch, location_headers, status
+    ):
+        """urljoin(current, "") is current, so this used to re-POST the same URL.
+
+        The walk then ran to MAX_REDIRECTS and reported a redirect loop, which
+        names the wrong problem and spends nine more requests on a server that
+        gave it nowhere to go. For 307/308 those repeats each carry the webhook
+        body again; for 301/302/303 the method downgrades to GET after the
+        first, so they are bodiless. Either way the four sibling walkers refuse
+        after one request, and this asserts both halves of that -- the refusal,
+        and that nothing was retried to reach it.
+
+        The status axis is varied because the guard sits inside
+        `if response.is_redirect:`, which spans the whole 3xx range: a guard
+        made conditional on the status would otherwise hide behind a suite
+        that only scripts 302.
+        """
+        seen, outcome = self._post(
+            monkeypatch,
+            lambda request, index: httpx.Response(status, headers=location_headers),
+        )
+
+        assert isinstance(outcome, _MalformedRedirect)
+        assert not isinstance(outcome, httpx.TooManyRedirects)
+        assert len(seen) == 1, "the same URL must not be requested again"
+        assert [method for method, _ in seen] == ["POST"]
+
+    @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+    @pytest.mark.parametrize(
+        "location_headers", [{}, {"location": ""}], ids=["absent", "empty"]
+    )
+    def test_a_missing_location_is_refused_on_a_later_hop_too(
+        self, monkeypatch, location_headers, status
+    ):
+        """The guard must not be conditional on being the first hop.
+
+        The test above scripts the bad response as the FIRST one, which leaves
+        both `if not location and current_url == url` and
+        `... and current_method == "POST"` green across the whole suite -- and
+        with them the original defect reachable one hop in, where
+        urljoin(current, "") is still current and is_safe_url still says yes.
+        The method axis matters for the same reason: on 301/302/303 the walk has
+        already downgraded to GET by the time it reaches this hop.
+        """
+
+        def handler(request, index):
+            if index == 0:
+                return httpx.Response(
+                    status, headers={"location": "https://second.example.com/hook"}
+                )
+            return httpx.Response(status, headers=location_headers)
+
+        seen, outcome = self._post(monkeypatch, handler)
+
+        assert isinstance(outcome, _MalformedRedirect)
+        assert len(seen) == 2, "the second hop must be refused, not re-requested"
+        assert [url for _, url in seen] == [
+            "http://start.example.com/hook",
+            "https://second.example.com/hook",
+        ]
+        expected_method = "GET" if status in (301, 302, 303) else "POST"
+        assert [m for m, _ in seen] == ["POST", expected_method]
+
+    def test_a_present_location_is_still_followed(self, monkeypatch):
+        """The empty-Location guard must not refuse a redirect that has one.
+
+        A guard written as `if not response.headers.get("location")` on a
+        header dict rather than on the joined value is one edit away from
+        refusing everything. Seven sibling tests in this class already catch
+        that: the hop-revalidation, relative-Location, both cap tests and the
+        two GET-hop header tests all drive a chain to completion (16 cases
+        between them), and the later-hop no-Location test needs its first hop
+        followed to reach the second (10 more). So a walk that refused every
+        redirect fails 26 cases across those seven, 27 counting this test's
+        own. It is kept as the direct,
+        single-purpose statement of the positive case: those six fail for
+        reasons of their own, and a reader asking "is a present Location
+        still followed?" should not have to infer it from a cap test.
+        """
+
+        def handler(request, index):
+            if index == 0:
+                return httpx.Response(
+                    307, headers={"location": "https://second.example.com/hook"}
+                )
+            return httpx.Response(200)
+
+        seen, outcome = self._post(monkeypatch, handler)
+
+        assert outcome.status_code == 200
+        assert [url for _, url in seen] == [
+            "http://start.example.com/hook",
+            "https://second.example.com/hook",
+        ]
+
+    @pytest.mark.parametrize("status", [307, 308])
+    @pytest.mark.parametrize(
+        "location",
+        ["https://loop.example.com/hook", "/loop"],
+        ids=["absolute", "relative"],
+    )
+    def test_method_keeping_cap_holds_for_both_location_flavours(
+        self, monkeypatch, location, status
+    ):
+        seen, outcome = self._post(
+            monkeypatch,
+            lambda request, index: httpx.Response(
+                status, headers={"location": location}
+            ),
+        )
+
+        assert isinstance(outcome, httpx.TooManyRedirects)
+        assert len(seen) == MAX_REDIRECTS
+        assert {method for method, _ in seen} == {"POST"}
+
+    @pytest.mark.parametrize("status", [301, 302, 303])
+    def test_method_switching_cap_counts_the_post_and_the_gets_together(
+        self, monkeypatch, status
+    ):
+        seen, outcome = self._post(
+            monkeypatch,
+            lambda request, index: httpx.Response(
+                status, headers={"location": "/loop"}
+            ),
+        )
+
+        methods = [method for method, _ in seen]
+        assert isinstance(outcome, httpx.TooManyRedirects)
+        assert methods == ["POST"] + ["GET"] * (MAX_REDIRECTS - 1)
+
+    @pytest.mark.parametrize("status", [301, 302, 303])
+    def test_get_hop_drops_the_body_headers(self, monkeypatch, status):
+        sent_headers = []
+
+        def handler(request, index):
+            sent_headers.append(request.headers)
+            if index == 0:
+                return httpx.Response(status, headers={"location": "/second"})
+            return httpx.Response(200)
+
+        seen, outcome = self._post(
+            monkeypatch,
+            handler,
+            headers={"Content-Type": "application/json", "X-Signature": "sig-1"},
+        )
+
+        assert outcome.status_code == 200
+        assert [method for method, _ in seen] == ["POST", "GET"]
+        assert sent_headers[0]["content-type"] == "application/json"
+        assert "content-type" not in sent_headers[1]
+        assert sent_headers[1]["x-signature"] == "sig-1"
+
+    def test_method_keeping_hop_after_a_switch_stays_get(self, monkeypatch):
+        def handler(request, index):
+            if index == 0:
+                return httpx.Response(303, headers={"location": "/second"})
+            if index == 1:
+                return httpx.Response(307, headers={"location": "/third"})
+            return httpx.Response(200)
+
+        seen, outcome = self._post(monkeypatch, handler)
+
+        assert outcome.status_code == 200
+        assert [method for method, _ in seen] == ["POST", "GET", "GET"]
+
+    @pytest.mark.parametrize("status", [400, 500])
+    @pytest.mark.parametrize("extra", [0, 1])
+    def test_terminal_body_is_bounded_incrementally(self, monkeypatch, status, extra):
+        cap = delivery.MAX_WEBHOOK_BODY_BYTES
+        assert cap == 256 * 1024
+        closed = []
+        read = []
+
+        class Body(httpx.SyncByteStream):
+            def __iter__(self):
+                for i in range(4):
+                    read.append(i)
+                    yield b"x" * (cap // 4)
+                if extra:
+                    read.append(4)
+                    yield b"x"
+                    pytest.fail("read beyond the terminal body cap")
+
+            def close(self):
+                closed.append(True)
+
+        _, outcome = self._post(
+            monkeypatch, lambda *a: httpx.Response(status, stream=Body())
+        )
+        assert closed == [True]
+        if extra:
+            assert isinstance(outcome, httpx.RequestError)
+            assert "response body exceeds" in str(outcome)
+            assert read == [0, 1, 2, 3, 4]
+        else:
+            assert outcome.status_code == status
+            assert outcome.text == "x" * cap
+            assert outcome.is_closed
+
+    @pytest.mark.parametrize("status", [302, 307])
+    def test_redirect_body_is_closed_without_reading(self, monkeypatch, status):
+        closed = []
+
+        class UnreadBody(httpx.SyncByteStream):
+            def __iter__(self):
+                pytest.fail("redirect bodies must not be read")
+                yield b""
+
+            def close(self):
+                closed.append(True)
+
+        def handler(request, index):
+            if index == 0:
+                return httpx.Response(
+                    status, headers={"location": "/next"}, stream=UnreadBody()
+                )
+            assert closed == [True]
+            return httpx.Response(500, content=b"terminal error")
+
+        seen, outcome = self._post(monkeypatch, handler)
+        assert len(seen) == 2
+        assert outcome.text == "terminal error"
+        assert closed == [True]
+
+    @pytest.mark.parametrize("status", [200, 500])
+    @pytest.mark.parametrize(
+        "encoding", ["gzip", "GZip", "deflate", "br", "gzip, identity"]
+    )
+    def test_encoded_terminal_body_is_unread_regardless_of_status(
+        self, monkeypatch, status, encoding
+    ):
+        """A 32 MiB gzip bomb is never read, including on accepted deliveries."""
+        import gzip
+
+        # This tiny wire payload expands to 128 times the response budget.
+        compressed = gzip.compress(b"x" * (delivery.MAX_WEBHOOK_BODY_BYTES * 128))
+        assert len(compressed) < delivery.MAX_WEBHOOK_BODY_BYTES
+        closed = []
+
+        class CompressedBody(httpx.SyncByteStream):
+            def __iter__(self):
+                pytest.fail("encoded terminal bodies must not be read")
+                yield compressed
+
+            def close(self):
+                closed.append(True)
+
+        _, outcome = self._post(
+            monkeypatch,
+            lambda *a: httpx.Response(
+                status, headers={"content-encoding": encoding}, stream=CompressedBody()
+            ),
+        )
+        if status == 200:
+            assert outcome.status_code == 200
+            assert outcome.is_closed
+        else:
+            assert isinstance(outcome, httpx.RequestError)
+            assert "Encoded webhook response" in str(outcome)
+        assert outcome.request.url.host == "start.example.com"
+        assert closed == [True]
+
+    @pytest.mark.parametrize("status", [200, 204, 299])
+    def test_success_body_is_closed_without_reading(self, monkeypatch, status):
+        """An accepted POST cannot fail due to an oversized or broken body."""
+        closed = []
+
+        class UnreadBody(httpx.SyncByteStream):
+            def __iter__(self):
+                pytest.fail("successful response bodies must not be read")
+                yield b"x" * (delivery.MAX_WEBHOOK_BODY_BYTES + 1)
+
+            def close(self):
+                closed.append(True)
+
+        _, outcome = self._post(
+            monkeypatch, lambda *a: httpx.Response(status, stream=UnreadBody())
+        )
+        assert outcome.status_code == status
+        assert outcome.is_closed
+        assert closed == [True]
+
+    @pytest.mark.parametrize("status", [200, 500])
+    def test_compressed_delivery_retries_only_non_success(self, monkeypatch, status):
+        """Compressed 200 is delivered once; compressed 500 exhausts retries unread."""
+        requests = []
+        closed = []
+
+        class UnreadBody(httpx.SyncByteStream):
+            def __iter__(self):
+                pytest.fail("compressed response bodies must not be read")
+                yield b""
+
+            def close(self):
+                closed.append(True)
+
+        def handler(request):
+            requests.append(request)
+            assert request.method == "POST"
+            assert request.headers["accept-encoding"] == "identity"
+            return httpx.Response(
+                status, headers={"content-encoding": "gzip"}, stream=UnreadBody()
+            )
+
+        monkeypatch.setattr(
+            delivery, "httpx", _StubHttpxModule(httpx.MockTransport(handler))
+        )
+        results = []
+        worker = DeliveryWorker(
+            max_attempts=2, backoff_times=[0], on_result=results.append
+        )
+        worker.enqueue(create_test_event(), "https://example.com/hook")
+        while worker.queue_size:
+            worker._deliver(worker._queue.get_nowait())
+
+        if status == 200:
+            assert [r.status for r in results] == [DeliveryStatus.SUCCESS]
+            assert results[0].status_code == 200
+            assert results[0].attempt == 1
+            assert len(requests) == 1
+        else:
+            assert [r.status for r in results] == [
+                DeliveryStatus.RETRYING,
+                DeliveryStatus.DROPPED,
+            ]
+            assert [r.attempt for r in results] == [1, 2]
+            assert all("Encoded webhook response" in r.error_message for r in results)
+            assert len(requests) == 2
+        assert len(closed) == len(requests)
+
+    def test_identity_terminal_encoding_is_accepted(self, monkeypatch):
+        _, outcome = self._post(
+            monkeypatch,
+            lambda *a: httpx.Response(
+                500, headers={"content-encoding": "identity"}, content=b"diagnostic"
+            ),
+        )
+        assert outcome.text == "diagnostic"
+        assert outcome.is_closed

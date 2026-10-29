@@ -4,13 +4,24 @@ import json
 import logging
 from dotenv import load_dotenv
 import inspect
-from backend.llm.llm_providers import create_provider, LLMProvider
+from backend.llm.llm_providers import (
+    create_provider,
+    LLMProvider,
+    tool_input_type_error,
+)
 from backend.config import config_loader
+from backend.core.storage_search import MATCH_MODES
 from backend.config.model_profiles import (
     create_provider_from_profile,
     resolve_profile_reference,
 )
 from backend.llm.language_policy import format_language_policy_for_prompt
+from backend.service.system_nodes import system_create_tool_definitions
+from backend.runtime.attachment_access import (
+    ATTACHMENT_TOOLS,
+    attachment_tool_allowed,
+    attachment_tool_refusal,
+)
 
 # Initialize logger
 logger = logging.getLogger(__name__)
@@ -415,6 +426,11 @@ TOOL USAGE GUIDELINES:
 - find_similar_nodes: For checking ONE node for duplicates
 - find_similar_nodes_batch: For checking MULTIPLE nodes at once - ALWAYS use this when extracting from documents
 - add_nodes: Only after user approval, with proper validation
+- create_agent, create_event_subscription, create_skill, create_active_knowledge_collection,
+  create_saved_view, create_collection_response: Use these dedicated tools for system
+  objects after user approval. Pass the type-specific fields inside config. create_agent
+  creates an enabled agent and its subscription together. create_saved_view persists
+  explicit node_ids and positions without a browser; save_view captures the current canvas.
 - update_node: For editing existing nodes (name, description, summary, tags)
 - delete_nodes: CAREFUL - max 10 nodes, requires confirmation=True
 - delete_edges: CAREFUL - max 50 edges, requires confirmation=True
@@ -509,7 +525,8 @@ Always be helpful, transparent, and data-driven in your responses while minimizi
 
 
 class ChatProcessor:
-    def __init__(self, tools_map: Dict[str, Callable]):
+    def __init__(self, tools_map: Dict[str, Callable], *, authorization_hook=None):
+        self._authorization_hook = authorization_hook
         # Auto-detect provider based on available API keys
         self.provider_type = self._detect_provider()
 
@@ -580,10 +597,10 @@ class ChatProcessor:
         In a more advanced setup, we could inspect the functions, but
         for now we want to ensure compatibility with the existing prompts.
         """
-        return [
+        return system_create_tool_definitions() + [
             {
                 "name": "search_graph",
-                "description": "Search for nodes in the graph based on text query. Matches against name, description, and summary.",
+                "description": "Search for nodes in the graph based on text query. Matches a node's name, description, summary, tags, subtypes, aliases and type label, for local and federated nodes alike. By default the whole query must occur verbatim, so a multi-word query that no node contains matches nothing lexically and at best returns semantic-fallback results; use match_mode='any_term' or semantic=true for such queries.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -609,6 +626,17 @@ class ChatProcessor:
                         "include_archived": {
                             "type": "boolean",
                             "description": "When false (default) archived nodes and edges are excluded. Set true to include archived items (e.g. to find something the user wants to restore).",
+                            "default": False,
+                        },
+                        "match_mode": {
+                            "type": "string",
+                            "enum": list(MATCH_MODES),
+                            "description": "How the query text is matched. 'substring' (default) requires the whole query verbatim. 'any_term' splits the query on whitespace and matches nodes containing ANY of the terms, each as a substring — pass distinctive terms, since a short or common one matches almost everything. Applies to local and federated results alike; semantic=true replaces it for local results only, since federated results are always matched lexically.",
+                            "default": "substring",
+                        },
+                        "semantic": {
+                            "type": "boolean",
+                            "description": "When true, rank results by embedding meaning instead of lexical matching — for conceptual or natural-language queries. Default false. A query other than '' or '*' that matches no local node of the requested types (archived nodes count only with include_archived) falls back to semantic ranking for local results. The check runs before tag, metadata and access filters, so a match those filters remove gets no fallback.",
                             "default": False,
                         },
                     },
@@ -1137,7 +1165,7 @@ class ChatProcessor:
         ]
 
     def _select_tool_definitions(
-        self, tool_allowlist: Optional[List[str]]
+        self, tool_allowlist: Optional[List[str]], attachment_access=None
     ) -> List[Dict]:
         """
         Return the tool definitions advertised to the LLM for this request.
@@ -1147,12 +1175,22 @@ class ChatProcessor:
         offered (unrestricted); when it is a non-empty list only tools whose
         name is in the list are advertised. This is the "hide from the LLM"
         layer — execution is independently gated in _handle_tool_use so a
-        disallowed tool is blocked even if the model calls it anyway.
+        disallowed tool is blocked even if the model calls it anyway. Attachment
+        tools additionally require the per-request grant resolver.
         """
-        if not tool_allowlist:
-            return self.tool_definitions
-        allowed = set(tool_allowlist)
-        return [t for t in self.tool_definitions if t.get("name") in allowed]
+        allowed = set(tool_allowlist) if tool_allowlist else None
+        return [
+            t
+            for t in self.tool_definitions
+            if (allowed is None or t.get("name") in allowed)
+            and (
+                t.get("name") not in ATTACHMENT_TOOLS
+                or attachment_tool_allowed(
+                    t.get("name"),
+                    attachment_access(t.get("name")) if attachment_access else "off",
+                )
+            )
+        ]
 
     def _resolve_llm_provider(
         self,
@@ -1214,6 +1252,8 @@ class ChatProcessor:
         tools_override: Dict[str, Callable] = None,
         visualization_context: str = None,
         tool_allowlist: Optional[List[str]] = None,
+        llm_provider: Optional[LLMProvider] = None,
+        attachment_access: Optional[Callable[[str], str]] = None,
     ) -> Dict:
         """
         Process a message history, call LLM, handle tools, return final response.
@@ -1240,13 +1280,25 @@ class ChatProcessor:
                 When set, only listed tools are advertised to the LLM and executed;
                 any other tool is blocked server-side. Mirrors the AIAgent
                 tool-permission model (used by the collection kiosk).
+            attachment_access: Resolver returning the current grant for an attachment
+                tool. Missing means no attachment access, independently of the allowlist.
+            llm_provider: Optional ready-made LLMProvider to use verbatim,
+                bypassing provider resolution entirely (api_key, provider and
+                model_profile_id are then unused). Used by the evaluation harness
+                (backend/evaluation), which must drive one exact provider/model
+                it was handed and must not inherit whatever LLM_PROVIDER or
+                model_profiles the host happens to have configured — otherwise
+                a measurement silently attributes one model's behaviour to
+                another. Not a request-level override surface: nothing reaches
+                this from an HTTP request.
         """
         try:
-            llm_provider, error = self._resolve_llm_provider(
-                api_key, provider, model_profile_id
-            )
-            if error:
-                return {"content": error, "toolUsed": None, "toolResult": None}
+            if llm_provider is None:
+                llm_provider, error = self._resolve_llm_provider(
+                    api_key, provider, model_profile_id
+                )
+                if error:
+                    return {"content": error, "toolUsed": None, "toolResult": None}
 
             # Build per-request system prompt:
             # 1. expert persona (extra_context) comes first — establishes who the model is
@@ -1268,7 +1320,9 @@ class ChatProcessor:
             # Tools advertised to the LLM: filtered by the per-request allowlist
             # (unrestricted when the allowlist is unset). Execution is gated
             # independently in _handle_tool_use.
-            active_tool_definitions = self._select_tool_definitions(tool_allowlist)
+            active_tool_definitions = self._select_tool_definitions(
+                tool_allowlist, attachment_access
+            )
 
             # First call to LLM
             response = llm_provider.create_completion(
@@ -1288,6 +1342,7 @@ class ChatProcessor:
                     tools_override=tools_override,
                     tool_allowlist=tool_allowlist,
                     active_tool_definitions=active_tool_definitions,
+                    attachment_access=attachment_access,
                 )
 
             # Just text response
@@ -1331,6 +1386,7 @@ class ChatProcessor:
         visualization_action=None,
         tool_allowlist: Optional[List[str]] = None,
         active_tool_definitions: List[Dict] = None,
+        attachment_access: Optional[Callable[[str], str]] = None,
     ) -> Dict:
         """Handle tool use with support for tool chaining and result aggregation.
 
@@ -1361,7 +1417,9 @@ class ChatProcessor:
             system_prompt if system_prompt is not None else self.system_prompt
         )
         if active_tool_definitions is None:
-            active_tool_definitions = self._select_tool_definitions(tool_allowlist)
+            active_tool_definitions = self._select_tool_definitions(
+                tool_allowlist, attachment_access
+            )
         effective_tools = {**self.tools_map, **(tools_override or {})}
 
         # Find ALL tool_use blocks (LLM can request multiple tools in parallel)
@@ -1416,6 +1474,23 @@ class ChatProcessor:
                             )
                         },
                     }
+                )
+                continue
+
+            if tool_name in ATTACHMENT_TOOLS:
+                refused = attachment_tool_refusal(
+                    tool_name,
+                    attachment_access(tool_name) if attachment_access else "off",
+                    self._authorization_hook,
+                )
+                if refused is not None:
+                    tool_results.append({"tool_use_id": tool_id, "result": refused})
+                    continue
+
+            input_error = tool_input_type_error(tool_name, tool_input)
+            if input_error is not None:
+                tool_results.append(
+                    {"tool_use_id": tool_id, "result": {"error": input_error}}
                 )
                 continue
 
@@ -1570,6 +1645,7 @@ class ChatProcessor:
                 visualization_action=visualization_action,
                 tool_allowlist=tool_allowlist,
                 active_tool_definitions=active_tool_definitions,
+                attachment_access=attachment_access,
             )
 
         # Extract text from response (handle multiple text blocks)

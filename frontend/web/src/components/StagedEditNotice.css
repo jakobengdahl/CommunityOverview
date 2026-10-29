@@ -1,0 +1,9 @@
+.staged-edit-notice {
+  margin: 0 20px 8px;
+  padding: 6px 10px;
+  border: 1px dashed #f0b429;
+  border-radius: 6px;
+  background: #4a3500;
+  color: #ffe8b0;
+  font-size: 12px;
+}

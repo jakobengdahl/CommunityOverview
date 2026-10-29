@@ -29,7 +29,14 @@ dist/
 *~
 
 # Claude Code
-.claude/
+# Claude Code's per-user state stays local at any depth; the shared hooks and
+# project settings at the root, which bind every session in this repo, are
+# tracked.
+**/.claude/*
+!/.claude/settings.json
+!/.claude/hooks/
+!/.claude/skills/
+**/.claude/settings.local.json
 
 # OS
 .DS_Store
@@ -49,6 +56,8 @@ config/*/.env.*.local
 # Test coverage
 coverage/
 .coverage
+# Per-process data files, left behind only when a run dies before combining.
+.coverage.*
 htmlcov/
 
 # Docker
@@ -71,6 +80,19 @@ data/active/sessions/
 # Stale runtime graph data (must not be tracked; see STRUCTURE_REVIEW.md C1)
 /graph.json
 /backend/graph.json
+
+# Mutation history and the write journal - the same shape as the embedding
+# sidecar below: GraphStorage writes them next to whichever graph file is in
+# use, so match them by name rather than by any one location. The data/active/
+# copies above stay for clarity; these cover the repo root, which is where a
+# default relative GRAPH_FILE lands and therefore where `pytest backend/ -q`
+# leaves them.
+*.history.ndjson
+*.journal.ndjson
+
+# Node attachment store - user files, written beside whichever graph file is
+# in use (ADR 0008), so match it by name too.
+*.attachments/
 
 # Embedding sidecar - derived data, written next to whichever graph file is in
 # use, so match it by name rather than by any one of those locations.

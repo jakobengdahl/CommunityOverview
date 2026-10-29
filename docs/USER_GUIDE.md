@@ -28,6 +28,7 @@ shared knowledge graphs. This guide covers all user-facing features.
 5. [Session menu and settings](#5-session-menu-and-settings)
    - [Collaborating in a session](#51-collaborating-in-a-session)
    - [Recent activity (audit log)](#52-recent-activity-audit-log)
+   - [Staged sessions: review before it reaches the graph](#53-staged-sessions-review-before-it-reaches-the-graph)
 6. [Federation — searching across multiple graphs](#6-federation--searching-across-multiple-graphs)
 7. [Interactive guides](#7-interactive-guides)
 8. [Connecting external AI tools via MCP](#8-connecting-external-ai-tools-via-mcp)
@@ -35,6 +36,7 @@ shared knowledge graphs. This guide covers all user-facing features.
    - [Connecting](#82-connecting)
    - [Live visualization control via session ID](#83-live-visualization-control-via-session-id)
    - [External pulse triggers](#84-external-pulse-triggers)
+   - [Interactive graph inside the chat](#85-interactive-graph-inside-the-chat)
 9. [On a phone](#9-on-a-phone)
 
 ---
@@ -107,6 +109,20 @@ Edges without any appearance settings keep the default look (thin grey line, no 
 fields are editable. The detail dialog also has a **History** tab showing the
 read-only change log for that node (see [5.2](#52-recent-activity-audit-log)).
 
+**Attachments:** For node types the schema marks with `allows_attachments: true`
+(see [PROFILES.md](PROFILES.md)), the **Details** tab of the detail dialog has an
+**Attachments** section. **Attach file** uploads one file; the hint next to the
+button shows the server's limits (size per file, and how many files and bytes one
+node may hold). A file over a limit is refused before it is sent, and a file the
+server refuses — for example a type it does not accept — shows the reason below
+the list. Each row shows the file's name, size and upload time; click the name to
+download it. **Delete** asks for confirmation in the row before removing the file.
+Files already attached stay listed (and downloadable and deletable) even if the
+node type later stops accepting new ones. Nodes shown from another graph through
+federation have no attachments section.
+
+![Attachments section in the node detail dialog](images/node-attachments.png)
+
 **Delete node:** Right-click → **Delete**, or select a node and press **Delete**.
 Deletions require confirmation. A single operation can remove up to 10 nodes at once.
 
@@ -131,6 +147,9 @@ Right-clicking a node opens the context menu:
   node (only offered when it has any), to de-emphasise its relationships without hiding
   the node or the edges' other endpoints.
 - **Expand** — load all nodes directly connected to this node into the canvas
+- **Open in source graph** — only on a node that belongs to a remote graph: open that
+  node in the graph that owns it, in a new tab, so the session you are in stays as it is.
+  See section 6 for what happens when the graph is unavailable or you lack access.
 - **Select all nodes of the same type** — select every node of this node's type across the
   whole visualization, including ones scrolled outside the current viewport
 - **Select related nodes** — select this node together with every node it is directly
@@ -164,8 +183,13 @@ Restore selected**, **Dim incident edges / Restore incident edges** (every conne
 touching any of the selected nodes, de-duplicated), Delete all. "Select
 all nodes of the same type" extends the selection to every node whose type matches any
 type already in the selection. **Organize** opens a submenu of arrangements — Auto-tidy,
-Cluster, List horizontally, List vertically, or Arrange as tree — keeping the nodes
-centred where they already sit. **Auto-tidy** is the one-click option: it picks a sensible
+Cluster, List horizontally, List vertically, Arrange as tree, or **Sort by date**
+(horizontal or vertical) — keeping the nodes centred where they already sit. **Sort by
+date** places the nodes earliest first, left to right or top to bottom; any field whose
+value is an ISO-8601 date (`2026-10-21` or `2026-10-21T08:30`) counts, and when the
+selection shares more than one such field each gets its own pair of entries. Nodes
+without a usable date follow the dated ones, ties keep name order, and the entries are
+disabled until two selected nodes carry a date. **Auto-tidy** is the one-click option: it picks a sensible
 structure for you — a tree when the selected nodes are connected in a hierarchy,
 otherwise a per-type grouping — and always lays them out overlap-free. The same
 arrangements are available from the keyboard: press **Ctrl/Cmd+O** with a
@@ -251,6 +275,66 @@ an empty area of the canvas and choosing one of:
   close to a node or another annotation and it snaps onto it (magnetic), staying attached
   as that target moves. Arrows do not attach to other arrows.
 
+**Reference tiles — links to sessions, web pages and supporting material.** A reference
+tile is a small card you put on the canvas that points at something a reader should be
+able to get to from here: another session, an external web page, or a piece of supporting
+material already in the graph. It is how an overview board leads into the focused boards
+that sit under it.
+
+A tile is deliberately not shaped like a graph node. It is a squared-off card with a
+coloured edge down its left side, a square badge showing what kind of thing it points at
+(a board symbol for a session, a link symbol for a web page, a document symbol for
+supporting material), and one or two lines of text — so you can tell at a glance that it
+is a signpost rather than part of the graph.
+
+**To add one, paste a web address onto the canvas.** Copy an `http` or `https` address,
+click an empty part of the canvas and press Ctrl+V (Cmd+V on a Mac). A tile appears in
+the middle of the view, showing the address. Rename it to something readable from its
+right-click menu's **Target** section (**Rename**). Pasting anything that is not, on its
+own, a web address — a sentence, a note to yourself, an address with an unusual prefix —
+does nothing at all, so copying ordinary text will not litter your board.
+
+Tiles pointing at a **session** or at **supporting material** are added for you by an
+assistant or an agent rather than by hand, because each needs an exact identifier. Ask
+for one in chat ("put a link to the programme overview board on this canvas") and it will
+search for the right session and place the tile.
+
+**To follow a tile, double-click it.** A session tile switches you to that board; a web
+page opens in a new browser tab; supporting material is fetched, added to the canvas and
+brought into focus. If you would rather not double-click, select the tile and use the
+small round **↗** button that appears in its corner, or pick **Open target** from its
+right-click menu — both do exactly the same thing, and both work from the keyboard.
+
+**A tile that cannot be followed says so** — though *when* it says so depends on what is
+wrong with it.
+
+Some problems are visible without going anywhere: an address the app will not open, or a
+session link that is not a valid session id. Those tiles turn dashed and grey straight
+away, their second line tells you why ("Unsafe link — not opened", "Target not
+available"), the **↗** button disappears, and double-clicking does nothing. A screen
+reader says such a tile is broken, so this is never carried by the colour alone.
+
+A session or a piece of supporting material that *has since been deleted* is different:
+nothing on the canvas can tell until it is actually looked up, so the tile stays live and
+the problem is reported when you follow it. You get an error message rather than a dead
+tile. For supporting material you stay where you are; for a session you are taken to that
+board, which opens empty, and told that the link could not be found.
+For a web page, the new browser tab handles an unavailable page; the app does not check
+whether the website exists before opening it.
+
+Either way the tile stays put, so you can rename or delete it rather than wondering where
+it went — and if it is pointing at the wrong place rather than a missing one, ask an
+assistant to repoint it, the same way session and supporting-material tiles are created.
+
+The app only ever opens ordinary `http` and `https` web addresses from a tile. Anything
+else is refused when the tile is created, refused again when storing it, and refused a
+third time if it somehow reaches the canvas — which is why a tile with an unusual address
+shows as broken instead of opening.
+
+Everything else works the way the other annotations do: drag to move, drag a corner
+handle (or use the Width/Height fields) to resize, and the same **Layer**, **Opacity**,
+**Duplicate** and **Delete** controls in the right-click menu.
+
 Annotations are part of the session, not the knowledge graph: they are stored with the
 session (so everyone sharing the session sees them) and never change the underlying node
 and edge data. Select an annotation and press **Delete** to remove it.
@@ -272,7 +356,8 @@ A freshly created annotation (from the toolbox, the right-click "add" menu, or a
 drag-and-drop) is selected and focused immediately, so its Edit button is one Tab away
 without having to click or tap to find it first.
 
-For **Text**, **Shape**, **Icon**, **Vote dot** and **Image** annotations the property
+For **Text**, **Shape**, **Icon**, **Vote dot**, **Heat map**, **Image** and **Reference**
+annotations the property
 menu is a compact row of small icons rather than a tall list of labelled sections. Each
 icon is one property — colour, fill, border, text alignment, text size, font, shape,
 rotation, opacity, size, layer order — and shows what that property is currently set to,
@@ -289,7 +374,8 @@ on.
 Some kinds' menus offer a few more non-drag controls, useful with a keyboard or on a
 device with no fine pointer:
 
-- **Width/Height fields** — Note, Group, Shape and Image boxes (the kinds with a resize
+- **Width/Height fields** — Note, Group, Shape, Image, Heat map and Reference boxes (the
+  kinds with a resize
   handle) also get a numeric width and height in their menu, with an **Apply** button, so
   resizing doesn't require dragging a corner handle precisely.
 - **Attach to…** — Label, Text and Icon annotations (the kinds that can snap onto a node
@@ -309,7 +395,7 @@ device with no fine pointer:
 
 A collapsible toolbox is also anchored to the bottom of the canvas. Click **Add
 annotation** to expand it, then pick a tool: **Select**, **Note**, **Text**, **Label**, a
-**Shape**, **Icon**, **Vote dot**, **Image**, **Freehand**, or **Eraser**. Each is a
+**Shape**, **Icon**, **Vote dot**, **Heat map**, **Image**, **Freehand**, or **Eraser**. Each is a
 single icon with no caption — hover one (or read its name with a screen reader) to see
 what it does. The toolbox is hidden while a focus view is active, since annotations are
 set aside during focus (see [9. On a phone](#9-on-a-phone) for how focus view works).
@@ -322,12 +408,29 @@ the way back to ordinary clicking, dragging and marquee-selection; pressing Esca
 same. You can still drag a tool straight from the toolbox onto the canvas to place a single
 object without arming anything.
 
-**Notes and shapes can be drawn to size.** Instead of pressing and releasing in one spot,
+**Notes, shapes and heat-map circles can be drawn to size.** Instead of pressing and releasing in one spot,
 press and drag: an outline follows the pointer showing the box you are about to get, and
 releasing creates it at that size. Dragging left from where you started mirrors the shape,
 and dragging upwards flips it — which is how a triangle or a process arrow is aimed without
 rotating it afterwards. The other kinds have a fixed or content-driven size, so a drag
 places them exactly like a press does.
+
+The **Heat map** tool places a soft red circle for marking where something is
+concentrated — activity, risk, attention. Each circle has an **intensity** from 0 to 10:
+0 is invisible and 10 is the strongest red. New circles start at 5, behind the graph's
+nodes, so the nodes stay readable and clickable on top of the heat. Circles fade out
+towards their edge, so where several overlap or sit close together they merge into one
+continuous heat field that gets redder the more of them cover a spot. The result is the
+same whichever circle is on top. To change the level, open the circle's Edit menu, choose
+**Intensity** (🔥) and pick a number from 0 to 10. While a circle is selected it shows
+its level as a number in the middle. A screen reader reads it as, for example, "Heat-map
+circle, intensity 7 of 10". A circle at intensity 0 draws nothing, but shows a faint
+dashed outline while you hover over it or have it selected, so you can still find and
+move it. Circles resize from their corner handles and stay round. When you draw one by
+dragging, it grows from where you pressed in the direction you drag. Circles have no
+colour, opacity or rotation settings: the intensity alone decides how they look.
+
+![A heat map built from overlapping circles](images/annotation-heatmap.png)
 
 The **Vote dot** entry is a slot like Shape and Icon, except the choice is the colour: the
 button shows the colour it will place, and its fold-out picker offers the full palette.
@@ -357,6 +460,14 @@ being drawn, and a second finger touching down mid-stroke is ignored (with a bri
 rather than starting a second line. Without pressure data (a mouse, a finger, or a
 pressure-less pen) the stroke draws at a constant width instead. Right-click a finished
 stroke for its own colour, stroke-width, smoothing and opacity controls.
+
+To choose those options *before* drawing, click the small arrow on the **Freehand** button
+(or right-click the button) and pick a colour, stroke width, smoothing level and opacity;
+the choice applies to the strokes you draw next and is remembered in your browser. Higher
+smoothing averages out hand tremor, so 100% draws a clearly smoother line than 0%, which
+keeps every sampled point as drawn. On a pressure-sensitive stylus a light touch draws a
+fine line and a hard press a much thicker one (about twenty-three times thicker at every offered width); a medium
+press draws at the chosen width, which is also what a mouse produces.
 
 **Image** annotations can be added three ways: pick **Image** in the toolbox to choose a
 file (PNG, JPEG or WebP); paste an image from your clipboard anywhere on the canvas
@@ -403,8 +514,10 @@ images all also have an **Opacity** row in their menu, offering four levels (30%
 hiding it entirely. Freehand strokes have had this since drawing shipped; every other
 kind gets it from the same row now too.
 
-Notes, labels, arrows, freehand strokes, text, shapes, icons, voting dots and
-images all have a **Layer** row in their right-click menu, just above Delete. **Bring to
+Notes, labels, arrows, freehand strokes, text, shapes, icons, voting dots,
+heat-map circles, images and reference tiles all have a **Layer** row in their right-click
+menu, just
+above Delete. **Bring to
 front** puts the annotation on top of the other annotations and **Send to back** puts it
 underneath, so you can pull a sticky note out from under a transparent-fill shape or tuck
 a shape behind a label. The buttons do nothing once an annotation is already alone at the
@@ -563,6 +676,17 @@ Ask the assistant to add content:
 
 Write operations go through the same validation as the UI — the node type must exist
 in the current profile's schema.
+
+You can also ask the assistant to create an Agent, EventSubscription, Skill,
+ActiveKnowledgeCollection, SavedView, or CollectionResponse. Dedicated tools
+validate their configuration and create the required links. An Agent is enabled
+by default and comes with its own subscription. A collection response names its
+collection by ID. These tools are available in ordinary graph chat; collection
+visitors use the collection's restricted tools and bound response-saving tool.
+
+Agent chains stop at eight agent hops. An agent also pauses after receiving more
+than 30 events in 60 seconds. The reason appears as a failed run in agent history;
+edit the agent configuration or disable and enable it to resume.
 
 ### 4.3 Node proposals and duplicate detection
 
@@ -746,6 +870,21 @@ recognisable name under **Settings → Your presence → Display name**; it is s
 to everyone in the roster and on your selection badges. The name is stored in
 your browser and takes effect the next time you open or switch session.
 
+**Bring everyone here.** When others are in the session, a broadcast button
+appears in the top bar next to the presence dots (on a computer; the phone
+layout has no presence dots, so the button is not offered there, but a phone
+is moved and gets the notice like everyone else). Click **Bring everyone here**
+to move everyone's view to exactly what you are looking at — on any screen size,
+they see the same region of the canvas. Their camera glides there (or jumps, if
+their system is set to reduce motion) and a notice tells them who brought them;
+**Return** in that notice takes them back to where they were. Only people
+connected right now are moved: someone who joins afterwards keeps their own
+view, and nothing about the summon is saved in the session. People in other
+sessions are never affected.
+
+![Summon notice with Return](images/session-summon-notice.png)
+*A summoned collaborator sees who brought them here, with a Return action.*
+
 **Reconnecting after a dropped connection.** If your connection drops — a
 network blip, closing your laptop, a poor signal — any edits you made while
 offline are kept locally and delivered once you reconnect; they are not lost.
@@ -763,6 +902,42 @@ changes — with undo) and **Graph** (a read-only log of
 everything that has changed in the graph itself, newest first). They are
 deliberately separate: session activity lives with the session and disappears
 with it; graph history is the permanent audit trail.
+
+**Operator maintenance: replacing actor attribution.**
+`ActorErasureService.erase_actor(actor_id, replacement_token)` in
+`backend/service/actor_erasure.py` replaces matching structured actor identifiers
+in mutation history, nested run-history attribution, proposal `decided_by`, and
+session activity (including sessions not currently loaded). Supply the optional
+stores to its constructor. An absent store returns zero; PostgreSQL graph storage
+has no mutation-history sidecar, so omit that store. Graph nodes and edges are
+never written. Record IDs, timestamps, decision status and unrelated actors are
+preserved. This replaces attribution, including actor/delegation objects,
+staging actors, client IDs and matching `agent:<id>` origins; it does not search
+free text or erase graph content.
+
+Stop application processes, workers and other writers before maintenance, and
+use a non-personal replacement token that does not contain the original actor
+identifier. The CLI operates on explicitly selected local stores:
+
+```bash
+python -m backend.service.actor_erasure \
+  --actor-id "$ACTOR_ID" --replacement-token erased \
+  --history-path /path/to/graph.history.ndjson \
+  --run-history-db /path/to/runs.db \
+  --governance-db /path/to/proposals.db \
+  --sessions-dir /path/to/sessions
+```
+
+The database flags default to `AGENTS_RUN_HISTORY_DB` and
+`AGENTS_GOVERNANCE_DB`. Omitted or nonexistent stores are clean no-ops and are
+not created. Output contains only per-store changed-record `counts` and
+`failed_stores`, never actor identifiers, replacement tokens or source data.
+Exit status is 0 on success, 1 for store failures and 2 for invocation errors.
+A failed store has a `null` count because partial changes may have happened;
+other stores are still processed. Repair any reported store failure and rerun
+with the same inputs: already replaced records count as zero. Damaged history
+or session records are reported as failures. The operation does not coordinate
+backups, external copies or future writes.
 
 ![Recent activity panel](images/recent-activity.png)
 *The activity panel's Session tab, with a readable description per action and an
@@ -819,6 +994,12 @@ no activity.
 The settings that previously lived directly in the app menu are now in the
 **Settings** dialog, opened from the bottom of the session menu.
 
+#### Version
+
+The bottom of the dialog shows the running application version, followed by the
+short build commit in parentheses when the image was built with one; it reads
+"unknown" if the build carries no version.
+
 #### Graph statistics
 
 The top of the dialog shows the total number of nodes and edges currently in the graph,
@@ -870,6 +1051,92 @@ UI language.
 
 ---
 
+### 5.3 Staged sessions: review before it reaches the graph
+
+Normally every edit you make lands in the graph at once. Where the
+installation has staged sessions turned on, a session can instead **stage** its
+edits: they are held in the session, everyone in the session sees them, and
+nobody else does — until someone reviews them and **merges** them into the
+graph, or **discards** them.
+
+**Starting one.** **Start new session** in the session menu then asks how the
+session should write: **Direct session** (edits go straight into the graph, as
+before) or **Staged session**. A direct session can also be switched to staged
+with **Switch to staged…** in the small *Direct* label at the bottom of the
+canvas. The switch applies to everyone in the session and cannot be undone: a
+staged session never goes back to direct editing. To edit the graph directly
+again, start a new session. Where the installation stages by default, the
+session the app opens with, and the one it moves you to after a session is
+deleted, is a staged session too (unless you are not allowed to stage; then
+it is direct, and says so). Opening a link to a session always joins that
+session as it is; any other link that opens something (a saved view, a node,
+a collection form) opens in a direct session.
+
+**Seeing what is staged.** A staged session shows a dashed amber **Staged
+session** bar at the bottom of the canvas (at the top on a phone) with the
+number of pending changes. Nodes changed in the session are drawn with a dashed
+amber border and a badge — *Staged: new*, *Staged: changed*, *Staged: deleted in
+graph* (the graph no longer has the node your change applies to) or *Staged:
+deleted* — and staged connections are drawn dashed. The create and edit dialogs
+say that the edit is held for review. Changes made by others in the same
+session appear for you as they happen.
+
+![Staged session bar and markers](images/staged-session.png)
+*A staged session: the bar with its pending count, and a node changed in the
+session.*
+
+**Reviewing.** **Review changes** opens the list of staged changes. For each
+one it shows what kind of change it is, its status, and per field the value
+**Before** (when it was first staged), in **This session**, and in the **Graph
+now** — so you can see when someone changed the same thing in the graph
+meanwhile. The status tells you whether it can go in as it is:
+
+| Status | Meaning |
+|---|---|
+| Ready | Can be merged as it is |
+| Conflict | The graph changed the same field since, to something else (or, for a delete, the node gained connections since) |
+| Gone from graph | The graph no longer holds the node or connection the change applies to |
+| Id taken | The graph now holds something with the id of a node created here |
+| Missing endpoint | A connection would point at a node that is not in the graph after the merge |
+
+Anything that is not Ready needs a decision before it can be merged: **Use this
+session's version**, **Keep the graph's version** (drops your change), **Create
+as a new node** (keeps the graph's node and adds yours beside it), or, for a
+conflicting change, **Enter the values** yourself.
+
+![Staged changes review](images/staged-review.png)
+*The review: a change ready to merge, and a conflict with the graph's newer
+value shown beside yours.*
+
+**Merging and discarding.** Tick the changes to merge or discard. Ticking a
+connection also ticks the new nodes it needs; unticking a node unticks what
+depends on it. **Merge** applies the ticked changes to the graph as one step —
+all of them or none. If any of them changed after you opened the review (someone
+staged over it, or the graph moved on), nothing is merged and the review asks
+you to look again: a change that is not as you reviewed it loses its tick, and
+a decision you made on it is cleared, until you look at it again. If the
+connection drops mid-merge, merging again is safe and never applies the changes
+twice. **Discard** drops the ticked changes from the session after you confirm;
+the graph is not touched, and a change staged over since you reviewed it is not
+discarded. If the answer to a discard is lost, the review reads the list again
+and says whether the changes are still held in the session.
+
+Opening a link to a session shows *Loading how this session writes* until
+the session has loaded, and edits wait until then: the session may be staged.
+The create and edit dialogs say meanwhile that the session's mode is being
+checked. **Retry** loads it again if that failed. File attachments are not staged: an
+attachment added to a node in a staged session is stored at once.
+
+**Deleting a staged session** drops its unmerged changes with it, and the
+delete confirmation says so. Everyone who was in it — you included — lands in a
+new, empty staged session, so nobody who was staging suddenly edits the graph
+directly. A link to a staged session that was deleted opens empty; once the
+server refuses its live connection or a rename, you are moved to a new session
+with a notice, since the canvas can no longer be saved to the deleted one. If
+the next session is refused the same way before it ever connects, you are not
+moved again: a notice says that session cannot be saved either, and its edits
+are refused rather than saved to the graph.
+
 ## 6. Federation — searching across multiple graphs
 
 When the application is connected to one or more remote graphs, a **depth selector**
@@ -887,6 +1154,30 @@ appears next to the minimap in the lower-right corner of the canvas.
 
 Changing the depth only affects your current search and view — it does not change
 what is permanently stored in the local graph.
+
+**Opening a result in the graph that owns it:** a search result from a remote graph
+carries a small "open in source graph" button at the right-hand end of its row, and the
+same action appears as **Open in source graph** when you right-click such a node on the
+canvas. Both open the node in its own graph in a new tab, so the session you were in
+stays open behind it. Going from a search result also carries your current search text
+across; going from the canvas does not, because there is no search in progress there.
+
+Clicking the result itself is unchanged — it still brings the node onto your current
+canvas. Double-clicking a node still opens its detail dialog. Teleport is always an
+explicit, separate action.
+
+Four cases are handled explicitly:
+
+| What you see | What it means |
+|---|---|
+| A confirmation before the tab opens | The source graph runs on a separate installation, so you are leaving this one |
+| "You do not have access to this node's source graph" | Your access does not include that graph. Nothing about it is revealed |
+| "&lt;Graph&gt; cannot be reached right now" | The graph is unknown, offline, disabled, or has no usable address for its interface |
+| "This node is already in the current graph" | The node is local, so there is nowhere to travel to |
+
+Arriving from a teleport, the app focuses the node named in the link, tells you which
+graph you came from, and — when the link carries search text — puts it back in the search
+box.
 
 **Node adoption:** If you want to permanently link a local node to an entity
 from a remote graph, right-click the federated node and choose **Adopt** (if available).
@@ -931,12 +1222,30 @@ interface.
 | `get_related_nodes` | Get nodes connected to a given node |
 | `find_similar_nodes` | Find nodes with similar names/descriptions |
 | `add_nodes` | Add new nodes and edges |
+| `create_agent` | Create an enabled Agent with its internal subscription |
+| `create_event_subscription` | Create a subscription for a public HTTP(S) webhook |
+| `create_skill` | Create reusable instructions with content and when-to-use guidance |
+| `create_active_knowledge_collection` | Create a collection with a unique kiosk short name |
+| `create_saved_view` | Save explicit node IDs and positions without needing a browser |
+| `create_collection_response` | Store answers linked to a collection by ID |
 | `update_node` | Update node properties |
 | `delete_nodes` | Delete nodes by ID |
 | `get_graph_stats` | Get summary statistics about the graph |
-| `save_view` | Save a named canvas view |
+| `preview_graph_merge` | Preview what merging a small graph document into the graph would add, overwrite, skip or reject — writes nothing (see [DATA_MANAGEMENT.md](DATA_MANAGEMENT.md#previewing-a-merge-import)) |
+| `save_view` | Ask a connected frontend to capture and save its canvas |
 | `get_capabilities` | Discover what the server supports |
 | `connect_to_visualization_session` | Check that a session ID resolves, and whether a client is connected to it |
+| `summon_session_viewport` | Move everyone connected to a session to one region of the canvas — given as bounds or as a set of node ids — the same as **Bring everyone here** |
+| `show_graph_widget` | Show matching nodes as an interactive graph inside the chat (see [8.5](#85-interactive-graph-inside-the-chat)) |
+
+Each dedicated create tool takes a `config` object. For example,
+`create_skill(config={"name": "Review", "content": "Check consistency.",
+"when_to_use": "When reviewing graph changes"})` creates a usable Skill.
+For a headless saved view, pass `config={"name": "Overview", "node_ids": ["node-id"],
+"positions": {"node-id": {"x": 0, "y": 0}}}` to `create_saved_view`; omitted
+positions receive a default layout. These writes use the UI's create authorization
+path and respect a bound session's staged write mode. Their schemas describe the
+required fields; invalid configurations are rejected before any nodes are added.
 
 ### 8.2 Connecting
 
@@ -1032,6 +1341,20 @@ session, so a trigger URL stops working once the session ends. If your system is
 set to **reduce motion**, a triggered node shows a static highlight instead of an
 animation.
 
+### 8.5 Interactive graph inside the chat
+
+Chat clients that support interactive MCP UI (the MCP Apps standard, implemented
+by Claude and ChatGPT) can show the graph directly in the conversation. Ask the
+assistant to *show* or *visualize* something — e.g. *"Show me the actors working
+on data strategies as a graph"* — and it calls `show_graph_widget`. The client
+renders a small graph canvas in the chat with the matching nodes and their
+connections. In the canvas you can search again and expand a node's neighbours;
+those calls go through the same MCP connection, so they see exactly what your
+account may see.
+
+Clients without interactive UI support get the same nodes and edges as a normal
+search result.
+
 ---
 
 ## 9. On a phone
@@ -1049,8 +1372,8 @@ bottom navigation bar replaces the toolbar and the hamburger menu:
 | **Search** | Opens the graph search in a sheet that slides up from the bottom |
 | **Create** | Opens the node-type picker in the same bottom sheet, for adding a
 graph node (an Actor, Initiative, and so on) |
-| **Annotate** | Opens the annotation toolbox — notes, text, labels, frames,
-shapes, icons, vote dots, images and freehand drawing — in its own bottom
+| **Annotate** | Opens the annotation toolbox — notes, text, labels, shapes,
+icons, vote dots, heat maps, images and freehand drawing — in its own bottom
 sheet. Kept as a separate slot from **Create** on purpose: an annotation is a
 mark on the canvas, not a graph node, and the two creation flows stay visually
 and behaviorally distinct even though both live behind the same style of
@@ -1149,6 +1472,7 @@ Screenshots for this guide are saved to `docs/images/` in PNG format.
 | `create-agent.png` | ✓ | Create Agent dialog with all configuration sections |
 | `skills.png` | ✓ | Chat panel bottom showing active skill and selected nodes |
 | `mcp-session-control.png` | ✓ | External AI (ChatGPT) controlling the canvas via session ID |
+| `session-summon-notice.png` | pending | Summoned collaborator's canvas with the "… brought you here" notice and its Return button; top bar showing the Bring everyone here button |
 | `federation-depth.png` | pending | Canvas depth selector (requires federation-enabled instance) |
 | `mobile-canvas-controls.png` | pending | Phone viewport with the compact zoom/fit/focus pill in the bottom-right corner |
 | `mobile-focus-view.png` | pending | Phone viewport in focus view — one node ringed by its direct neighbours |
@@ -1157,3 +1481,7 @@ Screenshots for this guide are saved to `docs/images/` in PNG format.
 | `mobile-annotate-sheet.png` | pending | Phone viewport with the Annotate bottom sheet open, showing the expanded annotation toolbox grid |
 | `mobile-session-menu.png` | pending | Phone viewport with the session menu open as a full-width overlay and scrim |
 | `metamodel-explorer.png` | pending | Metamodel explorer network view with a node type selected and its detail panel open |
+| `annotation-reference-tiles.png` | pending | Canvas with reference tiles for a session, a web page and supporting material, plus one in its broken state |
+| `staged-session.png` | pending | Canvas in a staged session: the dashed Staged session bar with its pending count, and a node with a dashed amber border and a "Staged: changed" badge |
+| `staged-review.png` | pending | Staged changes review with one Ready change and one Conflict showing Before / This session / Graph now values and a resolution chosen |
+| `node-attachments.png` | pending | Node detail dialog, Details tab: Attachments section with two files, the Attach file button and the limits hint |

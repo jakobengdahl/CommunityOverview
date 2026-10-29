@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@react-three/fiber": "^8.17.10",
@@ -19,6 +20,7 @@
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.0",
+    "@vitest/coverage-v8": "1.6.1",
     "vite": "^5.2.0",
     "vitest": "^1.4.0"
   }

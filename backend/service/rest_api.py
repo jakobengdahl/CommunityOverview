@@ -20,14 +20,44 @@ Usage:
 import asyncio
 import json
 import logging
-from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, HTTPException, Query, Body, Request, Path
+import threading
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    BinaryIO,
+    Callable,
+    List,
+    Literal,
+    Optional,
+    Dict,
+    Any,
+    Union,
+)
+from urllib.parse import quote
+from fastapi import (
+    APIRouter,
+    File,
+    HTTPException,
+    Query,
+    Body,
+    Request,
+    Path,
+    UploadFile,
+)
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, field_validator
+from fastapi.responses import Response, StreamingResponse
+from starlette.concurrency import run_in_threadpool
+from starlette.types import Receive, Scope, Send
+from pydantic import BaseModel, Field, RootModel, field_validator
 from pydantic import ValidationError as PydanticValidationError
 
-from backend.config.config_loader import RestInterfaceConfig, get_rest_interfaces
+from backend.config.config_loader import (
+    RestInterfaceConfig,
+    get_public_base_url,
+    get_rest_interfaces,
+)
+from backend.core.attachment_store import copy_stream
+from backend.core.attachment_types import TEXT_TYPES
 from backend.core.image_ingest import (
     DEFAULT_MAX_SOURCE_IMAGE_BYTES,
     ImageFetchError,
@@ -47,7 +77,13 @@ from backend.core.session_annotations import (
 from backend.core.storage_search import MATCH_MODE_SUBSTRING, validate_match_mode
 from backend.runtime.authorization import use_request_authorization
 
+from . import attachments as attachment_ops
+from .json_response import GraphJSONRoute
+from .mutations import VALIDATION_ERROR_CODE
 from .service import GraphService
+
+if TYPE_CHECKING:
+    from backend.agents.execution import ExecutionStore
 
 logger = logging.getLogger(__name__)
 
@@ -112,8 +148,11 @@ class SearchRequest(BaseModel):
         False,
         description=(
             "When true, rank results by embedding meaning instead of lexical "
-            "substring matching. Lexical search still auto-falls back to semantic "
-            "ranking when it returns zero results."
+            "substring matching. A query other than '' or '*' that matches no "
+            "local node of the requested types (archived nodes count only with "
+            "include_archived) falls back to semantic ranking for local results. "
+            "The check runs before tag, metadata and access filters, so a match "
+            "those filters remove gets no fallback."
         ),
     )
     match_mode: str = Field(
@@ -122,7 +161,9 @@ class SearchRequest(BaseModel):
             "Lexical match mode: 'substring' (default) requires the whole query "
             "verbatim; 'any_term' matches nodes containing any of the query's "
             "distinct whitespace-separated terms, and a repeated term counts "
-            "once. Ignored when semantic is true."
+            "once. Applies to local and federated results alike; semantic=true "
+            "replaces it for local results only, since federated results are "
+            "always matched lexically."
         ),
     )
 
@@ -172,6 +213,14 @@ class AddNodesRequest(BaseModel):
     edges: List[Dict[str, Any]] = Field(
         default_factory=list, description="Edges to add"
     )
+    expect_absent: bool = Field(
+        False,
+        description=(
+            "Every create expects no entity with its id to exist; otherwise "
+            "nothing is added and the request fails with 409 "
+            "entity_revision_conflict."
+        ),
+    )
     # Event context (optional, for webhooks/loop prevention)
     event_origin: Optional[str] = Field(
         None, description="Source of mutation (web-ui, mcp, system, agent:<id>)"
@@ -181,6 +230,13 @@ class AddNodesRequest(BaseModel):
     )
     event_correlation_id: Optional[str] = Field(
         None, description="Correlation ID for chaining events"
+    )
+    expected_session_seq: Optional[int] = Field(
+        None,
+        description=(
+            "In a session (x-communityoverview-session-id): the session sequence "
+            "number the write expects; a mismatch is session_seq_conflict"
+        ),
     )
 
 
@@ -203,6 +259,14 @@ class UpdateNodeRequest(BaseModel):
             "The update is rejected with 409 if the node changed since then."
         ),
     )
+    expected_revision: Optional[int] = Field(
+        None,
+        ge=0,
+        description=(
+            "The node's `revision` as the caller last read it. The update is "
+            "rejected with 409 entity_revision_conflict if it has moved."
+        ),
+    )
     # Event context (optional, for webhooks/loop prevention)
     event_origin: Optional[str] = Field(
         None, description="Source of mutation (web-ui, mcp, system, agent:<id>)"
@@ -212,6 +276,13 @@ class UpdateNodeRequest(BaseModel):
     )
     event_correlation_id: Optional[str] = Field(
         None, description="Correlation ID for chaining events"
+    )
+    expected_session_seq: Optional[int] = Field(
+        None,
+        description=(
+            "In a session (x-communityoverview-session-id): the session sequence "
+            "number the write expects; a mismatch is session_seq_conflict"
+        ),
     )
 
 
@@ -222,6 +293,14 @@ class DeleteNodesRequest(BaseModel):
         ..., max_length=10, description="Node IDs to delete (max 10)"
     )
     confirmed: bool = Field(False, description="Confirmation flag")
+    expected_revisions: Optional[Dict[str, Annotated[int, Field(ge=0)]]] = Field(
+        None,
+        max_length=10,
+        description=(
+            "Node id -> the revision it must still have. Any mismatch deletes "
+            "nothing and fails with 409 entity_revision_conflict."
+        ),
+    )
     # Event context (optional, for webhooks/loop prevention)
     event_origin: Optional[str] = Field(
         None, description="Source of mutation (web-ui, mcp, system, agent:<id>)"
@@ -231,6 +310,13 @@ class DeleteNodesRequest(BaseModel):
     )
     event_correlation_id: Optional[str] = Field(
         None, description="Correlation ID for chaining events"
+    )
+    expected_session_seq: Optional[int] = Field(
+        None,
+        description=(
+            "In a session (x-communityoverview-session-id): the session sequence "
+            "number the write expects; a mismatch is session_seq_conflict"
+        ),
     )
 
 
@@ -248,6 +334,13 @@ class ArchiveNodesRequest(BaseModel):
     event_correlation_id: Optional[str] = Field(
         None, description="Correlation ID for chaining events"
     )
+    expected_session_seq: Optional[int] = Field(
+        None,
+        description=(
+            "In a session (x-communityoverview-session-id): the session sequence "
+            "number the write expects; a mismatch is session_seq_conflict"
+        ),
+    )
 
 
 class ArchiveEdgesRequest(BaseModel):
@@ -263,6 +356,13 @@ class ArchiveEdgesRequest(BaseModel):
     )
     event_correlation_id: Optional[str] = Field(
         None, description="Correlation ID for chaining events"
+    )
+    expected_session_seq: Optional[int] = Field(
+        None,
+        description=(
+            "In a session (x-communityoverview-session-id): the session sequence "
+            "number the write expects; a mismatch is session_seq_conflict"
+        ),
     )
 
 
@@ -282,6 +382,13 @@ class AddEdgeRequest(BaseModel):
     event_correlation_id: Optional[str] = Field(
         None, description="Correlation ID for chaining events"
     )
+    expected_session_seq: Optional[int] = Field(
+        None,
+        description=(
+            "In a session (x-communityoverview-session-id): the session sequence "
+            "number the write expects; a mismatch is session_seq_conflict"
+        ),
+    )
 
 
 class UpdateEdgeRequest(BaseModel):
@@ -290,24 +397,60 @@ class UpdateEdgeRequest(BaseModel):
     updates: Dict[str, Any] = Field(
         ..., description="Fields to update (type, label, metadata)"
     )
+    expected_revision: Optional[int] = Field(
+        None,
+        ge=0,
+        description="The edge's `revision` as last read; 409 if it has moved.",
+    )
     event_origin: Optional[str] = Field(None, description="Source of mutation")
     event_session_id: Optional[str] = Field(
         None, description="Session ID for loop prevention"
     )
     event_correlation_id: Optional[str] = Field(
         None, description="Correlation ID for chaining events"
+    )
+    expected_session_seq: Optional[int] = Field(
+        None,
+        description=(
+            "In a session (x-communityoverview-session-id): the session sequence "
+            "number the write expects; a mismatch is session_seq_conflict"
+        ),
     )
 
 
 class DeleteEdgeRequest(BaseModel):
     """Request model for deleting a single edge."""
 
+    expected_revision: Optional[int] = Field(
+        None,
+        ge=0,
+        description="The edge's `revision` as last read; 409 if it has moved.",
+    )
     event_origin: Optional[str] = Field(None, description="Source of mutation")
     event_session_id: Optional[str] = Field(
         None, description="Session ID for loop prevention"
     )
     event_correlation_id: Optional[str] = Field(
         None, description="Correlation ID for chaining events"
+    )
+    expected_session_seq: Optional[int] = Field(
+        None,
+        description=(
+            "In a session (x-communityoverview-session-id): the session sequence "
+            "number the write expects; a mismatch is session_seq_conflict"
+        ),
+    )
+
+
+class ResolveTeleportRequest(BaseModel):
+    """Request model for resolving the route to a node's source graph."""
+
+    node_id: str = Field(..., description="Local or federated node ID")
+    session_id: Optional[str] = Field(
+        None, description="Session to offer as the way back"
+    )
+    search_query: Optional[str] = Field(
+        None, description="Search context to carry into the source graph"
     )
 
 
@@ -327,6 +470,13 @@ class AdoptFederatedNodeRequest(BaseModel):
     event_correlation_id: Optional[str] = Field(
         None, description="Correlation ID for chaining events"
     )
+    expected_session_seq: Optional[int] = Field(
+        None,
+        description=(
+            "In a session (x-communityoverview-session-id): the session sequence "
+            "number the write expects; a mismatch is session_seq_conflict"
+        ),
+    )
 
 
 class SaveViewRequest(BaseModel):
@@ -341,6 +491,42 @@ class CreateSessionRequest(BaseModel):
     name: Optional[str] = Field(
         None, max_length=200, description="Optional session name"
     )
+    write_mode: Optional[str] = Field(
+        None,
+        description=(
+            "direct or staged; omitted, the session takes the graph default "
+            "(SESSION_WRITE_MODE_DEFAULT)"
+        ),
+    )
+
+
+class MergeStagedRequest(BaseModel):
+    """Request model for merging a staged session's changes (§11)."""
+
+    merge_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=512,
+        description="Caller-chosen id; repeating it returns the first result",
+    )
+    entries: Union[Literal["all"], List[Dict[str, Any]]] = Field(
+        "all", description="'all', or a list of {kind, entity_id}"
+    )
+    resolutions: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description=(
+            "Per entry: {kind, entity_id, choice: take_session | keep_main | "
+            "as_new | manual, values: {field: value} for manual}"
+        ),
+    )
+
+
+class DiscardStagedRequest(BaseModel):
+    """Request model for discarding a staged session's changes (§12)."""
+
+    entries: Union[Literal["all"], List[Dict[str, Any]]] = Field(
+        "all", description="'all', or a list of {kind, entity_id}"
+    )
 
 
 class RenameSessionRequest(BaseModel):
@@ -354,6 +540,13 @@ class RenameSessionRequest(BaseModel):
         max_length=100,
         description="Renaming client id (attributes the op; defaults server-side)",
     )
+    write_mode: Optional[str] = Field(
+        None,
+        description=(
+            "Switch the session to this write mode: only direct -> staged is "
+            "allowed (staged -> direct is write_mode_irreversible)"
+        ),
+    )
 
 
 class SessionOpsRequest(BaseModel):
@@ -366,6 +559,20 @@ class SessionOpsRequest(BaseModel):
         None, description="Client's last-known seq (informational)"
     )
     ops: List[Dict[str, Any]] = Field(..., description="Ordered ops to apply")
+
+
+class SummonViewportRequest(BaseModel):
+    """Request model for summoning a session's clients to a model-space region."""
+
+    client_id: str = Field(
+        ..., min_length=1, max_length=100, description="Summoning client id"
+    )
+    # Any, not a dict type: the manager validates the shape, so a non-object
+    # is the same 400 as any other invalid bounds rather than a 422.
+    bounds: Any = Field(
+        ...,
+        description="Model-space region {x, y, width, height}; x/y is top-left",
+    )
 
 
 class UndoSessionActionRequest(BaseModel):
@@ -478,10 +685,98 @@ def _fetch_and_optimize_image(image_data: Optional[str], image_url: Optional[str
     return optimize_image(raw)
 
 
+# A direct write's refusal (docs/SESSION_OVERLAY_CONTRACT.md §16.3) and the
+# status it is answered with.
+_WRITE_ERROR_STATUS = {
+    "entity_revision_conflict": 409,
+    "write_failed": 502,
+    "write_outcome_unknown": 503,
+    # A write made in a session (§9, §16.3).
+    "session_not_found": 404,
+    "session_not_supported": 400,
+    "session_mismatch": 400,
+    "session_seq_conflict": 409,
+    "session_seq_without_session": 400,
+    "layer_full": 422,
+    "staged_unsupported": 422,
+    "invalid_entity": 400,
+    "busy": 409,
+}
+
+
+# The refusals of the review, merge and discard routes (§16.3), beyond those of
+# a write, and the status each is answered with.
+_STAGED_REFUSAL_STATUS = {
+    **_WRITE_ERROR_STATUS,
+    "session_not_staged": 409,
+    "merge_blocked": 409,
+    "merge_raced": 409,
+    "merge_incomplete": 422,
+    "merge_id_taken": 409,
+    "invalid_merge_request": 422,
+    "validation_error": 422,
+}
+
+
+def _staged_answer(result: Dict[str, Any]) -> Dict[str, Any]:
+    """A staged-changes route's result, or the HTTP refusal it stands for:
+    the code, message and the data needed to act on it, under ``detail``."""
+    _raise_for_access_denied(result)
+    if result.get("success") is False:
+        status = _STAGED_REFUSAL_STATUS.get(result.get("error"), 400)
+        raise HTTPException(
+            status_code=status,
+            detail={k: v for k, v in result.items() if k != "success"},
+        )
+    return result
+
+
+# The refusals of a request naming a session it cannot act in (§16.3).
+_SESSION_REFUSALS = frozenset(
+    {
+        "session_not_found",
+        "session_not_supported",
+        "session_mismatch",
+        "staged_unsupported",
+    }
+)
+
+
 def _raise_for_access_denied(result: Dict[str, Any]) -> None:
+    """Raise for a refusal the generic status checks would misreport: access
+    denied, and a write refused by its expectation or by the store."""
     if result.get("error_code") == "access_denied":
         raise HTTPException(
             status_code=403, detail=result.get("message") or result.get("error")
+        )
+    status = _WRITE_ERROR_STATUS.get(result.get("error"))
+    if status is not None and result.get("success") is False:
+        detail = {
+            key: result[key]
+            for key in (
+                "error",
+                "message",
+                "entity_kind",
+                "entity_id",
+                "current_revision",
+                "expected_session_seq",
+                "session_seq",
+                "limit",
+            )
+            if key in result
+        }
+        raise HTTPException(status_code=status, detail=detail)
+
+
+def _raise_for_invalid_update(result: Dict[str, Any]) -> None:
+    """A refused update body is 422; only an absent entity stays 404. Runs after
+    `_raise_for_access_denied`, and the mutation checks access before it looks
+    the entity up, so the status never tells an unauthorized caller anything."""
+    if result.get("success") is False and result.get("error_code") == (
+        VALIDATION_ERROR_CODE
+    ):
+        raise HTTPException(
+            status_code=422, detail=result.get("error") or result.get("message")
         )
 
 
@@ -490,15 +785,14 @@ async def _read_body_within_cap(
 ) -> bytes:
     """Read a request body, rejecting early once it is known to exceed ``max_bytes``.
 
-    Shared by ``apply_session_ops`` and ``ingest_session_image``, both of
-    which take their body as a raw ``Request`` instead of a typed Pydantic
-    parameter specifically so this check can run *before* the request is
+    Used by routes that take their body as a raw ``Request`` instead of a typed
+    Pydantic parameter specifically so this check can run *before* the request is
     buffered — a typed body parameter would let FastAPI/Starlette read and
     parse the whole thing first, defeating the point of a pre-parse cap.
 
     Checks the declared ``Content-Length`` header first, so a wildly
     oversized request is rejected without ever being read into memory; then
-    re-checks the actually-buffered length as a backstop for a request whose
+    checks the streamed length as a backstop for a request whose
     header is missing, absent, or understates the truth (e.g. chunked
     transfer-encoding, or a client that simply lies).
     """
@@ -510,25 +804,41 @@ async def _read_body_within_cap(
             declared_length = None
         if declared_length is not None and declared_length > max_bytes:
             raise HTTPException(status_code=413, detail=oversized_detail)
-    body = await http_request.body()
-    if len(body) > max_bytes:
-        raise HTTPException(status_code=413, detail=oversized_detail)
-    return body
+    chunks = []
+    size = 0
+    async for chunk in http_request.stream():
+        size += len(chunk)
+        if size > max_bytes:
+            raise HTTPException(status_code=413, detail=oversized_detail)
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
-def _parse_body_or_422(model_cls, body: bytes):
+def _parse_body_or_422(model_cls, body: bytes, *, include_input: bool = True):
     """Parse ``body`` as ``model_cls``, matching FastAPI's default 422 shape.
 
     Automatic body validation no longer runs once the route takes a raw
     ``Request`` (see ``_read_body_within_cap``), so this reproduces it: a
     list of error dicts, the same shape ``RequestValidationError`` produces.
-    ``jsonable_encoder`` handles error entries whose ``"input"`` is raw bytes
-    (e.g. an invalid-JSON error embeds the undecoded body).
+    JSON decoding failures omit the uploaded body from the error response.
     """
     try:
-        return model_cls.model_validate_json(body)
+        # Match FastAPI's JSON decoding before model validation. Pydantic's
+        # JSON parser rejects escaped lone surrogates and caps nesting below
+        # the graph service's metadata limit.
+        decoded = json.loads(body)
+    except (ValueError, RecursionError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=[{"type": "json_invalid", "loc": [], "msg": f"Invalid JSON: {exc}"}],
+        ) from exc
+    try:
+        return model_cls.model_validate(decoded)
     except PydanticValidationError as exc:
-        raise HTTPException(status_code=422, detail=jsonable_encoder(exc.errors()))
+        raise HTTPException(
+            status_code=422,
+            detail=jsonable_encoder(exc.errors(include_input=include_input)),
+        )
 
 
 # ==================== Route Registration Helpers ====================
@@ -593,26 +903,49 @@ def _register_search_endpoints(router: APIRouter, service: GraphService) -> None
 
 def _register_similarity_endpoints(router: APIRouter, service: GraphService) -> None:
     @router.post("/similar")
-    async def find_similar_nodes(request: SimilarNodesRequest) -> Dict[str, Any]:
+    async def find_similar_nodes(
+        request: SimilarNodesRequest, http_request: Request
+    ) -> Dict[str, Any]:
         """Find similar nodes based on name (for duplicate detection)."""
-        return service.find_similar_nodes(
-            name=request.name,
-            node_type=request.node_type,
-            threshold=request.threshold,
-            limit=request.limit,
-        )
+        with use_request_authorization(headers=http_request.headers):
+            result = service.find_similar_nodes(
+                name=request.name,
+                node_type=request.node_type,
+                threshold=request.threshold,
+                limit=request.limit,
+            )
+        _raise_for_access_denied(result)
+        return result
 
     @router.post("/similar/batch")
     async def find_similar_nodes_batch(
-        request: SimilarNodesBatchRequest,
+        request: SimilarNodesBatchRequest, http_request: Request
     ) -> Dict[str, Any]:
         """Find similar nodes for multiple names at once."""
-        return service.find_similar_nodes_batch(
-            names=request.names,
-            node_type=request.node_type,
-            threshold=request.threshold,
-            limit=request.limit,
-        )
+        with use_request_authorization(headers=http_request.headers):
+            result = service.find_similar_nodes_batch(
+                names=request.names,
+                node_type=request.node_type,
+                threshold=request.threshold,
+                limit=request.limit,
+            )
+        _raise_for_access_denied(result)
+        return result
+
+    @router.post("/federation/teleport")
+    async def resolve_teleport(
+        request: ResolveTeleportRequest, http_request: Request
+    ) -> Dict[str, Any]:
+        """Resolve the canonical route from a node to its source graph."""
+        with use_request_authorization(headers=http_request.headers):
+            result = service.resolve_teleport(
+                node_id=request.node_id,
+                session_id=request.session_id or "",
+                search_query=request.search_query or "",
+                local_gui_url=get_public_base_url(),
+            )
+        _raise_for_access_denied(result)
+        return result
 
     @router.post("/federation/adopt")
     async def adopt_federated_node(
@@ -628,6 +961,7 @@ def _register_similarity_endpoints(router: APIRouter, service: GraphService) -> 
                 event_origin=request.event_origin,
                 event_session_id=request.event_session_id,
                 event_correlation_id=request.event_correlation_id,
+                expected_session_seq=request.expected_session_seq,
             )
         _raise_for_access_denied(result)
         if not result.get("success", True):
@@ -650,6 +984,8 @@ def _register_node_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_origin=request.event_origin,
                 event_session_id=request.event_session_id,
                 event_correlation_id=request.event_correlation_id,
+                expected_session_seq=request.expected_session_seq,
+                expect_absent=request.expect_absent,
             )
         _raise_for_access_denied(result)
         if not result.get("success", True):
@@ -668,12 +1004,15 @@ def _register_node_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_origin=request.event_origin,
                 event_session_id=request.event_session_id,
                 event_correlation_id=request.event_correlation_id,
+                expected_session_seq=request.expected_session_seq,
                 metadata_merge=request.metadata_merge,
                 expected_updated_at=request.expected_updated_at,
+                expected_revision=request.expected_revision,
             )
         _raise_for_access_denied(result)
         if result.get("conflict"):
             raise HTTPException(status_code=409, detail=result.get("error"))
+        _raise_for_invalid_update(result)
         if not result.get("success", True):
             raise HTTPException(status_code=404, detail=result.get("error"))
         return result
@@ -690,6 +1029,8 @@ def _register_node_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_origin=request.event_origin,
                 event_session_id=request.event_session_id,
                 event_correlation_id=request.event_correlation_id,
+                expected_session_seq=request.expected_session_seq,
+                expected_revisions=request.expected_revisions,
             )
         _raise_for_access_denied(result)
         if not result.get("success", True):
@@ -710,6 +1051,7 @@ def _register_node_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_origin=request.event_origin,
                 event_session_id=request.event_session_id,
                 event_correlation_id=request.event_correlation_id,
+                expected_session_seq=request.expected_session_seq,
             )
         _raise_for_access_denied(result)
         if not result.get("success", True):
@@ -732,6 +1074,7 @@ def _register_edge_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_origin=request.event_origin,
                 event_session_id=request.event_session_id,
                 event_correlation_id=request.event_correlation_id,
+                expected_session_seq=request.expected_session_seq,
             )
         _raise_for_access_denied(result)
         if not result.get("success", True):
@@ -750,8 +1093,11 @@ def _register_edge_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_origin=request.event_origin,
                 event_session_id=request.event_session_id,
                 event_correlation_id=request.event_correlation_id,
+                expected_session_seq=request.expected_session_seq,
+                expected_revision=request.expected_revision,
             )
         _raise_for_access_denied(result)
+        _raise_for_invalid_update(result)
         if not result.get("success", True):
             raise HTTPException(status_code=404, detail=result.get("error"))
         return result
@@ -769,6 +1115,10 @@ def _register_edge_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_origin=request.event_origin if request else None,
                 event_session_id=request.event_session_id if request else None,
                 event_correlation_id=request.event_correlation_id if request else None,
+                expected_session_seq=(
+                    request.expected_session_seq if request else None
+                ),
+                expected_revision=request.expected_revision if request else None,
             )
         _raise_for_access_denied(result)
         if not result.get("success", True):
@@ -789,6 +1139,7 @@ def _register_edge_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_origin=request.event_origin,
                 event_session_id=request.event_session_id,
                 event_correlation_id=request.event_correlation_id,
+                expected_session_seq=request.expected_session_seq,
             )
         _raise_for_access_denied(result)
         if not result.get("success", True):
@@ -856,16 +1207,23 @@ def _register_metadata_endpoints(router: APIRouter, service: GraphService) -> No
         return service.list_relationship_types()
 
     @router.get("/meta/relationship-applicability/audit")
-    async def audit_relationship_applicability() -> Dict[str, Any]:
+    async def audit_relationship_applicability(request: Request) -> Dict[str, Any]:
         """Report existing edges that violate relationship applicability rules."""
-        return service.audit_relationship_applicability()
+        with use_request_authorization(headers=request.headers):
+            result = service.audit_relationship_applicability()
+        _raise_for_access_denied(result)
+        return result
 
     @router.get("/meta/subtypes")
     async def get_subtypes(
+        request: Request,
         node_type: Optional[str] = Query(None, description="Filter by node type"),
     ) -> Dict[str, Any]:
         """Get existing subtypes used in the graph, grouped by node type."""
-        return service.get_subtypes(node_type)
+        with use_request_authorization(headers=request.headers):
+            result = service.get_subtypes(node_type)
+        _raise_for_access_denied(result)
+        return result
 
     @router.get("/schema")
     async def get_schema() -> Dict[str, Any]:
@@ -964,6 +1322,32 @@ def _register_session_endpoints(
         OpError,
         is_valid_session_id,
     )
+    from backend.core.layer_store import LayerNotEmpty, StagedSessionRetired
+    from backend.core.write_modes import WRITE_MODE_STAGED, WriteModeRefused
+    from backend.runtime.authorization import GRAPH_ACTION_MUTATE
+
+    from . import access
+
+    def _session_refusal(code: str, message: str, status: int) -> HTTPException:
+        return HTTPException(
+            status_code=status, detail={"error": code, "message": message}
+        )
+
+    def _authorize_session_change(
+        http_request: Request, target: str, session_id: Optional[str], operation=""
+    ) -> None:
+        """§14: a session route that sets a write mode or changes a layer asks
+        the hook, under the name of its MCP twin."""
+        with use_request_authorization(headers=http_request.headers):
+            denied = access.authorize_graph_access(
+                service.authorization_hook,
+                action=GRAPH_ACTION_MUTATE,
+                target=target,
+                graph_operation=operation,
+                session_id=session_id,
+            )
+        if denied:
+            raise HTTPException(status_code=403, detail=denied.get("message"))
 
     def _rate_limit_lookup(http_request: Request) -> None:
         """Throttle auth-bypassed session-id lookups by client address.
@@ -976,11 +1360,23 @@ def _register_session_endpoints(
         except RateLimited:
             raise HTTPException(status_code=429, detail="rate limit exceeded")
 
-    def _session_payload(session, *, resolve: bool, manager) -> Dict[str, Any]:
-        payload = session.to_dict()
+    def _session_payload(
+        session, *, resolve: bool, manager, http_request: Optional[Request] = None
+    ) -> Dict[str, Any]:
+        payload = manager.describe(session)
         payload["roster"] = manager.roster(session.id)
         if resolve:
-            resolved = service.resolve_session_nodes(session.state.get("node_refs", []))
+            authorization = (
+                use_request_authorization(headers=http_request.headers)
+                if http_request is not None
+                else use_request_authorization()
+            )
+            with authorization, service.reading_in(session.id):
+                resolved = service.resolve_session_nodes(
+                    session.state.get("node_refs", [])
+                )
+            if resolved.get("error") in _SESSION_REFUSALS:
+                _raise_for_access_denied(resolved)
             payload["resolved"] = {
                 "nodes": resolved.get("nodes", []),
                 "edges": resolved.get("edges", []),
@@ -988,11 +1384,23 @@ def _register_session_endpoints(
         return payload
 
     @router.post("/sessions")
-    async def create_session(request: CreateSessionRequest) -> Dict[str, Any]:
+    async def create_session(
+        request: CreateSessionRequest, http_request: Request
+    ) -> Dict[str, Any]:
         try:
-            session = session_manager.create_session(request.name)
+            mode, _source = session_manager.write_modes.choose(request.write_mode)
+        except WriteModeRefused as exc:
+            raise _session_refusal(exc.code, exc.message, exc.status)
+        if mode == WRITE_MODE_STAGED:
+            _authorize_session_change(
+                http_request, "create_visualization_session", None
+            )
+        try:
+            session = session_manager.create_session(request.name, request.write_mode)
         except SessionLimitReached:
             raise HTTPException(status_code=503, detail="too many sessions")
+        except WriteModeRefused as exc:
+            raise _session_refusal(exc.code, exc.message, exc.status)
         return _session_payload(session, resolve=False, manager=session_manager)
 
     @router.get("/sessions")
@@ -1013,14 +1421,38 @@ def _register_session_endpoints(
         session = session_manager.get_session(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="session not found")
-        return _session_payload(session, resolve=resolve, manager=session_manager)
+        return _session_payload(
+            session,
+            resolve=resolve,
+            manager=session_manager,
+            http_request=http_request,
+        )
 
     @router.patch("/sessions/{session_id}")
     async def rename_session(
-        session_id: str, request: RenameSessionRequest
+        session_id: str, request: RenameSessionRequest, http_request: Request
     ) -> Dict[str, Any]:
         if not is_valid_session_id(session_id):
             raise HTTPException(status_code=400, detail="invalid session_id format")
+        if request.write_mode is not None:
+            # The mode first, so a rename riding along never materialises a
+            # session the mode change would then refuse.
+            _authorize_session_change(
+                http_request, "set_session_write_mode", session_id
+            )
+            try:
+                await session_manager.set_write_mode(
+                    session_id, request.write_mode, request.client_id
+                )
+            except WriteModeRefused as exc:
+                raise _session_refusal(exc.code, exc.message, exc.status)
+            except (SessionNotFound, StagedSessionRetired):
+                raise _session_refusal("session_not_found", "session not found", 404)
+            if "name" not in request.model_fields_set:
+                session = session_manager.get_session(session_id)
+                if session is None:
+                    raise HTTPException(status_code=404, detail="session not found")
+                return _session_payload(session, resolve=False, manager=session_manager)
         try:
             # get-or-create (R7): a rename for an id that only exists in the
             # browser's URL/recents (never saved server-side) must materialise
@@ -1046,16 +1478,95 @@ def _register_session_endpoints(
     @router.delete("/sessions/{session_id}")
     async def delete_session(
         session_id: str,
+        http_request: Request,
         client_id: Optional[str] = Query(
             None, description="Deleting client id (for the notice)"
+        ),
+        discard_staged: bool = Query(
+            False,
+            description=(
+                "Staged session only: drop its staged changes with it. Without "
+                "it, a session with staged changes is not deleted (layer_not_empty)"
+            ),
         ),
     ) -> Dict[str, Any]:
         if not is_valid_session_id(session_id):
             raise HTTPException(status_code=400, detail="invalid session_id format")
-        existed = await session_manager.delete_session(session_id, deleted_by=client_id)
+
+        def authorize_staged() -> None:
+            # Retiring a staged session's record, and with discard_staged
+            # dropping its layer, is a change to the layer (§13, §14).
+            _authorize_session_change(
+                http_request,
+                "delete_visualization_session",
+                session_id,
+                "discard" if discard_staged else "",
+            )
+
+        try:
+            existed = await session_manager.delete_session(
+                session_id,
+                deleted_by=client_id,
+                discard_staged=discard_staged,
+                authorize_staged=authorize_staged,
+            )
+        except LayerNotEmpty as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": exc.code,
+                    "message": (
+                        f"the session holds {exc.entries} staged changes; merge "
+                        "or discard them, or delete with discard_staged=true"
+                    ),
+                    "entries": exc.entries,
+                },
+            )
         if not existed:
             raise HTTPException(status_code=404, detail="session not found")
-        return {"deleted": True, "id": session_id}
+        # The mode the session was deleted in, so the deleting client replaces
+        # a staged session with a staged one even before its notice arrives.
+        # Read after the delete, which judged the mode under the session lock:
+        # only a staged session's delete retires its id.
+        retired = session_manager.write_modes.is_retired(session_id)
+        return {
+            "deleted": True,
+            "id": session_id,
+            "write_mode": WRITE_MODE_STAGED if retired else "direct",
+        }
+
+    @router.get("/sessions/{session_id}/staged")
+    async def get_staged_changes(
+        session_id: str, http_request: Request
+    ) -> Dict[str, Any]:
+        """The diff of a staged session's changes (§10), as far as the
+        caller's view covers them."""
+        with use_request_authorization(headers=http_request.headers):
+            result = service.get_staged_changes(session_id)
+        return _staged_answer(result)
+
+    @router.post("/sessions/{session_id}/staged/merge")
+    async def merge_staged_changes(
+        session_id: str, request: MergeStagedRequest, http_request: Request
+    ) -> Dict[str, Any]:
+        """Merge staged changes into the graph as one unit (§11)."""
+        with use_request_authorization(headers=http_request.headers):
+            result = service.merge_staged_changes(
+                session_id,
+                request.merge_id,
+                entries=request.entries,
+                resolutions=request.resolutions,
+            )
+        return _staged_answer(result)
+
+    @router.post("/sessions/{session_id}/staged/discard")
+    async def discard_staged_changes(
+        session_id: str, request: DiscardStagedRequest, http_request: Request
+    ) -> Dict[str, Any]:
+        """Drop staged changes; the graph does not change (§12)."""
+        with use_request_authorization(headers=http_request.headers):
+            result = service.discard_staged_changes(session_id, entries=request.entries)
+        return _staged_answer(result)
 
     @router.post("/sessions/{session_id}/ops")
     async def apply_session_ops(
@@ -1104,6 +1615,29 @@ def _register_session_endpoints(
                     "message": str(exc),
                 },
             )
+        except OpError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @router.post("/sessions/{session_id}/summon")
+    async def summon_session_viewport(
+        session_id: str, request: SummonViewportRequest, http_request: Request
+    ) -> Dict[str, Any]:
+        """Move every client connected to the session to ``bounds`` (ephemeral).
+
+        Asks the hook under the name of its MCP twin, like the other session
+        changes; the summoner's display name comes from its presence entry.
+        """
+        if not is_valid_session_id(session_id):
+            raise HTTPException(status_code=400, detail="invalid session_id format")
+        _authorize_session_change(http_request, "summon_session_viewport", session_id)
+        try:
+            return session_manager.summon_viewport(
+                session_id, request.client_id, request.bounds
+            )
+        except SessionNotFound:
+            raise HTTPException(status_code=404, detail="session not found")
+        except RateLimited:
+            raise HTTPException(status_code=429, detail="rate limit exceeded")
         except OpError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
@@ -1377,13 +1911,52 @@ def _register_session_endpoints(
             session_manager.get_or_create(session_id)
         except SessionLimitReached:
             raise HTTPException(status_code=503, detail="too many sessions")
+        except SessionNotFound:
+            # Retired after the binding middleware looked.
+            raise HTTPException(status_code=404, detail="session not found")
 
         subscription, _member = session_manager.connect(session_id, client_id, name)
+        disconnected = False
+
+        def release() -> None:
+            # Runs from the generator's finally and from the response's, so
+            # it must count once: a second presence leave would drop a sibling
+            # connection of the same client_id.
+            nonlocal disconnected
+            if disconnected:
+                return
+            disconnected = True
+            session_manager.disconnect(session_id, client_id, subscription)
+
+        session_deleted = (
+            f"data: {json.dumps({'type': 'session_deleted', 'deleted_by': None})}\n\n"
+        )
+
+        def queued_session_deleted() -> Optional[str]:
+            # The subscription predates the delete, so delete_session's own
+            # notice (with deleted_by and write_mode, §13) is already queued.
+            while True:
+                try:
+                    event = subscription.queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return None
+                if event.get("type") == "session_deleted":
+                    return f"data: {json.dumps(event)}\n\n"
 
         async def event_generator():
             try:
-                catch_up = session_manager.catch_up(session_id, since_seq)
-                yield f"data: {json.dumps(catch_up)}\n\n"
+                try:
+                    catch_up = session_manager.catch_up(session_id, since_seq)
+                except SessionNotFound:
+                    # Deleted between the handshake above and the first body
+                    # iteration. Without the notice a direct-mode client's
+                    # EventSource reconnect would silently re-materialise an
+                    # empty session under the same id. The stream then stays
+                    # open, as after a mid-stream delete, so the browser does
+                    # not reconnect before the client has moved off the id.
+                    yield queued_session_deleted() or session_deleted
+                else:
+                    yield f"data: {json.dumps(catch_up)}\n\n"
                 while True:
                     if await request.is_disconnected():
                         break
@@ -1397,23 +1970,24 @@ def _register_session_endpoints(
                             event, session_manager, session_id
                         )
                     except SessionNotFound:
-                        # The session was deleted in the narrow window between
-                        # this subscriber's queue overflowing (which may have
-                        # drained an already-queued session_deleted event
-                        # too, per session_hub.py's drain-on-overflow) and the
-                        # resync translation running catch_up against a store
-                        # entry that no longer exists. Give the client the
-                        # notice it would otherwise have missed.
-                        yield f"data: {json.dumps({'type': 'session_deleted', 'deleted_by': None})}\n\n"
-                        break
+                        # The session was deleted in the window between this
+                        # subscriber's queue overflowing and the resync
+                        # translation running catch_up. The overflow drain may
+                        # have discarded delete_session's notice, or it may
+                        # still be queued behind the resync sentinel. As on
+                        # the first catch_up, the stream stays open so the
+                        # browser does not reconnect into an empty session.
+                        yield queued_session_deleted() or session_deleted
+                        continue
                     yield f"data: {json.dumps(event)}\n\n"
             except asyncio.CancelledError:
                 pass
             finally:
-                session_manager.disconnect(session_id, client_id, subscription)
+                release()
 
-        return StreamingResponse(
+        return _SessionStream(
             event_generator(),
+            release,
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -1421,6 +1995,27 @@ def _register_session_endpoints(
                 "X-Accel-Buffering": "no",
             },
         )
+
+
+class _SessionStream(StreamingResponse):
+    """Release a session stream's subscription however the response ends.
+
+    The generator's ``finally`` only runs once the body has been iterated: if
+    sending the response start fails or is cancelled first, the subscription
+    and presence entry taken before the response was built would leak.
+    """
+
+    def __init__(
+        self, content: Any, release: Callable[[], None], **kwargs: Any
+    ) -> None:
+        super().__init__(content, **kwargs)
+        self._release = release
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._release()
 
 
 def _register_export_endpoints(router: APIRouter, service: GraphService) -> None:
@@ -1431,6 +2026,272 @@ def _register_export_endpoints(router: APIRouter, service: GraphService) -> None
             result = service.export_graph()
         _raise_for_access_denied(result)
         return result
+
+    @router.get("/export/archive")
+    async def export_graph_archive(request: Request) -> Response:
+        """
+        Export the graph as a ZIP archive: ``graph.json`` (the same content
+        ``GET /export`` returns), ``embeddings.bin`` (the live vector store's
+        embeddings, in the same binary format as the on-disk sidecar — see
+        ``backend/core/embedding_sidecar.py`` — omitted when the graph has no
+        vectors), and ``manifest.json`` (schema version, embedding
+        model/dimension, per-member SHA-256 checksums, node/edge counts).
+
+        See docs/adr/0007-vector-aware-export-archive.md and
+        docs/DATA_MANAGEMENT.md.
+        """
+        with use_request_authorization(headers=request.headers):
+            result = service.export_graph_archive()
+        _raise_for_access_denied(result)
+        return Response(
+            content=result["archive_bytes"],
+            media_type="application/zip",
+            headers={"Content-Disposition": 'attachment; filename="graph-export.zip"'},
+        )
+
+
+_IMPORT_ERROR_STATUS = {
+    "validation_failed": 422,
+    "import_requires_full_graph_access": 409,
+    "backup_failed": 503,
+    "replace_failed": 502,
+    "archive_integrity_failed": 422,
+    "invalid_parameters": 422,
+    "provenance_not_supported": 422,
+    "import_plan_unstable": 503,
+    "import_preview_busy": 503,
+    "plan_digest_required": 422,
+    "import_merge_blocked": 422,
+    "import_plan_stale": 409,
+    "import_merge_busy": 503,
+    "import_merge_not_supported": 501,
+    "write_failed": 502,
+    "write_outcome_unknown": 503,
+}
+
+# A generous cap on the whole multipart upload for POST /import/archive: a
+# ZIP holding a graph.json at MAX_IMPORT_NODES/MAX_IMPORT_EDGES (see
+# graph_import.py) plus its embedding sidecar, well above any graph this
+# application runs against today. A request-size sanity backstop, not a
+# product limit — the same role MAX_IMPORT_NODES/MAX_IMPORT_EDGES play for
+# POST /import's JSON body.
+_MAX_IMPORT_ARCHIVE_BYTES = 200 * 1024 * 1024
+_MAX_IMPORT_JSON_BYTES = 200 * 1024 * 1024
+
+
+class _ImportDocument(RootModel[Dict[str, Any]]):
+    pass
+
+
+def _register_import_endpoints(
+    router: APIRouter,
+    service: GraphService,
+    import_job_store: "ExecutionStore",
+) -> None:
+    from backend.runtime.authorization import GRAPH_ACTION_READ
+
+    from . import access
+
+    def _authorize_import_job_read(target: str) -> None:
+        decision = access.evaluate_graph_access(
+            service.authorization_hook, action=GRAPH_ACTION_READ, target=target
+        )
+        if not decision.allowed:
+            _raise_for_access_denied(
+                access.build_access_denied_result(
+                    action=GRAPH_ACTION_READ, target=target, decision=decision
+                )
+            )
+        # Job metadata covers whole-graph imports and cannot be scope-filtered.
+        if decision.graph_access.enabled:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "success": False,
+                    "error_code": "import_requires_full_graph_access",
+                    "message": "Reading import jobs requires full graph access.",
+                },
+            )
+
+    @router.post(
+        "/import",
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {"schema": _ImportDocument.model_json_schema()}
+                },
+            }
+        },
+    )
+    async def import_graph(request: Request) -> Dict[str, Any]:
+        """
+        Replace the ENTIRE active graph with ``document`` (same shape as
+        ``GET /export``: a ``nodes`` list and an ``edges`` list).
+
+        The document is fully validated (types, duplicate ids, dangling
+        references) before anything is written; a validation failure leaves
+        the graph untouched. On success the graph has already been replaced
+        and a durable background job (``job_id``) is (re)generating search
+        embeddings — poll ``GET /import/{job_id}`` for its status. This is a
+        REPLACE, not a merge: every node/edge id in ``document`` becomes the
+        live graph exactly, and nothing from the previous graph survives
+        unless it also appears in ``document``.
+        """
+        # Cookie-authenticated browsers can send simple content types from a
+        # sibling origin without a CORS preflight. Require JSON before reading.
+        media_type = (
+            request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        )
+        if not (
+            media_type == "application/json"
+            or (media_type.startswith("application/") and media_type.endswith("+json"))
+        ):
+            raise HTTPException(
+                status_code=415, detail="Import requires a JSON content type"
+            )
+        body = await _read_body_within_cap(
+            request,
+            _MAX_IMPORT_JSON_BYTES,
+            "Import document exceeds the request size limit",
+        )
+        # Parse errors must not echo an entire (potentially large) upload.
+        document = _parse_body_or_422(_ImportDocument, body, include_input=False).root
+        with use_request_authorization(headers=request.headers):
+            result = service.import_graph(
+                document,
+                import_job_store,
+                event_origin=request.headers.get("x-event-origin"),
+                event_correlation_id=request.headers.get("x-correlation-id"),
+            )
+        _raise_for_access_denied(result)
+        if not result.get("success", True):
+            status_code = _IMPORT_ERROR_STATUS.get(result.get("error_code"), 400)
+            raise HTTPException(status_code=status_code, detail=result)
+        return result
+
+    @router.post("/import/archive")
+    async def import_graph_archive(
+        request: Request, file: UploadFile = File(...)
+    ) -> Dict[str, Any]:
+        """
+        Restore a ZIP archive produced by ``GET /export/archive`` (or a plain
+        ``graph.json`` a user zipped themselves, with no ``embeddings.bin`` /
+        ``manifest.json`` at all — a legitimate, gracefully-handled case, not
+        an error).
+
+        Runs the same validate -> backup -> replace pipeline ``POST /import``
+        uses for the archive's ``graph.json`` member. What differs is where
+        embeddings come from afterward:
+
+        - manifest present, every checksum it declares verified,
+          ``embedding_model`` matching this instance's live model, and
+          ``embeddings.bin`` covering every node id in the imported graph:
+          vectors are restored directly from ``embeddings.bin`` —
+          bit-identical, no async job (``embeddings_status: "restored"``).
+        - the same compatible archive, but ``embeddings.bin`` covers only
+          SOME of the imported graph's node ids (the exporting instance had
+          its own never-embedded nodes): the covered subset is restored the
+          same way, synchronously, AND a background job is enqueued to
+          (re)generate embeddings for the rest (``embeddings_status:
+          "restored_partial"``, ``job_id`` set, ``embedded_count`` /
+          ``pending_node_ids`` / ``pending_count`` describing the split).
+        - manifest missing/unreadable, a model mismatch, or no
+          ``embeddings.bin`` at all: the graph still imports, and embeddings
+          are (re)generated by the same background job ``POST /import`` uses
+          (``embeddings_status: "queued"``, with ``embeddings_message``
+          explaining why).
+        - a corrupt ZIP, or any archive member whose bytes disagree with the
+          checksum ``manifest.json`` declares for it: rejected with
+          ``archive_integrity_failed`` before anything is written to the live
+          graph.
+
+        See docs/adr/0007-vector-aware-export-archive.md.
+        """
+        archive_bytes = await file.read()
+        if len(archive_bytes) > _MAX_IMPORT_ARCHIVE_BYTES:
+            raise HTTPException(status_code=413, detail="import archive too large")
+        with use_request_authorization(headers=request.headers):
+            result = service.import_graph_archive(
+                archive_bytes,
+                import_job_store,
+                event_origin=request.headers.get("x-event-origin"),
+                event_correlation_id=request.headers.get("x-correlation-id"),
+            )
+        _raise_for_access_denied(result)
+        if not result.get("success", True):
+            status_code = _IMPORT_ERROR_STATUS.get(result.get("error_code"), 400)
+            raise HTTPException(status_code=status_code, detail=result)
+        return result
+
+    @router.post("/import/merge/preview")
+    async def preview_merge_import(
+        request: Request, body: Dict[str, Any] = Body(...)
+    ) -> Dict[str, Any]:
+        """
+        Plan merging ``body.document`` into the live graph without writing
+        anything (ADR 0013, slice 1). Returns the per-entity plan and a
+        ``plan_digest`` a later merge commit will be bound to. Requires graph
+        mutation and read access, both with full graph scope.
+        """
+        # Planning is CPU-bound and linear in the document (up to the v1
+        # caps), so it runs in a worker thread rather than on the event loop.
+        with use_request_authorization(headers=request.headers):
+            result = await run_in_threadpool(service.preview_merge_import, body)
+        _raise_for_access_denied(result)
+        if not result.get("success", True):
+            status_code = _IMPORT_ERROR_STATUS.get(result.get("error_code"), 400)
+            raise HTTPException(status_code=status_code, detail=result)
+        return result
+
+    @router.post("/import/merge")
+    async def commit_merge_import(
+        request: Request, body: Dict[str, Any] = Body(...)
+    ) -> Dict[str, Any]:
+        """
+        Merge ``body.document`` into the live graph (ADR 0013, slice 2):
+        the request of a preview plus its ``plan_digest``. The plan is
+        recomputed and must still have that digest (409
+        ``import_plan_stale`` with the current plan otherwise); the whole
+        graph is backed up first; the merge then applies all-or-nothing.
+        Same access as the preview.
+        """
+        # Plans twice and writes a whole-graph backup: off the event loop.
+        with use_request_authorization(headers=request.headers):
+            result = await run_in_threadpool(
+                service.commit_merge_import,
+                body,
+                import_job_store,
+                event_origin=request.headers.get("x-event-origin"),
+                event_correlation_id=request.headers.get("x-correlation-id"),
+            )
+        _raise_for_access_denied(result)
+        if not result.get("success", True):
+            status_code = _IMPORT_ERROR_STATUS.get(result.get("error_code"), 400)
+            raise HTTPException(status_code=status_code, detail=result)
+        return result
+
+    @router.get("/import/{job_id}")
+    async def get_import_job(request: Request, job_id: str) -> Dict[str, Any]:
+        """Get the status of one import's background embedding job."""
+        with use_request_authorization(headers=request.headers):
+            _authorize_import_job_read("get_import_job")
+            job = service.get_import_job(import_job_store, job_id)
+        if job is None:
+            raise HTTPException(
+                status_code=404, detail=f"Import job '{job_id}' not found"
+            )
+        return job
+
+    @router.get("/import")
+    async def list_import_jobs(
+        request: Request,
+        limit: int = Query(100, ge=1, le=500),
+    ) -> List[Dict[str, Any]]:
+        """List import jobs, newest first."""
+        with use_request_authorization(headers=request.headers):
+            _authorize_import_job_read("list_import_jobs")
+            return service.list_import_jobs(import_job_store, limit=limit)
 
 
 def _register_custom_interface_endpoints(
@@ -1528,6 +2389,201 @@ def _register_single_custom_interface(
             return result
 
 
+# ==================== Node Attachments ====================
+# ADR 0008 section 7. Authorization and every per-route check live in
+# backend/service/attachments.py; these routes only translate HTTP.
+
+_ATTACHMENT_ERROR_STATUS = {
+    attachment_ops.ATTACHMENT_ERROR_NOT_FOUND: 404,
+    attachment_ops.ATTACHMENT_ERROR_UNAVAILABLE: 503,
+    attachment_ops.ATTACHMENT_ERROR_FEDERATED: 422,
+    attachment_ops.ATTACHMENT_ERROR_NOT_ALLOWED: 422,
+    attachment_ops.ATTACHMENT_ERROR_ARCHIVED: 409,
+    attachment_ops.ATTACHMENT_ERROR_TOO_LARGE: 413,
+    attachment_ops.ATTACHMENT_ERROR_NODE_LIMIT: 409,
+    attachment_ops.ATTACHMENT_ERROR_UNSUPPORTED_TYPE: 415,
+    attachment_ops.ATTACHMENT_ERROR_INDEX_CORRUPT: 500,
+}
+
+
+def _raise_for_attachment_error(result: Dict[str, Any]) -> None:
+    _raise_for_access_denied(result)
+    if result.get("success"):
+        return
+    code = result.get("error_code") or ""
+    raise HTTPException(
+        status_code=_ATTACHMENT_ERROR_STATUS.get(code, 500),
+        detail={"error": code, "message": result.get("error") or ""},
+    )
+
+
+def _declared_content_length(http_request: Request) -> Optional[int]:
+    raw = http_request.headers.get("content-length")
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value >= 0 else None
+
+
+def _content_disposition(filename: str) -> str:
+    """Always ``attachment``, with an ASCII fallback and an RFC 5987 name."""
+    fallback = "".join(
+        "_" if (ord(ch) > 126 or ch in '"\\' or ord(ch) < 32) else ch for ch in filename
+    )
+    encoded = quote(filename, safe="")
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}"
+
+
+def _attachment_download_headers(record: Dict[str, Any]) -> Dict[str, str]:
+    return {
+        "Content-Disposition": _content_disposition(record["filename"]),
+        "Content-Length": str(record["size"]),
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "Cache-Control": "private, no-store",
+    }
+
+
+class _CloseAfterRead:
+    """Defer a close that arrives during a read until that read returns.
+
+    Reads run on a worker thread. anyio waits for one when it cancels the
+    response itself, but a native cancel of the request task (a server
+    dropping the request) does not, so the response's ``finally`` can run
+    while the read is still in flight. Closing then would race the read, or,
+    for a buffered file, block the event loop on the reader's lock until it
+    returns; instead the reading thread closes once its read is done.
+    """
+
+    def __init__(self, stream: BinaryIO) -> None:
+        self._stream = stream
+        self._lock = threading.Lock()
+        self._reading = False
+        self._close_requested = False
+
+    def read(self, size: int = -1) -> bytes:
+        with self._lock:
+            if self._close_requested:
+                return b""
+            self._reading = True
+        try:
+            return self._stream.read(size)
+        finally:
+            with self._lock:
+                self._reading = False
+                close_now = self._close_requested
+            if close_now:
+                self._stream.close()
+
+    def close(self) -> None:
+        with self._lock:
+            # The body iterator closes its source too, so this runs twice.
+            if self._close_requested:
+                return
+            self._close_requested = True
+            if self._reading:
+                return
+        self._stream.close()
+
+
+class _AttachmentDownload(StreamingResponse):
+    """Stream an open attachment and close it however the response ends.
+
+    A ``background`` task cannot do the closing: under ASGI spec 2.4+ a client
+    disconnect raises out of the response before background tasks run, which
+    would leave the handle to be closed whenever garbage collection frees the
+    body iterator.
+    """
+
+    def __init__(self, stream: BinaryIO, **kwargs: Any) -> None:
+        guarded = _CloseAfterRead(stream)
+        super().__init__(copy_stream(guarded), **kwargs)
+        self._stream = guarded
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._stream.close()
+
+
+def _register_attachment_endpoints(router: APIRouter, service: GraphService) -> None:
+    # The store reads files and takes OS locks, so its calls run off the event
+    # loop. asyncio.to_thread copies the context, so the request authorization
+    # bound below reaches the service call.
+    @router.get("/nodes/{node_id}/attachments")
+    async def list_node_attachments(node_id: str, request: Request) -> Dict[str, Any]:
+        """List a node's attachments, the limits, and whether uploads are allowed."""
+        with use_request_authorization(headers=request.headers):
+            result = await asyncio.to_thread(service.list_node_attachments, node_id)
+        _raise_for_attachment_error(result)
+        return {
+            "attachments": result["attachments"],
+            "limits": result["limits"],
+            "uploads_allowed": result["uploads_allowed"],
+        }
+
+    @router.post("/nodes/{node_id}/attachments", status_code=201)
+    async def add_node_attachment(
+        node_id: str,
+        request: Request,
+        filename: str = Query("", max_length=4096),
+    ) -> Dict[str, Any]:
+        """Attach one file to a node.
+
+        The body is the raw file bytes, not multipart: a multipart body is
+        spooled by the framework before the handler runs, which would defeat
+        the size checks. The name comes from ``filename``; the declared type
+        from ``Content-Type`` and is kept for diagnosis only.
+        """
+        with use_request_authorization(headers=request.headers):
+            result = await service.add_node_attachment(
+                node_id,
+                filename=filename,
+                declared_content_type=request.headers.get("content-type"),
+                content=request.stream(),
+                content_length=_declared_content_length(request),
+            )
+        _raise_for_attachment_error(result)
+        return result["attachment"]
+
+    @router.get("/nodes/{node_id}/attachments/{attachment_id}")
+    async def download_node_attachment(
+        node_id: str, attachment_id: str, request: Request
+    ) -> StreamingResponse:
+        """Stream one attachment back, always as a download."""
+        with use_request_authorization(headers=request.headers):
+            result = await asyncio.to_thread(
+                service.open_node_attachment, node_id, attachment_id
+            )
+        _raise_for_attachment_error(result)
+        record = result["attachment"]
+        stream = result["stream"]
+        media_type = record["content_type"]
+        if media_type in TEXT_TYPES:
+            media_type = f"{media_type}; charset=utf-8"
+        return _AttachmentDownload(
+            stream,
+            media_type=media_type,
+            headers=_attachment_download_headers(record),
+        )
+
+    @router.delete("/nodes/{node_id}/attachments/{attachment_id}")
+    async def delete_node_attachment(
+        node_id: str, attachment_id: str, request: Request
+    ) -> Dict[str, Any]:
+        """Delete one attachment from a node."""
+        with use_request_authorization(headers=request.headers):
+            result = await asyncio.to_thread(
+                service.delete_node_attachment, node_id, attachment_id
+            )
+        _raise_for_attachment_error(result)
+        return {"success": True}
+
+
 # ==================== Router Factory ====================
 
 
@@ -1536,6 +2592,7 @@ def create_rest_router(
     prefix: str = "",
     session_manager=None,
     rest_interfaces: Optional[List[RestInterfaceConfig]] = None,
+    import_job_store: Optional["ExecutionStore"] = None,
 ) -> APIRouter:
     """
     Create a FastAPI router with all graph operation endpoints.
@@ -1549,11 +2606,25 @@ def create_rest_router(
         rest_interfaces: Optional explicit list of config-driven dedicated REST
             interfaces. When None, they are read from the loaded schema config
             (``config_loader.get_rest_interfaces()``).
+        import_job_store: Durable store backing ``/import``'s background
+            embedding jobs. When None, an ``InMemoryExecutionStore`` is used —
+            fine for tests and standalone runs, but import jobs then do NOT
+            survive a restart; production wiring (``backend/api_host/server.py``)
+            passes a durable ``SqliteExecutionStore``.
 
     Returns:
         Configured APIRouter
     """
-    router = APIRouter(prefix=prefix, tags=["graph"])
+    router = APIRouter(
+        prefix=prefix,
+        tags=["graph"],
+        route_class=GraphJSONRoute,
+    )
+
+    if import_job_store is None:
+        from backend.agents.execution import InMemoryExecutionStore
+
+        import_job_store = InMemoryExecutionStore()
 
     _register_search_endpoints(router, service)
     _register_similarity_endpoints(router, service)
@@ -1563,6 +2634,8 @@ def create_rest_router(
     _register_metadata_endpoints(router, service)
     _register_views_endpoints(router, service)
     _register_export_endpoints(router, service)
+    _register_attachment_endpoints(router, service)
+    _register_import_endpoints(router, service, import_job_store)
     if session_manager is not None:
         _register_session_endpoints(router, service, session_manager)
 

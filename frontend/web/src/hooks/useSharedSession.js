@@ -67,6 +67,12 @@ export function useSharedSession({
   // Deliberately NOT invoked from applyServerSession — that path is reused by
   // same-session resync, which must keep the current session's assistant state.
   resetSessionScopedState,
+  // Told the session payload the server answered, before its content is
+  // applied, so the session's write mode (and with it the staged-session
+  // header, docs/SESSION_OVERLAY_CONTRACT.md §16.1) is known before anything
+  // is done in it; told null when the server holds no such session (it then
+  // exists only in this browser, so it is direct, §5.1). Optional.
+  onSessionPayload,
 }) {
   // Load a session's canvas content from the server (resolved node refs +
   // layout + group annotations) onto the store.
@@ -109,9 +115,16 @@ export function useSharedSession({
   );
 
   const loadSessionFromServer = useCallback(
-    async (targetId, { eagerConnect = false, onMissing = null } = {}) => {
+    async (
+      targetId,
+      { eagerConnect = false, onMissing = null, onStaleMissing = null, isStale = () => false } = {}
+    ) => {
       try {
         const payload = await api.getSession(targetId, { resolve: true });
+        // Adopt the mode even from a stale reply: it is a fact about targetId,
+        // and adoption never downgrades a session known staged.
+        onSessionPayload?.(targetId, payload);
+        if (isStale()) return;
         // Compute the sync baseline before touching the canvas: it runs the same
         // annotation-transform logic applyServerSession does internally, and
         // applyServerSession itself validates the resolved shape before its first
@@ -129,11 +142,17 @@ export function useSharedSession({
         // Best-effort from here on: the canvas above already loaded correctly, so a
         // sync-connect failure must not be reported as a failed switch.
         try {
-          ensureSyncConnected(targetId)?.setBaseline(baselineMirror);
+          ensureSyncConnected(targetId)?.setBaseline(baselineMirror, { seq: payload?.seq });
         } catch (syncError) {
           console.error('Error connecting sync client:', syncError);
         }
       } catch (error) {
+        if (error?.status === 404) onSessionPayload?.(targetId, null);
+        if (isStale()) {
+          // Settled direct all the same; the caller decides what that needs.
+          if (error?.status === 404) onStaleMissing?.(targetId);
+          return;
+        }
         // Session does not exist server-side yet — new / not-yet-saved share URL.
         if (error?.status === 404) {
           clearVisualization();
@@ -141,7 +160,9 @@ export function useSharedSession({
           // reset the carried-over UI state just as the loaded-content path does.
           resetSessionScopedState?.();
           if (eagerConnect) {
-            ensureSyncConnected(targetId)?.setBaseline({});
+            // Seq 0: the stream creates the session, so any later seq is
+            // another client's write this empty load never saw.
+            ensureSyncConnected(targetId)?.setBaseline({}, { seq: 0 });
           } else if (syncRef.current && syncRef.current.sessionId === targetId) {
             syncRef.current.setBaseline({});
           }
@@ -157,7 +178,14 @@ export function useSharedSession({
         }
       }
     },
-    [applyServerSession, clearVisualization, ensureSyncConnected, syncRef, resetSessionScopedState]
+    [
+      applyServerSession,
+      clearVisualization,
+      ensureSyncConnected,
+      syncRef,
+      resetSessionScopedState,
+      onSessionPayload,
+    ]
   );
 
   return { applyServerSession, loadSessionFromServer };

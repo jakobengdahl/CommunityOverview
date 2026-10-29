@@ -125,7 +125,8 @@ each op batch is capped by op count (≤ 500) and body size (≤ 256 KB → `413
 an op carrying a validated embedded image is budgeted separately instead, and
 the session's cumulative document/image size is also checked per batch), and
 a per-client token bucket (200 burst, 100 ops/s refill → `429`) throttles a
-runaway client (design §3.9).
+runaway client (design §3.9). A batch of more ops than the full burst could
+never be admitted by waiting, so it is refused as `413` instead.
 
 ---
 

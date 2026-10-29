@@ -377,7 +377,6 @@ function GuideOverlay() {
                 value={inputValue}
                 placeholder={inputPlaceholder}
                 onChange={(e) => setInputValue(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleNext()}
               />
             </div>
           )}

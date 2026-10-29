@@ -57,6 +57,29 @@ CommunityOverview is packaged as a Docker container that can run on any platform
 - **Disk:** 1 GB for application + data
 - **Port:** 8000 (configurable)
 
+### User-function temporary storage
+
+The hardened-subprocess user-function runner creates private run directories
+under Python's temporary directory (selected by `TMPDIR` at application startup).
+Its supervisor checks work-directory usage every 100 ms and after termination,
+with defaults of 256 MiB and 10,000 entries per run. Exceeding either quota
+terminates the run with `disk_exceeded`. Integrations can lower these defaults
+through `HardenedSubprocessRunner(max_disk_bytes=..., max_disk_files=...)`;
+the constructor rejects zero, negative, non-integer or above-maximum values
+before any run starts. The per-file 16 MiB `RLIMIT_FSIZE` limit also applies.
+
+Polling is best-effort: a function can overshoot between scans, and temporary
+peaks or unlinked files held open may escape accounting. As defence in depth,
+put the temporary directory on storage with an enforced container/host limit:
+an ephemeral-storage limit where the platform enforces one, a filesystem quota,
+or a size-capped tmpfs with an inode limit. For a container allowing one run at
+a time, a dedicated 512 MiB tmpfs with 20,000 inodes is a starting budget;
+allow space for function source files and other temporary files too. Size the
+shared cap for the allowed number of concurrent runs and leave capacity for
+application data and logs. Tmpfs consumes memory, so include it in the container's
+memory budget. Use `isolation_minimum: full` when confinement to the private
+directory is required; at degraded isolation a function may write elsewhere.
+
 ---
 
 ## 2. Prerequisites
@@ -89,7 +112,7 @@ OPENAI_API_KEY=sk-xxxxx
 
 # Authentication (recommended for production)
 AUTH_ENABLED=true
-AUTH_USERNAME=admin
+AUTH_USERNAME=<operator-username>
 AUTH_PASSWORD=<strong-password>
 ```
 
@@ -556,6 +579,18 @@ Cloud platforms are often stateless. Ensure:
 ### SSL/HTTPS Issues
 
 Most cloud platforms handle SSL automatically. For self-hosted setups, add a reverse proxy such as Caddy or nginx in front of the application.
+
+### Outbound Fetches Fail Behind an Egress Proxy
+
+Requests that reach addresses users or remote servers choose — webhook
+delivery, `image_url` ingest, the agent fetch tool, skill fetches, and the
+redirect hops of MCP server discovery — do **not** use `HTTP_PROXY` /
+`HTTPS_PROXY`. They connect directly, and only to an address they have just
+resolved and checked as public, so a name cannot pass the check and then
+resolve to an internal address at connect time (DNS rebinding). A proxy would
+resolve the name itself and undo that check. In an environment whose only way
+out is an egress proxy, these requests fail with a connection error; allow
+direct outbound HTTP(S) from the backend for them to work.
 
 ---
 

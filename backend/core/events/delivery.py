@@ -14,6 +14,9 @@ import queue
 import time
 from typing import Optional, Callable
 from datetime import datetime, timezone
+import asyncio
+import typing
+import httpcore2
 import httpx2 as httpx
 import urllib.parse
 import socket
@@ -32,17 +35,38 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_BACKOFF_TIMES = [0.5, 2.0, 5.0]  # Seconds between retries
 DEFAULT_TIMEOUT = 10  # HTTP request timeout in seconds
+# Only a short error excerpt is used; bound decoded error bodies as they arrive.
+MAX_WEBHOOK_BODY_BYTES = 256 * 1024
 
 
-# RFC 6598 Carrier-Grade NAT range. Python's ipaddress module does not classify
-# 100.64.0.0/10 as private, but it is used for internal infrastructure in many
-# cloud and ISP environments and must be blocked.
-_RFC6598_CGNAT = ipaddress.ip_network("100.64.0.0/10")
+# Non-global ranges that Python's ipaddress module does not classify as private
+# or reserved, so the flag checks in _is_safe_ip let them through:
+# - 100.64.0.0/10: RFC 6598 Carrier-Grade NAT, used for internal infrastructure
+#   in many cloud and ISP environments.
+# - 192.88.99.0/24: the deprecated 6to4 relay anycast prefix (RFC 7526).
+# - fec0::/10: the deprecated IPv6 site-local prefix (RFC 3879), still routed
+#   internally by some networks.
+_UNFLAGGED_INTERNAL_NETWORKS = (
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("192.88.99.0/24"),
+    ipaddress.ip_network("fec0::/10"),
+)
 
 
 def _is_safe_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Return True if the IP is publicly routable (not private/internal)."""
-    if ip.version == 4 and ip in _RFC6598_CGNAT:
+    if isinstance(ip, ipaddress.IPv6Address):
+        # An IPv4-mapped address (::ffff:a.b.c.d) reaches the embedded IPv4
+        # host through a dual-stack socket, and the IPv6 flags on the wrapper
+        # differ between Python versions, so judge the embedded host alone.
+        if ip.ipv4_mapped is not None:
+            return _is_safe_ip(ip.ipv4_mapped)
+        # A 6to4 address (2002::/16) is relayed to its embedded IPv4 host.
+        # ipaddress currently flags all of 2002::/16 is_private, so this is
+        # defense in depth: the guard does not rest on that classification.
+        if ip.sixtofour is not None and not _is_safe_ip(ip.sixtofour):
+            return False
+    if any(ip in network for network in _UNFLAGGED_INTERNAL_NETWORKS):
         return False
     return not (
         ip.is_private
@@ -53,6 +77,33 @@ def _is_safe_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     )
 
 
+def _public_addresses(hostname: str) -> list[str]:
+    """Resolve *hostname* and return its addresses if every one is public.
+
+    getaddrinfo returns both A and AAAA records, and every one is checked, so a
+    hostname with a public IPv4 and an internal IPv6 (or vice versa) is still
+    refused (fail-closed). Returns an empty list when the name is refused or
+    has no answers; resolution errors propagate. An IP literal is judged as
+    itself, without DNS.
+    """
+    try:
+        literal_ip = ipaddress.ip_address(hostname)
+    except ValueError:
+        literal_ip = None
+    if literal_ip is not None:
+        return [str(literal_ip)] if _is_safe_ip(literal_ip) else []
+
+    addresses: list[str] = []
+    for addr_info in socket.getaddrinfo(hostname, None):
+        # Strip the zone ID that may appear in IPv6 link-local addresses
+        ip = ipaddress.ip_address(addr_info[4][0].split("%")[0])
+        if not _is_safe_ip(ip):
+            return []
+        if str(ip) not in addresses:
+            addresses.append(str(ip))
+    return addresses
+
+
 def is_safe_url(url: str) -> bool:
     """
     Validates a URL to prevent SSRF attacks.
@@ -60,6 +111,11 @@ def is_safe_url(url: str) -> bool:
     Ensures the scheme is http or https and that every IP address the hostname
     resolves to (IPv4 and IPv6) is publicly routable.  All resolved addresses
     must pass; a single internal address causes rejection (fail-closed).
+
+    This answers for the moment it is called only: a name can resolve
+    differently when the request later connects (DNS rebinding). The clients
+    built with pinned_transport() / async_pinned_transport() close that gap by
+    re-checking at connect time and connecting to the address they checked.
     """
     try:
         parsed = urllib.parse.urlparse(url)
@@ -70,42 +126,189 @@ def is_safe_url(url: str) -> bool:
         if not hostname:
             return False
 
-        # If the hostname is already an IP literal, validate it directly instead
-        # of going through DNS resolution.
-        try:
-            literal_ip = ipaddress.ip_address(hostname)
-        except ValueError:
-            literal_ip = None
-
-        if literal_ip is not None:
-            return _is_safe_ip(literal_ip)
-
-        # Resolve hostname — getaddrinfo returns both A and AAAA records.
-        # We check every resolved address so that a hostname that has both a
-        # public IPv4 and an internal IPv6 (or vice-versa) is still rejected.
-        addr_infos = socket.getaddrinfo(hostname, None)
-        if not addr_infos:
-            return False
-
-        for addr_info in addr_infos:
-            ip_str = addr_info[4][0]
-            # Strip the zone ID that may appear in IPv6 link-local addresses
-            ip_str = ip_str.split("%")[0]
-            ip = ipaddress.ip_address(ip_str)
-            if not _is_safe_ip(ip):
-                return False
-
-        return True
+        return bool(_public_addresses(hostname))
     except (ValueError, socket.gaierror, OSError, Exception) as e:
         logger.warning(f"URL validation failed for {url}: {e}")
         return False
 
 
-_MAX_REDIRECTS = 10
+class UnsafeAddressError(httpcore2.ConnectError):
+    """Raised at connect time when the host does not resolve to only public
+    addresses. A ConnectError subclass, so httpx surfaces it as
+    httpx.ConnectError and every caller's existing network-error path applies.
+    """
+
+
+def _pinned_targets(host: str) -> list[str]:
+    try:
+        addresses = _public_addresses(host)
+    except (ValueError, OSError) as exc:
+        raise UnsafeAddressError(f"Could not resolve {host}: {exc}") from exc
+    if not addresses:
+        raise UnsafeAddressError(
+            f"Refused to connect to {host}: it resolves to a restricted address"
+        )
+    return addresses
+
+
+class _PinnedBackend(httpcore2.NetworkBackend):
+    """Resolves once per connection, validates every answer, and connects to a
+    validated address literal, so the address checked is the address used.
+
+    The URL is never rewritten: httpcore still takes the Host header and the
+    TLS server name from the request's own host.
+    """
+
+    def __init__(self) -> None:
+        self._inner = httpcore2.SyncBackend()
+
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: typing.Iterable[httpcore2.SOCKET_OPTION] | None = None,
+    ) -> httpcore2.NetworkStream:
+        last_error: Exception | None = None
+        # Every address is already validated, so falling through to the next
+        # one on a connect failure keeps the fallback a by-name connect had.
+        for address in _pinned_targets(host):
+            try:
+                return self._inner.connect_tcp(
+                    address,
+                    port,
+                    timeout=timeout,
+                    local_address=local_address,
+                    socket_options=socket_options,
+                )
+            except (httpcore2.ConnectError, httpcore2.ConnectTimeout) as exc:
+                last_error = exc
+        assert last_error is not None
+        raise last_error
+
+    def sleep(self, seconds: float) -> None:
+        self._inner.sleep(seconds)
+
+
+class _AsyncPinnedBackend(httpcore2.AsyncNetworkBackend):
+    """The async counterpart of _PinnedBackend; resolution runs in a thread.
+
+    The lookup is held to the connect timeout. Checked addresses are then
+    tried one at a time, each with the full timeout, as _PinnedBackend and
+    socket.create_connection do -- not raced, as the by-name connect this
+    replaces does -- so a name with N unreachable addresses can take up to
+    N times the timeout before the next one answers.
+    """
+
+    def __init__(self) -> None:
+        self._inner = httpcore2.AnyIOBackend()
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: typing.Iterable[httpcore2.SOCKET_OPTION] | None = None,
+    ) -> httpcore2.AsyncNetworkStream:
+        try:
+            addresses = await asyncio.wait_for(
+                asyncio.to_thread(_pinned_targets, host), timeout
+            )
+        except TimeoutError as exc:
+            raise httpcore2.ConnectTimeout(f"Timed out resolving {host}") from exc
+        last_error: Exception | None = None
+        for address in addresses:
+            try:
+                return await self._inner.connect_tcp(
+                    address,
+                    port,
+                    timeout=timeout,
+                    local_address=local_address,
+                    socket_options=socket_options,
+                )
+            except (httpcore2.ConnectError, httpcore2.ConnectTimeout) as exc:
+                last_error = exc
+        assert last_error is not None
+        raise last_error
+
+    async def sleep(self, seconds: float) -> None:
+        await self._inner.sleep(seconds)
+
+
+class _PinnedTransport(httpx.HTTPTransport):
+    # HTTPTransport keeps no network-backend option, so the pool it routes
+    # requests through (self._pool) is built here with the same TLS and limit
+    # defaults it would otherwise use. That attribute is httpx2's own; the
+    # rebinding tests in tests/test_pinned_transport.py go through the real
+    # transport and fail if a future httpx2 stops using it.
+    def __init__(self) -> None:
+        self._pool = httpcore2.ConnectionPool(
+            ssl_context=httpx.create_ssl_context(),
+            max_connections=100,
+            max_keepalive_connections=20,
+            keepalive_expiry=5.0,
+            network_backend=_PinnedBackend(),
+        )
+
+
+class _AsyncPinnedTransport(httpx.AsyncHTTPTransport):
+    def __init__(self) -> None:
+        self._pool = httpcore2.AsyncConnectionPool(
+            ssl_context=httpx.create_ssl_context(),
+            max_connections=100,
+            max_keepalive_connections=20,
+            keepalive_expiry=5.0,
+            network_backend=_AsyncPinnedBackend(),
+        )
+
+
+def pinned_transport() -> httpx.HTTPTransport:
+    """A transport for the hop-validating walkers below: it connects only to an
+    address it has just resolved and checked, closing the window in which a
+    name passes is_safe_url and then resolves elsewhere at connect time.
+
+    An explicit transport also means the client takes no proxy from the
+    environment; a proxy would resolve the name itself and undo the pin.
+    """
+    return _PinnedTransport()
+
+
+def async_pinned_transport() -> httpx.AsyncHTTPTransport:
+    """The AsyncClient counterpart of pinned_transport()."""
+    return _AsyncPinnedTransport()
+
+
+# The redirect cap for the five paths that walk redirects by hand and
+# re-validate every hop with is_safe_url: the webhook delivery below, the image
+# ingest in core/image_ingest.py, BOTH walkers in agents/mcp_loader.py (the
+# agent fetch tool, and the MCP server info-endpoint discovery in
+# _connect_http) and the skills loader in skills/loader.py. Each hop is
+# re-validated before it is requested, so the cap bounds that cost; they import
+# this constant rather than keeping their own copy, so the five cannot drift
+# apart. The skills loader additionally re-applies its own trusted_domains
+# allowlist per hop, which the other four have no equivalent of. Other outbound
+# requests in the backend do not use this cap: they either leave redirect
+# handling to their HTTP client, or follow no redirects at all.
+#
+# This list is what an audit of "every hop-validating path" reads, so a new
+# walker is not added without being named here.
+MAX_REDIRECTS = 10
 
 
 class _SSRFRedirectBlocked(Exception):
     """Raised when a redirect target fails the SSRF check."""
+
+
+class _MalformedRedirect(Exception):
+    """Raised when a 3xx carries no Location header to follow.
+
+    Separate from _SSRFRedirectBlocked because the reason differs -- nothing
+    was refused on address grounds -- but both share the same outcome: the
+    delivery is dropped rather than retried, because neither improves on a
+    second attempt.
+    """
 
 
 class DeliveryItem:
@@ -240,6 +443,8 @@ class DeliveryWorker:
                 )
                 if self._on_result:
                     result = DeliveryResult(
+                        delivery_id=f"{event.subscription.id if event.subscription else ''}:{event.event_id}",
+                        correlation_id=event.origin.event_correlation_id or "",
                         event_id=event.event_id,
                         subscription_id=event.subscription.id
                         if event.subscription
@@ -273,6 +478,8 @@ class DeliveryWorker:
             if response.status_code >= 200 and response.status_code < 300:
                 # Success
                 result = DeliveryResult(
+                    delivery_id=f"{event.subscription.id if event.subscription else ''}:{event.event_id}",
+                    correlation_id=event.origin.event_correlation_id or "",
                     event_id=event.event_id,
                     subscription_id=event.subscription.id if event.subscription else "",
                     webhook_url=webhook_url,
@@ -295,13 +502,16 @@ class DeliveryWorker:
                 )
                 return
 
-        except _SSRFRedirectBlocked as e:
+        except (_SSRFRedirectBlocked, _MalformedRedirect) as e:
             error_message = str(e)
             logger.error(
-                f"SSRF blocked (redirect): event {event.event_id} to {webhook_url}. {error_message}"
+                f"Redirect refused: event {event.event_id} to {webhook_url}. "
+                f"{error_message}"
             )
             if self._on_result:
                 result = DeliveryResult(
+                    delivery_id=f"{event.subscription.id if event.subscription else ''}:{event.event_id}",
+                    correlation_id=event.origin.event_correlation_id or "",
                     event_id=event.event_id,
                     subscription_id=event.subscription.id if event.subscription else "",
                     webhook_url=webhook_url,
@@ -323,6 +533,8 @@ class DeliveryWorker:
             )
             if self._on_result:
                 result = DeliveryResult(
+                    delivery_id=f"{event.subscription.id if event.subscription else ''}:{event.event_id}",
+                    correlation_id=event.origin.event_correlation_id or "",
                     event_id=event.event_id,
                     subscription_id=event.subscription.id if event.subscription else "",
                     webhook_url=webhook_url,
@@ -369,6 +581,8 @@ class DeliveryWorker:
         self, url: str, payload: dict, headers: dict
     ) -> httpx.Response:
         """POST to url, following redirects while re-applying the SSRF check at each hop."""
+        headers = httpx.Headers(headers)
+        headers["Accept-Encoding"] = "identity"
         redirect_headers = {
             key: value
             for key, value in headers.items()
@@ -378,32 +592,61 @@ class DeliveryWorker:
         current_method = "POST"
         current_url = url
 
-        with httpx.Client(timeout=self._timeout, follow_redirects=False) as client:
-            for _ in range(_MAX_REDIRECTS):
-                if current_method == "POST":
-                    response = client.post(
-                        current_url,
-                        json=payload,
-                        headers=headers,
-                        follow_redirects=False,
-                    )
-                else:
-                    response = client.get(
-                        current_url,
-                        headers=redirect_headers,
-                        follow_redirects=False,
-                    )
-                if not response.is_redirect:
-                    return response
-                location = str(response.headers.get("location", ""))
-                next_url = urllib.parse.urljoin(current_url, location)
-                if not is_safe_url(next_url):
-                    raise _SSRFRedirectBlocked(
-                        f"Blocked redirect to restricted address: {next_url}"
-                    )
-                if response.status_code in (301, 302, 303):
-                    current_method = "GET"
-                current_url = next_url
+        with httpx.Client(
+            timeout=self._timeout,
+            follow_redirects=False,
+            transport=pinned_transport(),
+        ) as client:
+            for _ in range(MAX_REDIRECTS):
+                with client.stream(
+                    current_method,
+                    current_url,
+                    headers=headers if current_method == "POST" else redirect_headers,
+                    **({"json": payload} if current_method == "POST" else {}),
+                    follow_redirects=False,
+                ) as response:
+                    if not response.is_redirect:
+                        if 200 <= response.status_code < 300:
+                            # Status confirms acceptance. Reading an unused body
+                            # could fail and retry an already accepted POST.
+                            return response
+                        # HTTPX decodes before iter_bytes yields, so even a tiny
+                        # compressed chunk can allocate far beyond our body cap.
+                        # Webhook diagnostics do not require encoded bodies.
+                        encoding = response.headers.get("content-encoding", "")
+                        if encoding.strip().lower() not in ("", "identity"):
+                            raise httpx.RequestError(
+                                "Encoded webhook response body is not supported",
+                                request=response.request,
+                            )
+                        chunks = []
+                        total = 0
+                        for chunk in response.iter_bytes():
+                            total += len(chunk)
+                            if total > MAX_WEBHOOK_BODY_BYTES:
+                                raise httpx.RequestError(
+                                    "Webhook response body exceeds "
+                                    f"{MAX_WEBHOOK_BODY_BYTES} bytes",
+                                    request=response.request,
+                                )
+                            chunks.append(chunk)
+                        # Cache the decoded bytes as Response.read() does, so
+                        # response.text remains usable after the stream closes.
+                        response._content = b"".join(chunks)
+                        return response
+                    location = str(response.headers.get("location", ""))
+                    if not location:
+                        raise _MalformedRedirect(
+                            f"Redirect without a Location header from {current_url}"
+                        )
+                    next_url = urllib.parse.urljoin(current_url, location)
+                    if not is_safe_url(next_url):
+                        raise _SSRFRedirectBlocked(
+                            f"Blocked redirect to restricted address: {next_url}"
+                        )
+                    if response.status_code in (301, 302, 303):
+                        current_method = "GET"
+                    current_url = next_url
         raise httpx.TooManyRedirects("Exceeded redirect limit", request=None)
 
     def _handle_failure(
@@ -435,6 +678,8 @@ class DeliveryWorker:
             # Report retrying status
             if self._on_result:
                 result = DeliveryResult(
+                    delivery_id=f"{event.subscription.id if event.subscription else ''}:{event.event_id}",
+                    correlation_id=event.origin.event_correlation_id or "",
                     event_id=event.event_id,
                     subscription_id=event.subscription.id if event.subscription else "",
                     webhook_url=webhook_url,
@@ -470,6 +715,8 @@ class DeliveryWorker:
             # Report dropped status
             if self._on_result:
                 result = DeliveryResult(
+                    delivery_id=f"{event.subscription.id if event.subscription else ''}:{event.event_id}",
+                    correlation_id=event.origin.event_correlation_id or "",
                     event_id=event.event_id,
                     subscription_id=event.subscription.id if event.subscription else "",
                     webhook_url=webhook_url,

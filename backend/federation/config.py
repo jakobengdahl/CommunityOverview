@@ -7,11 +7,14 @@ Configuration is intentionally read-only at runtime and loaded from file/env.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Dict, List, Optional, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
 from backend.runtime.config_context import resolve_federation_config_path_info
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_FEDERATION_PATH = "config/default/federation_config.json"
@@ -150,13 +153,15 @@ def load_federation_config() -> FederationFileConfig:
         with open(path, "r", encoding="utf-8") as handle:
             payload = json.load(handle)
         config = FederationFileConfig(**payload)
-        print(f"Loaded federation configuration from: {path}")
+        logger.info(f"Loaded federation configuration from: {path}")
         return config
     except FileNotFoundError:
-        print(f"Federation config not found at {path}, federation disabled")
+        logger.info(f"Federation config not found at {path}, federation disabled")
         return FederationFileConfig()
     except Exception as exc:
-        print(f"Invalid federation config at {path}: {exc}, federation disabled")
+        logger.warning(
+            f"Invalid federation config at {path}: {exc}, federation disabled"
+        )
         return FederationFileConfig()
 
 

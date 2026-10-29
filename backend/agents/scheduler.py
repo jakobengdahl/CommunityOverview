@@ -69,6 +69,11 @@ class AgentScheduler:
             self._entries.pop(agent_id, None)
             self._last_fired.pop(agent_id, None)
 
+    def registrations(self) -> Dict[str, Tuple["AgentConfig", "AgentWorker"]]:
+        """Snapshot of registered agents: agent_id -> (config, worker)."""
+        with self._lock:
+            return dict(self._entries)
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -113,8 +118,7 @@ class AgentScheduler:
 
     def _check_and_fire(self) -> None:
         """Check all registered agents and fire those whose schedule matches now."""
-        with self._lock:
-            snapshot = dict(self._entries)
+        snapshot = self.registrations()
 
         for agent_id, (config, worker) in snapshot.items():
             schedule = config.schedule
