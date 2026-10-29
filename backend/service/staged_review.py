@@ -31,7 +31,7 @@ from backend.core.session_annotations import (
     sanitize_saved_view_metadata,
     saved_view_write_error,
 )
-from backend.core.storage import edge_applicability_error
+from backend.core.storage import edge_applicability_error, node_applicability_changed
 from backend.core.storage_merge import SessionMergePlan, SessionMergeWrite
 from backend.runtime.authorization import GraphAccessNarrowing
 
@@ -189,10 +189,12 @@ class Review:
                 if dep is not None and dep["action"] == "create":
                     deps.add(("node", end))
         # A node delete takes its edges' tombstones with it, and so does a
-        # re-create of the node as another type (an update staging `type`):
+        # re-create of the node as another type, or a subtype update:
         # the old node's edges are gone in the composed view, and some may
         # not fit the new type.
-        recreated = entry["action"] == "update" and "type" in (entry["staged"] or {})
+        recreated = entry["action"] == "update" and bool(
+            {"type", "subtypes"}.intersection(entry["staged"] or {})
+        )
         if kind == "node" and (entry["action"] == "delete" or recreated):
             for edge_key, edge_entry in self.entries.items():
                 if edge_key[0] != "edge" or edge_entry["action"] != "delete":
@@ -223,10 +225,10 @@ class Review:
             retyped = (
                 composed is not None
                 and main is not None
-                and composed.get("type") != main.get("type")
+                and node_applicability_changed(main, composed)
             )
             if retyped:
-                # A type change in place is judged against every main edge to
+                # A type or subtype change is judged against every main edge to
                 # the node not deleted with it, and an id_taken create does not
                 # depend on the tombstones it might be merged without: any
                 # edge the reader cannot see keeps the entry out of its view.
@@ -577,11 +579,11 @@ def requested_keys(selection: Any) -> List[LayerKey]:
 
 
 def _retyped(review: Review, write: SessionMergeWrite) -> bool:
-    """Whether a node upsert changes the type of the node main holds."""
+    """Whether a node upsert changes main's relationship applicability."""
     if write.kind != "node" or write.expect_absent:
         return False
     main_doc = _main_doc(review.storage, ("node", write.entity_id))
-    return main_doc is not None and main_doc.get("type") != write.payload.get("type")
+    return main_doc is not None and node_applicability_changed(main_doc, write.payload)
 
 
 def _validate_writes(
@@ -626,7 +628,7 @@ def _validate_writes(
             )
             if annotation_error:
                 raise refuse(write, annotation_error)
-    # A node whose type the merge changes in place keeps the main edges the
+    # A node whose type or subtypes the merge changes keeps the main edges the
     # merge does not delete: each must still fit the type, as a direct edge
     # create to it would have to. An entry with such an edge the caller
     # cannot see is outside its view (``_own_shown``), so every edge counted
@@ -654,7 +656,7 @@ def _validate_writes(
         if misfits:
             raise refuse(
                 write,
-                f"{misfits} existing edge(s) would not fit the new type; "
+                f"{misfits} existing edge(s) would not fit the new type or subtypes; "
                 "merge or stage their removal with it",
             )
     for write in edge_upserts:

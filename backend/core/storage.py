@@ -231,6 +231,13 @@ def build_edge_update(current: Dict[str, Any], updates: Dict[str, Any]) -> Edge:
     return validated_edge
 
 
+def node_applicability_changed(before: Dict[str, Any], after: Dict[str, Any]) -> bool:
+    """Whether a node write changes the fields relationship rules use."""
+    return before.get("type") != after.get("type") or (
+        before.get("subtypes", []) != after.get("subtypes", [])
+    )
+
+
 def edge_applicability_error(
     edge_type: str, source_node: Optional[Node], target_node: Optional[Node]
 ) -> Optional[str]:
@@ -4242,6 +4249,19 @@ class GraphStorage:
                 refused = validate(node.to_dict(), validated.to_dict())
                 if refused:
                     raise ValueError(refused)
+            if node_applicability_changed(before_state, validated.to_dict()):
+                for edge in self.get_edges_for_node(node_id):
+                    error = edge_applicability_error(
+                        edge.type_str,
+                        validated
+                        if edge.source == node_id
+                        else self.nodes.get(edge.source),
+                        validated
+                        if edge.target == node_id
+                        else self.nodes.get(edge.target),
+                    )
+                    if error:
+                        raise ValueError(error)
             allowed_fields = _NODE_UPDATE_FIELDS
 
             undo = self._capture(node_ids=[node_id])

@@ -330,6 +330,18 @@ def update_node(
             target_node, decision.graph_access
         ):
             return {"success": False, "error": f"Node with ID {node_id} not found"}
+        if (
+            decision.graph_access.enabled
+            and target_node is not None
+            and "subtypes" in updates
+            and updates["subtypes"] != target_node.subtypes
+            and any(
+                not access.is_edge_visible(edge, storage, decision.graph_access)
+                for edge in storage.get_edges_for_node(node_id)
+            )
+        ):
+            # Applicability errors must not reveal a hidden incident edge.
+            return {"success": False, "error": f"Node with ID {node_id} not found"}
 
         try:
             updated_node = storage.update_node(
