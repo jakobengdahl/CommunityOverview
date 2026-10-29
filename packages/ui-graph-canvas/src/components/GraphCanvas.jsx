@@ -1042,10 +1042,11 @@ function GraphCanvasInner({
   // is not treated as a switch (mount already fits via the ReactFlow fitView prop).
   const lastSessionKeyRef = useRef(sessionKey);
   const fitOnSessionKeyRef = useRef(sessionKey);
-  // The clear signal as the node-reconciliation effect last saw it. The host's
-  // canvasBaselineEpoch moves on every clear; clearGroupsFlag stays raised for
-  // a while after one (and through a second clear inside that window), so for a
-  // host that passes no epoch only the flag's rise counts as the clear.
+  // The clear signal as the node-reconciliation effect last saw it.
+  // clearGroupsFlag stays raised for a while after a clear, so a clear is the
+  // flag rising, or — for a second clear inside that window — the host's
+  // canvasBaselineEpoch moving while it is raised. An epoch move on its own is
+  // not a clear (a host may move it only to drop the undo history).
   const lastCanvasBaselineEpochRef = useRef(canvasBaselineEpoch);
   const lastClearGroupsFlagRef = useRef(false);
 
@@ -1621,9 +1622,9 @@ function GraphCanvasInner({
     const sessionChanged = lastSessionKeyRef.current !== sessionKey;
     lastSessionKeyRef.current = sessionKey;
     const clearRaised =
-      canvasBaselineEpoch === null
-        ? clearGroupsFlag && !lastClearGroupsFlagRef.current
-        : canvasBaselineEpoch !== lastCanvasBaselineEpochRef.current;
+      clearGroupsFlag &&
+      (!lastClearGroupsFlagRef.current ||
+        canvasBaselineEpoch !== lastCanvasBaselineEpochRef.current);
     lastClearGroupsFlagRef.current = clearGroupsFlag;
     lastCanvasBaselineEpochRef.current = canvasBaselineEpoch;
     const focusChanged = lastFocusRootRef.current !== activeFocusRootId;

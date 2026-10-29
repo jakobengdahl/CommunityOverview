@@ -230,4 +230,33 @@ describe('GraphCanvas preserves groups and annotations across an in-place node e
     expect(ids.has('label-1')).toBe(false);
     expect(ids.has('shape-1')).toBe(false);
   });
+
+  it('keeps the overlays when canvasBaselineEpoch moves without clearGroupsFlag', () => {
+    // A host may move the epoch only to drop the undo history on a new result.
+    const nodeA = { id: 'node-a', name: 'A', type: 'Actor', description: 'a' };
+    const { rerender } = render(
+      <GraphCanvas
+        nodes={[nodeA]}
+        edges={[]}
+        canvasBaselineEpoch={0}
+        groupsToRestore={GROUPS_TO_RESTORE}
+        annotationsToRestore={ANNOTATIONS_TO_RESTORE}
+      />
+    );
+    expectOverlaysPresent();
+
+    const nodeB = { id: 'node-b', name: 'B', type: 'Actor', description: 'b' };
+    act(() => {
+      rerender(
+        <GraphCanvas
+          nodes={[nodeB]}
+          edges={[]}
+          canvasBaselineEpoch={1}
+          groupsToRestore={GROUPS_TO_RESTORE}
+          annotationsToRestore={ANNOTATIONS_TO_RESTORE}
+        />
+      );
+    });
+    expectOverlaysPresent();
+  });
 });
