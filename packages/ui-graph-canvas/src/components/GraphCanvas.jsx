@@ -1042,6 +1042,9 @@ function GraphCanvasInner({
   // is not treated as a switch (mount already fits via the ReactFlow fitView prop).
   const lastSessionKeyRef = useRef(sessionKey);
   const fitOnSessionKeyRef = useRef(sessionKey);
+  // clearGroupsFlag as the node-reconciliation effect last saw it. The flag
+  // stays raised for a while after a clear, so only its rise is the clear.
+  const lastClearGroupsFlagRef = useRef(false);
 
   // Undo/redo history for node-position moves (drag + organize). Restoring a
   // prior state writes the positions back through the same persistence path a
@@ -1614,6 +1617,8 @@ function GraphCanvasInner({
   useEffect(() => {
     const sessionChanged = lastSessionKeyRef.current !== sessionKey;
     lastSessionKeyRef.current = sessionKey;
+    const clearRaised = clearGroupsFlag && !lastClearGroupsFlagRef.current;
+    lastClearGroupsFlagRef.current = clearGroupsFlag;
     const focusChanged = lastFocusRootRef.current !== activeFocusRootId;
     const enteringFocus = focusChanged && activeFocusRootId !== null;
     const leavingFocus = focusChanged && activeFocusRootId === null;
@@ -1623,18 +1628,22 @@ function GraphCanvasInner({
     // exists. Restoring it would force stale coordinates onto whatever ids the
     // old and new content happen to share, and resurrect groups and overlays the
     // replace deliberately dropped.
-    const contentReplaced = sessionChanged || clearGroupsFlag;
+    const contentReplaced = sessionChanged || clearRaised;
     if (contentReplaced) preFocusRef.current = null;
     const snapshot = contentReplaced ? null : preFocusRef.current;
     if (leavingFocus) preFocusRef.current = null;
     setNodes((nds) => {
       // A session switch drops the previous session's manual annotations too:
-      // clearVisualization sets clearGroupsFlag, and the new session's overlays
-      // arrive through the restore path. Outside a switch, keep the live ones —
-      // except while focused, where the ego graph is the whole view and an
-      // overlay parked elsewhere would only drag the fitted frame off it.
+      // clearVisualization raises clearGroupsFlag, and the new session's
+      // overlays arrive through the restore path. Only the run that sees the
+      // flag rise drops them: the flag stays raised for a while, and dropping on
+      // every run inside that window also removed the overlays the restore had
+      // just added — the next autosave then sent a delete for each of them.
+      // Outside a switch, keep the live ones — except while focused, where the
+      // ego graph is the whole view and an overlay parked elsewhere would only
+      // drag the fitted frame off it.
       let manualNodes;
-      if (clearGroupsFlag || sessionChanged) manualNodes = [];
+      if (clearRaised || sessionChanged) manualNodes = [];
       else if (activeFocusRootId) manualNodes = [];
       else if (leavingFocus) manualNodes = (snapshot?.nodes ?? []).filter(isManualNode);
       else manualNodes = nds.filter(isManualNode);

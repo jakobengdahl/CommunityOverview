@@ -141,4 +141,43 @@ describe('GraphCanvas preserves groups and annotations across an in-place node e
     expect(ids.has('label-1')).toBe(false);
     expect(ids.has('shape-1')).toBe(false);
   });
+
+  it('keeps the restored overlays of a just-opened session when the nodes change while clearGroupsFlag is still raised', () => {
+    const nodeA = { id: 'node-a', name: 'A', type: 'Actor', description: 'a' };
+    const { rerender } = render(<GraphCanvas nodes={[nodeA]} edges={[]} />);
+
+    // Opening a session: clearVisualization raises the flag and the session's
+    // overlays are queued for restore in the same commit.
+    const nodeB = { id: 'node-b', name: 'B', type: 'Actor', description: 'b' };
+    const groups = GROUPS_TO_RESTORE.map((g) => ({ ...g }));
+    const annotations = ANNOTATIONS_TO_RESTORE.map((a) => ({ ...a }));
+    act(() => {
+      rerender(
+        <GraphCanvas
+          nodes={[nodeB]}
+          edges={[]}
+          clearGroupsFlag={true}
+          groupsToRestore={groups}
+          annotationsToRestore={annotations}
+        />
+      );
+    });
+    expectOverlaysPresent();
+
+    // Inside the flag's window the node list changes again (hydration, layout).
+    // That re-run must not drop the overlays the restore just added: the next
+    // autosave would send a delete for each of them.
+    act(() => {
+      rerender(
+        <GraphCanvas
+          nodes={[{ ...nodeB, description: 'hydrated' }]}
+          edges={[]}
+          clearGroupsFlag={true}
+          groupsToRestore={groups}
+          annotationsToRestore={annotations}
+        />
+      );
+    });
+    expectOverlaysPresent();
+  });
 });
