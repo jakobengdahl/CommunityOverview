@@ -2,6 +2,8 @@
 Tests for event delivery worker.
 """
 
+from contextlib import contextmanager
+
 import ipaddress
 import socket
 import time
@@ -28,6 +30,12 @@ from backend.core.events.delivery import (
     _SSRFRedirectBlocked,
     is_safe_url,
 )
+
+
+@contextmanager
+def _mock_stream(response):
+    response.iter_bytes.return_value = iter([b"Server Error"])
+    yield response
 
 
 def _wait_for(predicate, timeout: float = 5.0, interval: float = 0.02):
@@ -212,7 +220,7 @@ class TestDeliveryWorker:
         mock_client = Mock()
         mock_client.__enter__ = Mock(return_value=mock_client)
         mock_client.__exit__ = Mock(return_value=None)
-        mock_client.post.return_value = mock_response
+        mock_client.stream.side_effect = lambda *a, **k: _mock_stream(mock_response)
         mock_client_cls.return_value = mock_client
 
         results = []
@@ -246,7 +254,7 @@ class TestDeliveryWorker:
         mock_client = Mock()
         mock_client.__enter__ = Mock(return_value=mock_client)
         mock_client.__exit__ = Mock(return_value=None)
-        mock_client.post.side_effect = mock_responses
+        mock_client.stream.side_effect = [_mock_stream(r) for r in mock_responses]
         mock_client_cls.return_value = mock_client
 
         results = []
@@ -286,7 +294,7 @@ class TestDeliveryWorker:
         mock_client = Mock()
         mock_client.__enter__ = Mock(return_value=mock_client)
         mock_client.__exit__ = Mock(return_value=None)
-        mock_client.post.return_value = mock_response
+        mock_client.stream.side_effect = lambda *a, **k: _mock_stream(mock_response)
         mock_client_cls.return_value = mock_client
 
         results = []
@@ -320,7 +328,7 @@ class TestDeliveryWorker:
         mock_client = Mock()
         mock_client.__enter__ = Mock(return_value=mock_client)
         mock_client.__exit__ = Mock(return_value=None)
-        mock_client.post.side_effect = httpx.TimeoutException("Connection timed out")
+        mock_client.stream.side_effect = httpx.TimeoutException("Connection timed out")
         mock_client_cls.return_value = mock_client
 
         results = []
@@ -351,7 +359,7 @@ class TestDeliveryWorker:
         mock_client = Mock()
         mock_client.__enter__ = Mock(return_value=mock_client)
         mock_client.__exit__ = Mock(return_value=None)
-        mock_client.post.return_value = mock_response
+        mock_client.stream.side_effect = lambda *a, **k: _mock_stream(mock_response)
         mock_client_cls.return_value = mock_client
 
         worker = DeliveryWorker()
@@ -364,11 +372,11 @@ class TestDeliveryWorker:
             # Wait for the worker thread to have actually made the call — a fixed
             # sleep races with CI load and can fire the assertion before the
             # background thread has posted, leaving call_args as None.
-            assert _wait_for(lambda: mock_client.post.called)
-            call_kwargs = mock_client.post.call_args.kwargs
+            assert _wait_for(lambda: mock_client.stream.called)
+            call_kwargs = mock_client.stream.call_args.kwargs
 
             # Check URL
-            assert mock_client.post.call_args.args[0] == "https://example.com/hook"
+            assert mock_client.stream.call_args.args[1] == "https://example.com/hook"
 
             # Check headers
             assert call_kwargs["headers"]["Content-Type"] == "application/json"
@@ -403,7 +411,7 @@ class TestDeliveryWorker:
         mock_client = Mock()
         mock_client.__enter__ = Mock(return_value=mock_client)
         mock_client.__exit__ = Mock(return_value=None)
-        mock_client.post.return_value = redirect_response
+        mock_client.stream.side_effect = lambda *a, **k: _mock_stream(redirect_response)
         mock_client_cls.return_value = mock_client
 
         results = []
@@ -426,7 +434,7 @@ class TestDeliveryWorker:
             # The per-hop check only runs if httpx is told not to follow
             # redirects itself, at both the client and the call.
             assert mock_client_cls.call_args.kwargs["follow_redirects"] is False
-            assert mock_client.post.call_args.kwargs["follow_redirects"] is False
+            assert mock_client.stream.call_args.kwargs["follow_redirects"] is False
             assert "169.254.169.254" in results[0].error_message
         finally:
             worker.stop(wait=True)
@@ -447,7 +455,7 @@ class TestDeliveryWorker:
         mock_client = Mock()
         mock_client.__enter__ = Mock(return_value=mock_client)
         mock_client.__exit__ = Mock(return_value=None)
-        mock_client.post.return_value = redirect_response
+        mock_client.stream.side_effect = lambda *a, **k: _mock_stream(redirect_response)
         mock_client_cls.return_value = mock_client
 
         results = []
@@ -492,7 +500,7 @@ class TestDeliveryWorker:
         mock_client = Mock()
         mock_client.__enter__ = Mock(return_value=mock_client)
         mock_client.__exit__ = Mock(return_value=None)
-        mock_client.post.return_value = redirect_response
+        mock_client.stream.side_effect = lambda *a, **k: _mock_stream(redirect_response)
         mock_client_cls.return_value = mock_client
 
         results = []
@@ -511,7 +519,7 @@ class TestDeliveryWorker:
 
             assert len(results) == 1
             assert results[0].status == DeliveryStatus.DROPPED
-            assert mock_client.post.call_count == 1
+            assert mock_client.stream.call_count == 1
             # The reason reaches the operator, not just the status: emptying the
             # exception message leaves "Redirect refused: ... ." with no stated
             # cause, and every other assertion here still passes.
@@ -538,7 +546,10 @@ class TestDeliveryWorker:
         mock_client = Mock()
         mock_client.__enter__ = Mock(return_value=mock_client)
         mock_client.__exit__ = Mock(return_value=None)
-        mock_client.post.side_effect = [redirect_response, success_response]
+        mock_client.stream.side_effect = [
+            _mock_stream(redirect_response),
+            _mock_stream(success_response),
+        ]
         mock_client_cls.return_value = mock_client
 
         results = []
@@ -579,7 +590,10 @@ class TestDeliveryWorker:
         mock_client = Mock()
         mock_client.__enter__ = Mock(return_value=mock_client)
         mock_client.__exit__ = Mock(return_value=None)
-        mock_client.post.side_effect = [redirect_response, success_response]
+        mock_client.stream.side_effect = [
+            _mock_stream(redirect_response),
+            _mock_stream(success_response),
+        ]
         mock_client_cls.return_value = mock_client
 
         results = []
@@ -598,7 +612,7 @@ class TestDeliveryWorker:
             assert len(results) == 1
             assert results[0].status == DeliveryStatus.SUCCESS
             assert (
-                mock_client.post.call_args_list[1].args[0]
+                mock_client.stream.call_args_list[1].args[1]
                 == "http://example.com/v2/hook"
             )
         finally:
@@ -620,7 +634,7 @@ class TestDeliveryWorker:
         mock_client = Mock()
         mock_client.__enter__ = Mock(return_value=mock_client)
         mock_client.__exit__ = Mock(return_value=None)
-        mock_client.post.return_value = redirect_response
+        mock_client.stream.side_effect = lambda *a, **k: _mock_stream(redirect_response)
         mock_client_cls.return_value = mock_client
 
         results = []
@@ -642,7 +656,7 @@ class TestDeliveryWorker:
             assert results[0].error_message == "Exceeded redirect limit"
             # Pin the effective cap, not just the outcome: any limit that
             # eventually terminates satisfies the assertions above.
-            assert mock_client.post.call_count == MAX_REDIRECTS
+            assert mock_client.stream.call_count == MAX_REDIRECTS
         finally:
             worker.stop(wait=True)
 
@@ -1100,3 +1114,85 @@ class TestWebhookRedirectHops:
 
         assert outcome.status_code == 200
         assert [method for method, _ in seen] == ["POST", "GET", "GET"]
+
+    @pytest.mark.parametrize("status", [200, 500])
+    @pytest.mark.parametrize("extra", [0, 1])
+    def test_terminal_body_is_bounded_incrementally(self, monkeypatch, status, extra):
+        cap = delivery.MAX_WEBHOOK_BODY_BYTES
+        assert cap == 256 * 1024
+        closed = []
+        read = []
+
+        class Body(httpx.SyncByteStream):
+            def __iter__(self):
+                for i in range(4):
+                    read.append(i)
+                    yield b"x" * (cap // 4)
+                if extra:
+                    read.append(4)
+                    yield b"x"
+                    pytest.fail("read beyond the terminal body cap")
+
+            def close(self):
+                closed.append(True)
+
+        _, outcome = self._post(
+            monkeypatch, lambda *a: httpx.Response(status, stream=Body())
+        )
+        assert closed == [True]
+        if extra:
+            assert isinstance(outcome, httpx.RequestError)
+            assert "response body exceeds" in str(outcome)
+            assert read == [0, 1, 2, 3, 4]
+        else:
+            assert outcome.status_code == status
+            assert outcome.text == "x" * cap
+            assert outcome.is_closed
+
+    @pytest.mark.parametrize("status", [302, 307])
+    def test_redirect_body_is_closed_without_reading(self, monkeypatch, status):
+        closed = []
+
+        class UnreadBody(httpx.SyncByteStream):
+            def __iter__(self):
+                pytest.fail("redirect bodies must not be read")
+                yield b""
+
+            def close(self):
+                closed.append(True)
+
+        def handler(request, index):
+            if index == 0:
+                return httpx.Response(
+                    status, headers={"location": "/next"}, stream=UnreadBody()
+                )
+            assert closed == [True]
+            return httpx.Response(500, content=b"terminal error")
+
+        seen, outcome = self._post(monkeypatch, handler)
+        assert len(seen) == 2
+        assert outcome.text == "terminal error"
+        assert closed == [True]
+
+    @pytest.mark.parametrize("extra", [0, 1])
+    def test_compressed_terminal_body_is_capped_after_decoding(
+        self, monkeypatch, extra
+    ):
+        import gzip
+
+        class CompressedBody(httpx.SyncByteStream):
+            def __iter__(self):
+                yield gzip.compress(b"x" * (delivery.MAX_WEBHOOK_BODY_BYTES + extra))
+
+        _, outcome = self._post(
+            monkeypatch,
+            lambda *a: httpx.Response(
+                500, headers={"content-encoding": "gzip"}, stream=CompressedBody()
+            ),
+        )
+        if extra:
+            assert isinstance(outcome, httpx.RequestError)
+            assert "response body exceeds" in str(outcome)
+        else:
+            assert outcome.text == "x" * delivery.MAX_WEBHOOK_BODY_BYTES
+            assert outcome.is_closed

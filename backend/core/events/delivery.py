@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_BACKOFF_TIMES = [0.5, 2.0, 5.0]  # Seconds between retries
 DEFAULT_TIMEOUT = 10  # HTTP request timeout in seconds
+# Only a short error excerpt is used; bound decoded terminal bodies as they arrive.
+MAX_WEBHOOK_BODY_BYTES = 256 * 1024
 
 
 # Non-global ranges that Python's ipaddress module does not classify as private
@@ -594,40 +596,42 @@ class DeliveryWorker:
             transport=pinned_transport(),
         ) as client:
             for _ in range(MAX_REDIRECTS):
-                if current_method == "POST":
-                    response = client.post(
-                        current_url,
-                        json=payload,
-                        headers=headers,
-                        follow_redirects=False,
-                    )
-                else:
-                    response = client.get(
-                        current_url,
-                        headers=redirect_headers,
-                        follow_redirects=False,
-                    )
-                if not response.is_redirect:
-                    return response
-                location = str(response.headers.get("location", ""))
-                if not location:
-                    # urljoin(current, "") returns current, so an absent or
-                    # empty Location used to re-request this same URL until
-                    # the cap ran out and reported a redirect loop -- as a
-                    # POST for 307/308, and as a bodiless GET for 301/302/303,
-                    # which downgrade the method below. Refuse after one
-                    # request, as the four sibling walkers do.
-                    raise _MalformedRedirect(
-                        f"Redirect without a Location header from {current_url}"
-                    )
-                next_url = urllib.parse.urljoin(current_url, location)
-                if not is_safe_url(next_url):
-                    raise _SSRFRedirectBlocked(
-                        f"Blocked redirect to restricted address: {next_url}"
-                    )
-                if response.status_code in (301, 302, 303):
-                    current_method = "GET"
-                current_url = next_url
+                with client.stream(
+                    current_method,
+                    current_url,
+                    headers=headers if current_method == "POST" else redirect_headers,
+                    **({"json": payload} if current_method == "POST" else {}),
+                    follow_redirects=False,
+                ) as response:
+                    if not response.is_redirect:
+                        chunks = []
+                        total = 0
+                        for chunk in response.iter_bytes():
+                            total += len(chunk)
+                            if total > MAX_WEBHOOK_BODY_BYTES:
+                                raise httpx.RequestError(
+                                    "Webhook response body exceeds "
+                                    f"{MAX_WEBHOOK_BODY_BYTES} bytes",
+                                    request=response.request,
+                                )
+                            chunks.append(chunk)
+                        # Cache the decoded bytes as Response.read() does, so
+                        # response.text remains usable after the stream closes.
+                        response._content = b"".join(chunks)
+                        return response
+                    location = str(response.headers.get("location", ""))
+                    if not location:
+                        raise _MalformedRedirect(
+                            f"Redirect without a Location header from {current_url}"
+                        )
+                    next_url = urllib.parse.urljoin(current_url, location)
+                    if not is_safe_url(next_url):
+                        raise _SSRFRedirectBlocked(
+                            f"Blocked redirect to restricted address: {next_url}"
+                        )
+                    if response.status_code in (301, 302, 303):
+                        current_method = "GET"
+                    current_url = next_url
         raise httpx.TooManyRedirects("Exceeded redirect limit", request=None)
 
     def _handle_failure(
