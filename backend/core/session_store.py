@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional, Protocol
 
+from .actor_attribution import replace_attribution, validate_erasure
 from .session_activity import (
     DEFAULT_ACTIVITY_MAX_AGE_DAYS,
     DEFAULT_MAX_ACTIVITY_RECORDS,
@@ -326,6 +327,8 @@ class SessionPersistenceBackend(Protocol):
 
     def list_meta(self) -> List[Dict[str, Any]]: ...
 
+    def list_ids(self) -> List[str]: ...
+
 
 # Cross-platform file locking mirrors storage_backends.py so session writes get
 # the same guarantees as graph writes.
@@ -405,6 +408,17 @@ class FileSessionPersistenceBackend:
         if path.exists():
             os.unlink(path)
 
+    def list_ids(self) -> List[str]:
+        # Enumerate without decoding so erasure cannot silently skip a damaged
+        # session that the ordinary metadata listing tolerates.
+        if not self.directory.exists():
+            return []
+        return [
+            p.stem
+            for p in self.directory.iterdir()
+            if p.suffix == ".json" and is_valid_session_id(p.stem)
+        ]
+
     def list_meta(self) -> List[Dict[str, Any]]:
         if not self.directory.exists():
             return []
@@ -442,6 +456,9 @@ class InMemorySessionPersistenceBackend:
 
     def delete(self, session_id: str) -> None:
         self._data.pop(session_id, None)
+
+    def list_ids(self) -> List[str]:
+        return list(self._data)
 
     def list_meta(self) -> List[Dict[str, Any]]:
         metas = [Session.from_dict(d).meta() for d in self._data.values()]
@@ -1372,6 +1389,43 @@ class SessionStore:
         return [op for op in ring if op["seq"] > since_seq]
 
     # ---------------- activity log / undo ----------------
+
+    def erase_actor(self, actor_id: str, replacement_token: str) -> int:
+        """Replace activity attribution in loaded and persisted sessions."""
+        validate_erasure(actor_id, replacement_token)
+        count = 0
+        with self._lock:
+            ids = set(self._backend.list_ids())
+            ids.update(self._sessions)
+            for session_id in ids:
+                session = self._sessions.get(session_id)
+                raw = self._backend.load(session_id)
+                # Persisted and loaded copies can differ; scrub both without
+                # saving unrelated in-memory state or normalising old documents.
+                changed_ids = set()
+                if raw is not None:
+                    activity = raw.get("activity_log", [])
+                    cleaned = replace_attribution(activity, actor_id, replacement_token)
+                    changed_ids.update(
+                        a.get("id", i)
+                        for i, (a, b) in enumerate(zip(activity, cleaned))
+                        if a != b
+                    )
+                    if changed_ids:
+                        raw["activity_log"] = cleaned
+                        self._backend.save(raw)
+                if session is not None:
+                    cleaned = replace_attribution(
+                        session.activity_log, actor_id, replacement_token
+                    )
+                    changed_ids.update(
+                        a.get("id", i)
+                        for i, (a, b) in enumerate(zip(session.activity_log, cleaned))
+                        if a != b
+                    )
+                    session.activity_log[:] = cleaned
+                count += len(changed_ids)
+        return count
 
     def list_activity(
         self, session: Session, actor: Optional[str] = None, limit: int = 50
