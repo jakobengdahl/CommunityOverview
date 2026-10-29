@@ -282,6 +282,8 @@ async function apiFetch(url, options = {}) {
     ...options,
     headers: {
       'Content-Type': 'application/json',
+      // Plain HTTP browsers omit fetch metadata; forms cannot set this header.
+      'X-Requested-With': 'XMLHttpRequest',
       ...sessionHeaders(url, options.method),
       ...options.headers,
     },
@@ -579,7 +581,10 @@ function attachmentsUrl(nodeId) {
  * map it to a translated message.
  */
 async function attachmentFetch(url, options = {}) {
-  const response = await fetch(url, options);
+  const response = await fetch(url, {
+    ...options,
+    headers: { 'X-Requested-With': 'XMLHttpRequest', ...options.headers },
+  });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
     const detail = body && typeof body.detail === 'object' && body.detail ? body.detail : {};
@@ -767,7 +772,7 @@ export async function uploadFile(file, analyze = false, options = {}) {
   refuseWhileModeUnknown(endpoint, 'POST');
   const response = await fetch(endpoint, {
     method: 'POST',
-    headers: sessionHeaders(endpoint, 'POST'),
+    headers: { 'X-Requested-With': 'XMLHttpRequest', ...sessionHeaders(endpoint, 'POST') },
     body: formData,
   });
 
@@ -1166,7 +1171,7 @@ export async function ingestSessionImage(sessionId, image) {
     `${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/annotations/image`,
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       body: JSON.stringify({
         client_id: getClientId(),
         x: image.x,

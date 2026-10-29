@@ -1523,7 +1523,7 @@ export class SessionSyncClient {
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
     const options = {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       body: JSON.stringify({ client_id: this.clientId, base_seq: this._seq, ops: batch }),
     };
     if (controller) options.signal = controller.signal;

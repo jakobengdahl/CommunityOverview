@@ -659,7 +659,11 @@ class TestSessionCookieLogin:
                 "/api/import/archive", files=upload, headers=metadata
             )
             assert response.status_code == 403
-            assert client.get("/api/export").json() == before
+            after = client.get("/api/export").json()
+            # Export timestamps change even when the graph is unchanged.
+            before.pop("exportDate")
+            after.pop("exportDate")
+            assert after == before
             # The identical archive is valid and can replace the graph locally.
             response = client.post(
                 "/api/import/archive",

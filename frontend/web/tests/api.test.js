@@ -242,3 +242,37 @@ describe('resolveTeleport', () => {
     await expect(resolveTeleport('n1')).resolves.toMatchObject({ status: 'ok' });
   });
 });
+
+// Plain HTTP browsers omit Sec-Fetch-Site, even on same-origin requests.
+describe('browser write authorization header', () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    vi.resetModules();
+  });
+
+  it('marks JSON, multipart, raw attachment and image writes without fetch metadata', async () => {
+    global.fetch = vi.fn(async (_url, options) => ({
+      ok: !!options.headers['X-Requested-With'],
+      status: options.headers['X-Requested-With'] ? 200 : 403,
+      json: async () => ({}),
+    }));
+    const api = await import('../src/services/api.js');
+    const file = new File(['hello'], 'hello.txt', { type: 'text/plain' });
+
+    await api.addNodes([]);
+    await api.uploadFile(file);
+    await api.uploadNodeAttachment('node-1', file);
+    await api.deleteNodeAttachment('node-1', 'attachment-1');
+    await api.ingestSessionImage('1234-5678', { x: 0, y: 0 });
+
+    expect(global.fetch).toHaveBeenCalledTimes(5);
+    for (const [, options] of global.fetch.mock.calls) {
+      expect(options.headers['X-Requested-With']).toBe('XMLHttpRequest');
+      expect(options.headers['Sec-Fetch-Site']).toBeUndefined();
+    }
+    expect(global.fetch.mock.calls[1][1].headers['Content-Type']).toBeUndefined();
+    expect(global.fetch.mock.calls[2][1].headers['Content-Type']).toBe('text/plain');
+  });
+});
