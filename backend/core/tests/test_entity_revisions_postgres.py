@@ -926,14 +926,20 @@ def test_direct_subtype_update_orders_against_another_instances_edge(
         ),
     )
     writer = instances(deaf=True)
-    writer.add_nodes([
-        Node(id="a", type="Actor", name="A", subtypes=["Agency"]),
-        _node("b"),
-    ], [])
+    writer.add_nodes(
+        [
+            Node(id="a", type="Actor", name="A", subtypes=["Agency"]),
+            _node("b"),
+        ],
+        [],
+    )
     other = instances(deaf=True)
-    edge = Edge(id="ab", type="SUBTYPE_LINK",
-                source="b" if endpoint == "target" else "a",
-                target="b" if endpoint == "source" else "a")
+    edge = Edge(
+        id="ab",
+        type="SUBTYPE_LINK",
+        source="b" if endpoint == "target" else "a",
+        target="b" if endpoint == "source" else "a",
+    )
     before = writer.nodes["a"].to_dict()
     events = _events(writer)
     if edge_first:

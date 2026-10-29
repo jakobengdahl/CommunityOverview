@@ -44,7 +44,10 @@ from backend.core.postgres_backend import (  # noqa: E402  (after importorskip)
     PostgresGraphPersistenceBackend,
 )
 from backend.core.storage import GraphStorage  # noqa: E402
-from backend.core.storage_backends import EntityOperation  # noqa: E402
+from backend.core.storage_backends import (  # noqa: E402
+    EntityOperation,
+    EntityRevisionConflict,
+)
 
 DSN = os.environ.get("CO_TEST_POSTGRES_DSN", "")
 
@@ -424,6 +427,7 @@ class TestTwoInstancesWritingTheSameEntity:
 
         real_batch = type(backend).apply_batch
         released = []
+        in_flight = threading.Event()
 
         def stall(self, operations, write_token=None):
             # Held until the test releases it, so the peer's announcement is
@@ -432,11 +436,12 @@ class TestTwoInstancesWritingTheSameEntity:
             # write through early and fail the assertion below for a reason
             # that has nothing to do with the property, so whether the wait
             # was released or expired is recorded and checked.
+            in_flight.set()
             released.append(slow.wait(CONVERGE_TIMEOUT))
             return real_batch(self, operations, write_token=write_token)
 
         # The release is gated on the announcement being in hand, not on a
-        # wall clock. Released as soon as the peer's write commits, the window
+        # wall clock. Released as soon as the peer announces, the window
         # is a few milliseconds wide and whether the announcement lands inside
         # it is a race - which is exactly what this case must not be, since a
         # read moved back to dispatch would then escape it whenever the race
@@ -455,18 +460,42 @@ class TestTwoInstancesWritingTheSameEntity:
         # On its own thread: a write to this store waits for the store
         # (SESSION_OVERLAY_CONTRACT.md §4.4), so the call is in flight, holding
         # this instance's lock, for as long as the stall lasts.
-        mine = threading.Thread(
-            target=lambda: one.update_node("contested", {"name": "Mine"})
-        )
+        errors = []
+
+        def write_mine():
+            try:
+                one.update_node("contested", {"name": "Mine"})
+            except Exception as exc:
+                errors.append(exc)
+
+        mine = threading.Thread(target=write_mine)
         mine.start()
-        two.update_node("contested", {"name": "Theirs"})
-        _drain(two)
+        assert in_flight.wait(CONVERGE_TIMEOUT), "the local write never started"
+        # Announce the current row without changing its revision. A real
+        # competing write would correctly refuse Mine's stale revision and
+        # would no longer exercise a successful queued write preceding a read.
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                "SELECT pg_notify(%s, %s)",
+                (
+                    backend._channel,
+                    two._persistence_backend._encode(
+                        [
+                            EntityOperation.upsert_node(
+                                two.get_node("contested").to_dict()
+                            )
+                        ]
+                    ),
+                ),
+            )
         assert arrived.wait(CONVERGE_TIMEOUT), (
             "the peer's announcement never reached this instance, so the "
             "interleaving this case is about did not happen"
         )
         slow.set()
         mine.join(CONVERGE_TIMEOUT)
+        assert not mine.is_alive()
+        assert errors == []
         _drain(one)
         _assert_nothing_failed(one, two)
         assert released == [True], (
@@ -725,14 +754,20 @@ class TestTwoInstancesWritingTheSameEntity:
         )
 
         errors = []
-        written = {"Origin"}
+        written = set()
 
         def rename(storage, tag):
             try:
                 for i in range(5):
                     name = f"{tag}{i}"
+                    try:
+                        storage.update_node("contested", {"name": name})
+                    except EntityRevisionConflict:
+                        # Another instance advanced the row before this write
+                        # landed. The refusal is part of the shared-store
+                        # contract; only accepted writes can win convergence.
+                        continue
                     written.add(name)
-                    storage.update_node("contested", {"name": name})
             except Exception as exc:
                 errors.append(exc)
 
@@ -770,6 +805,7 @@ class TestTwoInstancesWritingTheSameEntity:
                 one.get_node("contested").name, two.get_node("contested").name
             ),
         )
+        assert written, "neither racing writer committed an update"
         assert stored_name() in written, (
             f"the store holds {stored_name()!r}, which neither instance wrote"
         )
