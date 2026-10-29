@@ -177,6 +177,32 @@ apply_visualization_layout(
   `seq`. Re-read is unnecessary after a successful write — the returned
   `revision` is the value to pass to the next write.
 
+### 5.1 Stored node membership (`remove_nodes_from_session`)
+
+`remove_nodes_from_session(session_id, node_ids, expected_revision = null)`
+removes node references from a stored session, even when no browser is connected.
+The graph's nodes are unchanged. Create stored state with
+`create_visualization_session` before populating or pruning it.
+
+- **Result.** `{ success: true, session_id, removed, skipped, node_count, revision }`.
+  `removed` and `skipped` contain deduplicated ids; ids absent from the session
+  are skipped, including references that never named a graph node. An existing
+  session reference remains removable even if its graph node has been deleted.
+  `node_count` counts the remaining references, hidden nodes included.
+- **Cleanup.** Removal clears each removed node's position, hidden/dimmed flags
+  and group-annotation membership. Other nodes keep their positions and the
+  annotations remain. Re-adding the id with `add_nodes_to_session` makes it
+  visible and unpositioned (`x`/`y` are `null` in the layout projection).
+- **Concurrency and delivery.** The revision guard in §7 applies. A removal
+  emits one `nodes_removed` op carrying the removed `node_ids`, through the
+  same persistence, sequencing and broadcast path as layout writes. If no id is
+  present, success leaves the revision unchanged and broadcasts nothing.
+- **Limits.** The add tool's limits apply: 500 distinct ids, 256 KiB of ids,
+  and the tool's full rate budget (200 ids at default settings). Removal has its
+  own budget, shared by MCP clients, charged once per distinct id sent, skipped
+  ids included. A batch over a hard cap or the full budget returns `too_large`
+  without charging; an exhausted budget returns `rate_limited` (§11).
+
 ## 6. Atomicity, batching and limits
 
 - **One atomic op.** The whole batch is applied as a **single** `layout_applied`
