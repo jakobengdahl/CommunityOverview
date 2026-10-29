@@ -101,6 +101,15 @@ function renderReference(data, context = {}) {
 // fails its own case, and an ADDED one fails the equality, which nothing caught
 // before round 5.
 describe('reference URL gate — the whitespace enumeration itself', () => {
+  it('has a non-empty fixture of unique four-digit hex code points', () => {
+    expect(Array.isArray(urlGate.whitespace)).toBe(true);
+    expect(urlGate.whitespace.length).toBeGreaterThan(0);
+    for (const code of urlGate.whitespace) {
+      expect(code).toMatch(/^[0-9A-F]{4}$/);
+    }
+    expect(new Set(urlGate.whitespace).size).toBe(urlGate.whitespace.length);
+  });
+
   it.each(urlGate.whitespace)('refuses U+%s inside a path', (code) => {
     const char = String.fromCodePoint(parseInt(code, 16));
     expect(isSafeReferenceUrl(`https://example.org/a${char}b`)).toBe(false);

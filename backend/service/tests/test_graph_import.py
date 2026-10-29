@@ -185,6 +185,51 @@ class TestEdgeValidation:
 
 
 class TestApplicability:
+    def test_subtypes_are_narrowed_once_per_node_without_losing_applicability(
+        self, monkeypatch
+    ):
+        """Per-edge candidates contain only schema-relevant subtypes on either end."""
+        monkeypatch.setattr(
+            graph_import.config_loader,
+            "get_schema",
+            lambda: {
+                "relationship_types": {
+                    "BELONGS_TO": {
+                        "source_types": ["Agency"],
+                        "target_types": ["Project"],
+                    }
+                }
+            },
+        )
+        candidates = []
+
+        def check(kind, source_type, target_type, source_subtypes, target_subtypes):
+            candidates.append((source_subtypes, target_subtypes))
+            return {
+                "allowed": "Agency" in source_subtypes and "Project" in target_subtypes
+            }
+
+        monkeypatch.setattr(
+            graph_import.config_loader, "relationship_type_allows_node_types", check
+        )
+        unrelated = [f"unrelated-{i}" for i in range(2_000)]
+        result = graph_import.validate_import_document(
+            _doc(
+                [
+                    _node("n1", subtypes=[*unrelated, "Agency"]),
+                    _node("n2", subtypes=[*unrelated, "Project"]),
+                ],
+                [_edge(f"e{i}") for i in range(5)],
+            )
+        )
+        assert result.valid
+        assert candidates == [(["Agency"], ["Project"])] * 5
+        assert all(
+            source is candidates[0][0] and target is candidates[0][1]
+            for source, target in candidates
+        )
+        assert result.nodes[0].subtypes == [*unrelated, "Agency"]
+
     def test_applicability_violation_is_surfaced(self, monkeypatch):
         def _deny(*args, **kwargs):
             return {"allowed": False, "message": "not allowed between these types"}
@@ -225,6 +270,38 @@ class TestSizeLimits:
 
 
 class TestReportedIssueCap:
+    def test_errors_still_block_import_when_no_messages_are_retained(self, monkeypatch):
+        monkeypatch.setattr(graph_import, "MAX_REPORTED_ISSUES", 0)
+        result = graph_import.validate_import_document(_doc([_node("n1", "NotAType")]))
+        assert not result.valid
+        assert result.error_count == 1
+        assert result.errors == []
+        assert result.nodes == result.edges == []
+
+    @pytest.mark.parametrize(
+        "field", ["node_id", "node_type", "edge_id", "edge_type", "source", "target"]
+    )
+    def test_caller_strings_are_bounded_in_every_validation_message(self, field):
+        long_value = "caller-controlled-" * 1_000
+        nodes = [_node("n1"), _node("n2")]
+        edges = [_edge()]
+        if field == "node_id":
+            nodes = [_node(long_value), _node(long_value)]
+            edges = []
+        elif field == "node_type":
+            nodes[0]["type"] = long_value
+        elif field == "edge_id":
+            edges = [_edge(long_value), _edge(long_value)]
+        elif field == "edge_type":
+            edges[0]["type"] = long_value
+        else:
+            edges[0][field] = long_value
+        result = graph_import.validate_import_document(_doc(nodes, edges))
+        assert not result.valid
+        assert result.error_count > 0
+        assert all(len(issue.message) <= 520 for issue in result.errors)
+        assert all(long_value not in issue.message for issue in result.errors)
+
     def test_problems_are_counted_but_only_the_first_are_kept(self, monkeypatch):
         monkeypatch.setattr(graph_import, "MAX_REPORTED_ISSUES", 5)
         nodes = [_node("n1"), _node("n2")]

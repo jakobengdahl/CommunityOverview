@@ -4,7 +4,7 @@
 # Two checks on services/mcp_oauth_gateway's hash-locked dependency files:
 #
 #   - pip-audit over BOTH locks (requirements.txt and requirements-dev.txt),
-#     blocking: a known-vulnerable pin fails the job.
+#     blocking: a known-vulnerable pin or a dependency collection failure fails the job.
 #   - lock freshness: re-runs the compile command each lock records in its own
 #     header, then fails if either lock changed.
 #
@@ -83,14 +83,14 @@ jobs:
       - name: Audit gateway runtime lock
         run: |
           echo "## pip-audit — services/mcp_oauth_gateway/requirements.txt (all markers)" >> "$GITHUB_STEP_SUMMARY"
-          pip-audit --require-hashes --disable-pip -r "${{ steps.strip-markers.outputs.dir }}/requirements.txt" -f markdown 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          pip-audit --strict --require-hashes --disable-pip -r "${{ steps.strip-markers.outputs.dir }}/requirements.txt" -f markdown 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
           exit "${PIPESTATUS[0]}"
 
       - name: Audit gateway dev lock
         if: ${{ !cancelled() && steps.strip-markers.outcome == 'success' }}
         run: |
           echo "## pip-audit — services/mcp_oauth_gateway/requirements-dev.txt (all markers)" >> "$GITHUB_STEP_SUMMARY"
-          pip-audit --require-hashes --disable-pip -r "${{ steps.strip-markers.outputs.dir }}/requirements-dev.txt" -f markdown 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          pip-audit --strict --require-hashes --disable-pip -r "${{ steps.strip-markers.outputs.dir }}/requirements-dev.txt" -f markdown 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
           exit "${PIPESTATUS[0]}"
 
   lock-freshness:

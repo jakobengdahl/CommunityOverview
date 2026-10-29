@@ -80,7 +80,10 @@ def test_auth_required(auth_enabled_app):
 def test_auth_success(auth_enabled_app):
     """Successful authentication with valid Basic credentials."""
     credentials = base64.b64encode(b"admin:secretpassword").decode("utf-8")
-    headers = {"Authorization": f"Basic {credentials}"}
+    headers = {
+        "Authorization": f"Basic {credentials}",
+        "X-Requested-With": "api-client",
+    }
 
     response = auth_enabled_app.post(
         "/api/search", json={"query": "test"}, headers=headers
@@ -153,7 +156,10 @@ def test_auth_not_required_on_startup_diagnostics(auth_enabled_app):
 
 def test_bearer_auth_success(bearer_auth_app):
     """Valid bearer token grants access."""
-    headers = {"Authorization": "Bearer test-bearer-token-123"}
+    headers = {
+        "Authorization": "Bearer test-bearer-token-123",
+        "Sec-Fetch-Site": "cross-site",
+    }
     response = bearer_auth_app.post(
         "/api/search", json={"query": "test"}, headers=headers
     )
